@@ -115,6 +115,70 @@
     (is (not (contains? (:pseudo/after attrs) :color))
         "::after only carries its own declarations")))
 
+;; ---- ::before/::after generated `content` value parsing ----
+
+(deftest before-content-quoted-string-is-parsed-into-a-plain-string
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules
+               "p::before { content: \"→ \"; color: red }
+                p::after { content: '!' }")
+        node (dom/node doc p)
+        style-before (css/pseudo-element-style-for doc rules node :before)
+        style-after (css/pseudo-element-style-for doc rules node :after)]
+    (is (= "→ " (:content style-before))
+        "a double-quoted content literal is unquoted, not stored with its
+         literal quote characters")
+    (is (= "red" (:color style-before)))
+    (is (= "!" (:content style-after))
+        "single-quoted content literals are supported too")))
+
+(deftest before-content-empty-string-is-a-real-declared-value-not-absent
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: \"\" }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc span) :before)]
+    (is (contains? style :content)
+        "content: \"\" is a common icon-only generated-content idiom -- it
+         must still be present, not dropped like genuinely-absent content")
+    (is (= "" (:content style)))))
+
+(deftest unsupported-content-forms-are-dropped-rather-than-stored-raw
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: attr(data-x); color: blue }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc span) :before)]
+    (is (not (contains? style :content))
+        "attr()/counter()/url() and other unsupported content forms are out
+         of scope -- dropped rather than crashing or being stored as an
+         unusable raw string")
+    (is (= "blue" (:color style))
+        "other declared properties on the same pseudo-element rule are
+         unaffected by an unsupported content value")))
+
+(deftest pseudo-element-style-for-returns-empty-map-when-no-rule-targets-it
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules "p { color: black }")
+        node (dom/node doc p)]
+    (is (= {} (css/pseudo-element-style-for doc rules node :before)))
+    (is (= {} (css/pseudo-element-style-for rules node :after))
+        "the 3-arity (document-less) form works too, mirroring
+         computed-style's own two arities")))
+
+(deftest pseudo-element-style-for-honors-specificity-like-any-other-cascade
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        doc (dom/set-attribute doc p :id "lead")
+        rules (css/parse-rules
+               "p::before { content: \"*\"; color: red }
+                #lead::before { content: \"→\"; color: blue }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc p) :before)]
+    (is (= "→" (:content style))
+        "the higher-specificity #lead::before rule wins the cascade, same
+         as it would for a real element")
+    (is (= "blue" (:color style)))))
+
 ;; ---- @media (min-width/max-width) ----
 
 (deftest parses-media-blocks-and-tags-nested-rules-with-their-condition

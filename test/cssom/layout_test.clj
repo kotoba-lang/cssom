@@ -1,6 +1,7 @@
 (ns cssom.layout-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is]]
+            [cssom.core :as css]
             [cssom.layout :as layout]
             [kotoba.wasm.dom :as dom]))
 
@@ -193,3 +194,106 @@
     ;; content-inset convention every display mode in this file already
     ;; uses (border-width only offsets content when box-sizing: border-box).
     (is (= {:x 4 :y 4 :w 50 :h 10} (select-keys child [:x :y :w :h])))))
+
+;; ---- ::before / ::after generated content ----
+;;
+;; Unlike the rest of this file (which sets style attrs directly via
+;; kotoba.wasm.dom, bypassing cssom.core's cascade -- see grid-tree's
+;; docstring above), these run the real end-to-end pipeline: CSS text ->
+;; cssom.core/parse-rules + apply-cascade -> kotoba.wasm.dom tree ->
+;; cssom.layout/draw-ops. That's the only way to prove the two namespaces
+;; are actually wired together, not just that cssom.layout can read a
+;; hand-set attr.
+
+(deftest before-and-after-generated-content-renders-as-real-text-around-children
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [child doc] (dom/create-text-node doc "middle")
+        doc (dom/append-child doc p child)
+        rules (css/parse-rules
+               "p { color: black }
+                p::before { content: \"→ \"; color: red }
+                p::after { content: \" ←\" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 3 (count text-ops))
+        "::before text + the real child text + ::after text = 3 :text draw-ops")
+    (is (= ["→ " "middle" " ←"] (mapv :text text-ops))
+        "generated ::before text precedes the real child text, which
+         precedes generated ::after text -- document order, real content")
+    (is (= "red" (:color (first text-ops)))
+        "::before paints with its own declared color, not the element's
+         inherited black")
+    (is (= "black" (:color (second text-ops)))
+        "the real text node still inherits the element's own color, unaffected")
+    (is (= "black" (:color (nth text-ops 2)))
+        "::after with no declared color of its own inherits the element's
+         color, exactly like any real child would")
+    (is (< (:y (first text-ops)) (:y (second text-ops)))
+        "::before is positioned above (before) the real child in this
+         engine's vertical block flow")
+    (is (< (:y (second text-ops)) (:y (nth text-ops 2)))
+        "::after is positioned below (after) the real child")))
+
+(deftest before-content-empty-string-still-produces-a-real-empty-text-draw-op
+  ;; content: ""; is a common icon-only generated-content idiom -- still a
+  ;; box, just with no visible text.
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: \"\" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops)))
+    (is (= "" (:text (first text-ops))))))
+
+(deftest no-content-declared-produces-no-generated-text-box
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        [child doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc span child)
+        rules (css/parse-rules "span::before { color: red }") ; no content declared
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops))
+        "no content declared -> no generated-content box, just the real text")
+    (is (= "hi" (:text (first text-ops))))))
+
+(deftest unparseable-content-value-does-not-crash-and-produces-no-box
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: attr(data-x) }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})]
+    (is (empty? (filterv #(= :text (:draw/op %)) ops))
+        "attr()/counter()/url() content is out of scope -- must not crash
+         layout, and produces no generated-content box")))
+
+(deftest generated-content-wraps-long-text-through-the-same-word-wrap-path
+  ;; Proves ::before/::after content flows through the exact same
+  ;; text-lines word-wrapping real text uses, not a forked one-line-only
+  ;; implementation.
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules
+               "span::before { content: \"the quick brown fox jumps over\" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (> (count text-ops) 1)
+        "long generated content wraps onto multiple lines, same as real text at this width")
+    (is (= (str/split "the quick brown fox jumps over" #"\s+")
+           (mapcat #(str/split (:text %) #"\s+") text-ops))
+        "word-wrapping must not lose or reorder any words")))

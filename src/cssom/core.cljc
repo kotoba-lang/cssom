@@ -11,12 +11,19 @@
    - Sibling combinators `+` (adjacent) and `~` (general/subsequent).
    - `::before` / `::after` pseudo-elements (also the legacy single-colon
      `:before`/`:after` spelling). kotoba.wasm.dom has no generated-content
-     node concept, so pseudo-element declarations are NOT rendered as boxes;
-     instead `apply-cascade` resolves them into a synthetic
-     `:pseudo/before` / `:pseudo/after` attribute on the *real* element,
-     holding that pseudo-element's own resolved style map (e.g. `:content`).
-     `cssom.layout` does not currently read these attributes -- wiring them
-     into an actual generated box is left to that namespace.
+     DOM node concept, so pseudo-element declarations are resolved into a
+     synthetic `:pseudo/before` / `:pseudo/after` attribute on the *real*
+     element (`apply-cascade`/`computed-style`), holding that
+     pseudo-element's own cascade-resolved style map -- also directly
+     queryable via `pseudo-element-style-for` without a full apply-cascade
+     round trip. A `content` declaration that is a quoted string literal
+     (`content: \"...\";` / `'...'`, including the empty string) is unquoted
+     into a plain string under `:content`; unsupported forms (`attr(...)`,
+     `counter(...)`, `url(...)`, `none`/`normal`, unquoted text) simply leave
+     `:content` unset rather than storing something unusable. `cssom.layout`
+     reads these attributes and paints generated content as real text
+     immediately before/after the element's real children -- see its
+     namespace docstring.
    - `@media (min-width: Npx)` / `(max-width: Npx)` conditional rule blocks
      (optionally combined with `and`), evaluated against a viewport width
      passed to `apply-cascade` via an options map (default
@@ -45,13 +52,49 @@
                                    :cljs (js/parseInt v 10))
       :else v)))
 
+(def ^:private content-literal-pattern
+  "Matches a single quoted string literal, double- or single-quoted --
+   `\"...\"` / `'...'`, including the empty string. See
+   `parse-content-literal` for what this is used for and why it is
+   deliberately this narrow."
+  #"\"([^\"]*)\"|'([^']*)'")
+
+(defn- parse-content-literal
+  "Parses a CSS `content` declaration's raw value into the literal string it
+   designates, for the narrow, common real-world case of a single quoted
+   string (`content: \"some text\";` / `content: '...';`), including the
+   empty string (`content: \"\";` -- a common icon-only generated-content
+   idiom, still a real declared value, not the same as `content` being
+   absent). Anything else this engine doesn't support (`attr(...)`,
+   `counter(...)`, `url(...)`, `none`, `normal`, unquoted/unmatched text)
+   returns nil rather than guessing -- callers treat nil exactly like
+   `content` being absent: no generated-content box, no crash."
+  [v]
+  (when-let [[_ double-quoted single-quoted] (re-matches content-literal-pattern (str/trim (str v)))]
+    (or double-quoted single-quoted "")))
+
+(defn- parse-property-value
+  "Parses a single declaration's raw value string for property `k` (still a
+   raw string at this point, not yet keywordized). `content` gets its own
+   quoted-string-literal parsing (see `parse-content-literal`); every other
+   property keeps the existing numeric/px coercion (`parse-style-value`).
+   May return nil (currently only possible for an unparseable `content`
+   value) -- callers drop the declaration entirely in that case rather than
+   storing an unusable value."
+  [k v]
+  (if (= "content" (str/lower-case k))
+    (parse-content-literal v)
+    (parse-style-value v)))
+
 (defn parse-declarations
   [text]
   (->> (str/split (or text "") #";")
        (keep (fn [decl]
                (let [[k v] (map str/trim (str/split decl #":" 2))]
                  (when (and (seq k) (seq v))
-                   [(keyword k) (parse-style-value (str/replace v #"(?i)\s*!important\s*$" ""))]))))
+                   (let [value (parse-property-value k (str/replace v #"(?i)\s*!important\s*$" ""))]
+                     (when (some? value)
+                       [(keyword k) value]))))))
        (into {})))
 
 (defn- parse-declarations-with-importance
@@ -61,9 +104,11 @@
                (let [[k v] (map str/trim (str/split decl #":" 2))]
                  (when (and (seq k) (seq v))
                    (let [important? (boolean (re-find #"(?i)!important\s*$" v))
-                         value (str/replace v #"(?i)\s*!important\s*$" "")]
-                     [(keyword k) {:value (parse-style-value value)
-                                   :important? important?}])))))
+                         value (str/replace v #"(?i)\s*!important\s*$" "")
+                         parsed (parse-property-value k value)]
+                     (when (some? parsed)
+                       [(keyword k) {:value parsed
+                                     :important? important?}]))))))
        (into {})))
 
 (defn- parse-attribute-selector
@@ -903,6 +948,34 @@
      (cond-> base
        (seq before) (assoc :pseudo/before before)
        (seq after) (assoc :pseudo/after after)))))
+
+(defn pseudo-element-style-for
+  "Cascade-resolved style map for `node`'s `pseudo-element` (:before or
+   :after) generated content only -- the subset of `rules` whose selector
+   targets that pseudo-element (see the namespace docstring) and whose
+   non-pseudo simple-selector part matches `node`. Same specificity/layer/
+   cascade resolution as any other declaration; declarations that don't
+   target `pseudo-element` never contribute. Returns {} when no rule
+   targets this pseudo-element on this node -- callers (e.g. cssom.layout)
+   treat that the same as the pseudo-element not existing at all.
+
+   This is the same resolution `computed-style`/`apply-cascade` already
+   perform internally (attaching the result to the real element's own
+   computed style under :pseudo/before / :pseudo/after) -- exposed directly
+   here so callers can resolve a node's pseudo-element style without a full
+   apply-cascade + DOM-attrs round trip. `content` values are already
+   unquoted plain strings when parseable (see `parse-content-literal`);
+   `attr()`/`counter()`/`url()`/unsupported `content` forms simply have no
+   :content key in the returned map, same as `content` being absent.
+
+   Mirrors `computed-style`'s own two arities -- the document-less 3-arity
+   form has the same pseudo-class-matching restriction `matches?`'s
+   document-less arity does (document-dependent pseudo-classes like
+   :focus/:disabled won't match)."
+  ([rules node pseudo-element]
+   (pseudo-element-style-for nil rules node pseudo-element))
+  ([document rules node pseudo-element]
+   (resolve-style-for document rules node pseudo-element)))
 
 (defn- custom-property?
   [k]
