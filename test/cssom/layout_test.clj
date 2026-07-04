@@ -66,6 +66,108 @@
     ;; overflow convention), not silently expanded to fit the long word.
     (is (= avail (:w box)))))
 
+;; ---- injectable :measure-text (real-host text measurement, e.g. a real
+;; browser's CanvasRenderingContext2D.measureText) ----
+;;
+;; layout-text's word-wrap normally assumes every character is exactly
+;; `(long (* 0.6 font-size))` px wide (a monospace-like approximation --
+;; see text-lines) since this file is a pure, host-independent layout
+;; engine with no real glyph shaping and no Canvas API available in every
+;; environment it runs in (e.g. this very JVM test suite). A real host
+;; (a real browser's Canvas 2D context, or kotoba-lang/dom-gpu's WebGL/
+;; WebGPU hosts, which already hold one) can instead supply an OPTIONAL
+;; `:measure-text` function on `theme` -- `(fn [text font-size]
+;; width-in-px)` -- consulted instead (text-lines-measured). The two
+;; tests below prove both halves of that contract: (1) omitting
+;; `:measure-text` is byte-for-byte the SAME char-w-approximation code
+;; path this file has always used (default-theme has no :measure-text key
+;; at all, and every test above this comment -- unmodified by this
+;; feature -- already proves that path's exact output), and (2) supplying
+;; one is genuinely CONSULTED, not silently ignored.
+
+(deftest default-theme-has-no-measure-text-so-every-existing-caller-is-unaffected
+  ;; The non-regression contract, made explicit and self-documenting:
+  ;; default-theme (what draw-ops/layout-node fall back to whenever a
+  ;; caller doesn't override :theme) simply has no :measure-text key, so
+  ;; `(:measure-text theme)` is nil for every caller that predates this
+  ;; feature -- layout-text's (if measure-text ... (text-lines ...)) then
+  ;; always takes the untouched text-lines/char-w branch, exactly as
+  ;; before this feature existed.
+  (is (nil? (:measure-text layout/default-theme))))
+
+(defn- fake-proportional-measure
+  "A FAKE stand-in for a real browser's `CanvasRenderingContext2D.
+   measureText` -- an honest substitution for a real proportional font in
+   this JVM test environment (which has no real Canvas API to call),
+   *not* a mock of the feature under test (text-lines-measured/layout-text
+   genuinely call this fn; nothing about the wrap algorithm itself is
+   stubbed out). Assigns each character a per-character px width that
+   mimics a genuinely proportional (non-monospace) font -- 'W' is much
+   wider than 'i' -- unlike the production char-w approximation, which
+   assumes every character is the same width regardless of which letter
+   it is."
+  [text _font-size]
+  (reduce + 0 (map (fn [c] (case c \W 16 \i 3 \space 6 8)) text)))
+
+(deftest measure-text-is-genuinely-consulted-not-ignored
+  ;; Two strings with the IDENTICAL character count, word count, and
+  ;; per-word length (two 5-char words joined by one space, 11 characters
+  ;; total either way) -- so the production char-w approximation (which
+  ;; only ever counts characters) cannot tell them apart and must wrap
+  ;; them identically. A real proportional font renders them very
+  ;; differently widths apart though: "WWWWW WWWWW" is far wider than
+  ;; "iiiii iiiii". This proves layout-text's `:measure-text` is
+  ;; genuinely consulted (the wrap decision tracks the FAKE font's real
+  ;; per-character widths), not merely threaded through and ignored.
+  (let [text-w "WWWWW WWWWW"
+        text-i "iiiii iiiii"
+        avail 108 ;; content-w (avail - 2*padding) = 100 px
+        measured-theme (assoc layout/default-theme :measure-text fake-proportional-measure)
+        {draw-w :draw} (layout/layout-node measured-theme 0 0 avail 1.0 inherited-text text-w)
+        {draw-i :draw} (layout/layout-node measured-theme 0 0 avail 1.0 inherited-text text-i)
+        {draw-w-default :draw} (layout/layout-node layout/default-theme 0 0 avail 1.0 inherited-text text-w)
+        {draw-i-default :draw} (layout/layout-node layout/default-theme 0 0 avail 1.0 inherited-text text-i)]
+    ;; With the injected proportional measure fn: the W-heavy text is too
+    ;; wide for 100px (WWWWW=80 + space=6 + WWWWW=80 = 166px) and wraps
+    ;; onto two lines, one word per line...
+    (is (= ["WWWWW" "WWWWW"] (mapv :text draw-w)))
+    ;; ...while the i-heavy text of the SAME character count comfortably
+    ;; fits (iiiii=15 + space=6 + iiiii=15 = 36px) and stays on one line.
+    (is (= ["iiiii iiiii"] (mapv :text draw-i)))
+    ;; Genuinely different wrap OUTCOMES for same-length strings is the
+    ;; proof the injected fn drives the decision, not just character count.
+    (is (not= (count draw-w) (count draw-i)))
+    ;; Sanity check on the OTHER half of the contract: without
+    ;; :measure-text, the default char-w approximation can't tell these
+    ;; two same-character-count strings apart at all -- both fit on a
+    ;; single line (char-w for font-size 14 is 8px; 11 chars * 8 = 88 <=
+    ;; 100), unlike the measured case above where they genuinely diverge.
+    (is (= ["WWWWW WWWWW"] (mapv :text draw-w-default)))
+    (is (= ["iiiii iiiii"] (mapv :text draw-i-default)))
+    ;; Same wrap SHAPE (both a single unwrapped line) for both strings --
+    ;; unlike the measured case above, where the same two strings genuinely
+    ;; diverge (one line vs. two).
+    (is (= (count draw-w-default) (count draw-i-default)))))
+
+(deftest measure-text-flows-through-the-public-draw-ops-entry-point
+  ;; The same proof as measure-text-is-genuinely-consulted-not-ignored,
+  ;; but through the actual public entry point (draw-ops, called with a
+  ;; real kotoba.wasm.dom tree) instead of the lower-level layout-node --
+  ;; proving the plumbing draw-ops' docstring documents (opts' :theme
+  ;; merges :measure-text same as every other theme key) genuinely works
+  ;; end-to-end, exactly how kotoba-lang/browser's render-document already
+  ;; threads its own `theme` argument into this same opts map today.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [text-node doc] (dom/create-text-node doc "WWWWW WWWWW")
+        doc (dom/append-child doc root text-node)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 116
+                                   :theme {:measure-text fake-proportional-measure}})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["WWWWW" "WWWWW"] (mapv :text text-ops)))))
+
 ;; ---- display:grid ----
 
 (defn- grid-tree

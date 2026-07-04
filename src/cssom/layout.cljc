@@ -31,7 +31,16 @@
    exact same text-wrapping/paint path (layout-text) real text already
    uses, positioned immediately before/after the element's real children.
    Real hosts can still swap this for text shaping/WebGPU buffers etc — the
-   draw-ops data boundary is unchanged.
+   draw-ops data boundary is unchanged. Word-wrap itself normally decides
+   line breaks with a per-character `(long (* 0.6 font-size))`
+   monospace-like approximation (see text-lines) since this is a pure,
+   host-independent engine with no real glyph shaping and no Canvas API
+   guaranteed to exist in every environment it runs in (e.g. plain JVM
+   tests) — but a real host that DOES have real text measurement (e.g. a
+   browser's `CanvasRenderingContext2D.measureText`) can opt into using it
+   for wrap decisions instead, via draw-ops' optional `:measure-text` theme
+   key (see draw-ops/layout-text), so wrapping agrees with how that host
+   actually paints the already-wrapped lines.
 
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
   (:require [clojure.string :as str]))
@@ -99,7 +108,14 @@
    principled break point inside a word, so an overflowing single-word
    line is the same 'let it overflow the box' behavior already used
    elsewhere in the box model (e.g. min/max-width clamps without
-   hyphenation)."
+   hyphenation).
+
+   This is the DEFAULT text-measurement strategy, used whenever a host
+   doesn't supply its own (see layout-text's `measure-text` and
+   text-lines-measured below for the injectable alternative) -- kept
+   completely unmodified by that feature so every existing caller that
+   doesn't opt in keeps this exact monospace-approximation behavior,
+   byte-for-byte, forever."
   [char-w max-w text]
   (let [text (str text)]
     (if (<= (* (count text) char-w) (max 0 max-w))
@@ -123,6 +139,40 @@
                     :else
                     (recur words nil (conj lines cur))))))))))))
 
+(defn- text-lines-measured
+  "Word-wraps text exactly like text-lines' greedy word-packing algorithm
+   (same whitespace splitting, same 'never split/drop a word', same
+   'an overflowing single word gets its own line' rules) but consults a
+   real width-measurement function `measure` (text -> px width, e.g. a
+   real browser's `CanvasRenderingContext2D.measureText(text).width`,
+   see layout-text's `measure-text`) instead of assuming every character
+   is a fixed char-w px wide. This is what makes wrap decisions agree with
+   how a REAL proportional font actually renders -- a 'W'-heavy string
+   measures wider, and wraps earlier, than an 'i'-heavy string of the same
+   character count, which the char-w approximation can never tell apart."
+  [measure max-w text]
+  (let [text (str text)]
+    (if (<= (measure text) (max 0 max-w))
+      [text]
+      (let [words (remove str/blank? (str/split text #"\s+"))]
+        (if (empty? words)
+          [text]
+          (loop [words words cur nil lines []]
+            (if (empty? words)
+              (conj lines cur)
+              (let [word (first words)
+                    more (rest words)
+                    candidate (if cur (str cur " " word) word)]
+                (cond
+                  (nil? cur)
+                  (recur more word lines)
+
+                  (<= (measure candidate) max-w)
+                  (recur more candidate lines)
+
+                  :else
+                  (recur words nil (conj lines cur)))))))))))
+
 (defn- layout-text
   "Word-wraps and lays out `text` as one or more :text draw-ops -- exactly
    the algorithm layout-node's real-DOM-text-node branch uses, factored out
@@ -131,14 +181,31 @@
    of a second, forked implementation. `color`/`font-size` are taken as
    explicit args (rather than read off `inherited` internally) so a
    pseudo-element's own resolved style can override either one while still
-   falling back to whatever a real text child in the same spot would use."
+   falling back to whatever a real text child in the same spot would use.
+
+   Text measurement is pluggable via an OPTIONAL `:measure-text` key on
+   `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
+   docstring for the full rationale (this file is a pure, host-independent
+   layout engine with no real glyph shaping of its own; a real host that
+   DOES have one, e.g. a browser's real Canvas 2D `measureText`, can supply
+   it here so word-wrap decisions agree with how the text will actually be
+   painted). When `theme` has no `:measure-text` (the default -- absent
+   from default-theme, and absent from every existing caller), this
+   resolves to the EXACT SAME char-w-approximation code path
+   (text-lines/char-w below) this file has always used, so today's
+   word-wrap behavior is completely unaffected unless a host opts in."
   [theme x y avail-width opacity color font-size text]
   (let [line-height (:line-height theme)
         padding (:padding theme)
+        measure-text (:measure-text theme)
         char-w (long (* 0.6 font-size))
         content-w (max 0 (- avail-width (* 2 padding)))
-        lines (text-lines char-w content-w text)
-        max-line-w (apply max 0 (map #(* (count %) char-w) lines))
+        lines (if measure-text
+                (text-lines-measured #(measure-text % font-size) content-w text)
+                (text-lines char-w content-w text))
+        max-line-w (if measure-text
+                     (apply max 0 (map #(measure-text % font-size) lines))
+                     (apply max 0 (map #(* (count %) char-w) lines)))
         w (min avail-width (+ max-line-w (* 2 padding)))
         h (+ (* (count lines) line-height) (* 2 padding))]
     {:box {:x x :y y :w w :h h}
@@ -1733,6 +1800,36 @@
      (recur theme x y avail-width opacity inherited (str node)))))
 
 (defn draw-ops
+  "Entry point: projects a kotoba.wasm.dom/tree to a flat vector of draw
+   ops (see layout-node for the per-node-type breakdown). `opts` merges
+   onto default-theme via its own `:theme` key (any subset of
+   default-theme's keys -- :font-size/:line-height/:padding/:gap/
+   :fg/:bg/:button-bg -- overrides that default), plus top-level :x/:y/
+   :width for the root box.
+
+   `opts`' `:theme` map also accepts an OPTIONAL `:measure-text` key -- a
+   `(fn [text font-size] width-in-px)` real text-width function, e.g. one
+   backed by a real browser's `CanvasRenderingContext2D.measureText` --
+   consulted by layout-text's word-wrap instead of this file's own
+   char-w-per-character approximation (`(long (* 0.6 font-size))`, a
+   monospace-like heuristic that can disagree with how a real,
+   PROPORTIONAL system font actually renders, since a real host paints
+   already-wrapped lines with its own real font metrics, not this
+   engine's approximation -- see the ns docstring). This is a pure,
+   host-independent layout engine with no glyph shaping of its own and no
+   Canvas API available in every environment it runs in (e.g. the JVM test
+   suite), so `:measure-text` is entirely OPTIONAL: when absent (the
+   default -- every existing caller, including every test in this
+   namespace, doesn't set it), word-wrap uses the exact same
+   char-w-approximation code path (text-lines) this file has always used,
+   completely unaffected. A host that DOES have a real measurement
+   function available -- e.g. `kotoba-lang/dom-gpu`'s WebGL/WebGPU hosts
+   already hold a real 2D canvas context (`text-ctx`) they use to actually
+   paint text, and `kotoba-lang/browser`'s `browser.core/render-document`
+   already threads its own `theme` argument straight into this same
+   `opts` map -- can supply `:measure-text` to make this engine's
+   word-wrap decisions agree with how the text will actually be painted,
+   with no other call-site changes needed anywhere in that chain."
   ([tree] (draw-ops tree {}))
   ([tree opts]
    (let [theme (merge default-theme (:theme opts))
