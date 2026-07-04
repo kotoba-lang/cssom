@@ -98,6 +98,30 @@
      (only the `container-type`/`container-name` longhands are parsed), and
      `or`/range syntax/`style()`/`scroll-state()` container queries (same
      narrow feature/combinator subset `@media` already has).
+   - `:not(<selector>)` / `:is(<selector-list>)` / `:where(<selector-list>)`
+     selector-FUNCTION pseudo-classes -- not to be confused with a bare
+     pseudo-CLASS like `:hover`/`:disabled` (see `pseudo-class-pattern` vs
+     `functional-pseudo-class-pattern`). `:not(<sel>)` matches an element
+     that does NOT match `<sel>`; `:is(<sel-list>)` matches an element that
+     matches ANY selector in a comma-separated list -- reusing
+     `split-selector-list`, the exact same comma-splitting logic top-level
+     `sel1, sel2 { ... }` rules already use, so whitespace/commas inside the
+     parens behave identically (`selector-tokens`/`split-selector-list` both
+     track paren-depth for this, alongside their existing bracket-depth
+     tracking for attribute selectors); `:where(<sel-list>)` matches
+     IDENTICALLY to `:is(...)` but -- the one easy-to-get-wrong difference
+     this feature hinges on -- ALWAYS contributes ZERO specificity, whereas
+     `:not()`/`:is()` contribute the specificity of their own most specific
+     argument, per occurrence (real CSS 4 behavior; see `specificity`/
+     `simple-selector-specificity`). Scoped, documented limitation: the
+     argument inside the parens supports simple/compound selectors only
+     (tag/id/class/attribute/pseudo-class combinations) -- no descendant/
+     child/sibling combinators and no NESTED functional pseudo-classes
+     inside the parens (see `parse-simple-selector`'s own docstring for
+     exactly what that does and doesn't cover). This scope covers the
+     overwhelming majority of real-world usage: `:not(.hidden)`,
+     `:is(h1, h2, h3)`, `:where(.card, .panel)` are all compound-selector-
+     only in practice.
    - CSS custom properties (`--foo: value`) and `var(--foo[, fallback])`
      resolution, inherited top-down the same way `apply-cascade` walks the
      document from its root.
@@ -409,62 +433,212 @@
    subset only supports before/after generated content (see namespace doc)."
   #"(?i)::?(before|after)\b")
 
+(def functional-pseudo-class-pattern
+  "Matches a single `:not(...)` / `:is(...)` / `:where(...)` occurrence --
+   the selector-FUNCTION forms of these pseudo-classes, each capturing its
+   own name (group 1) and its raw parenthesized argument text (group 2).
+   Deliberately distinct from `pseudo-class-pattern` (which matches the bare
+   `:name` shape of an ordinary pseudo-class like `:hover`/`:disabled`): the
+   trailing `\\(` this pattern requires right after the name is what keeps
+   the two patterns from double-matching the same `:not`/`:is`/`:where`
+   text (`pseudo-class-pattern` alone would otherwise match just the name
+   and leave the parenthesized argument as unconsumed, confusing, leftover
+   text -- see `parse-simple-selector`'s docstring for the concrete bug this
+   caused before this pattern existed).
+
+   The argument is captured as `[^()]*` -- deliberately unable to contain
+   another `(` or `)` -- which scopes this pattern (and everything that
+   consumes it) to NON-NESTED occurrences only: nested functional
+   pseudo-classes inside the argument (`:is(:not(.a))`) are out of scope
+   (see `parse-simple-selector`'s docstring for what happens instead of
+   crashing), and an attribute selector's own `[...]` inside the argument is
+   fine (`:not([hidden])`) since square brackets never conflict with this
+   pattern's parens."
+  #"(?i):(not|is|where)\(([^()]*)\)")
+
 (defn- append-token
   [tokens token]
   (cond-> tokens
     (not (str/blank? token)) (conj token)))
 
 (defn selector-tokens
+  "Splits `selector` into its top-level compound-selector/combinator tokens
+   (see `parse-selector`), tracking BOTH `[...]` bracket-depth (attribute
+   selectors) and `(...)` paren-depth (a `:not(...)`/`:is(...)`/
+   `:where(...)` functional pseudo-class's argument, see
+   `functional-pseudo-class-pattern`) so that a combinator character or
+   whitespace INSIDE either kind of nesting never splits a token -- e.g.
+   `.card:is(.a, .b) > p` must tokenize as `[\".card:is(.a, .b)\" \">\" \"p\"]`,
+   not split again at the space after the comma inside the parens."
   [selector]
   (let [s (str selector)
         n (count s)]
     (loop [idx 0
            start 0
            bracket-depth 0
+           paren-depth 0
            quote-char nil
            tokens []]
       (if (= idx n)
         (append-token tokens (str/trim (subs s start idx)))
         (let [ch (nth s idx)
-              escaped? (and (pos? idx) (= \\ (nth s (dec idx))))]
+              escaped? (and (pos? idx) (= \\ (nth s (dec idx))))
+              nesting-depth (+ bracket-depth paren-depth)]
           (cond
             (and quote-char (= ch quote-char) (not escaped?))
-            (recur (inc idx) start bracket-depth nil tokens)
+            (recur (inc idx) start bracket-depth paren-depth nil tokens)
 
             quote-char
-            (recur (inc idx) start bracket-depth quote-char tokens)
+            (recur (inc idx) start bracket-depth paren-depth quote-char tokens)
 
             (or (= ch \") (= ch \'))
-            (recur (inc idx) start bracket-depth ch tokens)
+            (recur (inc idx) start bracket-depth paren-depth ch tokens)
 
             (= ch \[)
-            (recur (inc idx) start (inc bracket-depth) quote-char tokens)
+            (recur (inc idx) start (inc bracket-depth) paren-depth quote-char tokens)
 
             (= ch \])
-            (recur (inc idx) start (max 0 (dec bracket-depth)) quote-char tokens)
+            (recur (inc idx) start (max 0 (dec bracket-depth)) paren-depth quote-char tokens)
 
-            (and (contains? #{\> \+ \~} ch) (zero? bracket-depth))
+            (= ch \()
+            (recur (inc idx) start bracket-depth (inc paren-depth) quote-char tokens)
+
+            (= ch \))
+            (recur (inc idx) start bracket-depth (max 0 (dec paren-depth)) quote-char tokens)
+
+            (and (contains? #{\> \+ \~} ch) (zero? nesting-depth))
             (recur (inc idx)
                    (inc idx)
                    bracket-depth
+                   paren-depth
                    quote-char
                    (-> tokens
                        (append-token (str/trim (subs s start idx)))
                        (conj (str ch))))
 
-            (and (str/blank? (str ch)) (zero? bracket-depth))
+            (and (str/blank? (str ch)) (zero? nesting-depth))
             (recur (inc idx)
                    (inc idx)
                    bracket-depth
+                   paren-depth
                    quote-char
                    (append-token tokens (str/trim (subs s start idx))))
 
             :else
-            (recur (inc idx) start bracket-depth quote-char tokens)))))))
+            (recur (inc idx) start bracket-depth paren-depth quote-char tokens)))))))
+
+(defn split-selector-list
+  "Splits a comma-separated selector list (`\"sel1, sel2\"`, as in a
+   top-level `sel1, sel2 { ... }` rule, or a `:not(...)`/`:is(...)`/
+   `:where(...)` functional pseudo-class's own argument -- see
+   `parse-simple-selector`, which reuses this exact function for that
+   argument rather than reinventing comma-splitting) into its trimmed,
+   non-blank parts. Tracks BOTH `[...]` bracket-depth (so a comma inside an
+   attribute selector's value, e.g. `[data-label=\"a,b\"]`, doesn't split)
+   and `(...)` paren-depth (so a comma inside a functional pseudo-class's
+   own argument, e.g. `:not(.a, .b)` appearing inside a larger top-level
+   selector list, doesn't split there either -- mirrors `selector-tokens`'s
+   own paren-depth tracking, for the same reason)."
+  [selector-list]
+  (let [s (str selector-list)
+        n (count s)]
+    (loop [idx 0
+           start 0
+           bracket-depth 0
+           paren-depth 0
+           quote-char nil
+           selectors []]
+      (if (= idx n)
+        (->> (conj selectors (subs s start idx))
+             (map str/trim)
+             (remove str/blank?)
+             vec)
+        (let [ch (nth s idx)
+              escaped? (and (pos? idx) (= \\ (nth s (dec idx))))]
+          (cond
+            (and quote-char (= ch quote-char) (not escaped?))
+            (recur (inc idx) start bracket-depth paren-depth nil selectors)
+
+            quote-char
+            (recur (inc idx) start bracket-depth paren-depth quote-char selectors)
+
+            (or (= ch \") (= ch \'))
+            (recur (inc idx) start bracket-depth paren-depth ch selectors)
+
+            (= ch \[)
+            (recur (inc idx) start (inc bracket-depth) paren-depth quote-char selectors)
+
+            (= ch \])
+            (recur (inc idx) start (max 0 (dec bracket-depth)) paren-depth quote-char selectors)
+
+            (= ch \()
+            (recur (inc idx) start bracket-depth (inc paren-depth) quote-char selectors)
+
+            (= ch \))
+            (recur (inc idx) start bracket-depth (max 0 (dec paren-depth)) quote-char selectors)
+
+            (and (= ch \,) (zero? bracket-depth) (zero? paren-depth))
+            (recur (inc idx) (inc idx) bracket-depth paren-depth quote-char (conj selectors (subs s start idx)))
+
+            :else
+            (recur (inc idx) start bracket-depth paren-depth quote-char selectors)))))))
 
 (defn parse-simple-selector
+  "Parses one compound-selector token (see `selector-tokens`) into its
+   tag/id/classes/attrs/pseudos/pseudo-element parts, plus the
+   selector-FUNCTION pseudo-classes `:not(...)`/`:is(...)`/`:where(...)`
+   (see `functional-pseudo-class-pattern` -- not to be confused with a bare
+   pseudo-CLASS like `:hover`/`:disabled`, matched by `pseudo-class-pattern`
+   instead).
+
+   Every `:not(...)`/`:is(...)`/`:where(...)` occurrence is extracted FIRST
+   (`functional-matches`) and stripped out of the working text (`s`, as
+   opposed to `raw`, the untouched original) BEFORE any tag/id/class/attr/
+   pseudo extraction runs on what's left. This ordering is essential, not
+   cosmetic: without it, an argument like `.special` inside `:not(.special)`
+   would otherwise be picked up by the plain class regex as though
+   `.special` were a class on the OUTER compound selector itself -- this was
+   a real bug: `:not(.special)`/`:is(.special)` never matched anything at
+   all, because they were silently misparsed into \"has class special AND
+   has an unrecognized :not/:is pseudo-class\" (unrecognized pseudo-classes
+   never match, see `matches-pseudo?`'s default `false`), which could never
+   be true for any element.
+
+   Each occurrence's parenthesized argument is parsed as a comma-separated
+   SELECTOR LIST via `split-selector-list` -- the exact same comma-splitting
+   logic top-level `sel1, sel2 { ... }` rules already use, so whitespace/
+   commas inside the parens behave identically (`selector-tokens`/
+   `split-selector-list` both track paren-depth for this) -- into a vector
+   of parsed compound selectors, `parse-simple-selector` itself called
+   recursively on each comma-separated item (`parse-group` below). One such
+   vector is stored as a GROUP under :selector/not / :selector/is /
+   :selector/where per occurrence (almost always zero or one group each,
+   but e.g. `:not(.a):not(.b)` correctly records two groups, both of which
+   must hold -- see `matches-simple?` for exactly how groups combine, and
+   `simple-selector-specificity` for how they contribute to specificity --
+   :where()'s groups are matched identically to :is()'s but deliberately
+   NEVER consulted for specificity, always contributing zero).
+
+   SCOPED LIMITATION (deliberate, documented -- not a bug): the argument
+   inside the parens supports simple/compound selectors only (tag/id/class/
+   attribute/pseudo-class combinations) -- no descendant/child/sibling
+   combinators inside the parens (`:is(.a .b)` is misparsed as a single
+   compound requiring both classes on the SAME element, not a descendant
+   relationship), and no NESTED functional pseudo-classes inside the
+   argument (`:is(:not(.a))` -- `functional-pseudo-class-pattern`'s argument
+   capture deliberately cannot contain another `(`/`)`, so a nested
+   occurrence like this is never correctly parsed, though it also never
+   crashes). This covers the overwhelming majority of real-world usage:
+   `:not(.hidden)`, `:is(h1, h2, h3)`, `:where(.card, .panel)` are all
+   compound-selector-only in practice."
   [selector]
-  (let [s (str/trim selector)
+  (let [raw (str/trim selector)
+        functional-matches (re-seq functional-pseudo-class-pattern raw)
+        parse-group (fn [kind]
+                      (->> functional-matches
+                           (filter (fn [[_ fn-name _]] (= kind (str/lower-case fn-name))))
+                           (mapv (fn [[_ _ arg]] (mapv parse-simple-selector (split-selector-list arg))))))
+        s (str/replace raw functional-pseudo-class-pattern "")
         selector-without-attrs (str/replace s attribute-selector-pattern "")
         pseudo-element (some-> (re-find pseudo-element-pattern selector-without-attrs)
                                 second str/lower-case keyword)
@@ -477,13 +651,16 @@
                     (re-seq attribute-selector-pattern s))
         pseudos (mapv (comp keyword str/lower-case second)
                       (re-seq pseudo-class-pattern selector-sans-pseudo-element))]
-    {:selector/raw s
+    {:selector/raw raw
      :selector/tag (when (seq tag) (keyword (str/lower-case tag)))
      :selector/id id
      :selector/classes classes
      :selector/attrs (filterv some? attrs)
      :selector/pseudos pseudos
-     :selector/pseudo-element pseudo-element}))
+     :selector/pseudo-element pseudo-element
+     :selector/not (parse-group "not")
+     :selector/is (parse-group "is")
+     :selector/where (parse-group "where")}))
 
 (defn parse-selector
   [selector]
@@ -504,55 +681,67 @@
     {:selector/raw (str/trim (or selector ""))
      :selector/parts parts}))
 
-(defn split-selector-list
-  [selector-list]
-  (let [s (str selector-list)
-        n (count s)]
-    (loop [idx 0
-           start 0
-           bracket-depth 0
-           quote-char nil
-           selectors []]
-      (if (= idx n)
-        (->> (conj selectors (subs s start idx))
-             (map str/trim)
-             (remove str/blank?)
-             vec)
-        (let [ch (nth s idx)
-              escaped? (and (pos? idx) (= \\ (nth s (dec idx))))]
-          (cond
-            (and quote-char (= ch quote-char) (not escaped?))
-            (recur (inc idx) start bracket-depth nil selectors)
+(defn- simple-selector-specificity
+  "Specificity contribution -- a `[id-count class/attr/pseudo-count
+   tag/pseudo-element-count]` 3-vector, see `specificity` below -- of a
+   single already-parsed compound/simple selector map. Factored out from
+   the public `specificity` (which just sums this across a full selector's
+   :selector/parts) so this exact same per-compound computation can ALSO be
+   applied, recursively, to a :not()/:is() argument (itself always a bare
+   compound-selector map, never a full multi-part selector -- see
+   `parse-simple-selector`'s compound-only scope for these functions'
+   arguments) -- without a forward reference to `specificity` itself (this
+   namespace deliberately avoids `declare`-based forward references, see
+   `parse-counter-amount`'s docstring for precedent; `specificity` is
+   defined further down this file than `parse-simple-selector`'s callers
+   need, so this self-contained helper is defined first instead).
 
-            quote-char
-            (recur (inc idx) start bracket-depth quote-char selectors)
+   `:not()`/`:is()` (:selector/not / :selector/is) each contribute the
+   specificity of their OWN most specific argument, PER OCCURRENCE
+   (`most-specific-in-group`), summed across however many occurrences this
+   compound has (almost always zero or one each, but e.g.
+   `:not(.a):not(.b)` correctly contributes both) -- real CSS 4 behavior.
 
-            (or (= ch \") (= ch \'))
-            (recur (inc idx) start bracket-depth ch selectors)
-
-            (= ch \[)
-            (recur (inc idx) start (inc bracket-depth) quote-char selectors)
-
-            (= ch \])
-            (recur (inc idx) start (max 0 (dec bracket-depth)) quote-char selectors)
-
-            (and (= ch \,) (zero? bracket-depth))
-            (recur (inc idx) (inc idx) bracket-depth quote-char (conj selectors (subs s start idx)))
-
-            :else
-            (recur (inc idx) start bracket-depth quote-char selectors)))))))
+   `:where()` (:selector/where) is DELIBERATELY never consulted here: it
+   always contributes ZERO specificity regardless of its own argument's
+   specificity -- the one easy-to-get-wrong divergence from `:is()` this
+   whole feature hinges on getting right, and why `:where()` still needs
+   its own :selector/where key (matched identically to :is() by
+   `matches-simple?`) rather than reusing :selector/is verbatim."
+  [simple]
+  (let [most-specific-in-group
+        (fn [group]
+          (reduce (fn [best arg]
+                    (let [candidate (simple-selector-specificity arg)]
+                      (if (pos? (compare candidate best)) candidate best)))
+                  [0 0 0]
+                  group))
+        groups-specificity
+        (fn [groups]
+          (reduce (fn [[a b c] group]
+                    (let [[ga gb gc] (most-specific-in-group group)]
+                      [(+ a ga) (+ b gb) (+ c gc)]))
+                  [0 0 0]
+                  groups))
+        [na nb nc] (groups-specificity (:selector/not simple))
+        [ia ib ic] (groups-specificity (:selector/is simple))]
+    [(+ (if (:selector/id simple) 1 0) na ia)
+     (+ (count (:selector/classes simple))
+        (count (:selector/attrs simple))
+        (count (:selector/pseudos simple))
+        nb ib)
+     (+ (if (:selector/tag simple) 1 0)
+        (if (:selector/pseudo-element simple) 1 0)
+        nc ic)]))
 
 (defn specificity
   [selector]
   (let [parts (or (:selector/parts selector) [selector])]
-    [(reduce + (map #(if (:selector/id %) 1 0) parts))
-     (reduce + (map #(+ (count (:selector/classes %))
-                        (count (:selector/attrs %))
-                        (count (:selector/pseudos %)))
-                    parts))
-     (reduce + (map #(+ (if (:selector/tag %) 1 0)
-                        (if (:selector/pseudo-element %) 1 0))
-                    parts))]))
+    (reduce (fn [[a b c] part]
+              (let [[pa pb pc] (simple-selector-specificity part)]
+                [(+ a pa) (+ b pb) (+ c pc)]))
+            [0 0 0]
+            parts)))
 
 (defn- find-matching-brace
   "Index of the `}` that closes the `{` at `open-idx`, honoring nested braces
@@ -1165,6 +1354,27 @@
     false))
 
 (defn- matches-simple?
+  "Whether `node` matches one compound/simple selector map (see
+   `parse-simple-selector`) -- tag/id/classes/attrs/pseudos as before, plus
+   `:not()`/`:is()`/`:where()` (:selector/not / :selector/is /
+   :selector/where, each a vector of GROUPS -- one per occurrence of that
+   function on this compound, see `parse-simple-selector`'s docstring):
+
+   - :selector/not: `node` must satisfy EVERY group (`every?`) by matching
+     NONE of that group's comma-separated selectors (`not-any?`) -- e.g.
+     `:not(.a, .b)` requires neither `.a` nor `.b` to match; two occurrences
+     `:not(.a):not(.b)` requires both groups to independently hold, which is
+     the same as requiring neither `.a` nor `.b` to match either way.
+   - :selector/is / :selector/where: `node` must satisfy EVERY group by
+     matching AT LEAST ONE of that group's selectors (`some`) -- :is() and
+     :where() are matching-behavior IDENTICAL; they differ only in
+     specificity (see `simple-selector-specificity`), never in whether they
+     match.
+
+   Each group's selectors are matched via `matches-simple?` itself,
+   recursively -- ordinary self-recursion (`document`/node stay the same,
+   only the selector being tested changes to a simpler argument selector),
+   not a forward reference to some other function defined later."
   ([node selector]
    (matches-simple? nil node selector))
   ([document node selector]
@@ -1190,7 +1400,13 @@
                                    (str/starts-with? (str actual) (str value "-")))
                            false))))
                 (:selector/attrs selector))
-        (every? #(matches-pseudo? document node %) (:selector/pseudos selector)))))
+        (every? #(matches-pseudo? document node %) (:selector/pseudos selector))
+        (every? (fn [group] (not-any? #(matches-simple? document node %) group))
+                (:selector/not selector))
+        (every? (fn [group] (some #(matches-simple? document node %) group))
+                (:selector/is selector))
+        (every? (fn [group] (some #(matches-simple? document node %) group))
+                (:selector/where selector)))))
 
 (defn- parent-index
   [document]
