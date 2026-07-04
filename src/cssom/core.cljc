@@ -155,6 +155,31 @@
      integer `n >= 0` is the real CSS An+B matching rule (`nth-matches?`);
      an element with no parent at all (a detached/root node) never matches
      any of these, same as real CSS.
+
+     `:nth-child(<An+B>)`/`:nth-of-type(<An+B>)` also have their own
+     from-the-end mirrors, `:nth-last-child(<An+B>)`/
+     `:nth-last-of-type(<An+B>)` -- real CSS's way of counting backward from
+     the LAST matching sibling instead of forward from the first (e.g.
+     `:nth-last-child(1)` means 'the last child', `:nth-last-child(-n+2)`
+     means 'the last two children', both common real-world idioms). This
+     needed no new micro-syntax or parser at all: the An+B argument grammar
+     is byte-for-byte identical (`nth-pseudo-class-pattern`'s regex just
+     grew two more name alternatives, `parse-nth-expression` is reused
+     completely unchanged), and the only genuinely new piece of logic is
+     which sibling INDEX gets tested against that same `[A B]` pair.
+     `nth-pseudo-matches?` already computed `node`'s 1-indexed FORWARD
+     position and the full relevant sibling set (`structural-siblings`/
+     `sibling-position`) to answer `:nth-child`/`:nth-of-type` -- reversing
+     that into a from-the-end index needs no second, backward sibling walk,
+     just arithmetic on numbers already in hand:
+     `total-siblings - forward-position + 1` (position `total` -- the last
+     sibling -- reverses to 1; position 1 -- the first -- reverses to
+     `total`). `nth-matches?`'s own An+B arithmetic then runs against that
+     reversed index exactly as it does against a forward one, including
+     correctly for a negative A coefficient like `:nth-last-child(-n+2)`
+     (there is nothing special about negative A once the index itself is
+     already the right one to test -- see `nth-pseudo-matches?`'s own
+     docstring for the reversal formula and a worked example).
    - `:root` and `:empty`, two more argument-less pseudo-classes fitting the
      same plain-pseudo-class path the structural pseudo-classes above use
      (no parser changes needed at all -- `pseudo-class-pattern` already
@@ -827,30 +852,39 @@
   #"(?i):(not|is|where)\(([^()]*)\)")
 
 (def nth-pseudo-class-pattern
-  "Matches a single `:nth-child(...)` / `:nth-of-type(...)` occurrence,
-   capturing its name (group 1) and its raw parenthesized An+B argument
-   text (group 2, e.g. `\"2n+1\"`, `\"even\"`, `\"-n+3\"` -- see
-   `parse-nth-expression` for the micro-syntax this argument is parsed
-   with). Unlike `functional-pseudo-class-pattern` (:not()/:is()/:where()'s
-   own argument, a full comma-separated SELECTOR LIST that needs
-   `split-selector-list`'s paren/bracket-depth-aware splitting), this
-   argument is always a short keyword/integer/An+B token that never itself
-   contains parens, so a plain non-nested `[^()]*` capture is enough -- no
-   companion selector-list-splitting machinery needed.
+  "Matches a single `:nth-child(...)` / `:nth-of-type(...)` /
+   `:nth-last-child(...)` / `:nth-last-of-type(...)` occurrence, capturing
+   its name (group 1) and its raw parenthesized An+B argument text (group
+   2, e.g. `\"2n+1\"`, `\"even\"`, `\"-n+3\"` -- see `parse-nth-expression`
+   for the micro-syntax this argument is parsed with -- IDENTICAL for all
+   four names, see `nth-pseudo-matches?`). Unlike
+   `functional-pseudo-class-pattern` (:not()/:is()/:where()'s own argument,
+   a full comma-separated SELECTOR LIST that needs `split-selector-list`'s
+   paren/bracket-depth-aware splitting), this argument is always a short
+   keyword/integer/An+B token that never itself contains parens, so a plain
+   non-nested `[^()]*` capture is enough -- no companion
+   selector-list-splitting machinery needed.
+
+   `nth-last-child`/`nth-last-of-type` don't collide with the plain
+   `nth-child`/`nth-of-type` alternatives despite sharing the `nth-` prefix:
+   the literal text right after it diverges immediately (`-child`/`-of-type`
+   vs `-last-child`/`-last-of-type`), so this alternation is unambiguous
+   regardless of the order the four names are listed in.
 
    The bare pseudo-class NAME (`:nth-child`, alongside the argument-less
    `:first-child`/`:last-child`/`:only-child`/`:first-of-type`/
    `:last-of-type` structural pseudo-classes) is already picked up by the
    existing `pseudo-class-pattern` exactly as it always has been -- that
    regex's own `:name` match doesn't care what follows, parens included, so
-   `:selector/pseudos` already contained `:nth-child`/`:nth-of-type` before
-   this pattern existed (the actual pre-existing gap was that nothing ever
-   looked at those keywords in `matches-pseudo?`, and the argument text was
-   simply discarded). This pattern exists ONLY to additionally capture that
-   argument text, which `pseudo-class-pattern` alone cannot (its match
-   stops at the pseudo name, never consuming a trailing `(...)`) -- see
-   `parse-simple-selector`'s `:selector/nth-args`."
-  #"(?i):(nth-child|nth-of-type)\(([^()]*)\)")
+   `:selector/pseudos` already contained `:nth-child`/`:nth-of-type`/
+   `:nth-last-child`/`:nth-last-of-type` before this pattern existed (the
+   actual pre-existing gap was that nothing ever looked at those keywords in
+   `matches-pseudo?`, and the argument text was simply discarded). This
+   pattern exists ONLY to additionally capture that argument text, which
+   `pseudo-class-pattern` alone cannot (its match stops at the pseudo name,
+   never consuming a trailing `(...)`) -- see `parse-simple-selector`'s
+   `:selector/nth-args`."
+  #"(?i):(nth-last-child|nth-last-of-type|nth-child|nth-of-type)\(([^()]*)\)")
 
 (def lang-pseudo-class-pattern
   "Matches a single `:lang(...)` occurrence, capturing its raw parenthesized
@@ -1044,17 +1078,21 @@
 
    Structural pseudo-classes (`:first-child`/`:last-child`/`:only-child`/
    `:nth-child()` and their `:first-of-type`/`:last-of-type`/
-   `:nth-of-type()` same-tag counterparts) need none of the above
-   selector-list machinery -- their bare names are already captured into
-   `:selector/pseudos` by the ordinary `pseudo-class-pattern` regex just
-   like `:hover`/`:disabled` always were (parens or not, that regex's match
-   stops at the name either way). Only `:nth-child()`/`:nth-of-type()`
-   carry an argument, and it is always a short An+B micro-syntax token,
-   never a selector -- `nth-pseudo-class-pattern` captures that argument
-   text alongside the pseudo name into `:selector/nth-args` (a
-   `{pseudo-keyword raw-arg-string}` map), left for `matches-pseudo?` to
-   parse (`parse-nth-expression`) and evaluate against the element's actual
-   sibling position at match time (see the namespace docstring's
+   `:nth-of-type()` same-tag counterparts, plus `:nth-child()`'s and
+   `:nth-of-type()`'s own from-the-end mirrors `:nth-last-child()`/
+   `:nth-last-of-type()`) need none of the above selector-list machinery --
+   their bare names are already captured into `:selector/pseudos` by the
+   ordinary `pseudo-class-pattern` regex just like `:hover`/`:disabled`
+   always were (parens or not, that regex's match stops at the name either
+   way). Only `:nth-child()`/`:nth-of-type()`/`:nth-last-child()`/
+   `:nth-last-of-type()` carry an argument, and it is always a short An+B
+   micro-syntax token, never a selector -- `nth-pseudo-class-pattern`
+   captures that argument text alongside the pseudo name into
+   `:selector/nth-args` (a `{pseudo-keyword raw-arg-string}` map), left for
+   `matches-pseudo?` to parse (`parse-nth-expression`) and evaluate against
+   the element's actual sibling position (forward for `:nth-child()`/
+   `:nth-of-type()`, from-the-end for `:nth-last-child()`/
+   `:nth-last-of-type()`) at match time (see the namespace docstring's
    structural-pseudo-classes paragraph).
 
    `:lang(...)` (see `lang-pseudo-class-pattern`) works exactly like
@@ -1772,7 +1810,8 @@
 
 ;; ---- structural pseudo-classes (:first-child/:last-child/:only-child/
 ;;      :nth-child() and their :first-of-type/:last-of-type/:nth-of-type()
-;;      same-tag counterparts) ----
+;;      same-tag counterparts, plus :nth-child()'s/:nth-of-type()'s own
+;;      from-the-end mirrors :nth-last-child()/:nth-last-of-type()) ----
 
 (defn- element-children
   "All `:element`-type children of `parent-id`, in document order -- text
@@ -1885,19 +1924,45 @@
                 (>= (quot diff a) 0))))))
 
 (defn- nth-pseudo-matches?
-  "Whether `node` matches `:nth-child(arg)` (`same-tag?` false) or
-   `:nth-of-type(arg)` (`same-tag?` true) -- resolves `node`'s 1-indexed
-   position among the relevant sibling set (`structural-siblings`/
-   `sibling-position`) and tests it against `arg`'s parsed An+B pattern
-   (`parse-nth-expression`/`nth-matches?`). False for an unparseable `arg`
-   or a `node` with no parent, the same conservative defaults their own
-   docstrings describe."
-  [document node same-tag? arg]
+  "Whether `node` matches `:nth-child(arg)` (`same-tag?` false, `from-end?`
+   false), `:nth-of-type(arg)` (`same-tag?` true, `from-end?` false),
+   `:nth-last-child(arg)` (`same-tag?` false, `from-end?` true), or
+   `:nth-last-of-type(arg)` (`same-tag?` true, `from-end?` true) -- resolves
+   `node`'s 1-indexed position among the relevant sibling set
+   (`structural-siblings`/`sibling-position`) and tests it against `arg`'s
+   parsed An+B pattern (`parse-nth-expression`/`nth-matches?`, IDENTICAL
+   micro-syntax and arithmetic for all four pseudo-classes -- only which
+   index gets tested differs).
+
+   `from-end?` reverses which END of the sibling set position 1 counts
+   from: real CSS's `:nth-last-child`/`:nth-last-of-type` count backward
+   from the LAST matching sibling instead of forward from the first. Since
+   `structural-siblings` already returns the full relevant sibling set (all
+   element siblings, or just same-tag ones) in document order, and
+   `sibling-position` already gives `node`'s 1-indexed FORWARD position
+   within it, the reverse (\"from-the-end\") position is just
+   `total-siblings - forward-position + 1` -- simple arithmetic on numbers
+   already in hand, needing no second, backward walk of the sibling list at
+   all. E.g. among 5 siblings, forward position 5 (the last one) reverses to
+   `5 - 5 + 1 = 1` (`:nth-last-child(1)` means 'the last child', matching
+   real CSS), and forward position 1 (the first) reverses to
+   `5 - 1 + 1 = 5`. `nth-matches?`'s own An+B arithmetic is then run against
+   this reversed index exactly as it would against a forward one -- it has
+   no idea, and doesn't need to know, which direction the index it was
+   handed came from.
+
+   False for an unparseable `arg` or a `node` with no parent, the same
+   conservative defaults their own docstrings describe."
+  [document node same-tag? from-end? arg]
   (boolean
    (when-let [an-b (parse-nth-expression arg)]
      (let [siblings (structural-siblings document node same-tag?)
            position (sibling-position siblings (:node/id node))]
-       (and position (nth-matches? position an-b))))))
+       (and position
+            (nth-matches? (if from-end?
+                            (- (+ (count siblings) 1) position)
+                            position)
+                          an-b))))))
 
 ;; ---- :root / :empty pseudo-classes ----
 
@@ -2041,15 +2106,20 @@
 (defn- matches-pseudo?
   "Whether `node` matches bare pseudo-class `selector-pseudo`, given its raw
    argument text `arg` (nil for every pseudo-class except `:nth-child`/
-   `:nth-of-type`/`:lang`, see `parse-simple-selector`'s `:selector/nth-args`
-   / `:selector/lang-args`).
+   `:nth-of-type`/`:nth-last-child`/`:nth-last-of-type`/`:lang`, see
+   `parse-simple-selector`'s `:selector/nth-args` / `:selector/lang-args`).
 
    `:first-child`/`:last-child`/`:only-child` and `:first-of-type`/
    `:last-of-type` need no argument -- they test `node`'s position
    (`structural-siblings`/`sibling-position`) against a fixed constant
-   (1st, last, or 'only one at all'); `:nth-child`/`:nth-of-type` delegate
-   to `nth-pseudo-matches?`, which additionally parses+evaluates `arg`'s
-   An+B micro-syntax. `:root` compares `node`'s own `:node/id` against
+   (1st, last, or 'only one at all'); `:nth-child`/`:nth-of-type`/
+   `:nth-last-child`/`:nth-last-of-type` all delegate to
+   `nth-pseudo-matches?`, which additionally parses+evaluates `arg`'s An+B
+   micro-syntax -- the `:nth-last-*` pair simply passes `from-end?` true,
+   testing the same An+B pattern against `node`'s position counted from the
+   END of the relevant sibling set instead of the start (see
+   `nth-pseudo-matches?`'s own docstring for exactly how that reversed index
+   is computed). `:root` compares `node`'s own `:node/id` against
    `document`'s own `:root` key (the document's root element, set by
    `kotoba.wasm.dom/set-root` -- NOT the same thing as this `:root` CSS
    pseudo-class, see the namespace docstring), the same document-dependent
@@ -2096,8 +2166,10 @@
     :last-of-type (let [siblings (structural-siblings document node true)]
                     (and (seq siblings)
                          (= (count siblings) (sibling-position siblings (:node/id node)))))
-    :nth-child (nth-pseudo-matches? document node false arg)
-    :nth-of-type (nth-pseudo-matches? document node true arg)
+    :nth-child (nth-pseudo-matches? document node false false arg)
+    :nth-of-type (nth-pseudo-matches? document node true false arg)
+    :nth-last-child (nth-pseudo-matches? document node false true arg)
+    :nth-last-of-type (nth-pseudo-matches? document node true true arg)
     :root (and document (= (:node/id node) (:root document)))
     :empty (empty-pseudo-matches? document node)
     :lang (lang-pseudo-matches? document node arg)
@@ -2129,9 +2201,10 @@
    Every :selector/pseudos entry is checked via `matches-pseudo?`, given
    its matching raw argument text from :selector/nth-args or
    :selector/lang-args when present (nil for every pseudo-class except
-   `:nth-child`/`:nth-of-type`/`:lang` -- the two maps' keys never overlap,
-   so `or`-ing their lookups together is unambiguous -- see
-   `parse-simple-selector`). Structural pseudo-classes (`:first-child` and
+   `:nth-child`/`:nth-of-type`/`:nth-last-child`/`:nth-last-of-type`/
+   `:lang` -- the two maps' keys never overlap, so `or`-ing their lookups
+   together is unambiguous -- see `parse-simple-selector`). Structural
+   pseudo-classes (`:first-child` and
    friends) and `:lang` alike need `document` to look up `node`'s
    parent/siblings/ancestor chain, exactly like `:focus`/`:disabled`
    already need it for other reasons -- the document-less 2-arity form
