@@ -806,3 +806,205 @@
           "the outer @media (min-width: 320px) fails at a 200px viewport, so
            the whole nested block -- including its @container rule -- never
            applies, regardless of the container's own width"))))
+
+;; ---- :not() / :is() / :where() selector-function pseudo-classes ----
+;;
+;; Before this feature existed, `:not(.special)` and `:is(.special)` were
+;; silently misparsed: the plain class regex picked up `.special` (the
+;; argument INSIDE the parens) as though it were a class on the OUTER
+;; compound selector, and `:not`/`:is` themselves fell through to
+;; `matches-pseudo?`'s unrecognized-pseudo-class default of `false` -- so
+;; neither selector ever matched anything at all, regardless of the
+;; element. These tests exercise the real fix through the full
+;; `parse-rules` -> `apply-cascade` pipeline (not just the parser in
+;; isolation), the same discipline the rest of this file already uses.
+
+(deftest not-and-is-resolve-correctly-through-the-real-cascade-pipeline
+  ;; The exact repro that exposed the gap in the first place: a <p> with
+  ;; class "special" and a childless <p> without it.
+  (let [[p1 doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p1)
+        doc (dom/set-attribute doc p1 :class "special")
+        [p2 doc] (dom/create-element doc :p)
+        doc (dom/append-child doc p1 p2)
+        rules (css/parse-rules "p:not(.special) { color: red } p:is(.special) { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes p1 :attrs :style/color]))
+        "p1 has class \"special\" -- :is(.special) matches it, :not(.special)
+         must NOT (so it doesn't get overwritten to red)")
+    (is (= "red" (get-in doc [:nodes p2 :attrs :style/color]))
+        "p2 has no class at all -- :not(.special) matches it, :is(.special)
+         must NOT (so it doesn't get overwritten to blue)")))
+
+(deftest not-pseudo-class-with-a-comma-separated-selector-list-excludes-every-alternative
+  ;; Real CSS 4 allows a full selector LIST inside :not() -- :not(.a, .b)
+  ;; must exclude an element matching EITHER .a OR .b, not just a single
+  ;; selector.
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [d1 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d1)
+        doc (dom/set-attribute doc d1 :class "a")
+        [d2 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d2)
+        doc (dom/set-attribute doc d2 :class "b")
+        [d3 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d3)
+        doc (dom/set-attribute doc d3 :class "c")
+        rules (css/parse-rules "div:not(.a, .b) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes d1 :attrs :style/color])) "a .a element is excluded")
+    (is (nil? (get-in doc [:nodes d2 :attrs :style/color])) "a .b element is also excluded")
+    (is (= "red" (get-in doc [:nodes d3 :attrs :style/color]))
+        "a .c element matches neither listed alternative, so :not(.a, .b)
+         matches it")))
+
+(deftest not-pseudo-class-composes-with-a-leading-compound-selector
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [card1 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section card1)
+        doc (dom/set-attribute doc card1 :class "card")
+        [card2 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section card2)
+        doc (dom/set-attribute doc card2 :class "card disabled")
+        rules (css/parse-rules ".card:not(.disabled) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes card1 :attrs :style/color]))
+        "a plain .card (no .disabled) matches .card:not(.disabled)")
+    (is (nil? (get-in doc [:nodes card2 :attrs :style/color]))
+        "a .card.disabled must NOT match .card:not(.disabled) -- the
+         .disabled class it also carries excludes it")))
+
+(deftest is-pseudo-class-matches-any-of-several-alternatives
+  (let [[h1 doc] (dom/create-element dom/empty-document :h1)
+        doc (dom/set-root doc h1)
+        [h2 doc] (dom/create-element doc :h2)
+        doc (dom/append-child doc h1 h2)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc h1 p)
+        rules (css/parse-rules ":is(h1, h2, h3) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes h1 :attrs :style/color])) "h1 is one of the listed alternatives")
+    (is (= "red" (get-in doc [:nodes h2 :attrs :style/color])) "h2 is another listed alternative")
+    (is (nil? (get-in doc [:nodes p :attrs :style/color]))
+        "p matches none of h1/h2/h3, so :is(h1, h2, h3) does not match it")))
+
+(deftest where-pseudo-class-matches-identically-to-is
+  (let [[h1 doc] (dom/create-element dom/empty-document :h1)
+        doc (dom/set-root doc h1)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc h1 p)
+        rules (css/parse-rules ":where(h1, h2) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes h1 :attrs :style/color])))
+    (is (nil? (get-in doc [:nodes p :attrs :style/color])))))
+
+(deftest parses-not-is-where-into-per-occurrence-selector-groups-without-leaking-into-the-outer-compound
+  (let [not-sel (css/parse-simple-selector "p:not(.a, .b)")
+        is-sel (css/parse-simple-selector "h1:is(.big, .huge)")
+        where-sel (css/parse-simple-selector ".card:where(.featured)")
+        group-classes (fn [groups] (mapv (fn [group] (mapv #(first (:selector/classes %)) group)) groups))]
+    (is (= :p (:selector/tag not-sel)))
+    (is (empty? (:selector/classes not-sel))
+        "the :not() argument's own classes must NOT leak onto the outer
+         compound selector -- the exact bug this whole feature fixes")
+    (is (= [["a" "b"]] (group-classes (:selector/not not-sel)))
+        "the argument is parsed as a comma-separated selector list, reusing
+         split-selector-list")
+    (is (= [["big" "huge"]] (group-classes (:selector/is is-sel))))
+    (is (= [["featured"]] (group-classes (:selector/where where-sel))))))
+
+;; ---- :not()/:is() DO count toward specificity (their most specific
+;;      argument); :where() NEVER does -- always zero. ----
+
+(deftest not-and-is-contribute-the-specificity-of-their-most-specific-argument
+  (let [rules (css/parse-rules
+               "p:not(.a) { color: red }
+                p:is(#id, .a) { color: blue }")]
+    (is (= [0 1 1] (css/specificity (-> rules first :rule/selectors first)))
+        ":not(.a) adds .a's own specificity (0 class, contributing to the
+         middle column) on top of the bare `p` tag selector's own (0 0 1)")
+    (is (= [1 0 1] (css/specificity (-> rules second :rule/selectors first)))
+        ":is(#id, .a) adds the MOST specific of its two arguments --
+         #id's (1 0 0), which beats .a's lower (0 1 0) -- not an average or
+         the first-listed one")))
+
+(deftest not-pseudo-class-specificity-wins-a-real-cascade-tie-break-despite-losing-on-source-order
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules
+               "div:not(#nonexistent) { color: red }
+                div { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes div :attrs :style/color]))
+        "div:not(#nonexistent) has HIGHER specificity than plain `div`
+         ((1 0 1) beats (0 0 1), because :not()'s #nonexistent argument
+         contributes id-level specificity regardless of whether the element
+         actually has that id), so it wins the cascade even though it is
+         declared FIRST -- source order alone would otherwise favor the
+         later-declared plain `div` rule")))
+
+(deftest where-pseudo-class-always-contributes-zero-specificity-even-with-an-id-argument
+  ;; THE single most important, easy-to-get-wrong test in this whole
+  ;; feature: a naive implementation might give :where() the same
+  ;; specificity treatment as :is() (since they match identically) -- this
+  ;; proves that would be wrong, using a rule that would WIN under that
+  ;; bug but LOSES under the correct real-CSS-4 behavior.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "big")
+        rules (css/parse-rules
+               "div:where(#big) { color: red }
+                div { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (= [0 0 1] (css/specificity (-> rules first :rule/selectors first)))
+        ":where(#big) contributes ZERO specificity regardless of the #big
+         id argument -- the compound's specificity is exactly `div`'s own
+         (0 0 1), not (1 0 1) like :is(#big) would give (see the mirror test
+         below)")
+    (is (= "blue" (get-in doc [:nodes div :attrs :style/color]))
+        "the div genuinely HAS id=\"big\", so div:where(#big) really does
+         match it -- but it TIES with plain `div` on specificity (both
+         (0 0 1)), so the cascade falls through to source order and the
+         later-declared plain `div` rule wins. A naive implementation that
+         (wrongly) gave :where() the same specificity treatment as :is()
+         would make div:where(#big) win instead ((1 0 1) beats (0 0 1))
+         regardless of declaration order -- this assertion fails under that
+         bug")))
+
+(deftest is-pseudo-class-with-the-identical-argument-does-get-the-specificity-where-deliberately-does-not
+  ;; The mirror image of the :where() test above, using the exact same
+  ;; #big argument and the exact same tie-breaking setup, to prove the
+  ;; divergence is real and specific to :where() -- not a general
+  ;; :not()/:is()/:where() bug.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "big")
+        rules (css/parse-rules
+               "div:is(#big) { color: red }
+                div { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (= [1 0 1] (css/specificity (-> rules first :rule/selectors first)))
+        ":is(#big) DOES contribute #big's id-level specificity, unlike
+         :where(#big) above")
+    (is (= "red" (get-in doc [:nodes div :attrs :style/color]))
+        "div:is(#big) has HIGHER specificity than plain `div` ((1 0 1)
+         beats (0 0 1)), so it wins despite being declared FIRST -- the
+         opposite outcome of the :where() test above, for an otherwise
+         identical setup")))
+
+;; ---- paren-depth tokenization/splitting for :not()/:is()/:where() args ----
+
+(deftest selector-tokenization-ignores-whitespace-and-commas-inside-functional-pseudo-class-arguments
+  (let [tokens (css/selector-tokens ".card:is(.a, .b) > p")]
+    (is (= [".card:is(.a, .b)" ">" "p"] tokens)
+        "the space after the comma inside :is(...) must not split this into
+         two separate compound-selector tokens")))
+
+(deftest selector-list-split-ignores-commas-inside-functional-pseudo-class-arguments
+  (let [selectors (css/split-selector-list "p:not(.a, .b), div")]
+    (is (= ["p:not(.a, .b)" "div"] selectors)
+        "the comma inside :not(...) must not split the top-level selector
+         list -- only the comma separating the two top-level selectors
+         should")))
