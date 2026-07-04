@@ -1,11 +1,14 @@
 (ns cssom.layout
-  "Box-model + flexbox layout projection from a kotoba virtual DOM tree
-   (kotoba.wasm.dom/tree) to renderer draw ops.
+  "Box-model + flexbox + grid layout projection from a kotoba virtual DOM
+   tree (kotoba.wasm.dom/tree) to renderer draw ops.
 
    Covers: padding/border/margin box model with min/max-width and
    content-box/border-box sizing; display:flex with flex-direction/
-   flex-wrap/justify-content/align-items/gap; position:relative/absolute
-   with z-index stacking; opacity (multiplicatively inherited); background/
+   flex-wrap/justify-content/align-items/gap; display:grid with
+   grid-template-columns/grid-template-rows (fixed px + fr tracks,
+   auto-placement only — see layout-grid for the exact subset and its
+   documented limitations); position:relative/absolute with z-index
+   stacking; opacity (multiplicatively inherited); background/
    background-color; borders; overflow+scroll-top/scroll-left clipping;
    form-control value/checked/selected-option-label projection; text input
    caret/selection. Real hosts can still swap this for text shaping/WebGPU
@@ -126,6 +129,8 @@
    :align-items (or (style node :align-items) "stretch")
    :flex-direction (or (style node :flex-direction) "row")
    :flex-wrap (or (style node :flex-wrap) "nowrap")
+   :grid-template-columns (style node :grid-template-columns)
+   :grid-template-rows (style node :grid-template-rows)
    :gap (parse-int (style node :gap) (:gap theme))
    :pointer-events (style node :pointer-events)
    :overflow (attr node :overflow)
@@ -251,6 +256,96 @@
           (recur idx [] 0 (conj rows cur))
           (recur (inc idx) (conj cur idx) next-size rows))))))
 
+;; ---- grid track-size parsing / sizing ----
+
+(defn- parse-track-list
+  "Parses a `grid-template-columns`/`grid-template-rows` value into a vector
+   of track specs, e.g. \"100px 1fr 2fr\" -> [{:type :fixed :size 100}
+   {:type :fr :size 1} {:type :fr :size 2}].
+
+   Deliberately a small, local parser rather than an extension to
+   cssom.core's cascade — mirrors how this file already owns its own
+   parse-int/parse-dbl numeric coercion instead of depending on cssom.core
+   for it. cssom.core/parse-declarations (parse-style-value) passes any
+   value that isn't a bare integer or a single `Npx` token through
+   untouched as a raw string, so a multi-token track list like
+   \"100px 1fr 2fr\" always arrives here exactly as the CSS author wrote it
+   (verified against cssom.core/parse-style-value, which only special-cases
+   a whole-value match of `-?\\d+` or `-?\\d+px`). A bare integer input
+   (cssom.core coerces a lone single-track `Npx` value, e.g.
+   `grid-template-columns: 200px`, to the plain integer 200) is treated as
+   a single fixed-px track for symmetry with that string case.
+
+   Supports fixed `Npx` and fractional `Nfr` tracks only. Explicitly out of
+   scope: `auto`, `minmax()`, `repeat()`, percentage tracks — any token that
+   doesn't match `Npx`/`Nfr` degrades to a 0px fixed track rather than
+   throwing, so an unsupported keyword doesn't crash layout.
+
+   nil/blank input returns [] — callers decide the no-explicit-tracks
+   fallback (layout-grid falls back to a single full-width column when
+   grid-template-columns is absent)."
+  [v]
+  (cond
+    (integer? v) [{:type :fixed :size v}]
+    (string? v)
+    (->> (str/split (str/trim v) #"\s+")
+         (remove str/blank?)
+         (mapv (fn [tok]
+                 (cond
+                   (re-matches #"-?[0-9]*\.?[0-9]+fr" tok)
+                   {:type :fr :size (parse-dbl (subs tok 0 (- (count tok) 2)) 1.0)}
+
+                   (re-matches #"-?[0-9]*\.?[0-9]+px" tok)
+                   {:type :fixed :size (parse-int (subs tok 0 (- (count tok) 2)) 0)}
+
+                   (re-matches #"-?[0-9]*\.?[0-9]+" tok)
+                   {:type :fixed :size (parse-int tok 0)}
+
+                   :else
+                   {:type :fixed :size 0}))))
+    :else []))
+
+(defn- distribute-fr
+  "Splits `remaining` px across `weights` (fr weights, in track order)
+   proportionally using integer division, then assigns any leftover px from
+   rounding to the last (highest-index) fr track, so the returned sizes
+   always sum exactly to `remaining` (same 'don't lose a pixel to rounding'
+   convention as the rest of this file's integer-pixel math)."
+  [remaining weights]
+  (let [total (reduce + 0 weights)]
+    (if (or (<= remaining 0) (not (pos? total)))
+      (mapv (constantly 0) weights)
+      (let [sizes (mapv #(long (quot (* remaining %) total)) weights)
+            leftover (- remaining (reduce + 0 sizes))]
+        (if (and (pos? leftover) (seq sizes))
+          (update sizes (dec (count sizes)) + leftover)
+          sizes)))))
+
+(defn- track-sizes
+  "Resolves parsed tracks (see parse-track-list) to concrete pixel sizes.
+   `definite-total` is the space available along this axis to distribute fr
+   tracks against: always the container's content-width for columns; for
+   rows it is the container's explicit :height if given, else nil. When nil,
+   fr tracks resolve to 0px here and layout-grid falls back to auto/content
+   sizing for that row instead (mirroring flexbox's own auto cross-axis
+   convention elsewhere in this file) — there is no definite total to share
+   proportionally when the grid container's height is itself content-driven."
+  [tracks gap definite-total]
+  (let [n (count tracks)
+        gap-total (* gap (max 0 (dec n)))
+        fixed-total (reduce + 0 (keep #(when (= :fixed (:type %)) (:size %)) tracks))
+        remaining (when definite-total (max 0 (- definite-total fixed-total gap-total)))
+        fr-sizes (if remaining
+                   (distribute-fr remaining (mapv :size (filter #(= :fr (:type %)) tracks)))
+                   [])]
+    (loop [ts tracks frs fr-sizes out []]
+      (if (empty? ts)
+        out
+        (let [t (first ts)]
+          (if (= :fixed (:type t))
+            (recur (rest ts) frs (conj out (long (:size t))))
+            (recur (rest ts) (rest frs) (conj out (long (or (first frs) 0))))))))))
+
 (declare layout-node)
 
 (defn- measure-child
@@ -316,6 +411,93 @@
             node-h (if column? (+ main-content (* 2 inset)) (+ cross-content (* 2 inset)))
             node-w (if (:width st) w node-w)]
         {:box-w node-w :box-h node-h :draws (vec draws)}))))
+
+;; ---- grid layout ----
+
+(defn- layout-grid
+  "display:grid subset: explicit `grid-template-columns`/`grid-template-rows`
+   track lists (fixed px + fr — see parse-track-list) with auto-placement in
+   DOM order, row-major (fills a row left-to-right before wrapping to the
+   next row). `gap` — the same style key flex already reuses — spaces both
+   rows and columns.
+
+   Column count = the number of parsed grid-template-columns tracks. With no
+   (or a blank) grid-template-columns, this falls back to a single
+   full-content-width column — i.e. behaves like a vertical stack, a
+   reasonable default that also keeps `display:grid` usable with only
+   grid-template-rows set. Column track sizes are always resolved against
+   the container's definite content-width (`cw`), exactly like flexbox's
+   main-axis sizing whenever the main size is known — so `fr` columns are
+   always well-defined (see track-sizes).
+
+   Row sizing: rows are auto-generated (row-major wrap) to fit however many
+   children there are, regardless of how many grid-template-rows tracks were
+   given — there is no implicit-grid concept beyond 'add another row'. A row
+   whose index has an explicit *fixed*-px grid-template-rows track uses that
+   literal height. Every other row — an `fr` row track, or any row beyond
+   the explicit track list — is auto-sized to the tallest child placed in
+   that row (mirrors flexbox's own auto cross-axis convention elsewhere in
+   this file), UNLESS the grid container has an explicit :height, in which
+   case the explicit row tracks (fixed + fr) are resolved proportionally
+   against that height the same way columns are. Without an explicit
+   container height there is no definite total to share `fr` row tracks
+   against, so this is the one deliberate asymmetry versus columns in this
+   subset — documented here rather than silently guessed at.
+
+   Absolute-positioned children are NOT extracted via partition-flow here —
+   this matches layout-flex's current behavior (today only layout-block
+   partitions out-of-flow children); a position:absolute child inside a grid
+   container is placed as an ordinary grid item, the same limitation flex
+   already has.
+
+   Explicitly out of scope: `auto`/`minmax()`/`repeat()`/percentage tracks,
+   explicit grid-column/grid-row placement, grid-template-areas, dense
+   packing."
+  [theme x y avail-width opacity inherited st node in-flow]
+  (let [w (resolve-width st avail-width)
+        inset (content-inset st)
+        cx (+ x (:margin st) inset)
+        cy (+ y (:margin st) inset)
+        cw (max 0 (- w (* 2 inset)))
+        gap (:gap st)
+        explicit-cols (parse-track-list (:grid-template-columns st))
+        col-tracks (if (seq explicit-cols) explicit-cols [{:type :fixed :size cw}])
+        n-cols (count col-tracks)
+        col-widths (track-sizes col-tracks gap cw)
+        col-offsets (place-main-axis "flex-start" col-widths gap 0)
+        row-tracks (parse-track-list (:grid-template-rows st))
+        explicit-h (:height st)
+        row-track-fr-sizes (when explicit-h (track-sizes row-tracks gap explicit-h))
+        rows-of-children (partition-all n-cols in-flow)
+        measured-rows (mapv (fn [row-children]
+                              (vec (map-indexed
+                                    (fn [col-idx child]
+                                      (measure-child theme (nth col-widths col-idx cw) opacity inherited child))
+                                    row-children)))
+                            rows-of-children)
+        row-heights (vec (map-indexed
+                          (fn [row-idx measured]
+                            (let [track (nth row-tracks row-idx nil)]
+                              (cond
+                                (and track (= :fixed (:type track)))
+                                (:size track)
+
+                                (and track row-track-fr-sizes)
+                                (nth row-track-fr-sizes row-idx)
+
+                                :else
+                                (apply max 0 (mapv #(:h (:box %)) measured)))))
+                          measured-rows))
+        row-offsets (place-main-axis "flex-start" row-heights gap 0)
+        draws (vec (mapcat (fn [measured row-y]
+                             (mapcat
+                              (fn [col-idx m]
+                                (translate-ops (+ cx (nth col-offsets col-idx)) (+ cy row-y) (:draw m)))
+                              (range) measured))
+                           measured-rows row-offsets))
+        content-h (+ (reduce + 0 row-heights) (* gap (max 0 (dec (count row-heights)))))
+        node-h (or explicit-h (+ content-h (* 2 inset)))]
+    {:box-w w :box-h node-h :draws draws}))
 
 ;; ---- block (normal-flow) layout ----
 
@@ -465,6 +647,19 @@
 
              (= "flex" (:display st))
              (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node (:children node))]
+               {:box {:x x :y y :w box-w :h box-h}
+                :draw (vec (concat
+                            (or (border-ops st x y box-w box-h opacity) [])
+                            (when-let [bg (default-bg tag st theme)]
+                              [{:draw/op :rect :x x :y y :w box-w :h box-h :color bg :tag tag :opacity opacity}])
+                            [(merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w box-w :h box-h
+                                     :class (attr node :class) :listeners (listeners node)
+                                     :opacity opacity}
+                                    (style-passthrough st))]
+                            draws))})
+
+             (= "grid" (:display st))
+             (let [{:keys [box-w box-h draws]} (layout-grid theme x y avail-width opacity inherited st node (:children node))]
                {:box {:x x :y y :w box-w :h box-h}
                 :draw (vec (concat
                             (or (border-ops st x y box-w box-h opacity) [])
