@@ -3,7 +3,7 @@
 CSS Object Model for kotoba documents: selector parsing, cascade resolution,
 and the reference box-model/layout projection to renderer draw ops.
 
-Split out of `kotoba-lang/browser` (ADR-2607041700), where it lived as
+Split out of `kotoba-lang/browser` (ADR-2607051100), where it lived as
 `browser.css` (cascade) and, via `kotoba-lang/wasm-ui`'s
 `kotoba.wasm.layout`, the layout projection. Both now live together here as
 `cssom.core` and `cssom.layout`, since cascade and layout are one cohesive
