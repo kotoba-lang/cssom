@@ -155,6 +155,27 @@
      integer `n >= 0` is the real CSS An+B matching rule (`nth-matches?`);
      an element with no parent at all (a detached/root node) never matches
      any of these, same as real CSS.
+   - `:root` and `:empty`, two more argument-less pseudo-classes fitting the
+     same plain-pseudo-class path the structural pseudo-classes above use
+     (no parser changes needed at all -- `pseudo-class-pattern` already
+     captures both bare names). `:root` matches ONLY the document's own
+     root element -- `kotoba.wasm.dom`'s document map already names that
+     element's node-id under a `:root` KEY (set by `dom/set-root`, read by
+     `apply-cascade`'s own top-down walk and elsewhere in this namespace,
+     e.g. `radio-group-node-ids`) -- not to be confused with the `:root`
+     CSS pseudo-CLASS of the same name; matching is simply comparing
+     `node`'s own `:node/id` against that key (`matches-pseudo?`), the same
+     document-dependent restriction `:focus` already has (needs `document`;
+     never matches via the document-less 2-arity `matches?`/
+     `matches-simple?` form). `:empty` matches an element with NO children
+     AT ALL, of any node type -- a stricter, and different, question than
+     the structural pseudo-classes' element-only sibling counting above:
+     real CSS's `:empty` counts a `:text` child too, UNLESS that text
+     node's data is genuinely zero-length -- so a WHITESPACE-only text
+     child (a single space/newline between tags) still counts as content
+     (non-zero length), meaning `<div> </div>` does NOT match `:empty`,
+     only a truly childless `<div></div>` does (verified against real
+     browser behavior, not assumed -- see `child-counts-as-content?`).
    - CSS custom properties (`--foo: value`) and `var(--foo[, fallback])`
      resolution, inherited top-down the same way `apply-cascade` walks the
      document from its root.
@@ -1798,6 +1819,48 @@
            position (sibling-position siblings (:node/id node))]
        (and position (nth-matches? position an-b))))))
 
+;; ---- :root / :empty pseudo-classes ----
+
+(defn- child-counts-as-content?
+  "Whether `document`'s node `child-id` counts as REAL CONTENT that
+   disqualifies its parent from matching `:empty` (see
+   `empty-pseudo-matches?`). An `:element` child ALWAYS counts (any element
+   child at all -- however deeply empty THAT child may itself be --
+   disqualifies its parent, since the parent isn't childless); a `:text`
+   child counts only when its own data is non-empty (real CSS tests a text
+   node's LENGTH, not whether it's meaningful: a WHITESPACE-ONLY text node,
+   e.g. a single space or newline sitting between tags in the source, still
+   has non-zero length and so DOES count as content -- `<div> </div>` does
+   NOT match `:empty`, only a genuinely childless `<div></div>` does; only
+   a truly zero-length text node -- about the only way one would ever exist
+   is an explicit `content: \"\"` producing an empty string -- doesn't
+   count. Verified against real browser `:empty` behavior, not assumed).
+   Any other/unknown node type -- including when `document` is nil, e.g.
+   `:empty` checked via the document-less 2-arity `matches-simple?` form --
+   conservatively counts as content too, the same 'don't guess, degrade
+   safely' default this namespace uses everywhere else for an unrecognized
+   case."
+  [document child-id]
+  (let [child (get-in document [:nodes child-id])]
+    (case (:node/type child)
+      :element true
+      :text (pos? (count (str (:text child))))
+      true)))
+
+(defn- empty-pseudo-matches?
+  "Whether `node` matches `:empty` -- real CSS: an element with NO children
+   AT ALL, of ANY node type. Deliberately different from the structural
+   pseudo-classes above (`element-children`/`structural-siblings`), which
+   ignore text nodes entirely for SIBLING-POSITION purposes -- `:empty` is
+   a stricter question about the element's OWN children, where a text node
+   very much counts unless it is genuinely zero-length (see
+   `child-counts-as-content?`). `node`'s own `:children` (a vector of
+   child node-ids populated by `kotoba.wasm.dom/append-child`) is checked
+   directly -- no parent/sibling traversal needed, unlike the structural
+   pseudo-classes."
+  [document node]
+  (not-any? #(child-counts-as-content? document %) (:children node)))
+
 (defn- matches-pseudo?
   "Whether `node` matches bare pseudo-class `selector-pseudo`, given its raw
    argument text `arg` (nil for every pseudo-class except `:nth-child`/
@@ -1808,7 +1871,13 @@
    (`structural-siblings`/`sibling-position`) against a fixed constant
    (1st, last, or 'only one at all'); `:nth-child`/`:nth-of-type` delegate
    to `nth-pseudo-matches?`, which additionally parses+evaluates `arg`'s
-   An+B micro-syntax."
+   An+B micro-syntax. `:root` compares `node`'s own `:node/id` against
+   `document`'s own `:root` key (the document's root element, set by
+   `kotoba.wasm.dom/set-root` -- NOT the same thing as this `:root` CSS
+   pseudo-class, see the namespace docstring), the same document-dependent
+   restriction `:focus` already has. `:empty` delegates to
+   `empty-pseudo-matches?` (real CSS's stricter 'no children of ANY node
+   type' rule, not just no element children)."
   [document node selector-pseudo arg]
   (case selector-pseudo
     :disabled (disabled-control? document node)
@@ -1846,6 +1915,8 @@
                          (= (count siblings) (sibling-position siblings (:node/id node)))))
     :nth-child (nth-pseudo-matches? document node false arg)
     :nth-of-type (nth-pseudo-matches? document node true arg)
+    :root (and document (= (:node/id node) (:root document)))
+    :empty (empty-pseudo-matches? document node)
     false))
 
 (defn- matches-simple?
