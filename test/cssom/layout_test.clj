@@ -402,6 +402,162 @@
     (is (= 2 (count (node-ops ops))))                        ; container + 1 child, no crash
     (is (= {:x 52 :y 8 :w 80 :h 10} (select-keys item [:x :y :w :h])))))
 
+;; ---- grid-template-areas / grid-area named placement ----
+
+(deftest grid-template-areas-canonical-sidebar-header-main-footer-layout
+  ;; The canonical real-CSS example this feature exists for:
+  ;;   grid-template-columns: 200px 1fr;
+  ;;   grid-template-rows: 60px 1fr 40px;
+  ;;   grid-template-areas: "sidebar header" "sidebar main" "sidebar footer";
+  ;; with .header/.main/.footer/.sidebar each declaring grid-area: <name>.
+  ;; Container width 400 (200 + 1fr-resolved-200) / height 300
+  ;; (60 + 1fr-resolved-200 + 40) makes every track size concrete: column
+  ;; widths [200 200], row heights [60 200 40]. Each item's own height is
+  ;; set explicitly (per this engine's documented "height never auto-stretches
+  ;; across a row span" convention -- see layout-grid's docstring) to exactly
+  ;; the combined height of the rows its area spans, so the assertions below
+  ;; prove BOTH that x/y/w land on the real resolved track offsets/sizes AND
+  ;; that the sidebar's single item spans the full 3-row combined rectangle.
+  (let [tree (grid-tree {:grid-template-columns "200px 1fr"
+                          :grid-template-rows "60px 1fr 40px"
+                          :grid-template-areas "\"sidebar header\" \"sidebar main\" \"sidebar footer\""
+                          :gap 0 :padding 0 :width 400 :height 300}
+                         [[nil 60 {:grid-area "header"}]
+                          [nil 200 {:grid-area "main"}]
+                          [nil 40 {:grid-area "footer"}]
+                          [nil 300 {:grid-area "sidebar"}]])
+        ops (layout/draw-ops tree {:width 400})
+        [container header main footer sidebar] (node-ops ops)]
+    (is (= 400 (:w container)))
+    (is (= 300 (:h container)))
+    ;; header: row 0, col 1 (the 1fr->200px column) -> x=200 (past the 200px
+    ;; sidebar column), y=0 (row 0's offset), w=200 (the 1fr column's
+    ;; resolved width), h=60 (its own declared height, matching the 60px row
+    ;; track it occupies).
+    (is (= {:x 200 :y 0 :w 200 :h 60} (select-keys header [:x :y :w :h])))
+    ;; main: row 1, col 1 -> y=60 (past row 0's 60px), w=200, h=200 (matching
+    ;; the 1fr row track's own resolved 200px height).
+    (is (= {:x 200 :y 60 :w 200 :h 200} (select-keys main [:x :y :w :h])))
+    ;; footer: row 2, col 1 -> y=260 (past rows 0+1: 60+200), w=200, h=40
+    ;; (matching the 40px row track).
+    (is (= {:x 200 :y 260 :w 200 :h 40} (select-keys footer [:x :y :w :h])))
+    ;; sidebar: ONE item spanning the union of every row in column 0 (rows
+    ;; 0..3) -> x=0, y=0 (starts at the very first row), w=200 (the sidebar's
+    ;; own 200px column, not spanning any other column), h=300 (the full
+    ;; combined height of all 3 row tracks: 60+200+40).
+    (is (= {:x 0 :y 0 :w 200 :h 300} (select-keys sidebar [:x :y :w :h])))))
+
+(deftest grid-template-areas-named-area-spans-combined-multi-row-multi-col-rectangle
+  ;; grid-template-areas "box box skip" / "box box skip": "box" spans BOTH
+  ;; rows and the first two columns -- proving parse-grid-template-areas
+  ;; computes the union of every same-named cell as a single combined
+  ;; rectangle (not e.g. only the first row/column it happens to appear in)
+  ;; and place-grid-items places exactly ONE item there, at the union's own
+  ;; combined width (auto-filled across both spanned columns, exactly like
+  ;; a multi-column grid-column span already does).
+  (let [tree (grid-tree {:grid-template-columns "40px 50px 60px"
+                          :grid-template-rows "10px 20px"
+                          :grid-template-areas "\"box box skip\" \"box box skip\""
+                          :gap 0 :padding 0 :width 150}
+                         [[nil 30 {:grid-area "box"}]])
+        ops (layout/draw-ops tree {:width 150})
+        [container item] (node-ops ops)]
+    (is (= 150 (:w container)))
+    (is (= 30 (:h container)))                              ; 10 + 20, no gap/padding
+    ;; Combined rectangle: col0+col1 (40+50=90) wide, starting at row0/col0 --
+    ;; ONE item, not two, occupying the full 2-row x 2-col cell union.
+    (is (= {:x 0 :y 0 :w 90 :h 30} (select-keys item [:x :y :w :h])))
+    (is (= 2 (count (node-ops ops))))))                     ; container + exactly 1 item
+
+(deftest grid-area-unrecognized-name-falls-back-to-auto-placement
+  ;; grid-area: "nonexistent" doesn't match any name declared in the
+  ;; container's grid-template-areas ("a"/"b" only) -- must NOT crash, and
+  ;; the item must be honestly auto-placed (into the first free cell,
+  ;; row-major) rather than guessing at a nonsense rectangle.
+  (let [tree (grid-tree {:grid-template-columns "40px 40px"
+                          :grid-template-areas "\"a b\""
+                          :gap 0 :padding 0 :width 80}
+                         [[nil 10 {:grid-area "nonexistent"}]])
+        ops (layout/draw-ops tree {:width 80})
+        [container item] (node-ops ops)]
+    (is (= 2 (count (node-ops ops))))                       ; container + 1 item, no crash
+    (is (= {:x 0 :y 0 :w 40 :h 10} (select-keys item [:x :y :w :h])))))
+
+(deftest grid-template-areas-inconsistent-row-lengths-degrades-to-no-op
+  ;; Malformed/inconsistent grid-template-areas (rows with different token
+  ;; counts -- real CSS requires every row to declare the same number of
+  ;; columns) falls back to "no template" (parse-grid-template-areas returns
+  ;; nil) rather than crashing or guessing at a shape: a grid-area reference
+  ;; to a name inside it (even "a", which unambiguously appears) falls back
+  ;; to auto-placement, the same treatment an unrecognized name gets.
+  (let [tree (grid-tree {:grid-template-columns "40px 40px"
+                          :grid-template-areas "\"a b\" \"a b c\""
+                          :gap 0 :padding 0 :width 80}
+                         [[nil 10 {:grid-area "a"}]])
+        ops (layout/draw-ops tree {:width 80})
+        [container item] (node-ops ops)]
+    (is (= 2 (count (node-ops ops))))                       ; no crash
+    (is (= {:x 0 :y 0 :w 40 :h 10} (select-keys item [:x :y :w :h])))))
+
+(deftest grid-template-areas-composes-with-a-fully-auto-sibling
+  ;; grid-template-areas "a ." / ". .": "a" claims row0/col0 only; row0/col1,
+  ;; row1/col0, row1/col1 are NOT claimed by any area name ("." is real
+  ;; CSS's own 'intentionally empty cell' marker, not a name any item can
+  ;; reference). A second, fully-auto child (no grid-area/grid-column/
+  ;; grid-row at all) composes exactly like it already does alongside
+  ;; grid-column/grid-row explicit placement (see
+  ;; grid-explicit-item-does-not-collide-with-auto-placed-siblings above):
+  ;; the auto item's row-major scan skips (0,0) (claimed by "a") and lands
+  ;; in the very next free cell, (0,1).
+  (let [tree (grid-tree {:grid-template-columns "40px 40px"
+                          :grid-template-areas "\"a .\" \". .\""
+                          :gap 0 :padding 0 :width 80}
+                         [[nil 10 {:grid-area "a"}]
+                          [nil 12]])
+        ops (layout/draw-ops tree {:width 80})
+        [container a auto] (node-ops ops)]
+    (is (= {:x 0 :y 0 :w 40 :h 10} (select-keys a [:x :y :w :h])))
+    (is (= {:x 40 :y 0 :w 40 :h 12} (select-keys auto [:x :y :w :h])))))
+
+(deftest grid-template-areas-establishes-column-count-when-no-explicit-tracks
+  ;; No grid-template-columns declared at all: the areas template's own
+  ;; column count (2, from "left right") establishes the grid's column
+  ;; shape (equal-width 1fr fallback tracks) instead of this engine's usual
+  ;; "no tracks declared" single-full-width-column fallback -- so "left" and
+  ;; "right" land in two DISTINCT, evenly-split columns rather than
+  ;; collapsing onto one full-width column.
+  (let [tree (grid-tree {:grid-template-areas "\"left right\""
+                          :gap 0 :padding 0 :width 100}
+                         [[nil 10 {:grid-area "left"}]
+                          [nil 10 {:grid-area "right"}]])
+        ops (layout/draw-ops tree {:width 100})
+        [container left right] (node-ops ops)]
+    (is (= {:x 0 :y 0 :w 50 :h 10} (select-keys left [:x :y :w :h])))
+    (is (= {:x 50 :y 0 :w 50 :h 10} (select-keys right [:x :y :w :h])))))
+
+(deftest grid-column-explicit-on-item-wins-over-grid-area-same-axis
+  ;; When an item declares BOTH grid-area AND an explicit grid-column (a
+  ;; contradictory-but-real-possible declaration set), this engine's
+  ;; documented precedence (see item-grid-placement) is per-axis: the
+  ;; explicit grid-column wins for the COLUMN axis (mirroring real CSS's
+  ;; longhand-conflict resolution, since grid-area ultimately resolves to
+  ;; the same four longhands grid-column/grid-row do), while grid-area's own
+  ;; ROW range (not overridden by any explicit grid-row here) still applies.
+  (let [tree (grid-tree {:grid-template-columns "40px 40px 40px"
+                          :grid-template-rows "10px 20px"
+                          :grid-template-areas "\"a a b\" \"a a b\""
+                          :gap 0 :padding 0 :width 120}
+                         [[nil 5 {:grid-area "a" :grid-column 3}]])
+        ops (layout/draw-ops tree {:width 120})
+        [container item] (node-ops ops)]
+    ;; Column: explicit grid-column:3 wins -> 0-based col index 2 (x=80,
+    ;; w=40), NOT area "a"'s own col range (0..2, which would've been x=0
+    ;; w=80).
+    ;; Row: grid-area "a" still supplies the row range (rows 0..2, spanning
+    ;; both the 10px and 20px row tracks) since no explicit grid-row was
+    ;; declared.
+    (is (= {:x 80 :y 0 :w 40 :h 5} (select-keys item [:x :y :w :h])))))
+
 ;; ---- ::before / ::after generated content ----
 ;;
 ;; Unlike the rest of this file (which sets style attrs directly via

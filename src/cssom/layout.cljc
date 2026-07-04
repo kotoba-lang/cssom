@@ -7,16 +7,20 @@
    flex-wrap/justify-content/align-items/gap; display:grid with
    grid-template-columns/grid-template-rows (fixed px + fr tracks, plus
    `repeat(<n>, <track>)` and `minmax(<px>, <px-or-1fr>)` composing over
-   them) and per-item `grid-column`/`grid-row` explicit placement composing
-   with auto-placement for everything else — see layout-grid for the exact
+   them) and THREE composing item-placement mechanisms — per-item
+   `grid-column`/`grid-row` explicit line-based placement, per-item
+   `grid-area: <name>` named-area placement resolved against the
+   container's own `grid-template-areas` quoted-string template, and
+   auto-placement for everything else — see layout-grid for the exact
    subset and its documented limitations; position:relative/absolute with z-index
    stacking; opacity (multiplicatively inherited); background/
    background-color; borders; overflow+scroll-top/scroll-left clipping;
    form-control value/checked/selected-option-label projection; text input
    caret/selection; grid item explicit placement via `grid-column`/
-   `grid-row` composing with auto-placement for everything else (see
-   layout-grid/parse-grid-placement/place-grid-items for the exact subset);
-   ::before/::after generated `content` (see
+   `grid-row` and/or `grid-area` composing with auto-placement for
+   everything else (see layout-grid/parse-grid-placement/
+   parse-grid-template-areas/item-grid-placement/place-grid-items for the
+   exact subset); ::before/::after generated `content` (see
    with-generated-content) — cssom.core's cascade already resolves each
    element's ::before/::after style onto its :attrs (:pseudo/before /
    :pseudo/after, e.g. `{:content \"→ \" :color \"red\"}`); this namespace
@@ -168,8 +172,10 @@
    :flex-wrap (or (style node :flex-wrap) "nowrap")
    :grid-template-columns (style node :grid-template-columns)
    :grid-template-rows (style node :grid-template-rows)
+   :grid-template-areas (style node :grid-template-areas)
    :grid-column (style node :grid-column)
    :grid-row (style node :grid-row)
+   :grid-area (style node :grid-area)
    :gap (parse-int (style node :gap) (:gap theme))
    :pointer-events (style node :pointer-events)
    :overflow (attr node :overflow)
@@ -587,9 +593,13 @@
 ;; (`grid-column: 1 / 3`), and `<start> / span <n>` (`grid-column: 2 / span
 ;; 2`) -- see parse-grid-placement for the exact per-form grammar and
 ;; resolve-grid-line for how a negative line number resolves. Explicitly out
-;; of scope: the `-start`/`-end` longhand properties, `grid-template-areas`
-;; name references, dense packing, and implicit track creation for an
-;; out-of-range line (see clamp-col-range for the fallback used instead).
+;; of scope: the `-start`/`-end` longhand properties, dense packing, and
+;; implicit track creation for an out-of-range line (see clamp-col-range for
+;; the fallback used instead). `grid-template-areas`/`grid-area` named-area
+;; placement is a separate, THIRD placement mechanism (see the
+;; "grid-template-areas" section further below, after clamp-col-range) that
+;; composes with this one -- see item-grid-placement for exactly how the two
+;; (plus fully-auto placement) resolve together per item.
 ;; See layout-grid's docstring and place-grid-items below for exactly how
 ;; explicitly- and auto-placed items compose.
 
@@ -760,65 +770,213 @@
         end (-> end (max (inc start)) (min n-cols))]
     [start end]))
 
+;; ---- grid-template-areas (named-area placement, a THIRD mechanism) ----
+;;
+;; Real CSS also lets an author place a grid item by NAME rather than raw
+;; line numbers: `grid-template-areas` on the container declares a sequence
+;; of quoted-string ROWS (one string per row; whitespace-separated tokens
+;; name which area occupies each cell; `.` means "no area, this cell
+;; intentionally empty"), and `grid-area: <name>` on an item places it at
+;; whatever cell-range that name's area occupies. This composes with, rather
+;; than replaces, grid-column/grid-row explicit placement and auto-placement
+;; -- see item-grid-placement below for exactly how the three resolve
+;; per-item, and layout-grid's docstring for how an areas-only (no explicit
+;; grid-template-columns) declaration establishes the grid's column count.
+;; Out of scope: the longhand `grid-area: <row-start> / <col-start> /
+;; <row-end> / <col-end>` 4-value shorthand -- only a bare area-name
+;; reference is parsed.
+
+(def ^:private area-row-pattern
+  "Matches a single quoted string, double- or single-quoted -- deliberately
+   the same narrow quoted-literal grammar cssom.core's content-literal-pattern
+   uses for `content: \"...\"` values. This file owns its own tiny copy
+   rather than depending on cssom.core for it, the same convention this file
+   already follows for its own numeric coercion (see parse-track-list's
+   docstring for why)."
+  #"\"([^\"]*)\"|'([^']*)'")
+
+(defn- area-template-row-strings
+  "Extracts every quoted-string ROW's unquoted text, in source order, from a
+   grid-template-areas raw value -- e.g. the raw multi-line string
+   `\"sidebar header\"\n\"sidebar main\"\n\"sidebar footer\"` (exactly how it
+   arrives here: cssom.core's parse-style-value passes any value that isn't a
+   bare integer/px length through untouched as a raw string, see node-style
+   and parse-track-list's docstring for the identical reasoning re:
+   grid-template-columns) yields [\"sidebar header\" \"sidebar main\"
+   \"sidebar footer\"]. Only the quoted strings matter -- any other
+   character in the raw value (the newlines/indentation between them, which
+   real CSS also treats as insignificant whitespace here) simply isn't part
+   of any match, so it's silently ignored rather than needing separate
+   whitespace-skipping logic. Returns [] for a blank/non-string value or one
+   with no quoted strings at all."
+  [v]
+  (if (string? v)
+    (mapv (fn [[_ double-quoted single-quoted]] (or double-quoted single-quoted ""))
+          (re-seq area-row-pattern v))
+    []))
+
+(defn- parse-grid-template-areas
+  "Parses a grid-template-areas raw value into {:areas {name {:row-start
+   :row-end :col-start :col-end}, ...} :row-count n :col-count n}, or nil
+   when the value doesn't parse into a well-formed rectangular grid at all
+   (blank, no quoted rows, or rows whose token counts disagree -- real CSS
+   requires every row to declare the same number of columns). This engine
+   degrades to 'no template' -- treated exactly like the declaration being
+   absent -- rather than guessing at a shape, the same 'degrade, don't
+   crash' convention parse-track-list/parse-grid-placement above already use
+   for their own malformed-input cases.
+
+   Each row (area-template-row-strings) is split on whitespace into cell
+   tokens; `.` is real CSS's own 'intentionally empty cell' marker and is
+   never part of any named area. Every other distinct token names an area,
+   occupying the UNION of every cell naming it. Real CSS requires that union
+   to already form a solid rectangle (a named area whose cells don't tile a
+   rectangle is invalid CSS) -- rather than replicating real CSS's actual
+   error-recovery algorithm for that case, this computes each name's
+   BOUNDING rectangle (min/max row and column across every cell naming it),
+   then verifies every cell inside that bounding rectangle really is named
+   the same -- and DROPS (excludes from the returned :areas map) any name
+   that fails that check, so a non-rectangular/invalid area name is an
+   honest non-match (grid-area references to it fall back to auto-placement,
+   see item-grid-placement) rather than a crash or a guessed-at shape.
+
+   :row-count/:col-count -- the areas template's OWN grid shape, independent
+   of whatever grid-template-columns/-rows tracks are (or aren't) declared
+   -- are also returned. Only :col-count feeds back into this engine's own
+   track resolution (see layout-grid's docstring for exactly how an
+   areas-only, no-grid-template-columns declaration uses it to establish
+   the column count instead of the usual single-full-width-column fallback);
+   :row-count does NOT feed back into anything, since rows are already an
+   unbounded, auto-growing axis in this engine regardless of any declared
+   grid-template-rows track count or any grid-template-areas row count (see
+   layout-grid's row-sizing docstring section) -- an item's row range
+   resolved via grid-area is just as capable of growing the grid past
+   however many rows grid-template-rows itself declares as an explicit
+   grid-row line reference already is."
+  [v]
+  (when-let [rows (not-empty (area-template-row-strings v))]
+    (let [tokenized (mapv #(vec (remove str/blank? (str/split % #"\s+"))) rows)
+          col-count (count (first tokenized))]
+      (when (and (pos? col-count) (every? #(= col-count (count %)) tokenized))
+        (let [row-count (count tokenized)
+              named-cells (for [r (range row-count) c (range col-count)
+                                 :let [nm (nth (nth tokenized r) c)]
+                                 :when (not= nm ".")]
+                            [nm r c])
+              areas (into {}
+                          (keep (fn [[nm entries]]
+                                  (let [rs (map second entries)
+                                        cs (map #(nth % 2) entries)
+                                        row-start (apply min rs)
+                                        row-end (inc (apply max rs))
+                                        col-start (apply min cs)
+                                        col-end (inc (apply max cs))
+                                        expected-cells (set (for [r (range row-start row-end)
+                                                                   c (range col-start col-end)]
+                                                               [r c]))
+                                        actual-cells (set (map (fn [[_ r c]] [r c]) entries))]
+                                    (when (= expected-cells actual-cells)
+                                      [nm {:row-start row-start :row-end row-end
+                                           :col-start col-start :col-end col-end}]))))
+                          (group-by first named-cells))]
+          {:areas areas :row-count row-count :col-count col-count})))))
+
 (defn- item-grid-placement
-  "The child's own explicit grid-column/grid-row placement request, each
-   parsed to a 0-based [start end) range or nil for an axis it doesn't
-   declare (see parse-grid-placement). A non-element child (e.g. a raw text
-   node, which can't carry a :style/* attr) always gets {:col nil :row nil}
-   -- i.e. treated as fully auto-placed, same as before this feature
-   existed. `theme` is only needed because node-style requires it (neither
-   grid-column nor grid-row depend on any theme value)."
-  [theme child n-cols n-row-tracks]
+  "The child's own explicit placement request, resolved to a 0-based [start
+   end) range per axis, or nil for an axis nothing places it on. Three
+   composing sources, in this engine's documented PER-AXIS precedence:
+
+     1. grid-column/grid-row (parse-grid-placement) -- when present on a
+        given axis, always wins on that axis.
+     2. grid-area (resolved by name against `areas`, the container's own
+        parse-grid-template-areas :areas map, or nil when the container has
+        no valid grid-template-areas) -- supplies whichever axis/axes
+        grid-column/grid-row left undeclared.
+     3. Neither declared on a given axis -- stays nil, i.e. fully-auto for
+        that axis, exactly like before grid-area existed.
+
+   This mirrors real CSS's actual cascade mechanics without this engine
+   needing to literally expand grid-area into four separate longhand
+   declarations: `grid-area: <name>` IS EQUIVALENT to setting the
+   grid-row-start/grid-column-start/grid-row-end/grid-column-end longhands
+   to that name's own bounds, so a real conflict between grid-area and
+   grid-column/grid-row on the same item is really a same-longhand conflict
+   -- and an explicitly-written longhand (here, grid-column/grid-row) always
+   beats one merely implied by a shorthand's expansion. So an item with BOTH
+   `grid-area` and `grid-column` set gets grid-column's COLUMN range, but
+   still gets grid-area's ROW range if no grid-row was also given (see the
+   grid-column-explicit-on-item-wins-over-grid-area-same-axis test).
+
+   A grid-area reference to a name `areas` doesn't recognize (not declared
+   in the container's grid-template-areas at all, or dropped by
+   parse-grid-template-areas for being non-rectangular) is treated exactly
+   like grid-area being absent -- an honest non-match (falls through to
+   grid-column/grid-row if present, else fully auto), never a crash or a
+   guessed-at cell.
+
+   A non-element child (e.g. a raw text node, which can't carry a :style/*
+   attr) always gets {:col nil :row nil} -- i.e. treated as fully
+   auto-placed, same as before any of this existed. `theme` is only needed
+   because node-style requires it."
+  [theme child n-cols n-row-tracks areas]
   (if (map? child)
-    (let [cst (node-style child theme)]
-      {:col (parse-grid-placement (:grid-column cst) n-cols)
-       :row (parse-grid-placement (:grid-row cst) n-row-tracks)})
+    (let [cst (node-style child theme)
+          col (parse-grid-placement (:grid-column cst) n-cols)
+          row (parse-grid-placement (:grid-row cst) n-row-tracks)
+          area-name (:grid-area cst)
+          area (when (and areas area-name) (get areas (str/trim (str area-name))))
+          area-col (when area [(:col-start area) (:col-end area)])
+          area-row (when area [(:row-start area) (:row-end area)])]
+      {:col (or col area-col) :row (or row area-row)})
     {:col nil :row nil}))
 
 (defn- place-grid-items
   "Resolves every in-flow grid child's [row-start row-end) x [col-start
-   col-end) cell range, honoring explicit grid-column/grid-row declarations
-   (parse-grid-placement) and auto-placing everything else in DOM order.
-   Returns a vector, parallel to `children` (DOM order preserved regardless
-   of placement order), of {:row-start :row-end :col-start :col-end}.
+   col-end) cell range, honoring explicit grid-column/grid-row and/or
+   grid-area declarations (item-grid-placement) and auto-placing everything
+   else in DOM order. Returns a vector, parallel to `children` (DOM order
+   preserved regardless of placement order), of {:row-start :row-end
+   :col-start :col-end}.
 
    Simplification (this engine's documented subset -- real CSS Grid's own
    auto-placement-around-explicit-items algorithm, CSS Grid section 8.5, is
    genuinely complex and deliberately NOT replicated here):
 
-     1. Every child with an explicit grid-column and/or grid-row is placed
-        FIRST, in DOM order among themselves, before any fully-auto child --
-        mirroring real CSS's own two-phase placement (explicit items are
-        placed before auto-placement runs at all, regardless of where they
-        fall in DOM order relative to auto items). A child with only ONE
-        axis explicit gets the OTHER axis resolved by searching for the
-        first free row (find-free-row, if grid-column was given) or column
-        (find-free-col, if grid-row was given) against only the explicit
-        items placed so far -- not a full 2D bin-pack, but enough to avoid
-        colliding with an earlier explicit item on the same row/column.
+     1. Every child with an explicit grid-column/grid-row/grid-area-derived
+        col and/or row (item-grid-placement returns non-nil for that axis,
+        whichever of the three sources supplied it) is placed FIRST, in DOM
+        order among themselves, before any fully-auto child -- mirroring
+        real CSS's own two-phase placement (explicit items are placed before
+        auto-placement runs at all, regardless of where they fall in DOM
+        order relative to auto items). A child with only ONE axis resolved
+        gets the OTHER axis resolved by searching for the first free row
+        (find-free-row, if a column was resolved) or column (find-free-col,
+        if a row was resolved) against only the explicitly-placed items so
+        far -- not a full 2D bin-pack, but enough to avoid colliding with an
+        earlier explicit item on the same row/column.
 
-     2. Every remaining (fully auto -- neither axis declared) child is then
-        placed, in DOM order among themselves, into the next unoccupied
-        SINGLE cell (1 col x 1 row, exactly this engine's original
-        pre-explicit-placement auto-placement grain) found by scanning
-        row-major from (row 0, col 0), via a cursor that only ever advances
-        (never revisits a cell). Cells already claimed by an explicit item
-        are skipped -- this is the 'auto-placed items skip
-        explicitly-occupied cells but don't attempt sophisticated backfill'
-        simplification: once the scan has moved past a gap, it never
-        backtracks into it, even if a later cell the scan reaches is itself
-        a dead end (the loop's occupied-cell check keeps advancing until it
-        finds a free cell, so it can't get stuck, but it also can't go
-        backwards).
+     2. Every remaining (fully auto -- neither axis resolved by any of the
+        three sources) child is then placed, in DOM order among themselves,
+        into the next unoccupied SINGLE cell (1 col x 1 row, exactly this
+        engine's original pre-explicit-placement auto-placement grain) found
+        by scanning row-major from (row 0, col 0), via a cursor that only
+        ever advances (never revisits a cell). Cells already claimed by an
+        explicit item (including one placed via grid-area) are skipped --
+        this is the 'auto-placed items skip explicitly-occupied cells but
+        don't attempt sophisticated backfill' simplification: once the scan
+        has moved past a gap, it never backtracks into it, even if a later
+        cell the scan reaches is itself a dead end (the loop's occupied-cell
+        check keeps advancing until it finds a free cell, so it can't get
+        stuck, but it also can't go backwards).
 
    When there are NO explicitly-placed items at all, this degenerates to
    exactly the row-major scan every auto item always got before this
    feature existed (the cursor never encounters an already-occupied cell,
    so it always accepts the first cell it lands on) -- a pure
    backwards-compatibility guarantee, not a special case in the code."
-  [theme children n-cols n-row-tracks]
+  [theme children n-cols n-row-tracks areas]
   (let [n (count children)
-        requests (mapv #(item-grid-placement theme % n-cols n-row-tracks) children)
+        requests (mapv #(item-grid-placement theme % n-cols n-row-tracks areas) children)
         idx-range (range n)
         explicit? (fn [i] (let [{:keys [col row]} (nth requests i)] (boolean (or col row))))
         explicit-idxs (filter explicit? idx-range)
@@ -1032,69 +1190,107 @@
 (defn- layout-grid
   "display:grid subset: explicit `grid-template-columns`/`grid-template-rows`
    track lists (fixed px + fr, plus `repeat()`/`minmax()` composing over
-   them — see parse-track-list), per-item explicit placement via
-   `grid-column`/`grid-row` (see parse-grid-placement), and auto-placement
-   in DOM order, row-major (fills a row left-to-right before wrapping to the
-   next row) for everything else — see place-grid-items for exactly how
-   explicit and auto placement compose. `gap` — the same style key flex
-   already reuses — spaces both rows and columns.
+   them — see parse-track-list), THREE composing per-item placement
+   mechanisms — explicit `grid-column`/`grid-row` line-based placement (see
+   parse-grid-placement), named `grid-area` placement resolved against the
+   container's own `grid-template-areas` (see parse-grid-template-areas), and
+   auto-placement in DOM order, row-major (fills a row left-to-right before
+   wrapping to the next row) for everything else — see place-grid-items/
+   item-grid-placement for exactly how all three compose. `gap` — the same
+   style key flex already reuses — spaces both rows and columns.
 
    Column count = the number of parsed grid-template-columns tracks. With no
-   (or a blank) grid-template-columns, this falls back to a single
-   full-content-width column — i.e. behaves like a vertical stack, a
+   (or a blank) grid-template-columns, this falls back to `grid-template-areas`'s
+   OWN column count when a valid areas template is declared — evenly-split
+   `1fr` tracks, so named areas actually land in distinct columns instead of
+   collapsing onto one — or, with neither declared, a single
+   full-content-width column (i.e. behaves like a vertical stack) — a
    reasonable default that also keeps `display:grid` usable with only
-   grid-template-rows set. Column track sizes are always resolved against
-   the container's definite content-width (`cw`), exactly like flexbox's
-   main-axis sizing whenever the main size is known — so `fr` columns are
-   always well-defined (see track-sizes). An item spanning more than one
-   column (`grid-column: 1 / 3`) gets the combined width of every column it
+   grid-template-rows/grid-template-areas set. This is the one place
+   grid-template-areas feeds back into track resolution: its OWN row count
+   is never consulted (rows are already an unbounded, auto-growing axis in
+   this engine regardless of any track/areas row count — see the row-sizing
+   paragraph below), and when grid-template-columns IS explicitly declared,
+   its own track count wins outright even if it disagrees with the areas
+   template's column count (this engine does not reconcile the two beyond
+   that one fallback case — an honest, documented non-goal, not a guess).
+   Column track sizes are always resolved against the container's definite
+   content-width (`cw`), exactly like flexbox's main-axis sizing whenever the
+   main size is known — so `fr` columns are always well-defined (see
+   track-sizes). An item spanning more than one column (`grid-column: 1 / 3`,
+   or a multi-column grid-area) gets the combined width of every column it
    spans plus the gaps between them (span-width), and is measured against
    that combined width exactly like a plain single-column item is measured
    against its one column's width (so it stretches to fill the whole span
-   when it has no explicit width of its own).
+   when it has no explicit width of its own) — note this engine has no
+   analogous auto-stretch for HEIGHT across a multi-row span; an item's own
+   height is always its own (auto-content or explicit), never stretched to
+   its row-span's combined height, matching the box-height convention
+   grid-column/grid-row explicit placement already established.
 
-   Explicit placement (`grid-column`/`grid-row`, see parse-grid-placement):
-   a plain 1-based line number (`grid-column: 2`), the two-value `<start> /
-   <end>` shorthand (`grid-column: 1 / 3`), and `<start> / span <n>`
-   (`grid-column: 2 / span 2`) are all supported for both axes. A negative
-   line/index (`grid-column: -1`, 'the last column') is also supported as a
-   deliberately pragmatic stretch goal. NOT supported: the `-start`/`-end`
-   longhand properties, `grid-template-areas` name references, and dense
-   packing (see parse-grid-placement's own docstring for the precise
-   grammar/arithmetic). An out-of-range column line (e.g. `grid-column: 5`
-   with only 3 declared column tracks) does NOT implicitly create a new
-   column track the way real CSS does (explicitly out of scope) — instead
-   it's CLAMPED into the declared column range (clamp-col-range), landing
-   on/overlapping the last column rather than indexing past
-   col-widths/col-offsets or crashing. Auto-placed items that don't declare
-   either property compose with explicitly-placed ones per the
-   documented simplification in place-grid-items (short version: explicit
-   items are placed first in DOM order, then auto items fill remaining
-   single cells row-major, skipping whatever's already occupied — no
-   sophisticated backfill).
+   Explicit line-based placement (`grid-column`/`grid-row`, see
+   parse-grid-placement): a plain 1-based line number (`grid-column: 2`), the
+   two-value `<start> / <end>` shorthand (`grid-column: 1 / 3`), and
+   `<start> / span <n>` (`grid-column: 2 / span 2`) are all supported for
+   both axes. A negative line/index (`grid-column: -1`, 'the last column')
+   is also supported as a deliberately pragmatic stretch goal. NOT
+   supported: the `-start`/`-end` longhand properties and dense packing (see
+   parse-grid-placement's own docstring for the precise grammar/arithmetic).
+   An out-of-range column line (e.g. `grid-column: 5` with only 3 declared
+   column tracks) does NOT implicitly create a new column track the way real
+   CSS does (explicitly out of scope) — instead it's CLAMPED into the
+   declared column range (clamp-col-range), landing on/overlapping the last
+   column rather than indexing past col-widths/col-offsets or crashing.
+
+   Named placement (`grid-template-areas`/`grid-area`, see
+   parse-grid-template-areas/item-grid-placement): `grid-template-areas` is a
+   sequence of quoted-string rows, each whitespace-separated token naming
+   which area occupies that cell (`.` = intentionally empty); a repeated
+   name spanning several adjacent cells occupies their combined rectangle.
+   `grid-area: <name>` on an item places it at that name's own rectangle. An
+   item with BOTH grid-area and an explicit grid-column/grid-row gets the
+   explicit value on whichever axis/axes it declares (mirrors real CSS's
+   longhand-conflict resolution, since grid-area is equivalent to setting
+   the same four longhands grid-column/grid-row do — see item-grid-placement
+   for the exact per-axis rule), falling back to grid-area's own range for
+   any axis left undeclared. A `grid-area` name not found in the container's
+   (or not present at all, or malformed/non-rectangular — see
+   parse-grid-template-areas) `grid-template-areas` is an honest non-match:
+   the item falls back to grid-column/grid-row if declared, else fully
+   auto-placed — never a crash or a guessed-at cell. NOT supported: the
+   4-value `grid-area: <row-start> / <col-start> / <row-end> / <col-end>`
+   longhand shorthand (only a bare area-name reference is parsed).
+
+   Auto-placed items that resolve neither axis via either of the two
+   explicit mechanisms compose with explicitly-placed ones (from either
+   mechanism) per the documented simplification in place-grid-items (short
+   version: explicit items are placed first in DOM order, then auto items
+   fill remaining single cells row-major, skipping whatever's already
+   occupied — no sophisticated backfill).
 
    Row sizing: rows are auto-generated (row-major wrap, extended as needed
-   by any explicit grid-row placement that reaches further than
+   by any explicit grid-row/grid-area placement that reaches further than
    auto-placement alone would) to fit however many rows are actually
-   needed, regardless of how many grid-template-rows tracks were given —
-   there is no implicit-grid concept beyond 'add another row', and (unlike
-   columns) no clamping: a row is not a fixed, finite axis in this engine to
-   begin with, so an out-of-range grid-row line just means however many
-   more (possibly empty, 0px-tall) rows are needed to reach it. A row whose
-   index has an explicit *fixed*-px grid-template-rows track uses that
-   literal height. Every other row — an `fr` row track, any row beyond the
-   explicit track list, or an empty row nothing was placed into — is
-   auto-sized to the tallest child whose placement STARTS in that row
-   (mirrors flexbox's own auto cross-axis convention elsewhere in this
-   file; a multi-row-span item's height only contributes to its start row's
-   auto-sizing, not any row it merely passes through — a documented
-   simplification, row spans are not this feature's must-have), UNLESS the
-   grid container has an explicit :height, in which case the explicit row
-   tracks (fixed + fr) are resolved proportionally against that height the
-   same way columns are. Without an explicit container height there is no
-   definite total to share `fr` row tracks against, so this is the one
-   deliberate asymmetry versus columns in this subset — documented here
-   rather than silently guessed at.
+   needed, regardless of how many grid-template-rows tracks (or
+   grid-template-areas rows) were declared — there is no implicit-grid
+   concept beyond 'add another row', and (unlike columns) no clamping: a row
+   is not a fixed, finite axis in this engine to begin with, so an
+   out-of-range grid-row line (or a grid-area whose own rows reach further
+   than grid-template-rows declares) just means however many more (possibly
+   empty, 0px-tall) rows are needed to reach it. A row whose index has an
+   explicit *fixed*-px grid-template-rows track uses that literal height.
+   Every other row — an `fr` row track, any row beyond the explicit track
+   list, or an empty row nothing was placed into — is auto-sized to the
+   tallest child whose placement STARTS in that row (mirrors flexbox's own
+   auto cross-axis convention elsewhere in this file; a multi-row-span
+   item's height only contributes to its start row's auto-sizing, not any
+   row it merely passes through — a documented simplification, row spans
+   are not this feature's must-have), UNLESS the grid container has an
+   explicit :height, in which case the explicit row tracks (fixed + fr) are
+   resolved proportionally against that height the same way columns are.
+   Without an explicit container height there is no definite total to share
+   `fr` row tracks against, so this is the one deliberate asymmetry versus
+   columns in this subset — documented here rather than silently guessed at.
 
    Absolute-positioned children are NOT extracted via partition-flow here —
    this matches layout-flex's current behavior (today only layout-block
@@ -1107,9 +1303,10 @@
    parse-track-list/parse-track-token/track-sizes. Explicitly out of scope:
    `auto` tracks, percentage tracks, `repeat(auto-fill|auto-fit, ...)` (real
    content-based auto-sizing this engine doesn't do), implicit track
-   creation, grid-template-areas, dense packing, and the grid-column-start/
-   grid-column-end/grid-row-start/grid-row-end longhand properties (only the
-   grid-column/grid-row shorthand is parsed)."
+   creation, dense packing, the grid-column-start/grid-column-end/
+   grid-row-start/grid-row-end longhand properties (only the grid-column/
+   grid-row shorthand is parsed), and the 4-value grid-area longhand
+   shorthand (only a bare area-name reference is parsed, see above)."
   [theme x y avail-width opacity inherited st node in-flow]
   (let [w (resolve-width st avail-width)
         inset (content-inset st)
@@ -1117,8 +1314,12 @@
         cy (+ y (:margin st) inset)
         cw (max 0 (- w (* 2 inset)))
         gap (:gap st)
+        template-areas (parse-grid-template-areas (:grid-template-areas st))
         explicit-cols (parse-track-list (:grid-template-columns st))
-        col-tracks (if (seq explicit-cols) explicit-cols [{:type :fixed :size cw}])
+        col-tracks (cond
+                     (seq explicit-cols) explicit-cols
+                     template-areas (vec (repeat (:col-count template-areas) {:type :fr :size 1.0}))
+                     :else [{:type :fixed :size cw}])
         n-cols (count col-tracks)
         col-widths (track-sizes col-tracks gap cw)
         col-offsets (place-main-axis "flex-start" col-widths gap 0)
@@ -1126,7 +1327,7 @@
         n-row-tracks (count row-tracks)
         explicit-h (:height st)
         row-track-fr-sizes (when explicit-h (track-sizes row-tracks gap explicit-h))
-        placements (place-grid-items theme in-flow n-cols n-row-tracks)
+        placements (place-grid-items theme in-flow n-cols n-row-tracks (:areas template-areas))
         total-rows (if (seq placements) (apply max 0 (map :row-end placements)) 0)
         measured (mapv (fn [child pl]
                           (let [item-w (span-width col-widths gap (:col-start pl) (:col-end pl))]
