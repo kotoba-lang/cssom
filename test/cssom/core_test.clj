@@ -1311,6 +1311,145 @@
          :root contributes ordinary pseudo-class specificity (1 to the 2nd
          column), same as :hover/:disabled/:first-child/etc.")))
 
+;; ---- :lang() pseudo-class ----
+;;
+;; Real CSS: `:lang(<tag>)` matches when the element's COMPUTED language --
+;; its own `lang` HTML attribute if present and non-blank, else the nearest
+;; ANCESTOR's -- is a whole-subtag, case-insensitive match for `<tag>` (a
+;; comma-separated list of tags matches if ANY of them does). These tests
+;; exercise the real parse-rules -> apply-cascade pipeline, the same
+;; discipline the :root/:empty tests above use.
+
+(deftest parses-lang-argument-into-selector-lang-args
+  (let [lang-sel (css/parse-simple-selector "p:lang(en, fr)")
+        no-arg-sel (css/parse-simple-selector "p:first-child")]
+    (is (= [:lang] (:selector/pseudos lang-sel)))
+    (is (= {:lang "en, fr"} (:selector/lang-args lang-sel))
+        "the raw comma-separated argument text is captured separately from
+         the bare pseudo-class name (which is captured the same way
+         :hover/:nth-child/etc. already were), for matches-pseudo? to parse
+         later")
+    (is (empty? (:selector/lang-args no-arg-sel))
+        "a compound selector with no :lang() at all has no
+         :selector/lang-args entry")))
+
+(deftest lang-matches-an-exact-tag-and-a-hyphenated-subtag-but-not-a-bare-string-prefix
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        [exact doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc exact :lang "en")
+        doc (dom/append-child doc root exact)
+        [subtag doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc subtag :lang "en-US")
+        doc (dom/append-child doc root subtag)
+        [not-a-subtag doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc not-a-subtag :lang "eng")
+        doc (dom/append-child doc root not-a-subtag)
+        rules (css/parse-rules "p:lang(en) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes exact :attrs :style/color]))
+        "lang=\"en\" is an exact match for :lang(en)")
+    (is (= "red" (get-in doc [:nodes subtag :attrs :style/color]))
+        "lang=\"en-US\" -- \"en\" is a whole leading SUBTAG of it")
+    (is (nil? (get-in doc [:nodes not-a-subtag :attrs :style/color]))
+        "lang=\"eng\" must NOT match :lang(en) -- \"en\" is only a bare
+         STRING prefix of \"eng\", not a whole subtag")))
+
+(deftest lang-matches-case-insensitively
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc p :lang "EN-us")
+        doc (dom/append-child doc root p)
+        rules (css/parse-rules "p:lang(en) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p :attrs :style/color]))
+        "lang=\"EN-us\" matches :lang(en) case-insensitively on both
+         sides")))
+
+(deftest lang-is-inherited-from-the-nearest-ancestor-with-a-lang-attribute
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :lang "fr")
+        [section doc] (dom/create-element doc :section)
+        doc (dom/append-child doc root section)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc section p)
+        rules (css/parse-rules "p:lang(fr) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p :attrs :style/color]))
+        "<p> itself has no lang attribute at all -- it inherits \"fr\" from
+         its grandparent <html>, walking past its parent <section> (which
+         also has no lang attribute of its own) to find it")))
+
+(deftest lang-on-the-element-itself-overrides-an-ancestors-lang
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :lang "fr")
+        [p doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc p :lang "en")
+        doc (dom/append-child doc root p)
+        rules (css/parse-rules
+               "p:lang(en) { color: red } p:lang(fr) { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p :attrs :style/color]))
+        "the element's OWN lang=\"en\" wins over its ancestor's lang=\"fr\"
+         -- :lang(en) matches, :lang(fr) does not")))
+
+(deftest lang-comma-separated-list-matches-any-one-of-its-tags
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        [fr-p doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc fr-p :lang "fr")
+        doc (dom/append-child doc root fr-p)
+        [de-p doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc de-p :lang "de")
+        doc (dom/append-child doc root de-p)
+        rules (css/parse-rules "p:lang(en, fr) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes fr-p :attrs :style/color]))
+        "lang=\"fr\" matches the second tag in :lang(en, fr)")
+    (is (nil? (get-in doc [:nodes de-p :attrs :style/color]))
+        "lang=\"de\" matches neither tag in the list")))
+
+(deftest lang-does-not-match-when-no-element-has-a-lang-attribute-at-all
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc root p)
+        rules (css/parse-rules "p:lang(en) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes p :attrs :style/color]))
+        "no element from <p> up to the root has a lang attribute -- no
+         computed language at all, so :lang(en) never matches")))
+
+(deftest lang-treats-a-blank-lang-attribute-as-no-computed-language-of-its-own
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :lang "fr")
+        [p doc] (dom/create-element doc :p)
+        doc (dom/set-attribute doc p :lang "")
+        doc (dom/append-child doc root p)
+        rules (css/parse-rules "p:lang(fr) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p :attrs :style/color]))
+        "lang=\"\" (real HTML/CSS's own way of saying 'explicitly unknown
+         language') does not count as the element's own computed language
+         -- it still inherits its ancestor's \"fr\" rather than matching
+         nothing at all")))
+
+(deftest lang-pseudo-class-does-not-match-when-document-is-absent
+  ;; Same documented restriction :root/the structural pseudo-classes
+  ;; already have -- the document-less 2-arity form can't walk any
+  ;; ancestor chain at all, so :lang() can never match there, even when
+  ;; the node itself carries a matching `lang` attribute.
+  (let [[p _doc] (dom/create-element dom/empty-document :p)
+        selector (-> (css/parse-selector ":lang(en)") :selector/parts first)]
+    (is (false? (css/matches? {:node/id p :node/type :element :tag :p
+                                :attrs {:lang "en"}}
+                               selector))
+        ":lang() can never match via the document-less arity")))
+
 ;; ---- calc() -- constant, percentage-free arithmetic ----
 ;;
 ;; parse-style-value is private, so every case below goes through the real
