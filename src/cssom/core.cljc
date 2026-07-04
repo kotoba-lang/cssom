@@ -24,15 +24,41 @@
      *originating* element's own real HTML attribute value at
      cascade-resolution time (a missing attribute resolves to `\"\"`,
      matching real CSS -- not the same as `content` being absent), also
-     ending up as a plain string under `:content`; a mix of quoted-literal
-     and `attr()` terms in one declaration (`content: \"Price: \"
-     attr(data-price);`) is supported too, concatenated in source order.
-     Other unsupported forms (`counter(...)`, `url(...)`, `none`/`normal`,
-     unquoted text, `attr()`'s extended `name type, fallback` syntax) simply
-     leave `:content` unset rather than storing something unusable.
-     `cssom.layout` reads these attributes and paints generated content as
-     real text immediately before/after the element's real children -- see
-     its namespace docstring.
+     ending up as a plain string under `:content`; a bare `counter(name)`
+     reference (`content: counter(item);`, the single most common
+     generated-content idiom for automatic numbering -- e.g. a `<li>` with
+     `counter-increment: item` and `::before { content: counter(item) \".
+     \"; }`) resolves to that named counter's CURRENT value at this exact
+     point in the document tree. Unlike `attr()`, a counter is NOT resolvable
+     from one node in isolation -- its value is the cumulative effect of
+     every `counter-reset`/`counter-increment` declaration on every element
+     that precedes it in document tree order -- so it can only be resolved
+     correctly by `apply-cascade`'s own top-down tree walk (see its
+     docstring for how the running counters map is threaded alongside the
+     existing custom-property environment); `computed-style`/
+     `pseudo-element-style-for` called standalone, with no real tree walk
+     backing them, honestly leave `:content` unset for a `counter()`
+     reference rather than guessing a number (see their own docstrings). A
+     mix of quoted-literal, `attr()`, and/or `counter()` terms in one
+     declaration (`content: \"Price: \" attr(data-price);` /
+     `content: counter(item) \". \";`) is supported too, concatenated in
+     source order. Other unsupported forms (`counter()`'s two-argument
+     `name, <list-style-type>` form, e.g. `counter(item, upper-roman)`,
+     `url(...)`, `none`/`normal`, unquoted text, `attr()`'s extended `name
+     type, fallback` syntax) simply leave `:content` unset rather than
+     storing something unusable. `cssom.layout` reads these attributes and
+     paints generated content as real text immediately before/after the
+     element's real children -- see its namespace docstring.
+   - `counter-reset`/`counter-increment` declarations (`counter-reset: item
+     5;` / `counter-increment: item;`, one or more `<name> [<integer>]?`
+     pairs each -- see `parse-counter-property`): parsed as ordinary
+     properties (default reset value 0, default increment amount 1, matching
+     real CSS), but their EFFECT (mutating a named-counter map as
+     `apply-cascade` walks the document) only happens as part of that same
+     tree walk described above -- a simplification this engine makes
+     honestly explicit: counters live in one flat, per-document namespace
+     (real CSS technically scopes them to element nesting in a more complex
+     way this engine does not attempt).
    - `@media (min-width: Npx)` / `(max-width: Npx)` conditional rule blocks
      (optionally combined with `and`), evaluated against a viewport width
      passed to `apply-cascade` via an options map (default
@@ -114,15 +140,53 @@
   (when-let [[_ attr-name] (re-matches content-attr-pattern (str/trim (str v)))]
     {:content/attr-name attr-name}))
 
+(def ^:private content-counter-pattern
+  "Matches a single bare `counter(name)` reference -- the default-decimal,
+   no-list-style-type form only. CSS's two-argument
+   `counter(name, <list-style-type>)` form (e.g. `counter(item,
+   upper-roman)`, used to render as e.g. lowercase-alpha/upper-roman instead
+   of plain decimal digits) is explicitly out of scope -- see
+   `parse-content-counter-ref`."
+  #"counter\(\s*([A-Za-z_][-A-Za-z0-9_]*)\s*\)")
+
+(defn- parse-content-counter-ref
+  "Parses a single CSS `content` TERM into a *counter() reference* marker --
+   a map, `{:content/counter-name \"item\"}` -- for the narrow, common
+   real-world case of a single bare `counter(name)` call: default decimal
+   numbering, no list-style-type argument.
+
+   Unlike `attr()` (purely local -- resolvable from one element's own attrs
+   in isolation, see `parse-content-attr-ref`), a counter's value is
+   fundamentally NOT local: it is the cumulative effect of every
+   `counter-reset`/`counter-increment` declaration on every element that
+   precedes THIS point in document tree order -- genuinely unknowable from
+   `node` alone, no matter how much of its own state you inspect. So this
+   marker stays unresolved through rule parsing and cascade priority
+   resolution exactly like an attr() marker does, but its resolution point
+   is different: `resolve-content-term`/`resolve-content-value` need an
+   externally-supplied running `counters` map (name -> current value) to
+   resolve it, which only `apply-cascade`'s own top-down tree walk can
+   correctly build and thread node-by-node (see its docstring) --
+   `resolve-style-for` honors a `counters` argument for exactly this reason.
+   Returns nil for anything else (including the two-argument
+   `name, <list-style-type>` form), same contract as
+   `parse-content-literal`/`parse-content-attr-ref`."
+  [v]
+  (when-let [[_ counter-name] (re-matches content-counter-pattern (str/trim (str v)))]
+    {:content/counter-name counter-name}))
+
 (defn- parse-content-term
   "Parses a single content TERM -- no combination with any other term --
-   into whichever of `parse-content-literal` (a quoted string literal) or
-   `parse-content-attr-ref` (a bare `attr(name)` call) matches, or nil if
-   neither does. Used both for the common single-term case and, by
+   into whichever of `parse-content-literal` (a quoted string literal),
+   `parse-content-attr-ref` (a bare `attr(name)` call), or
+   `parse-content-counter-ref` (a bare `counter(name)` call) matches, or nil
+   if none does. Used both for the common single-term case and, by
    `parse-content-value`, for each term of a multi-term composed value."
   [v]
   (let [literal (parse-content-literal v)]
-    (if (some? literal) literal (parse-content-attr-ref v))))
+    (if (some? literal)
+      literal
+      (or (parse-content-attr-ref v) (parse-content-counter-ref v)))))
 
 (defn- content-ws-char? [c] (boolean (re-matches #"\s" (str c))))
 
@@ -162,24 +226,32 @@
 (defn- parse-content-value
   "Parses a CSS `content` declaration's raw value. Supports:
    1. A single quoted string literal (`parse-content-literal`) -- returns a
-      plain string, exactly as before `attr()` support existed.
+      plain string, exactly as before `attr()`/`counter()` support existed.
    2. A single bare `attr(name)` call (`parse-content-attr-ref`) -- returns
       an attr() reference marker (resolved later, per-element -- see
       `resolve-content-value`), since its text isn't a fixed string the
       declaration itself carries.
-   3. Two or more whitespace-separated terms, each itself a quoted literal
-      or an `attr()` call (e.g. `\"Price: \" attr(data-price)`, a real,
-      common composition) -- returns a marker map holding the ordered
-      parsed terms under :content/parts, concatenated later the same way
-      (`resolve-content-value`). If ANY term in a multi-term value fails to
-      parse (some other, unsupported form mixed in), the WHOLE declaration
-      is dropped (nil) rather than silently rendering a partial string.
+   3. A single bare `counter(name)` call (`parse-content-counter-ref`) --
+      returns a counter() reference marker (resolved later, against a
+      running per-document counters map only `apply-cascade`'s own tree walk
+      can build -- see `resolve-content-value`), since its value depends on
+      every counter-reset/counter-increment declaration that precedes this
+      point in document tree order, not anything local to one element.
+   4. Two or more whitespace-separated terms, each itself a quoted literal,
+      an `attr()` call, or a `counter()` call (e.g. `\"Price: \"
+      attr(data-price)`, or the canonical numbering idiom `counter(item)
+      \". \"`, both real, common compositions) -- returns a marker map
+      holding the ordered parsed terms under :content/parts, concatenated
+      later the same way (`resolve-content-value`). If ANY term in a
+      multi-term value fails to parse (some other, unsupported form mixed
+      in), the WHOLE declaration is dropped (nil) rather than silently
+      rendering a partial string.
 
-   Anything else this engine doesn't support (`counter(...)`, `url(...)`,
-   `none`/`normal`, unquoted/unmatched text, `attr()`'s extended `name type,
-   fallback` syntax) returns nil rather than guessing -- callers treat nil
-   exactly like `content` being absent: no generated-content box, no
-   crash."
+   Anything else this engine doesn't support (`counter()`'s two-argument
+   `name, <list-style-type>` form, `url(...)`, `none`/`normal`,
+   unquoted/unmatched text, `attr()`'s extended `name type, fallback`
+   syntax) returns nil rather than guessing -- callers treat nil exactly
+   like `content` being absent: no generated-content box, no crash."
   [v]
   (or (parse-content-term v)
       (let [terms (split-content-terms v)]
@@ -188,19 +260,74 @@
             (when (every? some? parsed)
               {:content/parts parsed}))))))
 
+(defn- parse-counter-amount
+  "Parses a bare integer token already validated by `counter-list-pattern`
+   (mirrors `parse-style-value`'s own reader-conditional integer parsing --
+   this exists as its own tiny helper, rather than reusing the general
+   `parse-int` further down this file, purely to avoid a forward reference:
+   `parse-int` is defined later in this namespace, after several of its own
+   dependents)."
+  [s]
+  #?(:clj (Long/parseLong s) :cljs (js/parseInt s 10)))
+
+(def ^:private counter-list-pattern
+  "Validates that a `counter-reset`/`counter-increment` raw value is one or
+   more whitespace-separated `<counter-name> [<integer>]?` pairs (real CSS
+   allows more than one counter per declaration, e.g. `counter-reset:
+   section subsection;`, each independently defaulting when no integer
+   follows it) -- see `parse-counter-property`."
+  #"[A-Za-z_][-A-Za-z0-9_]*(?:\s+-?\d+)?(?:\s+[A-Za-z_][-A-Za-z0-9_]*(?:\s+-?\d+)?)*")
+
+(defn- parse-counter-property
+  "Parses a `counter-reset`/`counter-increment` declaration's raw value into
+   a vector of `[name amount]` pairs, e.g. `counter-reset: item 5;` ->
+   `[[\"item\" 5]]`, `counter-increment: item;` -> `[[\"item\"
+   default-amount]]`, `counter-reset: a 1 b 2;` -> `[[\"a\" 1] [\"b\" 2]]`.
+   A counter name with no following integer gets `default-amount` (callers
+   pass 0 for `counter-reset`, 1 for `counter-increment` -- real CSS's own
+   defaults, see `parse-property-value`). This is pure parsing -- it has no
+   idea what any of these counters' CURRENT values are; only
+   `apply-cascade`'s own top-down tree walk actually mutates a running
+   counters map by these `[name amount]` pairs, per node, in document
+   order (see its docstring).
+
+   Returns nil (declaration dropped, matching every other unparseable-value
+   case in this namespace) for a blank value or anything that isn't this
+   exact repeated name/integer shape (e.g. `none` -- CSS's own way to write
+   'no counters' -- is intentionally out of scope, same treatment as any
+   other unrecognized value)."
+  [v default-amount]
+  (let [s (str/trim (str v))]
+    (when (and (seq s) (re-matches counter-list-pattern s))
+      (let [tokens (str/split s #"\s+")]
+        (loop [tokens tokens pairs []]
+          (if (empty? tokens)
+            pairs
+            (let [name (first tokens)
+                  next-tok (second tokens)]
+              (if (and next-tok (re-matches #"-?\d+" next-tok))
+                (recur (drop 2 tokens) (conj pairs [name (parse-counter-amount next-tok)]))
+                (recur (rest tokens) (conj pairs [name default-amount]))))))))))
+
 (defn- parse-property-value
   "Parses a single declaration's raw value string for property `k` (still a
    raw string at this point, not yet keywordized). `content` gets its own
    parsing (see `parse-content-value`: a quoted string literal, a bare
-   `attr(name)` reference, or a mix of both terms); every other property
-   keeps the existing numeric/px coercion (`parse-style-value`). May return
-   nil (currently only possible for an unparseable `content` value) --
-   callers drop the declaration entirely in that case rather than storing
-   an unusable value."
+   `attr(name)`/`counter(name)` reference, or a mix of those terms);
+   `counter-reset`/`counter-increment` also get their own parsing (see
+   `parse-counter-property`, called with real CSS's own default amount for
+   each: 0 for `counter-reset`, 1 for `counter-increment`); every other
+   property keeps the existing numeric/px coercion (`parse-style-value`).
+   May return nil (an unparseable `content`/`counter-reset`/
+   `counter-increment` value) -- callers drop the declaration entirely in
+   that case rather than storing an unusable value."
   [k v]
-  (if (= "content" (str/lower-case k))
-    (parse-content-value v)
-    (parse-style-value v)))
+  (let [k-lower (str/lower-case k)]
+    (cond
+      (= "content" k-lower) (parse-content-value v)
+      (= "counter-reset" k-lower) (parse-counter-property v 0)
+      (= "counter-increment" k-lower) (parse-counter-property v 1)
+      :else (parse-style-value v))))
 
 (defn parse-declarations
   [text]
@@ -995,32 +1122,59 @@
   (:selector/pseudo-element (last (:selector/parts selector))))
 
 (defn- resolve-content-term
-  "Resolves a single already-parsed content TERM (see `parse-content-term`)
-   against `node`'s own real HTML attribute values: an attr() reference
-   marker (`{:content/attr-name \"data-foo\"}`) becomes that attribute's
-   real value, or `\"\"` if `node` doesn't carry it -- real CSS's attr()
-   behavior for an absent attribute (an empty string, not \"no value\"),
-   matching how `content: \"\"` already behaves; a plain string term passes
+  "Resolves a single already-parsed content TERM (see `parse-content-term`):
+   an attr() reference marker (`{:content/attr-name \"data-foo\"}`) becomes
+   `node`'s own real HTML attribute value, or `\"\"` if `node` doesn't carry
+   it -- real CSS's attr() behavior for an absent attribute (an empty
+   string, not \"no value\"), matching how `content: \"\"` already behaves.
+   A counter() reference marker (`{:content/counter-name \"item\"}`) becomes
+   that name's current value in `counters` (a running name -> value map, or
+   0 if `counters` doesn't (yet) have an entry for it -- real CSS: a counter
+   that was never `counter-reset`/`counter-increment`-ed reads as 0 the
+   first time it's referenced), UNLESS `counters` itself is nil -- which
+   means this call has no real document-tree-walk context to resolve a
+   counter() reference against at all (see `resolve-style-for`'s own
+   `counters` argument), in which case this honestly returns nil (an
+   unresolvable term) rather than fabricating a number; `resolve-content-value`
+   propagates that nil so the whole `content` value is dropped, same
+   treatment as any other unsupported form. A plain string term passes
    through as itself."
-  [node term]
-  (if (map? term)
+  [node counters term]
+  (cond
+    (not (map? term)) (str term)
+
+    (contains? term :content/attr-name)
     (str (or (get-in node [:attrs (keyword (:content/attr-name term))]) ""))
-    (str term)))
+
+    (contains? term :content/counter-name)
+    (when (some? counters)
+      (str (get counters (:content/counter-name term) 0)))
+
+    :else (str term)))
 
 (defn- resolve-content-value
   "Resolves a cascade-winning `content` value (see `parse-content-value`)
-   into the plain string `cssom.layout` expects under :content: a
-   :content/parts marker (a mix of literal/attr() terms) resolves each term
-   (`resolve-content-term`) and concatenates them in source order; a lone
-   attr() reference marker resolves the same way; anything else (already a
-   plain string, from a quoted literal, or nil) passes through unchanged."
-  [node value]
+   into the plain string `cssom.layout` expects under :content, given
+   `counters` -- the running named-counter map as of this exact point in
+   document tree order (nil when there is no real tree-walk context to draw
+   one from -- see `resolve-style-for`): a :content/parts marker (a mix of
+   literal/attr()/counter() terms) resolves each term (`resolve-content-term`)
+   and concatenates them in source order, UNLESS any term resolves to nil
+   (an unresolvable counter() reference with no `counters` context), in
+   which case the WHOLE value resolves to nil rather than rendering a
+   partial string; a lone attr() or counter() reference marker resolves the
+   same way; anything else (already a plain string, from a quoted literal,
+   or nil) passes through unchanged."
+  [node counters value]
   (cond
     (and (map? value) (contains? value :content/parts))
-    (str/join "" (map #(resolve-content-term node %) (:content/parts value)))
+    (let [resolved (mapv #(resolve-content-term node counters %) (:content/parts value))]
+      (when (every? some? resolved)
+        (str/join "" resolved)))
 
-    (and (map? value) (contains? value :content/attr-name))
-    (resolve-content-term node value)
+    (and (map? value) (or (contains? value :content/attr-name)
+                           (contains? value :content/counter-name)))
+    (resolve-content-term node counters value)
 
     :else value))
 
@@ -1117,45 +1271,69 @@
    attr() on an absent attribute is an empty string, not \"no content\"),
    matching how `content: \"\"` already behaves. Every other property, and
    every already-a-plain-string `content` value, passes through this step
-   unaffected."
-  [document rules node pseudo-element]
-  (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rules
-                            selector selectors
-                            :when (= pseudo-element (pseudo-element-of selector))
-                            :when (if document
-                                    (matches? document node selector)
-                                    (matches? node selector))
-                            [property value] declarations]
-                        (let [{:keys [important?]} (get declaration-meta property)
-                              important? (boolean important?)
-                              raw-layer (or layer-priority 0)]
-                          {:property property
-                           :value value
-                           :important? important?
-                           :specificity (specificity selector)
-                           :inline? false
-                           :unlayered? (nil? layer)
-                           :layer (if important? (- raw-layer) raw-layer)
-                           :order order}))
-        max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
-        inline-declarations (when (nil? pseudo-element)
-                               (map-indexed (fn [idx [property value]]
-                                              {:property property
-                                               :value value
-                                               :important? false
-                                               :specificity [1 0 0]
-                                               :inline? true
-                                               :unlayered? true
-                                               :layer max-layer-priority
-                                               :order idx})
-                                            (inline-style node)))]
-    (let [m (reduce (fn [m {:keys [property value]}]
-                       (assoc m property value))
-                     {}
-                     (sort-by (juxt :important? :inline? :unlayered? :layer :specificity :order)
-                              (concat declarations inline-declarations)))]
-      (cond-> m
-        (contains? m :content) (update :content #(resolve-content-value node %))))))
+   unaffected.
+
+   `content: counter(name)` resolution -- the 5-arity form's `counters`
+   argument: unlike attr(), a counter() reference cannot be resolved from
+   `node` alone (see the namespace docstring and `parse-content-counter-ref`
+   for why: a counter's value is the cumulative effect of every
+   counter-reset/counter-increment declaration on every element preceding
+   this point in document tree order). So this function accepts an
+   additional, OPTIONAL `counters` argument -- the running named-counter map
+   as of this exact point in a real top-down tree walk, which only
+   `apply-cascade` can honestly build and thread (see its docstring and
+   `style-with-counters`). The 4-arity form (used by `computed-style` and
+   `pseudo-element-style-for`, i.e. every standalone, non-apply-cascade
+   caller) implicitly passes `counters` nil, meaning \"no real tree-walk
+   context exists\" -- `resolve-content-value` then honestly leaves any
+   counter() reference unresolved (dropping :content entirely, same as any
+   other unsupported form) rather than fabricating a number. This is a real,
+   documented limitation of calling `computed-style`/`pseudo-element-style-for`
+   outside `apply-cascade`, not a bug."
+  ([document rules node pseudo-element]
+   (resolve-style-for document rules node pseudo-element nil))
+  ([document rules node pseudo-element counters]
+   (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rules
+                             selector selectors
+                             :when (= pseudo-element (pseudo-element-of selector))
+                             :when (if document
+                                     (matches? document node selector)
+                                     (matches? node selector))
+                             [property value] declarations]
+                         (let [{:keys [important?]} (get declaration-meta property)
+                               important? (boolean important?)
+                               raw-layer (or layer-priority 0)]
+                           {:property property
+                            :value value
+                            :important? important?
+                            :specificity (specificity selector)
+                            :inline? false
+                            :unlayered? (nil? layer)
+                            :layer (if important? (- raw-layer) raw-layer)
+                            :order order}))
+         max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
+         inline-declarations (when (nil? pseudo-element)
+                                (map-indexed (fn [idx [property value]]
+                                               {:property property
+                                                :value value
+                                                :important? false
+                                                :specificity [1 0 0]
+                                                :inline? true
+                                                :unlayered? true
+                                                :layer max-layer-priority
+                                                :order idx})
+                                             (inline-style node)))]
+     (let [m (reduce (fn [m {:keys [property value]}]
+                        (assoc m property value))
+                      {}
+                      (sort-by (juxt :important? :inline? :unlayered? :layer :specificity :order)
+                               (concat declarations inline-declarations)))]
+       (if (contains? m :content)
+         (let [resolved (resolve-content-value node counters (:content m))]
+           (if (nil? resolved)
+             (dissoc m :content)
+             (assoc m :content resolved)))
+         m)))))
 
 (defn computed-style
   "Cascade-resolved style map for `node`. Regular declarations are flat
@@ -1163,7 +1341,13 @@
    `::after` pseudo-element, that pseudo-element's own resolved style map is
    attached under the extra key :pseudo/before / :pseudo/after (only when
    non-empty) -- see the namespace docstring for what does/doesn't consume
-   those keys downstream."
+   those keys downstream.
+
+   Called standalone here (not via `apply-cascade`'s tree walk), so any
+   `content: counter(name)` reference has no running counters map to
+   resolve against and is honestly left unresolved (no :content key) --
+   see `resolve-style-for`'s `counters` argument for exactly why, and
+   `apply-cascade`'s own docstring for the tree walk that CAN resolve it."
   ([rules node]
    (computed-style nil rules node))
   ([document rules node]
@@ -1193,9 +1377,20 @@
    (see `parse-content-literal`) already was one, and a `content: attr(name)`
    reference (see `parse-content-attr-ref`/`resolve-content-value`) has
    already been resolved against `node`'s own real HTML attribute (`\"\"` if
-   absent) by `resolve-style-for` above; `counter()`/`url()`/other
-   unsupported `content` forms simply have no :content key in the returned
-   map, same as `content` being absent.
+   absent) by `resolve-style-for` above; `url()`/other unsupported `content`
+   forms simply have no :content key in the returned map, same as `content`
+   being absent.
+
+   `content: counter(name)` is a REAL, DOCUMENTED LIMITATION of this
+   standalone entry point specifically: unlike attr(), a counter's value is
+   the cumulative effect of every counter-reset/counter-increment
+   declaration on every element preceding this point in document tree order
+   (see the namespace docstring) -- genuinely not derivable from `node` in
+   isolation, with no document tree walk backing this call. So a
+   `counter()` reference here is honestly left unresolved (no :content key,
+   same as `content` being absent) rather than guessing a number. Only
+   `apply-cascade`'s own top-down tree walk (see its docstring) can resolve
+   `counter()` correctly, node by node, in document order.
 
    Mirrors `computed-style`'s own two arities -- the document-less 3-arity
    form has the same pseudo-class-matching restriction `matches?`'s
@@ -1250,15 +1445,85 @@
   [env m]
   (into {} (map (fn [[k v]] [k (resolve-value env v)])) m))
 
+(defn- apply-counter-pairs
+  "Applies `op` (:reset or :increment) over `pairs` (a `[[name amount] ...]`
+   vector -- the shape `parse-counter-property` produces for a resolved
+   `counter-reset`/`counter-increment` declaration) to `counters`, a running
+   name -> current-value map: :reset sets/overwrites the named counter to
+   `amount` outright (real CSS: `counter-reset` re-initializes, discarding
+   any prior value); :increment adds `amount` to the counter's current value,
+   defaulting a name with no prior entry to 0 first (real CSS: an
+   un-reset counter starts from 0 the first time it's referenced or
+   incremented -- see the namespace docstring's \"flat, per-document\"
+   counters simplification). `pairs` nil/empty is a no-op (`reduce` over nil
+   returns `counters` unchanged), matching a node with no
+   counter-reset/counter-increment declaration at all."
+  [counters op pairs]
+  (reduce (fn [counters [name amount]]
+            (case op
+              :reset (assoc counters name amount)
+              :increment (update counters name (fnil + 0) amount)))
+          counters
+          pairs))
+
+(defn- style-with-counters
+  "Like `computed-style`, but for `apply-cascade`'s own top-down tree walk:
+   resolves `node`'s base/::before/::after style given `inherited-counters`
+   (the running named-counter map accumulated from every node that precedes
+   `node` in document order -- see `apply-cascade`'s docstring), and returns
+   `[style node-counters]`.
+
+   `node-counters` is `inherited-counters` updated by `node`'s OWN
+   `counter-reset` declaration (applied first) then its OWN
+   `counter-increment` declaration (applied second) -- exactly real CSS's
+   order (`apply-counter-pairs`) -- and is what descendants AND subsequent
+   siblings should keep accumulating from.
+
+   `node`'s ::before/::after `content: counter(name)` reference(s) resolve
+   against `node-counters`, i.e. AFTER `node`'s own reset/increment already
+   applied: matching real CSS, a `<li>` with both `counter-increment: item`
+   and a `::before { content: counter(item); }` sees the INCREMENTED value,
+   never the pre-increment one. This is only possible because
+   counter-reset/counter-increment are read off `node`'s own BASE style
+   first (`resolve-style-for ... nil inherited-counters` below), before
+   ::before/::after are resolved at all.
+
+   Known, honest simplification: `node`'s own (non-pseudo-element) `content`
+   declaration, if it has one (unusual and not meaningfully rendered by real
+   CSS on a regular element in the first place -- content only applies to
+   generated ::before/::after boxes), is resolved against
+   `inherited-counters` (pre-this-node), not `node-counters` -- it has to
+   be, structurally: `node`'s own counter-reset/counter-increment
+   declarations are read FROM that very same base-style resolution call, so
+   `node-counters` isn't known yet at the point the base style resolves.
+   Since real CSS doesn't render a plain element's own `content` anyway,
+   this ordering choice has no real-world-visible consequence."
+  [document rules node inherited-counters]
+  (let [base (resolve-style-for document rules node nil inherited-counters)
+        node-counters (-> inherited-counters
+                          (apply-counter-pairs :reset (:counter-reset base))
+                          (apply-counter-pairs :increment (:counter-increment base)))
+        before (resolve-style-for document rules node :before node-counters)
+        after (resolve-style-for document rules node :after node-counters)
+        style (cond-> base
+                (seq before) (assoc :pseudo/before before)
+                (seq after) (assoc :pseudo/after after))]
+    [style node-counters]))
+
 (defn- style-element
   "Resolves and writes computed style attrs for a single element, given the
-   custom-property environment inherited from its ancestors. Returns
-   [document node-env] where node-env is the environment children should
-   inherit (inherited-env merged with this element's own resolved custom
-   properties)."
-  [document rules node-id inherited-env]
+   custom-property environment inherited from its ancestors and the running
+   named-counter map inherited from every node preceding it in document
+   order (see `style-with-counters`). Returns `[document node-env
+   node-counters]`: `node-env` is the environment children should inherit
+   (`inherited-env` merged with this element's own resolved custom
+   properties, unchanged from before counters existed); `node-counters` is
+   the counters map children AND subsequent siblings should continue
+   accumulating from (`inherited-counters` updated by this element's own
+   `counter-reset`/`counter-increment`, see `style-with-counters`)."
+  [document rules node-id inherited-env inherited-counters]
   (let [node (get-in document [:nodes node-id])
-        style (computed-style document rules node)
+        [style node-counters] (style-with-counters document rules node inherited-counters)
         pseudo-keys #{:pseudo/before :pseudo/after}
         regular (into {} (remove (fn [[k _]] (contains? pseudo-keys k))) style)
         pseudo (select-keys style pseudo-keys)
@@ -1276,7 +1541,7 @@
                       (dom/set-attribute d node-id (keyword "style" (name k)) v)))
                   (clear-style-attrs document node-id)
                   final-style)]
-    [document node-env]))
+    [document node-env node-counters]))
 
 (defn apply-cascade
   "Applies the cascade over `document`, writing each element's resolved
@@ -1288,6 +1553,26 @@
    detached subtree) still gets styled, using an empty inherited environment,
    to preserve the previous flat-walk behavior for those nodes.
 
+   This same top-down walk also threads a running named-counter map (see
+   `style-with-counters`/`style-element`), alongside (but NOT the same as)
+   the custom-property environment: `counter-reset`/`counter-increment`
+   are NOT inherited properties (each element's own declaration affects only
+   itself, exactly like every other non-inherited CSS property, and exactly
+   like the custom-property environment already does NOT get threaded
+   sideways between siblings) -- but a counter's VALUE is nonetheless a
+   running total across the WHOLE preceding document (ancestors, preceding
+   siblings, and everything nested inside them), because that's what
+   `content: counter(name)` actually reads. So unlike the custom-property
+   environment (recomputed fresh, unaffected by siblings, for every child
+   from its parent's fixed `node-env`), the counters map threaded into the
+   next sibling is the one that comes OUT of the previous sibling's ENTIRE
+   subtree, not the one going INTO it -- i.e. it is threaded through the
+   `reduce` over children the same way `document`/`visited` already are,
+   not passed down as a fixed value the way `node-env` is. This is a real,
+   deliberate, honest simplification of real CSS's actual (element-nesting
+   scoped) counter scoping rules: this engine keeps counters in one flat,
+   per-document namespace instead (see the namespace docstring).
+
    `opts` (optional, 3-arity) may include :viewport-width (default
    `default-viewport-width`) used to decide whether `@media (min-width:...)`
    / `(max-width:...)` rule blocks apply."
@@ -1296,23 +1581,24 @@
   ([document rules opts]
    (let [viewport-width (or (:viewport-width opts) default-viewport-width)
          rules (filterv #(rule-applies-to-viewport? % viewport-width) rules)]
-     (letfn [(walk [document node-id inherited-env visited]
+     (letfn [(walk [document node-id inherited-env inherited-counters visited]
                (let [node (get-in document [:nodes node-id])
-                     [document node-env] (if (= :element (:node/type node))
-                                           (style-element document rules node-id inherited-env)
-                                           [document inherited-env])
+                     [document node-env node-counters]
+                     (if (= :element (:node/type node))
+                       (style-element document rules node-id inherited-env inherited-counters)
+                       [document inherited-env inherited-counters])
                      visited (conj visited node-id)]
-                 (reduce (fn [[document visited] child-id]
-                           (walk document child-id node-env visited))
-                         [document visited]
+                 (reduce (fn [[document visited counters] child-id]
+                           (walk document child-id node-env counters visited))
+                         [document visited node-counters]
                          (:children node))))]
        (let [[document visited] (if-let [root (:root document)]
-                                   (walk document root {} #{})
+                                   (walk document root {} {} #{})
                                    [document #{}])]
          (reduce-kv
           (fn [document node-id node]
             (if (and (= :element (:node/type node)) (not (contains? visited node-id)))
-              (first (style-element document rules node-id {}))
+              (first (style-element document rules node-id {} {}))
               document))
           document
           (:nodes document)))))))

@@ -477,14 +477,14 @@
 (deftest unparseable-content-value-does-not-crash-and-produces-no-box
   (let [[span doc] (dom/create-element dom/empty-document :span)
         doc (dom/set-root doc span)
-        rules (css/parse-rules "span::before { content: counter(item) }")
+        rules (css/parse-rules "span::before { content: url(icon.png) }")
         doc (css/apply-cascade doc rules)
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 200})]
     (is (empty? (filterv #(= :text (:draw/op %)) ops))
-        "counter()/url()/none content is out of scope -- must not crash
-         layout, and produces no generated-content box")))
+        "url()/none content is out of scope -- must not crash layout, and
+         produces no generated-content box")))
 
 ;; ---- ::before/::after generated `content: attr(name)` ----
 ;;
@@ -545,6 +545,65 @@
     (is (= "Price: 10" (:text (first text-ops)))
         "the quoted literal and the resolved attr() value concatenate into
          one real painted text run")))
+
+;; ---- ::before/::after generated `content: counter(name)` ----
+;;
+;; Same real end-to-end pipeline (CSS text -> cssom.core/parse-rules +
+;; apply-cascade -> kotoba.wasm.dom tree -> cssom.layout/draw-ops). Unlike
+;; attr(), a counter's value is the cumulative effect of every
+;; counter-reset/counter-increment declaration on every element preceding
+;; it in document tree order -- these tests prove that running total is
+;; genuinely computed across REAL sibling elements, not faked or resolved
+;; independently per node.
+
+(deftest three-sibling-list-items-render-sequential-counter-numbers-as-real-text
+  ;; THE canonical real-world CSS-counters use case: automatic sequential
+  ;; numbering across sibling <li> elements, purely from CSS, painted as
+  ;; three genuinely distinct :text draw-ops.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [li1-text doc] (dom/create-text-node doc "one")
+        doc (dom/append-child doc li1 li1-text)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [li2-text doc] (dom/create-text-node doc "two")
+        doc (dom/append-child doc li2 li2-text)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li3)
+        [li3-text doc] (dom/create-text-node doc "three")
+        doc (dom/append-child doc li3 li3-text)
+        rules (css/parse-rules
+               "li { counter-increment: item }
+                li::before { content: counter(item) \". \"; }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. " "one" "2. " "two" "3. " "three"] (mapv :text text-ops))
+        "each <li>'s ::before renders that <li>'s OWN incremented counter
+         value (\"1. \"/\"2. \"/\"3. \"), immediately before its own real
+         text child, in document order -- a genuine running total across
+         siblings, not three independently-resolved copies of the same
+         value")))
+
+(deftest counter-never-reset-or-incremented-still-produces-a-real-zero-text-draw-op
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: counter(untouched); }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops))
+        "a counter reference is still a real generated-content box even
+         when the counter was never touched")
+    (is (= "0" (:text (first text-ops)))
+        "real CSS: an un-reset, un-incremented counter reads as 0, not
+         nothing and not a crash")))
 
 (deftest generated-content-wraps-long-text-through-the-same-word-wrap-path
   ;; Proves ::before/::after content flows through the exact same

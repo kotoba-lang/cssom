@@ -896,12 +896,21 @@
    (:before/:after) generated content, if cssom.core's cascade resolved a
    usable `content` value for it -- a quoted string literal, a resolved
    `attr(name)` reference (already substituted with the real element's own
-   attribute value, `\"\"` if absent), or a mix of both, all arriving here
-   as a plain string either way (see cssom.core/parse-content-value and
-   resolve-content-value; this file never distinguishes where the string
-   came from, exactly like real CSS's own generated-content box doesn't
-   care whether its text came from a literal or attr()). `counter(...)`/
-   `url(...)`/`none`/absent all leave no :content key. Returns nil when
+   attribute value, `\"\"` if absent), a resolved `counter(name)` reference
+   (already substituted with that named counter's current value as of this
+   exact point in document tree order -- see cssom.core/apply-cascade's own
+   docstring for how it computes that; 0 if the counter was never
+   `counter-reset`/`counter-increment`-ed), or any mix of those, all
+   arriving here as a plain string either way (see
+   cssom.core/parse-content-value and resolve-content-value; this file
+   never distinguishes where the string came from, exactly like real CSS's
+   own generated-content box doesn't care whether its text came from a
+   literal, attr(), or counter()). `counter()`'s two-argument
+   `name, <list-style-type>` form (e.g. `counter(item, upper-roman)`),
+   `url(...)`, `none`, and absent `content` all leave no :content key (a
+   `counter()` reference also has no :content key when the cascade that
+   resolved it had no real document-tree-walk context behind it -- see
+   cssom.core/resolve-style-for's `counters` argument). Returns nil when
    there's nothing to generate, so a node with no matching ::before/::after
    rule lays out exactly as it did before this feature existed."
   [node pseudo-key]
