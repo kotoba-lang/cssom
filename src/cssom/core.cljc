@@ -176,6 +176,56 @@
      (non-zero length), meaning `<div> </div>` does NOT match `:empty`,
      only a truly childless `<div></div>` does (verified against real
      browser behavior, not assumed -- see `child-counts-as-content?`).
+   - `:lang(<tag>)`, a pseudo-class FUNCTION taking a comma-separated list of
+     BCP-47-ish language tags/ranges (`:lang(en)`, `:lang(en, fr)`). Unlike
+     `:not()`/`:is()`/`:where()` (a selector-list argument, needing
+     `functional-pseudo-class-pattern` + `split-selector-list`) or
+     `:nth-child()`/`:nth-of-type()` (an An+B micro-syntax argument), this
+     argument is its own narrow micro-syntax -- a comma-separated list of
+     bare identifiers and/or quoted strings (`lang-pseudo-class-pattern`
+     captures the raw argument text exactly like `nth-pseudo-class-pattern`
+     does, since a lang-range list never itself contains parens either;
+     `parse-lang-ranges` then splits/unquotes it), each compared against the
+     element's OWN computed language: the nearest `lang` HTML attribute
+     found walking from the element ITSELF upward through its ancestor
+     chain (`computed-lang`, reusing the exact same `parent-node-id`
+     ancestor-chain walk `disabled-by-fieldset?`/`disabled-by-optgroup?`
+     already established elsewhere in this namespace for a different
+     purpose -- see the structural-pseudo-classes paragraph above for that
+     precedent too) -- the element's own `lang` attribute wins if present
+     and non-blank, otherwise the nearest ancestor's, matching real CSS
+     language inheritance; an element with no non-blank `lang` attribute
+     anywhere from itself up to the document root has no computed language
+     at all and never matches any `:lang()` argument (a blank `lang=\"\"`
+     -- real HTML/CSS's own way of saying 'explicitly unknown language' --
+     is treated exactly like no `lang` attribute at all: `computed-lang`
+     keeps walking up past it rather than treating \"\" as a real, if
+     empty, tag).
+
+     A single range matches case-insensitively when it is a WHOLE-SUBTAG
+     prefix of the computed tag, `-`-separated (`lang-range-matches-tag?`)
+     -- e.g. `:lang(en)` matches `lang=\"en\"`/`lang=\"en-US\"`/
+     `lang=\"EN-us\"` but NOT `lang=\"eng\"` (real CSS's own
+     subtag-boundary rule: a language range must match one or more WHOLE
+     leading subtags, never just a bare string prefix -- `[\"en\"]` is a
+     whole-subtag prefix of `[\"en\" \"us\"]` but is not, and can never be,
+     a whole-subtag prefix of `[\"eng\"]`, even though \"en\" is a plain
+     STRING prefix of \"eng\") -- and the
+     comma-separated list matches if ANY range in it does (`:lang(en, fr)`
+     matches either English or French content). Deliberately out of scope:
+     RFC 4647 extended filtering's `*` wildcard subtag syntax
+     (`:lang(*-fr)`/`:lang(de-*-DE)`) -- rare in practice; the overwhelming
+     majority of real-world `:lang()` usage is a plain tag or comma list of
+     plain tags, e.g. `:lang(en)`/`:lang(en, fr, de)`, exactly this
+     engine's scope. Like `:root` and the structural pseudo-classes above,
+     `:lang()` needs `document` to walk the ancestor chain at all, so it
+     never matches via the document-less 2-arity `matches?`/
+     `matches-simple?` form (the same restriction `:focus`/`:first-child`
+     already have). This trusted-subset parser has no `xml:lang` concept at
+     all -- only the plain HTML `lang` attribute exists here -- so
+     `:lang()` checking only `lang` isn't a gap, it's the correct, complete
+     behavior for this engine's scope (real CSS additionally falls back to
+     `xml:lang` only for XML documents, which this engine doesn't model).
    - CSS custom properties (`--foo: value`) and `var(--foo[, fallback])`
      resolution, inherited top-down the same way `apply-cascade` walks the
      document from its root.
@@ -802,6 +852,20 @@
    `parse-simple-selector`'s `:selector/nth-args`."
   #"(?i):(nth-child|nth-of-type)\(([^()]*)\)")
 
+(def lang-pseudo-class-pattern
+  "Matches a single `:lang(...)` occurrence, capturing its raw parenthesized
+   argument text (group 1 -- e.g. `\"en\"`, `\"en, fr\"`, `\"'en-US'\"` --
+   see `parse-lang-ranges` for the comma-separated tag/quoted-string-list
+   micro-syntax this argument is parsed with). Mirrors
+   `nth-pseudo-class-pattern` exactly (see its own docstring for why a
+   plain non-nested `[^()]*` capture is enough here too -- a lang-range
+   list never itself contains parens): the bare `:lang` pseudo-class NAME
+   is already picked up by the existing `pseudo-class-pattern` regex (that
+   match stops at the name, parens and all, exactly like every other
+   pseudo-class); this pattern exists ONLY to additionally capture the
+   argument text, into `:selector/lang-args`."
+  #"(?i):lang\(([^()]*)\)")
+
 (defn- append-token
   [tokens token]
   (cond-> tokens
@@ -991,7 +1055,19 @@
    `{pseudo-keyword raw-arg-string}` map), left for `matches-pseudo?` to
    parse (`parse-nth-expression`) and evaluate against the element's actual
    sibling position at match time (see the namespace docstring's
-   structural-pseudo-classes paragraph)."
+   structural-pseudo-classes paragraph).
+
+   `:lang(...)` (see `lang-pseudo-class-pattern`) works exactly like
+   `:nth-child()`/`:nth-of-type()` above -- its bare name is already
+   captured into `:selector/pseudos`, and its raw comma-separated
+   tag-list argument is captured separately into `:selector/lang-args`
+   (same `{pseudo-keyword raw-arg-string}` shape as `:selector/nth-args`,
+   just its own map rather than merged into that one -- mirroring how
+   `:selector/not`/`:selector/is`/`:selector/where` each get their own key
+   despite similar shapes), left for `matches-pseudo?` to parse
+   (`parse-lang-ranges`) and evaluate against the element's computed
+   language at match time (see the namespace docstring's `:lang()`
+   paragraph)."
   [selector]
   (let [raw (str/trim selector)
         functional-matches (re-seq functional-pseudo-class-pattern raw)
@@ -1003,6 +1079,9 @@
                        (map (fn [[_ pseudo-name arg]]
                               [(keyword (str/lower-case pseudo-name)) (str/trim arg)]))
                        (re-seq nth-pseudo-class-pattern raw))
+        lang-args (into {}
+                        (map (fn [[_ arg]] [:lang (str/trim arg)]))
+                        (re-seq lang-pseudo-class-pattern raw))
         s (str/replace raw functional-pseudo-class-pattern "")
         selector-without-attrs (str/replace s attribute-selector-pattern "")
         pseudo-element (some-> (re-find pseudo-element-pattern selector-without-attrs)
@@ -1026,7 +1105,8 @@
      :selector/not (parse-group "not")
      :selector/is (parse-group "is")
      :selector/where (parse-group "where")
-     :selector/nth-args nth-args}))
+     :selector/nth-args nth-args
+     :selector/lang-args lang-args}))
 
 (defn parse-selector
   [selector]
@@ -1861,10 +1941,108 @@
   [document node]
   (not-any? #(child-counts-as-content? document %) (:children node)))
 
+;; ---- :lang() pseudo-class ----
+
+(defn- own-lang-attr
+  "`node`'s own `lang` HTML attribute value, or nil when absent OR blank --
+   an empty/whitespace-only `lang=\"\"` (real HTML/CSS's own way of saying
+   'explicitly unknown language') is deliberately treated the same as no
+   `lang` attribute at all, so `computed-lang` keeps walking up past it
+   rather than treating `\"\"` as this element's own real (if empty)
+   computed language."
+  [node]
+  (let [lang (get-in node [:attrs :lang])]
+    (when (and (string? lang) (not (str/blank? lang)))
+      lang)))
+
+(defn- computed-lang
+  "The BCP-47-ish language tag governing `node` for `:lang()` matching --
+   `node`'s own `lang` HTML attribute if present and non-blank
+   (`own-lang-attr`), else the NEAREST ancestor's `lang` attribute, walking
+   up node-by-node via `parent-node-id` (the exact same ancestor-chain walk
+   `disabled-by-fieldset?`/`disabled-by-optgroup?` already use elsewhere in
+   this namespace, for a different purpose -- see the namespace docstring's
+   `:lang()` paragraph). Matches real CSS language inheritance: an element
+   without its own `lang` inherits its nearest ancestor's.
+
+   Returns nil when no element from `node` up to the document root carries
+   a non-blank `lang` attribute at all (an unset/unknown computed language
+   never matches any `:lang()` argument, see `lang-pseudo-matches?`), and
+   also unconditionally when `document` is nil -- the document-less 2-arity
+   `matches-simple?` form can't walk any ancestor chain at all, the same
+   restriction `:first-child` and friends already have."
+  [document node]
+  (when document
+    (loop [current node]
+      (when current
+        (or (own-lang-attr current)
+            (recur (get-in document [:nodes (parent-node-id document (:node/id current))])))))))
+
+(defn- lang-tag-subtags
+  [tag]
+  (str/split (str/lower-case (str tag)) #"-"))
+
+(defn- lang-range-matches-tag?
+  "Whether a single already-unquoted `:lang()` comma-list item `range` (see
+   `parse-lang-ranges`) matches computed language `tag` (`computed-lang`) --
+   real CSS's own subtag-boundary rule: `range` matches when it is a
+   case-insensitive prefix of `tag`'s `-`-separated SUBTAGS, one or more
+   WHOLE subtags, never a bare string prefix -- e.g. range `\"en\"` matches
+   tag `\"en\"`/`\"en-US\"` (subtags `[\"en\"]` is a whole-subtag prefix of
+   `[\"en\"]`/`[\"en\" \"us\"]`) but NOT tag `\"eng\"` (`[\"en\"]` is a
+   STRING prefix of `[\"eng\"]` but is not, and can never be, equal to that
+   tag's one and only whole subtag, so this correctly rejects it)."
+  [range tag]
+  (let [range-subtags (lang-tag-subtags range)
+        tag-subtags (lang-tag-subtags tag)]
+    (and (<= (count range-subtags) (count tag-subtags))
+         (= range-subtags (take (count range-subtags) tag-subtags)))))
+
+(defn- unquote-lang-range
+  "Strips one optional matching pair of surrounding quotes (double or
+   single) off a trimmed `:lang()` comma-list item -- real CSS accepts
+   either a bare identifier (`:lang(en)`) or a quoted string
+   (`:lang(\"en\")`) per item. Leaves the text as-is when it isn't a
+   matching quoted pair (the common bare-identifier case)."
+  [s]
+  (let [s (str/trim s)]
+    (if (and (>= (count s) 2)
+             (or (and (str/starts-with? s "\"") (str/ends-with? s "\""))
+                 (and (str/starts-with? s "'") (str/ends-with? s "'"))))
+      (subs s 1 (dec (count s)))
+      s)))
+
+(defn- parse-lang-ranges
+  "Parses a `:lang(...)` raw argument (see `lang-pseudo-class-pattern`) into
+   its comma-separated list of language-range items -- real CSS allows
+   either a bare identifier or a quoted string per item, and more than one
+   comma-separated item (`:lang(en, fr)`, matching EITHER -- see
+   `lang-pseudo-matches?`). A blank item (a stray trailing comma, or a
+   wholly-blank argument) is dropped rather than becoming a range that
+   could never legitimately match anything anyway."
+  [arg]
+  (->> (str/split (str arg) #",")
+       (map unquote-lang-range)
+       (remove str/blank?)))
+
+(defn- lang-pseudo-matches?
+  "Whether `node` matches `:lang(arg)` -- real CSS: `node`'s computed
+   language (`computed-lang`) matches AT LEAST ONE comma-separated range in
+   `arg` (`parse-lang-ranges`/`lang-range-matches-tag?`). False when `node`
+   has no computed language at all (no `lang` attribute anywhere from
+   itself up to the document root, or no `document` to walk at all), or
+   when `arg` parses to no usable ranges."
+  [document node arg]
+  (boolean
+   (when-let [tag (computed-lang document node)]
+     (let [ranges (parse-lang-ranges arg)]
+       (some #(lang-range-matches-tag? % tag) ranges)))))
+
 (defn- matches-pseudo?
   "Whether `node` matches bare pseudo-class `selector-pseudo`, given its raw
    argument text `arg` (nil for every pseudo-class except `:nth-child`/
-   `:nth-of-type`, see `parse-simple-selector`'s `:selector/nth-args`).
+   `:nth-of-type`/`:lang`, see `parse-simple-selector`'s `:selector/nth-args`
+   / `:selector/lang-args`).
 
    `:first-child`/`:last-child`/`:only-child` and `:first-of-type`/
    `:last-of-type` need no argument -- they test `node`'s position
@@ -1877,7 +2055,12 @@
    pseudo-class, see the namespace docstring), the same document-dependent
    restriction `:focus` already has. `:empty` delegates to
    `empty-pseudo-matches?` (real CSS's stricter 'no children of ANY node
-   type' rule, not just no element children)."
+   type' rule, not just no element children). `:lang` delegates to
+   `lang-pseudo-matches?`, which parses+evaluates `arg`'s comma-separated
+   language-range list against `node`'s computed language (`computed-lang`,
+   walking `node`'s own ancestor chain via `document` -- the same
+   document-dependent restriction `:root`/structural pseudo-classes already
+   have, see the namespace docstring's `:lang()` paragraph)."
   [document node selector-pseudo arg]
   (case selector-pseudo
     :disabled (disabled-control? document node)
@@ -1917,6 +2100,7 @@
     :nth-of-type (nth-pseudo-matches? document node true arg)
     :root (and document (= (:node/id node) (:root document)))
     :empty (empty-pseudo-matches? document node)
+    :lang (lang-pseudo-matches? document node arg)
     false))
 
 (defn- matches-simple?
@@ -1943,14 +2127,17 @@
    not a forward reference to some other function defined later.
 
    Every :selector/pseudos entry is checked via `matches-pseudo?`, given
-   its matching raw argument text from :selector/nth-args when present
-   (nil for every pseudo-class except `:nth-child`/`:nth-of-type` -- see
+   its matching raw argument text from :selector/nth-args or
+   :selector/lang-args when present (nil for every pseudo-class except
+   `:nth-child`/`:nth-of-type`/`:lang` -- the two maps' keys never overlap,
+   so `or`-ing their lookups together is unambiguous -- see
    `parse-simple-selector`). Structural pseudo-classes (`:first-child` and
-   friends) need `document` to look up `node`'s parent/siblings, exactly
-   like `:focus`/`:disabled` already need it for other reasons -- the
-   document-less 2-arity form below passes `document` nil, so those never
-   match there either, the same documented restriction `matches?`'s own
-   document-less arity already has."
+   friends) and `:lang` alike need `document` to look up `node`'s
+   parent/siblings/ancestor chain, exactly like `:focus`/`:disabled`
+   already need it for other reasons -- the document-less 2-arity form
+   below passes `document` nil, so those never match there either, the
+   same documented restriction `matches?`'s own document-less arity
+   already has."
   ([node selector]
    (matches-simple? nil node selector))
   ([document node selector]
@@ -1977,7 +2164,9 @@
                            false))))
                 (:selector/attrs selector))
         (every? (fn [pseudo]
-                  (matches-pseudo? document node pseudo (get (:selector/nth-args selector) pseudo)))
+                  (matches-pseudo? document node pseudo
+                                   (or (get (:selector/nth-args selector) pseudo)
+                                       (get (:selector/lang-args selector) pseudo))))
                 (:selector/pseudos selector))
         (every? (fn [group] (not-any? #(matches-simple? document node %) group))
                 (:selector/not selector))
