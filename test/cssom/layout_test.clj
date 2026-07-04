@@ -297,3 +297,153 @@
     (is (= (str/split "the quick brown fox jumps over" #"\s+")
            (mapcat #(str/split (:text %) #"\s+") text-ops))
         "word-wrapping must not lose or reorder any words")))
+
+;; ---- non-rendered (metadata) elements ----
+;;
+;; <head>/<title>/<script>/<style>/<meta>/<link> are never part of a real
+;; browser's visual rendering tree, full stop -- independent of any
+;; `display` a stylesheet declares for them. Confirmed against a real
+;; rendering bug: loading kotoba-lang/browser's own demo page in an actual
+;; Chrome tab showed a real background rect for <head>/<title> and the
+;; <script> tag's raw JS source painted as garbled visible text.
+
+(deftest head-and-title-contribute-zero-draw-ops
+  ;; <head> as the document root, with a real, non-empty <title> text
+  ;; child -- proves the exclusion recurses into (and blocks) children too,
+  ;; not just the immediate element.
+  (let [[head doc] (dom/create-element dom/empty-document :head)
+        doc (dom/set-root doc head)
+        [title doc] (dom/create-element doc :title)
+        doc (dom/append-child doc head title)
+        [text doc] (dom/create-text-node doc "Page Title")
+        doc (dom/append-child doc title text)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (is (= [] ops)
+        "head (and its title child, and the title's own real, non-empty
+         text content) contribute zero draw-ops of any kind -- no rect, no
+         text, no :node")))
+
+(deftest script-raw-source-contributes-zero-draw-ops
+  ;; A <script>'s raw JS source is real, multi-line, and contains a
+  ;; distinctive string that would obviously show up as garbled visible text
+  ;; if this exclusion regressed.
+  (let [[script doc] (dom/create-element dom/empty-document :script)
+        doc (dom/set-root doc script)
+        [text doc] (dom/create-text-node
+                    doc
+                    "document.title = 'DISTINCTIVE_MARKER_STRING_998877';\nconsole.log('hi');")
+        doc (dom/append-child doc script text)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (is (= [] ops))
+    (is (not (some #(and (:text %) (str/includes? (:text %) "DISTINCTIVE_MARKER_STRING_998877")) ops))
+        "the script's raw source never reaches a :text draw-op")))
+
+(deftest style-block-contributes-zero-draw-ops
+  (let [[style-el doc] (dom/create-element dom/empty-document :style)
+        doc (dom/set-root doc style-el)
+        [text doc] (dom/create-text-node doc "body { color: red; } .stage { width: 760px; }")
+        doc (dom/append-child doc style-el text)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (is (= [] ops))))
+
+(deftest meta-and-link-contribute-zero-draw-ops
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [meta-el doc] (dom/create-element doc :meta)
+        doc (dom/set-attribute doc meta-el :charset "utf-8")
+        doc (dom/append-child doc root meta-el)
+        [link-el doc] (dom/create-element doc :link)
+        doc (dom/set-attribute doc link-el :rel "stylesheet")
+        doc (dom/append-child doc root link-el)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (is (not (some #(contains? #{:meta :link} (:tag %)) ops))
+        "no draw-op of any kind traces back to meta/link")))
+
+(deftest excluded-sibling-does-not-disturb-normal-sibling-rendering
+  ;; A <script> immediately before a real <p> must not change the <p>'s own
+  ;; box/position, and the <p> must still render completely normally.
+  ;; Whatever "does a hidden box still reserve flow space" quirk
+  ;; display:none already has in this engine's block layout, the tag-name
+  ;; exclusion must reproduce EXACTLY -- so this compares against an
+  ;; explicit display:none sibling rather than assuming zero-space
+  ;; reservation one way or the other.
+  (let [build (fn [make-first-child]
+                (let [[root doc] (dom/create-element dom/empty-document :main)
+                      doc (dom/set-root doc root)
+                      [first-child doc] (make-first-child doc)
+                      doc (dom/append-child doc root first-child)
+                      [p doc] (dom/create-element doc :p)
+                      doc (dom/append-child doc root p)
+                      [text doc] (dom/create-text-node doc "Z")
+                      doc (dom/append-child doc p text)
+                      [_ doc] (dom/consume-ops doc)]
+                  (dom/tree doc)))
+        script-tree (build (fn [doc]
+                              (let [[el doc] (dom/create-element doc :script)
+                                    [t doc] (dom/create-text-node doc "var x = 1;")
+                                    doc (dom/append-child doc el t)]
+                                [el doc])))
+        hidden-div-tree (build (fn [doc]
+                                  (let [[el doc] (dom/create-element doc :div)
+                                        doc (dom/set-style doc el {:display "none"})
+                                        [t doc] (dom/create-text-node doc "hidden")
+                                        doc (dom/append-child doc el t)]
+                                    [el doc])))
+        script-ops (layout/draw-ops script-tree {:width 480})
+        hidden-div-ops (layout/draw-ops hidden-div-tree {:width 480})
+        node-ops-for (fn [ops] (filterv #(= :node (:draw/op %)) ops))
+        text-ops-for (fn [ops] (filterv #(= :text (:draw/op %)) ops))]
+    ;; The real <p>Z</p> sibling still renders normally: its own :node box
+    ;; plus its text draw-op, exactly as if there were no excluded sibling.
+    (is (some #(= :p (:tag %)) (node-ops-for script-ops)))
+    (is (= ["Z"] (mapv :text (text-ops-for script-ops))))
+    ;; No draw-op at all traces back to the <script> itself.
+    (is (not (some #(= :script (:tag %)) script-ops)))
+    ;; The <script> sibling positions/sizes the real <p> IDENTICALLY to how
+    ;; an explicit display:none sibling already does here -- the exclusion
+    ;; doesn't leak into (or diverge from existing display:none behavior
+    ;; for) sibling positioning.
+    (let [p-box #(select-keys (second (node-ops-for %)) [:x :y :w :h])]
+      (is (= (p-box hidden-div-ops) (p-box script-ops))))))
+
+(deftest head-title-script-excluded-body-p-renders-normally
+  ;; Mirrors the real, visually-confirmed bug shape:
+  ;; <head><title>X</title></head><body><script>Y</script><p>Z</p></body>.
+  ;; X (title text) and Y (script source) must produce zero draw-ops of any
+  ;; kind; Z (the real <p> content) must still render normally.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [head doc] (dom/create-element doc :head)
+        doc (dom/append-child doc root head)
+        [title doc] (dom/create-element doc :title)
+        doc (dom/append-child doc head title)
+        [title-text doc] (dom/create-text-node doc "X")
+        doc (dom/append-child doc title title-text)
+        [body doc] (dom/create-element doc :body)
+        doc (dom/append-child doc root body)
+        [script doc] (dom/create-element doc :script)
+        doc (dom/append-child doc body script)
+        [script-text doc] (dom/create-text-node doc "Y")
+        doc (dom/append-child doc script script-text)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc body p)
+        [p-text doc] (dom/create-text-node doc "Z")
+        doc (dom/append-child doc p p-text)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["Z"] (mapv :text text-ops))
+        "X (title text) and Y (script source) produce no :text draw-ops at
+         all -- only Z, the real <p> content, does")
+    (is (not (some #(contains? #{:head :title :script} (:tag %)) ops))
+        "no draw-op of any kind (rect/text/node) traces back to
+         head/title/script")))
