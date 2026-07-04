@@ -15,9 +15,9 @@
   (let [rules (css/parse-rules "input[required], [data-mode=\"edit\"] { border-width: 2px !important; color: red }")]
     (is (= {:border-width 2 :color "red"}
            (:rule/declarations (first rules))))
-    (is (= [{:attr/name :required :attr/operator nil :attr/value nil}]
+    (is (= [{:attr/name :required :attr/operator nil :attr/value nil :attr/case-insensitive? false}]
            (-> rules first :rule/selectors first :selector/parts first :selector/attrs)))
-    (is (= [{:attr/name :data-mode :attr/operator "=" :attr/value "edit"}]
+    (is (= [{:attr/name :data-mode :attr/operator "=" :attr/value "edit" :attr/case-insensitive? false}]
            (-> rules first :rule/selectors second :selector/parts first :selector/attrs)))
     (is (= true (get-in (first rules) [:rule/declaration-meta :border-width :important?])))))
 
@@ -46,6 +46,111 @@
            (-> selector :selector/parts second :selector/attrs first :attr/value)))
     (is (= "report pdf"
            (-> selector :selector/parts (nth 2) :selector/attrs first :attr/value)))))
+
+;; ---- attribute selector case-sensitivity flag ([attr=val i] / [attr=val s]) ----
+;;
+;; Real CSS Selectors Level 4: an attribute selector may end in an optional
+;; `i`/`I` (force case-INSENSITIVE matching, regardless of whether HTML
+;; happens to define that attribute as case-sensitive by default) or `s`/`S`
+;; (the explicit, no-op case-SENSITIVE default) flag, separated from the
+;; value by whitespace -- e.g. `[type="text" i]`. These tests exercise both
+;; the parser (`parse-simple-selector`) and the real parse-rules ->
+;; apply-cascade pipeline, the same discipline the :root/:empty/:lang()
+;; tests above use.
+
+(deftest parses-attribute-selector-case-insensitivity-flag
+  (let [i-sel (css/parse-simple-selector "[type=\"text\" i]")
+        upper-i-sel (css/parse-simple-selector "[type=\"text\" I]")
+        s-sel (css/parse-simple-selector "[type=\"text\" s]")
+        no-flag-sel (css/parse-simple-selector "[type=\"text\"]")
+        extra-ws-sel (css/parse-simple-selector "[type=\"text\"   i ]")
+        presence-only-sel (css/parse-simple-selector "[required]")]
+    (is (true? (-> i-sel :selector/attrs first :attr/case-insensitive?))
+        "a lowercase `i` flag sets :attr/case-insensitive? true")
+    (is (true? (-> upper-i-sel :selector/attrs first :attr/case-insensitive?))
+        "the flag letter is itself case-insensitive -- `I` behaves the same as `i`")
+    (is (false? (-> s-sel :selector/attrs first :attr/case-insensitive?))
+        "`s` is the explicit, already-default case-sensitive behavior -- it
+         parses successfully but is a no-op")
+    (is (false? (-> no-flag-sel :selector/attrs first :attr/case-insensitive?))
+        "no flag at all defaults to case-sensitive, same as before this
+         feature existed")
+    (is (true? (-> extra-ws-sel :selector/attrs first :attr/case-insensitive?))
+        "extra whitespace around the flag, on either side, is tolerated")
+    (is (= "text" (-> extra-ws-sel :selector/attrs first :attr/value))
+        "the flag's surrounding whitespace doesn't leak into the captured value")
+    (is (= [{:attr/name :required :attr/operator nil :attr/value nil :attr/case-insensitive? false}]
+           (:selector/attrs presence-only-sel))
+        "a bare presence-only [attr] selector (no value at all, so no flag
+         position exists in the grammar) still parses fine -- this feature
+         must not have broken the no-operator regex path")))
+
+(deftest attribute-selector-unquoted-value-ending-in-a-flag-letter-is-not-misparsed-as-having-a-flag
+  ;; The critical edge case: an unquoted value's own trailing `i`/`s`
+  ;; character must never be misread as a whitespace-less flag token --
+  ;; there is no whitespace separating them, so this can never legitimately
+  ;; be a flag in real CSS's own grammar either (see
+  ;; attribute-selector-pattern/parse-attribute-selector's own docstrings
+  ;; for why requiring `\s+`, not `\s*`, before the flag is essential here).
+  (let [sel (css/parse-simple-selector "[data-x=abcs]")]
+    (is (= "abcs" (-> sel :selector/attrs first :attr/value))
+        "the whole unquoted value is captured, not truncated to \"abc\"")
+    (is (false? (-> sel :selector/attrs first :attr/case-insensitive?))
+        "no flag was actually present -- the trailing `s` belongs to the value")))
+
+(deftest attribute-selector-case-insensitive-flag-matches-regardless-of-which-side-is-uppercase
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [lower-el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc lower-el :type "text")
+        doc (dom/append-child doc root lower-el)
+        [upper-el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc upper-el :type "TEXT")
+        doc (dom/append-child doc root upper-el)
+        rules (css/parse-rules "[type=\"TEXT\" i] { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes lower-el :attrs :style/color]))
+        "type=\"text\" matches [type=\"TEXT\" i] -- the flag forces
+         case-insensitivity on the ACTUAL attribute value, not just the
+         selector's own value")
+    (is (= "red" (get-in doc [:nodes upper-el :attrs :style/color]))
+        "type=\"TEXT\" also matches -- symmetric regardless of which side
+         happens to be uppercase")))
+
+(deftest attribute-selector-without-the-flag-the-same-mismatched-case-selector-does-not-match
+  ;; Proves the flag above is genuinely doing something, not that this
+  ;; engine's attribute matching was accidentally always case-insensitive.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "text")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "[type=\"TEXT\"] { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes el :attrs :style/color]))
+        "without the `i` flag, type=\"text\" does NOT match [type=\"TEXT\"]
+         -- this engine's attribute matching is case-sensitive by default,
+         exactly like real CSS")))
+
+(deftest attribute-selector-case-insensitive-flag-combines-with-non-equality-operators
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [has-class doc] (dom/create-element doc :div)
+        doc (dom/set-attribute doc has-class :class "Foo bar")
+        doc (dom/append-child doc root has-class)
+        [has-href doc] (dom/create-element doc :a)
+        doc (dom/set-attribute doc has-href :href "HTTP://example.com")
+        doc (dom/append-child doc root has-href)
+        rules (css/parse-rules
+               "[class~=\"foo\" i] { color: red }
+                [href^=\"http\" i] { padding: 3px }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes has-class :attrs :style/color]))
+        "[class~=\"foo\" i] matches class=\"Foo bar\" -- ~='s own
+         whitespace-split tokens are compared case-insensitively too, not
+         just the whole attribute value as one string")
+    (is (= 3 (get-in doc [:nodes has-href :attrs :style/padding]))
+        "[href^=\"http\" i] matches href=\"HTTP://example.com\"")))
 
 (deftest parses-form-state-pseudo-classes
   (let [rules (css/parse-rules "input:disabled, input:enabled, input:checked, input:required, input:optional, input:read-only, input:read-write, input:invalid, input:valid, input:focus { color: red }")

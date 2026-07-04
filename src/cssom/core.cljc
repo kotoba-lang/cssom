@@ -300,7 +300,46 @@
      lists (`grid-template-columns`/`grid-template-rows` are multi-token
      strings `parse-style-value` never touches at all -- see
      `parse-track-list`'s docstring), since that file already owns its own
-     numeric coercion independent of this namespace (see its ns docstring)."
+     numeric coercion independent of this namespace (see its ns docstring).
+   - Attribute selectors' optional trailing case-sensitivity FLAG --
+     `[attr=val i]` / `[attr=val I]` (force case-INSENSITIVE matching,
+     regardless of whether HTML happens to define that particular
+     attribute as case-sensitive by default) and `[attr=val s]` /
+     `[attr=val S]` (the explicit, no-op case-SENSITIVE default -- valid
+     syntax that parses successfully and changes nothing) -- CSS Selectors
+     Level 4's attribute-selector modifier, e.g. `[type=\"text\" i]`/
+     `[lang=\"en\" i]`, a common real-world idiom for matching an HTML
+     attribute value whose casing the author can't fully control.
+     `attribute-selector-pattern`/`parse-attribute-selector` capture it
+     into `:attr/case-insensitive?` (true only for `i`/`I`; `s`/`S` needs
+     no special handling beyond parsing successfully), and
+     `matches-simple?`'s attribute clause honors it by lower-casing BOTH
+     `actual` and `value` before comparing -- the same `str/lower-case`
+     convention `:lang()`'s subtag matching already established above --
+     for EVERY operator this engine supports (`=`/`~=`/`^=`/`$=`/`*=`/
+     `|=`, and the presence-only no-operator case, which the flag is
+     simply irrelevant to), including `~=`'s own whitespace-split token
+     set (each split token, not just the whole attribute value, needs the
+     same lower-casing). Before this addition, `[attr=val i]` syntax
+     didn't just fail to apply the flag: the flag token made the WHOLE
+     bracket fail to match `attribute-selector-pattern` at all (no
+     provision for anything besides whitespace between the value and the
+     closing `]`), so the entire attribute constraint silently vanished
+     from the compound selector -- an `[attr=val i]`-only compound
+     selector matched EVERY element rather than the intended subset (a
+     compound selector left with no tag/id/class/attr/pseudo constraints
+     at all matches unconditionally), a worse failure mode than simply
+     matching nothing. The flag must be separated from the value by REAL
+     whitespace in this engine's regex (`\\s+`, not `\\s*`) -- not an
+     arbitrary tightening: an unquoted attribute value tokenizes as a
+     single maximal-munch identifier in real CSS, so `[data-x=abcs]` can
+     never legitimately split into value `abc` + flag `s` (there is no
+     whitespace token separating them, ever) -- and a `\\s*`-based
+     (optional-whitespace) regex would, via ordinary greedy-then-backtrack
+     matching, wrongly find exactly that split (backing the unquoted-value
+     match off by one trailing character to let it double as the flag)
+     the moment a mandatory-whitespace requirement isn't there to forbid
+     it."
   (:require [clojure.string :as str]
             [kotoba.wasm.dom :as dom]))
 
@@ -809,15 +848,38 @@
        (into {})))
 
 (defn- parse-attribute-selector
+  "Parses a single `[...]` attribute selector (see `attribute-selector-pattern`)
+   into `{:attr/name :attr/operator :attr/value :attr/case-insensitive?}`.
+   The trailing CSS Selectors Level 4 case-sensitivity flag (`i`/`I`/`s`/`S`,
+   see the namespace docstring's own paragraph on it) is optional and only
+   ever meaningful when a value is present -- captured here as group 6,
+   REQUIRED to be separated from the value by at least one real whitespace
+   character (`\\s+`, not `\\s*`) so an unquoted value's own trailing
+   `i`/`s` character (`[data-x=abcs]`) can never be misread as a
+   whitespace-less flag (see the namespace docstring for why `\\s*` would
+   be a genuine bug here, not just stylistic). `:attr/case-insensitive?` is
+   true only for `i`/`I` -- `s`/`S` is the explicit, already-default
+   case-SENSITIVE behavior and needs no special handling beyond parsing
+   successfully."
   [text]
-  (when-let [[_ attr operator double-quoted single-quoted unquoted]
-             (re-matches #"\[\s*([A-Za-z_][-A-Za-z0-9_]*)\s*(?:(~=|\|=|\^=|\$=|\*=|=)\s*(?:\"([^\"]*)\"|'([^']*)'|([^\]\s]+)))?\s*\]" text)]
+  (when-let [[_ attr operator double-quoted single-quoted unquoted flag]
+             (re-matches #"\[\s*([A-Za-z_][-A-Za-z0-9_]*)\s*(?:(~=|\|=|\^=|\$=|\*=|=)\s*(?:\"([^\"]*)\"|'([^']*)'|([^\]\s]+))(?:\s+([iIsS]))?)?\s*\]" text)]
     {:attr/name (keyword attr)
      :attr/operator operator
-     :attr/value (or double-quoted single-quoted unquoted)}))
+     :attr/value (or double-quoted single-quoted unquoted)
+     :attr/case-insensitive? (boolean (#{"i" "I"} flag))}))
 
 (def attribute-selector-pattern
-  #"\[\s*[A-Za-z_][-A-Za-z0-9_]*\s*(?:(?:~=|\|=|\^=|\$=|\*=|=)\s*(?:\"[^\"]*\"|'[^']*'|[^\]\s]+))?\s*\]")
+  "Matches a single `[...]` attribute selector, including its optional
+   trailing CSS Selectors Level 4 case-sensitivity flag (`i`/`I`/`s`/`S`,
+   see the namespace docstring and `parse-attribute-selector`) -- the flag
+   is only recognized as part of the SAME optional group as the
+   operator+value (so a bare `[attr]` presence-only selector, with no
+   value at all, correctly has no flag position to match either), and
+   must be separated from the value by at least one real whitespace
+   character, never zero, for the same unquoted-value-boundary reason
+   `parse-attribute-selector` documents."
+  #"\[\s*[A-Za-z_][-A-Za-z0-9_]*\s*(?:(?:~=|\|=|\^=|\$=|\*=|=)\s*(?:\"[^\"]*\"|'[^']*'|[^\]\s]+)(?:\s+[iIsS])?)?\s*\]")
 
 (def pseudo-class-pattern
   #":([A-Za-z_][-A-Za-z0-9_]*)")
@@ -2220,21 +2282,23 @@
         (or (nil? (:selector/id selector))
             (= (:selector/id selector) (get-in node [:attrs :id])))
         (every? (classes node) (:selector/classes selector))
-        (every? (fn [{:attr/keys [name operator value]}]
+        (every? (fn [{:attr/keys [name operator value case-insensitive?]}]
                   (let [actual (get-in node [:attrs name])]
                     (and (some? actual)
-                         (case operator
-                           nil true
-                           "=" (= (str actual) value)
-                           "~=" (contains? (set (remove str/blank?
-                                                        (str/split (str actual) #"\s+")))
-                                          value)
-                           "^=" (str/starts-with? (str actual) value)
-                           "$=" (str/ends-with? (str actual) value)
-                           "*=" (str/includes? (str actual) value)
-                           "|=" (or (= (str actual) value)
-                                   (str/starts-with? (str actual) (str value "-")))
-                           false))))
+                         (let [actual-str (cond-> (str actual) case-insensitive? str/lower-case)
+                               value (cond-> value case-insensitive? str/lower-case)]
+                           (case operator
+                             nil true
+                             "=" (= actual-str value)
+                             "~=" (contains? (set (remove str/blank?
+                                                          (str/split actual-str #"\s+")))
+                                            value)
+                             "^=" (str/starts-with? actual-str value)
+                             "$=" (str/ends-with? actual-str value)
+                             "*=" (str/includes? actual-str value)
+                             "|=" (or (= actual-str value)
+                                     (str/starts-with? actual-str (str value "-")))
+                             false)))))
                 (:selector/attrs selector))
         (every? (fn [pseudo]
                   (matches-pseudo? document node pseudo
