@@ -146,12 +146,12 @@
 (deftest unsupported-content-forms-are-dropped-rather-than-stored-raw
   (let [[span doc] (dom/create-element dom/empty-document :span)
         doc (dom/set-root doc span)
-        rules (css/parse-rules "span::before { content: counter(item); color: blue }")
+        rules (css/parse-rules "span::before { content: url(icon.png); color: blue }")
         style (css/pseudo-element-style-for doc rules (dom/node doc span) :before)]
     (is (not (contains? style :content))
-        "counter()/url()/none and other unsupported content forms are out
-         of scope -- dropped rather than crashing or being stored as an
-         unusable raw string")
+        "url()/none and other unsupported content forms are out of scope --
+         dropped rather than crashing or being stored as an unusable raw
+         string")
     (is (= "blue" (:color style))
         "other declared properties on the same pseudo-element rule are
          unaffected by an unsupported content value")))
@@ -217,6 +217,143 @@
         "a string literal and an attr() reference in the same declaration
          concatenate in source order, the attr() term resolved against the
          real element")))
+
+;; ---- `counter-reset`/`counter-increment` + ::before/::after `content:
+;; counter(name)` ----
+;;
+;; Unlike attr() (purely local to one element), a counter's value is the
+;; CUMULATIVE effect of every counter-reset/counter-increment declaration on
+;; every element preceding this point in document tree order -- so, unlike
+;; every attr() test above, these tests exercise the value through a real
+;; `apply-cascade` tree walk (the only code path that can resolve it
+;; correctly), not `pseudo-element-style-for` alone.
+
+(deftest parses-counter-reset-and-counter-increment-declarations
+  (let [rules (css/parse-rules
+               "li { counter-reset: item 5; counter-increment: item }
+                ol { counter-reset: section; }
+                div { counter-reset: a 1 b 2; }")]
+    (is (= [["item" 5]] (:counter-reset (:rule/declarations (first rules))))
+        "an explicit integer after the counter name overrides the default
+         reset value")
+    (is (= [["item" 1]] (:counter-increment (:rule/declarations (first rules))))
+        "counter-increment with no explicit integer defaults to 1, real
+         CSS's own default amount")
+    (is (= [["section" 0]] (:counter-reset (:rule/declarations (second rules))))
+        "counter-reset with no explicit integer defaults to 0, real CSS's
+         own default reset value")
+    (is (= [["a" 1] ["b" 2]] (:counter-reset (:rule/declarations (nth rules 2))))
+        "a single declaration may reset more than one counter, each with its
+         own optional integer")))
+
+(deftest content-counter-reference-parses-into-an-unresolved-marker
+  (let [rules (css/parse-rules "li::before { content: counter(item); }")]
+    (is (= {:content/counter-name "item"}
+           (:content (:rule/declarations (first rules))))
+        "content: counter(name) parses into an unresolved marker at parse
+         time -- its actual numeric value depends on the whole document's
+         accumulated counter state, not anything the declaration itself
+         carries, so it cannot be a plain string yet")))
+
+(deftest single-element-counter-increment-is-seen-by-its-own-before-content
+  ;; The core semantic this feature hinges on: a node's OWN
+  ;; counter-increment must already have applied by the time that SAME
+  ;; node's ::before content: counter(...) resolves (not the pre-increment
+  ;; value) -- verified against real CSS behavior, not guessed.
+  (let [[li doc] (dom/create-element dom/empty-document :li)
+        doc (dom/set-root doc li)
+        rules (css/parse-rules
+               "li { counter-increment: item }
+                li::before { content: counter(item); }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes li :attrs])]
+    (is (= "1" (:content (:pseudo/before attrs)))
+        "a lone <li> with counter-increment: item sees the INCREMENTED
+         value (1), not the pre-increment value (0)")))
+
+(deftest three-sibling-list-items-produce-sequential-counter-values
+  ;; THE canonical real-world use case: an ordered-list-like numbering
+  ;; produced purely by CSS counters across sibling elements.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li3)
+        rules (css/parse-rules
+               "li { counter-increment: item }
+                li::before { content: counter(item) \". \"; }")
+        doc (css/apply-cascade doc rules)
+        content-for #(:content (:pseudo/before (get-in doc [:nodes % :attrs])))]
+    (is (= "1. " (content-for li1)))
+    (is (= "2. " (content-for li2))
+        "the second <li> sees the counter as of AFTER the first <li>'s own
+         increment -- a genuine running total across siblings, not each
+         node resolved independently")
+    (is (= "3. " (content-for li3)))))
+
+(deftest counter-never-reset-or-incremented-reads-as-zero
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: counter(untouched); }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes span :attrs])]
+    (is (= "0" (:content (:pseudo/before attrs)))
+        "a counter that was never counter-reset/counter-increment anywhere
+         in the document still reads as 0, real CSS's own default, not nil
+         or a crash")))
+
+(deftest counter-reset-establishes-a-starting-value-counter-increment-adds-to-it
+  (let [[li doc] (dom/create-element dom/empty-document :li)
+        doc (dom/set-root doc li)
+        rules (css/parse-rules
+               "li { counter-reset: item 5; counter-increment: item 2 }
+                li::before { content: counter(item); }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes li :attrs])]
+    (is (= "7" (:content (:pseudo/before attrs)))
+        "counter-reset: item 5 sets the starting value, then
+         counter-increment: item 2 adds to it -- reset applies before
+         increment, matching real CSS's own declaration order")))
+
+(deftest content-counter-composes-with-string-literals-across-siblings
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        rules (css/parse-rules
+               "li { counter-increment: item }
+                li::before { content: \"Item \" counter(item) \":\"; }")
+        doc (css/apply-cascade doc rules)
+        content-for #(:content (:pseudo/before (get-in doc [:nodes % :attrs])))]
+    (is (= "Item 1:" (content-for li1)))
+    (is (= "Item 2:" (content-for li2)))))
+
+(deftest pseudo-element-style-for-standalone-cannot-resolve-counter-reference
+  ;; Documented, honest limitation: pseudo-element-style-for (and
+  ;; computed-style) called standalone -- no real apply-cascade tree walk
+  ;; behind them -- have no running counters map to resolve counter()
+  ;; against, so they leave :content unset rather than guessing a number.
+  ;; Even though counter() IS a supported content form now (see the tests
+  ;; above, all going through apply-cascade), this narrow entry point
+  ;; genuinely cannot resolve it.
+  (let [[li doc] (dom/create-element dom/empty-document :li)
+        doc (dom/set-root doc li)
+        rules (css/parse-rules
+               "li { counter-increment: item }
+                li::before { content: counter(item); color: red }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc li) :before)]
+    (is (not (contains? style :content))
+        "no apply-cascade tree walk means no counters context -- counter()
+         is honestly left unresolved rather than defaulting to a wrong
+         guess like 0")
+    (is (= "red" (:color style))
+        "other declared properties on the same rule are still resolved
+         normally")))
 
 (deftest pseudo-element-style-for-returns-empty-map-when-no-rule-targets-it
   (let [[p doc] (dom/create-element dom/empty-document :p)
