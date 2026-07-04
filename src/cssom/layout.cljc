@@ -3,7 +3,7 @@
    Real hosts can replace this with text shaping, flex/grid, WebGPU buffers, etc.
    The point is to keep a stable data boundary after DOM compatibility.
 
-   Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051100) so
+   Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140) so
    the CSS cascade (cssom.core) and the box-model/layout projection that
    consumes its computed styles live in one repo."
   (:require [clojure.string :as str]))

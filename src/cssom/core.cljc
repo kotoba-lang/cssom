@@ -1,7 +1,7 @@
 (ns cssom.core
   "Small CSS selector/cascade subset for kotoba documents.
 
-   Split out of kotoba-lang/browser (ADR-2607051100). Not to be confused with
+   Split out of kotoba-lang/browser (ADR-2607051140). Not to be confused with
    kotoba-lang/css, an unrelated EDN-as-CSS-data renderer (data -> CSS text);
    this namespace goes the other direction: parses CSS text and resolves the
    cascade against a kotoba.wasm.dom document."
