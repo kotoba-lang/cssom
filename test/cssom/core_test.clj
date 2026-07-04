@@ -1011,7 +1011,8 @@
 
 ;; ---- structural pseudo-classes: :first-child/:last-child/:only-child/
 ;;      :nth-child(), and their same-tag :first-of-type/:last-of-type/
-;;      :nth-of-type() counterparts ----
+;;      :nth-of-type() counterparts, plus :nth-child()'s/:nth-of-type()'s
+;;      own from-the-end mirrors :nth-last-child()/:nth-last-of-type() ----
 ;;
 ;; Before this feature existed, ALL of these matched nothing at all, for
 ;; any element whatsoever: their bare pseudo-class names were captured
@@ -1191,6 +1192,162 @@
     (is (empty? (:selector/nth-args first-child-sel))
         "an argument-less structural pseudo-class has no :selector/nth-args
          entry at all")))
+
+;; ---- :nth-last-child()/:nth-last-of-type() -- from-the-end mirrors of
+;;      :nth-child()/:nth-of-type() above ----
+;;
+;; The An+B micro-syntax and its arithmetic (parse-nth-expression/
+;; nth-matches?) are entirely unchanged/reused -- these tests exist to
+;; exercise the one genuinely new piece, the from-the-end index
+;; (nth-pseudo-matches?'s `from-end?` reversal), through the same real
+;; parse-rules -> apply-cascade pipeline the tests above use.
+
+(deftest nth-last-child-1-matches-the-last-sibling-not-the-first
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        mk (fn [doc] (dom/create-element doc :li))
+        [li1 doc] (mk doc) doc (dom/append-child doc ul li1)
+        [li2 doc] (mk doc) doc (dom/append-child doc ul li2)
+        [li3 doc] (mk doc) doc (dom/append-child doc ul li3)
+        rules (css/parse-rules "li:nth-last-child(1) { color: purple }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes li1 :attrs :style/color]))
+        "li1 is the FIRST child -- :nth-last-child(1) means the LAST
+         child, not the first (unlike a naive same-number reading against
+         :nth-child(1))")
+    (is (nil? (get-in doc [:nodes li2 :attrs :style/color])))
+    (is (= "purple" (get-in doc [:nodes li3 :attrs :style/color]))
+        "li3 is the LAST child -- matched by :nth-last-child(1)")))
+
+(deftest nth-last-child-2n-matches-every-other-sibling-counting-from-the-end
+  ;; Six siblings (an EVEN count) so the from-the-end subset is visibly the
+  ;; MIRROR IMAGE of :nth-child(2n)'s forward subset, not coincidentally
+  ;; identical to it -- with an ODD sibling count (e.g. 5), :nth-child(2n)
+  ;; and :nth-last-child(2n) happen to land on the EXACT SAME forward
+  ;; positions (each position's distance from one end equals its distance
+  ;; from the other, modulo the even/odd split), which would obscure which
+  ;; direction is actually being tested.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        mk (fn [doc] (dom/create-element doc :li))
+        [li1 doc] (mk doc) doc (dom/append-child doc ul li1)
+        [li2 doc] (mk doc) doc (dom/append-child doc ul li2)
+        [li3 doc] (mk doc) doc (dom/append-child doc ul li3)
+        [li4 doc] (mk doc) doc (dom/append-child doc ul li4)
+        [li5 doc] (mk doc) doc (dom/append-child doc ul li5)
+        [li6 doc] (mk doc) doc (dom/append-child doc ul li6)
+        lis [li1 li2 li3 li4 li5 li6]
+        rules (css/parse-rules
+               "li:nth-child(2n) { color: red }
+                li:nth-last-child(2n) { border-width: 1px }")
+        doc (css/apply-cascade doc rules)
+        matching-1-indexed-positions
+        (fn [prop expected-val]
+          (set (keep-indexed (fn [idx id]
+                                (when (= expected-val (get-in doc [:nodes id :attrs prop]))
+                                  (inc idx)))
+                              lis)))]
+    (is (= #{2 4 6} (matching-1-indexed-positions :style/color "red"))
+        ":nth-child(2n) matches the 2nd/4th/6th elements counting from the
+         START, as before")
+    (is (= #{1 3 5} (matching-1-indexed-positions :style/border-width 1))
+        ":nth-last-child(2n) matches from-end positions 2/4/6 -- among 6
+         siblings that's forward positions 5/3/1, the COMPLEMENT of
+         :nth-child(2n)'s own {2 4 6}, proving this really counts from the
+         last sibling backward and not just re-running the same forward
+         arithmetic under a different name")))
+
+(deftest nth-last-child-negative-n-plus-2-matches-the-last-two-siblings
+  ;; :nth-last-child(-n+2) is a common real-world 'style the last two
+  ;; items' idiom -- exercises a negative A coefficient against the
+  ;; REVERSED index, not just a positive-A/simple-literal case.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        mk (fn [doc] (dom/create-element doc :li))
+        [li1 doc] (mk doc) doc (dom/append-child doc ul li1)
+        [li2 doc] (mk doc) doc (dom/append-child doc ul li2)
+        [li3 doc] (mk doc) doc (dom/append-child doc ul li3)
+        [li4 doc] (mk doc) doc (dom/append-child doc ul li4)
+        [li5 doc] (mk doc) doc (dom/append-child doc ul li5)
+        lis [li1 li2 li3 li4 li5]
+        rules (css/parse-rules "li:nth-last-child(-n+2) { margin: 4px }")
+        doc (css/apply-cascade doc rules)
+        matching-1-indexed-positions
+        (fn [prop expected-val]
+          (set (keep-indexed (fn [idx id]
+                                (when (= expected-val (get-in doc [:nodes id :attrs prop]))
+                                  (inc idx)))
+                              lis)))]
+    (is (= #{4 5} (matching-1-indexed-positions :style/margin 4))
+        ":nth-last-child(-n+2) matches from-end positions 1 and 2 (n=0 -> 2,
+         n=1 -> 1; n=2 would need from-end position 0, which does not
+         exist) -- the LAST two siblings, forward positions 5 and 4 among
+         these five")))
+
+(deftest nth-last-of-type-counts-only-same-tag-siblings-from-the-end-unlike-nth-last-child
+  ;; Mirrors nth-of-type-and-first-last-of-type-count-only-same-tag-siblings-unlike-nth-child
+  ;; above, but exercising the from-the-end :nth-last-of-type()/
+  ;; :nth-last-child() pair instead of the from-the-start
+  ;; :nth-of-type()/:nth-child() pair. Same six alternating <p>/<span>
+  ;; siblings: overall forward document positions 1..6 are p,span,p,span,p,
+  ;; span (p1/s1/p2/s2/p3/s3); of-type position resets per tag (p1/p2/p3 =
+  ;; of-type 1/2/3, s1/s2/s3 = of-type 1/2/3), so of-type-FROM-THE-END, p3/
+  ;; s3 are position 1 (the last of their own tag), p2/s2 are position 2,
+  ;; p1/s1 are position 3.
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [p1 doc] (dom/create-element doc :p) doc (dom/append-child doc section p1)
+        [s1 doc] (dom/create-element doc :span) doc (dom/append-child doc section s1)
+        [p2 doc] (dom/create-element doc :p) doc (dom/append-child doc section p2)
+        [s2 doc] (dom/create-element doc :span) doc (dom/append-child doc section s2)
+        [p3 doc] (dom/create-element doc :p) doc (dom/append-child doc section p3)
+        [s3 doc] (dom/create-element doc :span) doc (dom/append-child doc section s3)
+        rules (css/parse-rules
+               "p:nth-last-of-type(1), span:nth-last-of-type(1) { color: red }
+                p:nth-last-of-type(2), span:nth-last-of-type(2) { border-width: 1px }
+                p:nth-last-child(2) { padding: 2px }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p3 :attrs :style/color]))
+        "p3 is the LAST <p> -- of-type-from-end position 1")
+    (is (= "red" (get-in doc [:nodes s3 :attrs :style/color]))
+        "s3 is the LAST <span> -- of-type-from-end position 1 too, a
+         DIFFERENT element, since of-type-from-end position resets per tag
+         just like plain of-type position already does")
+    (is (nil? (get-in doc [:nodes p1 :attrs :style/color])))
+    (is (nil? (get-in doc [:nodes s1 :attrs :style/color])))
+    (is (nil? (get-in doc [:nodes p2 :attrs :style/color])))
+    (is (nil? (get-in doc [:nodes s2 :attrs :style/color])))
+    (is (= 1 (get-in doc [:nodes p2 :attrs :style/border-width]))
+        "p2 is the 2nd-from-the-end <p> -- matched by
+         p:nth-last-of-type(2)")
+    (is (= 1 (get-in doc [:nodes s2 :attrs :style/border-width]))
+        "s2 is the 2nd-from-the-end <span> -- matched by
+         span:nth-last-of-type(2)")
+    (is (nil? (get-in doc [:nodes p3 :attrs :style/border-width])))
+    (is (nil? (get-in doc [:nodes s3 :attrs :style/border-width])))
+    ;; :nth-last-child(2), by contrast, counts ALL element siblings
+    ;; regardless of tag, from the end: overall from-end positions are
+    ;; s3=1, p3=2, s2=3, p2=4, s1=5, p1=6 -- so overall position-from-end 2
+    ;; is p3, NOT p2, even though p2's own of-type-from-end position (2)
+    ;; happens to equal the argument too.
+    (is (= 2 (get-in doc [:nodes p3 :attrs :style/padding]))
+        "p3 is overall element-position-from-end 2, so
+         p:nth-last-child(2) matches it despite p3's of-type-from-end
+         position being only 1")
+    (is (nil? (get-in doc [:nodes p2 :attrs :style/padding]))
+        "p2 is overall element-position-from-end 4, not 2 --
+         p:nth-last-child(2) must not match it, even though p2's
+         of-type-from-end position (2) happens to equal the target
+         argument")))
+
+(deftest parses-nth-last-child-and-nth-last-of-type-arguments-into-selector-nth-args
+  (let [nth-last-child-sel (css/parse-simple-selector "li:nth-last-child(2n+1)")
+        nth-last-of-type-sel (css/parse-simple-selector "p:nth-last-of-type(even)")]
+    (is (= [:nth-last-child] (:selector/pseudos nth-last-child-sel)))
+    (is (= {:nth-last-child "2n+1"} (:selector/nth-args nth-last-child-sel))
+        "captured exactly like :nth-child's own argument -- same regex
+         alternation, same [A B] micro-syntax")
+    (is (= {:nth-last-of-type "even"} (:selector/nth-args nth-last-of-type-sel)))))
 
 ;; ---- :root / :empty pseudo-classes ----
 ;;
