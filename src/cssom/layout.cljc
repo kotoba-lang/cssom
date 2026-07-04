@@ -428,6 +428,28 @@
         children (if after (conj children after) children)]
     children))
 
+;; ---- non-rendered (metadata) elements ----
+;;
+;; <head>, <title>, <script>, <style>, <meta>, <link> are never part of a
+;; real browser's visual rendering tree at all -- this is independent of
+;; whatever `display` value a stylesheet declares for them (a real browser
+;; does not let `<script style="display:block">` opt back in). This engine
+;; has no separate metadata-tree/rendering-tree split the way a real
+;; browser's HTML+CSS integration does (see the ns docstring for this
+;; project's honestly-scoped feature set), so the narrowest correct fix is a
+;; tag-name gate checked ahead of the general :element branch in
+;; layout-node, deliberately NOT folded into node-style/:display -- gating
+;; on the cascade's :display would let an author-declared `display: block`
+;; make a <script> visible, which no real browser permits.
+
+(def ^:private non-rendered-tags
+  "Tags that always contribute zero layout box and paint zero draw-ops, full
+   stop, no override mechanism -- see the section comment above."
+  #{:head :title :script :style :meta :link})
+
+(defn- non-rendered-tag? [tag]
+  (contains? non-rendered-tags tag))
+
 (declare layout-node)
 
 (defn- measure-child
@@ -705,6 +727,14 @@
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
+
+     (and (= :element (:node/type node)) (non-rendered-tag? (:tag node)))
+     ;; <head>/<title>/<script>/<style>/<meta>/<link>: zero box, zero
+     ;; draw-ops, and -- critically -- children are never walked, so a
+     ;; <title>'s text content or a <script>'s raw JS source never reaches
+     ;; layout-text/layout-block. Checked ahead of (and independent of) the
+     ;; :display-driven branch below; see non-rendered-tags above.
+     {:box {:x x :y y :w 0 :h 0} :draw []}
 
      (= :element (:node/type node))
      (let [st (node-style node theme)]
