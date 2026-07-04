@@ -1,6 +1,7 @@
 (ns cssom.core-test
   (:require [cssom.core :as css]
-            [clojure.test :refer [deftest is]]))
+            [clojure.test :refer [deftest is]]
+            [kotoba.wasm.dom :as dom]))
 
 (deftest parses-simple-selector-rules
   (let [rules (css/parse-rules "main.note, #hero { color: red; padding: 8px } .muted { color: gray }")]
@@ -52,3 +53,120 @@
                       (-> rules first :rule/selectors))]
     (is (= [:disabled :enabled :checked :required :optional :read-only :read-write :invalid :valid :focus] pseudos))
     (is (= [0 1 1] (css/specificity (-> rules first :rule/selectors first))))))
+
+;; ---- sibling combinators (+ / ~) ----
+
+(deftest parses-adjacent-and-general-sibling-combinators
+  (let [selector (css/parse-selector "h1 + p ~ span")]
+    (is (= [nil :next-sibling :subsequent-sibling]
+           (mapv :selector/combinator (:selector/parts selector))))))
+
+(deftest matches-adjacent-and-general-sibling-combinators
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [h1 doc] (dom/create-element doc :h1)
+        doc (dom/append-child doc section h1)
+        [p1 doc] (dom/create-element doc :p)
+        doc (dom/append-child doc section p1)
+        [_span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc section _span)
+        [p2 doc] (dom/create-element doc :p)
+        doc (dom/append-child doc section p2)
+        rules (css/parse-rules "h1 + p { color: red } h1 ~ p { border-width: 1px }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p1 :attrs :style/color]))
+        "adjacent sibling matches the immediately following element")
+    (is (nil? (get-in doc [:nodes p2 :attrs :style/color]))
+        "adjacent sibling must not match a non-immediate later sibling")
+    (is (= 1 (get-in doc [:nodes p1 :attrs :style/border-width]))
+        "general sibling also matches the immediately following element")
+    (is (= 1 (get-in doc [:nodes p2 :attrs :style/border-width]))
+        "general sibling matches any later sibling, not just the adjacent one")))
+
+;; ---- ::before / ::after pseudo-elements ----
+
+(deftest parses-before-and-after-pseudo-elements
+  (let [double-colon (css/parse-selector "p.note::before")
+        legacy-single-colon (css/parse-selector "p:after")]
+    (is (= :before (-> double-colon :selector/parts first :selector/pseudo-element)))
+    (is (= ["note"] (-> double-colon :selector/parts first :selector/classes))
+        "pseudo-element must not swallow the class it follows")
+    (is (empty? (-> double-colon :selector/parts first :selector/pseudos))
+        "before/after must not also leak into generic pseudo-classes")
+    (is (= :after (-> legacy-single-colon :selector/parts first :selector/pseudo-element))
+        "legacy single-colon :after spelling is also recognized")))
+
+(deftest resolves-before-and-after-declarations-into-a-synthetic-pseudo-style
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules
+               "p { color: black }
+                p::before { content: \"*\"; color: red }
+                p::after { content: \"!\" }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes p :attrs])]
+    (is (= "black" (:style/color attrs))
+        "the real element's own color is unaffected by ::before/::after rules")
+    (is (not (contains? attrs :style/content))
+        "pseudo-element declarations must not leak onto the real element")
+    (is (= "red" (:color (:pseudo/before attrs))))
+    (is (some? (:content (:pseudo/before attrs))))
+    (is (some? (:content (:pseudo/after attrs))))
+    (is (not (contains? (:pseudo/after attrs) :color))
+        "::after only carries its own declarations")))
+
+;; ---- @media (min-width/max-width) ----
+
+(deftest parses-media-blocks-and-tags-nested-rules-with-their-condition
+  (let [rules (css/parse-rules
+               "p { color: black }
+                @media (min-width: 600px) { p { color: blue } .a { color: green } }")]
+    (is (= 3 (count rules)))
+    (is (nil? (:rule/media (first rules))))
+    (is (= "(min-width: 600px)" (:rule/media (second rules))))
+    (is (= "(min-width: 600px)" (:rule/media (nth rules 2))))
+    (is (= [0 1 2] (mapv :rule/order rules))
+        "rule order stays stable across plain and @media-wrapped rules")))
+
+(deftest media-min-and-max-width-conditionally-apply-rules
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules
+               "div { color: black }
+                @media (min-width: 600px) { div { color: blue } }
+                @media (max-width: 400px) { div { color: red } }")]
+    (is (= "red" (get-in (css/apply-cascade doc rules {:viewport-width 320})
+                         [:nodes div :attrs :style/color]))
+        "only the max-width rule matches a narrow viewport")
+    (is (= "blue" (get-in (css/apply-cascade doc rules {:viewport-width 1024})
+                          [:nodes div :attrs :style/color]))
+        "only the min-width rule matches a wide viewport")
+    (is (= "blue" (get-in (css/apply-cascade doc rules)
+                          [:nodes div :attrs :style/color]))
+        "the default viewport width (800px) behaves like a desktop-sized viewport")))
+
+;; ---- CSS custom properties (--foo) and var() ----
+
+(deftest resolves-custom-properties-inherited-from-an-ancestor
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        doc (dom/set-attribute doc section :class "theme")
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc section p)
+        rules (css/parse-rules
+               ".theme { --gap: 8px; --accent: teal }
+                p { padding: var(--gap); color: var(--accent); margin: var(--missing, 3px) }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes p :attrs])]
+    (is (= 8 (:style/padding attrs))
+        "var() resolves an ancestor's custom property, coercing px like a literal declaration")
+    (is (= "teal" (:style/color attrs)))
+    (is (= 3 (:style/margin attrs))
+        "var() falls back to its second argument when the custom property is undefined")))
+
+(deftest own-element-custom-property-is-visible-to-its-own-declarations
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules "p { --size: 12px; font-size: var(--size) }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 12 (get-in doc [:nodes p :attrs :style/font-size])))))
