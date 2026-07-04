@@ -1008,3 +1008,186 @@
         "the comma inside :not(...) must not split the top-level selector
          list -- only the comma separating the two top-level selectors
          should")))
+
+;; ---- structural pseudo-classes: :first-child/:last-child/:only-child/
+;;      :nth-child(), and their same-tag :first-of-type/:last-of-type/
+;;      :nth-of-type() counterparts ----
+;;
+;; Before this feature existed, ALL of these matched nothing at all, for
+;; any element whatsoever: their bare pseudo-class names were captured
+;; into :selector/pseudos just fine (pseudo-class-pattern doesn't care what
+;; follows the name), but matches-pseudo? had no case for any of them and
+;; fell through to its unrecognized-pseudo-class default of `false`, and
+;; any :nth-child()/:nth-of-type() argument text was silently discarded.
+;; These tests exercise the real fix through the full `parse-rules` ->
+;; `apply-cascade` pipeline, the same discipline the rest of this file uses.
+
+(deftest first-child-last-child-and-nth-child-match-correctly-among-three-real-li-siblings
+  ;; The exact repro that exposed the gap in the first place.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        mk (fn [doc] (dom/create-element doc :li))
+        [li1 doc] (mk doc)
+        doc (dom/append-child doc ul li1)
+        [li2 doc] (mk doc)
+        doc (dom/append-child doc ul li2)
+        [li3 doc] (mk doc)
+        doc (dom/append-child doc ul li3)
+        rules (css/parse-rules
+               "li:first-child { color: red }
+                li:last-child { color: blue }
+                li:nth-child(2) { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes li1 :attrs :style/color]))
+        "li1 is the first element child -- matched by :first-child")
+    (is (= "green" (get-in doc [:nodes li2 :attrs :style/color]))
+        "li2 is the 2nd element child -- matched by :nth-child(2), not
+         :first-child or :last-child")
+    (is (= "blue" (get-in doc [:nodes li3 :attrs :style/color]))
+        "li3 is the last element child -- matched by :last-child")
+    (is (= [0 1 1] (css/specificity (-> rules first :rule/selectors first)))
+        "li:first-child -- the tag `li` contributes 1 to the 3rd column,
+         and :first-child contributes ordinary pseudo-class specificity (1
+         to the 2nd column), same as :hover/:disabled/etc.")))
+
+(deftest only-child-matches-a-lone-element-child-but-not-when-siblings-exist
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [solo doc] (dom/create-element doc :p)
+        doc (dom/append-child doc section solo)
+        rules (css/parse-rules "p:only-child { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes solo :attrs :style/color]))
+        "a lone element child matches :only-child"))
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [p1 doc] (dom/create-element doc :p)
+        doc (dom/append-child doc section p1)
+        [p2 doc] (dom/create-element doc :p)
+        doc (dom/append-child doc section p2)
+        rules (css/parse-rules "p:only-child { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes p1 :attrs :style/color]))
+        "two element siblings -- neither is :only-child")
+    (is (nil? (get-in doc [:nodes p2 :attrs :style/color])))))
+
+(deftest text-node-siblings-do-not-shift-first-child-or-nth-child-position
+  ;; Real CSS: text nodes never count toward sibling position. A preceding
+  ;; text-node sibling must not push the first REAL element down to
+  ;; position 2.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [txt doc] (dom/create-text-node doc "   ")
+        doc (dom/append-child doc ul txt)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        rules (css/parse-rules
+               "li:first-child { color: red }
+                li:nth-child(1) { border-width: 1px }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes li1 :attrs :style/color]))
+        "li1 is still element-position 1 despite the preceding text node")
+    (is (= 1 (get-in doc [:nodes li1 :attrs :style/border-width]))
+        ":nth-child(1) agrees -- li1 is position 1")
+    (is (nil? (get-in doc [:nodes li2 :attrs :style/color]))
+        "li2 is position 2 -- not :first-child")
+    (is (nil? (get-in doc [:nodes li2 :attrs :style/border-width]))
+        "li2 is position 2 -- not :nth-child(1)")))
+
+(deftest nth-child-an-b-forms-match-the-correct-full-subset-among-five-real-siblings
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        mk (fn [doc] (dom/create-element doc :li))
+        [li1 doc] (mk doc) doc (dom/append-child doc ul li1)
+        [li2 doc] (mk doc) doc (dom/append-child doc ul li2)
+        [li3 doc] (mk doc) doc (dom/append-child doc ul li3)
+        [li4 doc] (mk doc) doc (dom/append-child doc ul li4)
+        [li5 doc] (mk doc) doc (dom/append-child doc ul li5)
+        lis [li1 li2 li3 li4 li5]
+        rules (css/parse-rules
+               "li:nth-child(2) { color: red }
+                li:nth-child(even) { border-width: 1px }
+                li:nth-child(odd) { border-width: 2px }
+                li:nth-child(2n+1) { padding: 3px }
+                li:nth-child(-n+2) { margin: 4px }")
+        doc (css/apply-cascade doc rules)
+        matching-1-indexed-positions
+        (fn [prop expected-val]
+          (set (keep-indexed (fn [idx id]
+                                (when (= expected-val (get-in doc [:nodes id :attrs prop]))
+                                  (inc idx)))
+                              lis)))]
+    (is (= #{2} (matching-1-indexed-positions :style/color "red"))
+        ":nth-child(2) matches only the 2nd element")
+    (is (= #{2 4} (matching-1-indexed-positions :style/border-width 1))
+        ":nth-child(even) matches exactly the 2nd and 4th elements")
+    (is (= #{1 3 5} (matching-1-indexed-positions :style/border-width 2))
+        ":nth-child(odd) matches exactly the 1st, 3rd, and 5th elements")
+    (is (= #{1 3 5} (matching-1-indexed-positions :style/padding 3))
+        ":nth-child(2n+1) matches the IDENTICAL subset :nth-child(odd) does")
+    (is (= #{1 2} (matching-1-indexed-positions :style/margin 4))
+        ":nth-child(-n+2) matches only the first two elements (n=1 -> 1,
+         n=0 -> 2; n=2 would give position 0, which does not exist)")))
+
+(deftest nth-of-type-and-first-last-of-type-count-only-same-tag-siblings-unlike-nth-child
+  ;; Six siblings alternating <p>/<span>: overall document positions
+  ;; 1..6 are p,span,p,span,p,span -- but each tag's OWN of-type position
+  ;; resets independently: p1/s1/p2/s2/p3/s3 are of-type positions
+  ;; 1,1,2,2,3,3 respectively.
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [p1 doc] (dom/create-element doc :p) doc (dom/append-child doc section p1)
+        [s1 doc] (dom/create-element doc :span) doc (dom/append-child doc section s1)
+        [p2 doc] (dom/create-element doc :p) doc (dom/append-child doc section p2)
+        [s2 doc] (dom/create-element doc :span) doc (dom/append-child doc section s2)
+        [p3 doc] (dom/create-element doc :p) doc (dom/append-child doc section p3)
+        [s3 doc] (dom/create-element doc :span) doc (dom/append-child doc section s3)
+        rules (css/parse-rules
+               "p:first-of-type, span:first-of-type { color: red }
+                p:last-of-type, span:last-of-type { color: blue }
+                p:nth-of-type(2), span:nth-of-type(2) { border-width: 1px }
+                p:nth-child(3), span:nth-child(3) { padding: 2px }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p1 :attrs :style/color])) "p1 is the first <p>")
+    (is (= "red" (get-in doc [:nodes s1 :attrs :style/color]))
+        "s1 is the first <span> -- of-type position resets per tag, so a
+         DIFFERENT element also gets :first-of-type, unlike :first-child
+         (which only ever matches ONE element, the true first child)")
+    (is (nil? (get-in doc [:nodes p2 :attrs :style/color])) "p2 is the 2nd <p>, not first-of-type or last-of-type")
+    (is (nil? (get-in doc [:nodes s2 :attrs :style/color])) "s2 is the 2nd <span>, not first-of-type or last-of-type")
+    (is (= "blue" (get-in doc [:nodes p3 :attrs :style/color])) "p3 is the last <p>")
+    (is (= "blue" (get-in doc [:nodes s3 :attrs :style/color])) "s3 is the last <span>")
+    (is (= 1 (get-in doc [:nodes p2 :attrs :style/border-width]))
+        "p2 is the 2nd <p> -- matched by p:nth-of-type(2)")
+    (is (= 1 (get-in doc [:nodes s2 :attrs :style/border-width]))
+        "s2 is the 2nd <span> -- matched by span:nth-of-type(2)")
+    (is (nil? (get-in doc [:nodes p1 :attrs :style/border-width])))
+    (is (nil? (get-in doc [:nodes s1 :attrs :style/border-width])))
+    ;; :nth-child(3), by contrast, counts ALL element siblings regardless
+    ;; of tag: overall document position 3 (p1=1, s1=2, p2=3, s2=4, p3=5,
+    ;; s3=6) is p2 -- even though p2's OWN of-type position is only 2, NOT
+    ;; 3. :nth-child never resets per-tag the way :nth-of-type does.
+    (is (= 2 (get-in doc [:nodes p2 :attrs :style/padding]))
+        "p2 is overall element-position 3, so p:nth-child(3) matches it
+         despite p2's of-type position being only 2")
+    (is (nil? (get-in doc [:nodes s2 :attrs :style/padding]))
+        "s2 is overall element-position 4, not 3 -- span:nth-child(3) must
+         not match it, even though s2's of-type position (2) happens to
+         equal p2's")))
+
+(deftest parses-nth-child-and-nth-of-type-arguments-into-selector-nth-args
+  (let [nth-child-sel (css/parse-simple-selector "li:nth-child(2n+1)")
+        nth-of-type-sel (css/parse-simple-selector "p:nth-of-type(even)")
+        first-child-sel (css/parse-simple-selector "li:first-child")]
+    (is (= [:nth-child] (:selector/pseudos nth-child-sel)))
+    (is (= {:nth-child "2n+1"} (:selector/nth-args nth-child-sel))
+        "the raw An+B argument text is captured separately from the bare
+         pseudo-class name (which is captured the same way :hover/etc.
+         already were), for matches-pseudo? to parse+evaluate later")
+    (is (= {:nth-of-type "even"} (:selector/nth-args nth-of-type-sel)))
+    (is (= [:first-child] (:selector/pseudos first-child-sel)))
+    (is (empty? (:selector/nth-args first-child-sel))
+        "an argument-less structural pseudo-class has no :selector/nth-args
+         entry at all")))
