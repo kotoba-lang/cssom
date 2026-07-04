@@ -146,15 +146,77 @@
 (deftest unsupported-content-forms-are-dropped-rather-than-stored-raw
   (let [[span doc] (dom/create-element dom/empty-document :span)
         doc (dom/set-root doc span)
-        rules (css/parse-rules "span::before { content: attr(data-x); color: blue }")
+        rules (css/parse-rules "span::before { content: counter(item); color: blue }")
         style (css/pseudo-element-style-for doc rules (dom/node doc span) :before)]
     (is (not (contains? style :content))
-        "attr()/counter()/url() and other unsupported content forms are out
+        "counter()/url()/none and other unsupported content forms are out
          of scope -- dropped rather than crashing or being stored as an
          unusable raw string")
     (is (= "blue" (:color style))
         "other declared properties on the same pseudo-element rule are
          unaffected by an unsupported content value")))
+
+;; ---- ::before/::after generated `content: attr(name)` ----
+;;
+;; attr() is the single most common real-world non-string-literal `content`
+;; value (e.g. the `[title]::after { content: \" (\" attr(title) \")\"; }`
+;; tooltip idiom, or numbering/labeling off a data attribute) -- unlike a
+;; quoted literal, its actual text depends on the SPECIFIC element the
+;; declaration ends up applied to, so these tests exercise it via a real
+;; `node` with real attrs, not just the parser in isolation.
+
+(deftest before-content-attr-resolves-to-the-elements-own-attribute-value
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        doc (dom/set-attribute doc span :data-foo "bar")
+        rules (css/parse-rules "span::before { content: attr(data-foo); color: red }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc span) :before)]
+    (is (= "bar" (:content style))
+        "content: attr(data-foo) resolves to the real, current value of the
+         element's own data-foo HTML attribute")
+    (is (= "red" (:color style))
+        "other declared properties on the same rule are unaffected")))
+
+(deftest before-content-attr-missing-attribute-resolves-to-empty-string-not-absent
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: attr(data-missing); }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc span) :before)]
+    (is (contains? style :content)
+        "a missing attribute is real CSS's attr() 'empty string' case, not
+         the same as content being absent altogether -- still a real
+         generated-content box, just with empty text")
+    (is (= "" (:content style)))))
+
+(deftest before-content-attr-honors-specificity-like-any-other-content-value
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        doc (dom/set-attribute doc p :id "lead")
+        doc (dom/set-attribute doc p :data-a "A")
+        doc (dom/set-attribute doc p :data-b "B")
+        rules (css/parse-rules
+               "p::before { content: attr(data-a); color: red }
+                #lead::before { content: attr(data-b); color: blue }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc p) :before)]
+    (is (= "B" (:content style))
+        "the higher-specificity #lead::before rule's attr() reference wins
+         the cascade -- attr() reference markers flow through the exact
+         same cascade-priority sort as any other content value, resolved
+         only after the winner is picked")
+    (is (= "blue" (:color style)))))
+
+(deftest before-content-composes-string-literal-and-attr-reference
+  ;; Stretch goal: mixing a quoted literal and attr() in one declaration --
+  ;; a real, common pattern (e.g. `content: \"Price: \" attr(data-price);`).
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        doc (dom/set-attribute doc span :data-price "10")
+        rules (css/parse-rules "span::before { content: \"Price: \" attr(data-price); }")
+        style (css/pseudo-element-style-for doc rules (dom/node doc span) :before)]
+    (is (= "Price: 10" (:content style))
+        "a string literal and an attr() reference in the same declaration
+         concatenate in source order, the attr() term resolved against the
+         real element")))
 
 (deftest pseudo-element-style-for-returns-empty-map-when-no-rule-targets-it
   (let [[p doc] (dom/create-element dom/empty-document :p)

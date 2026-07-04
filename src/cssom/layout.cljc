@@ -894,11 +894,16 @@
 (defn- generated-content-node
   "Synthesizes a layout-only child node representing `node`'s `pseudo-key`
    (:before/:after) generated content, if cssom.core's cascade resolved a
-   usable `content` value for it (a quoted string literal, including the
-   empty string -- see cssom.core/parse-content-literal; attr()/counter()/
-   url()/none/absent all leave no :content key). Returns nil when there's
-   nothing to generate, so a node with no matching ::before/::after rule
-   lays out exactly as it did before this feature existed."
+   usable `content` value for it -- a quoted string literal, a resolved
+   `attr(name)` reference (already substituted with the real element's own
+   attribute value, `\"\"` if absent), or a mix of both, all arriving here
+   as a plain string either way (see cssom.core/parse-content-value and
+   resolve-content-value; this file never distinguishes where the string
+   came from, exactly like real CSS's own generated-content box doesn't
+   care whether its text came from a literal or attr()). `counter(...)`/
+   `url(...)`/`none`/absent all leave no :content key. Returns nil when
+   there's nothing to generate, so a node with no matching ::before/::after
+   rule lays out exactly as it did before this feature existed."
   [node pseudo-key]
   (let [style (pseudo-style node pseudo-key)]
     (when-let [content (:content style)]
