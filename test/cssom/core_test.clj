@@ -1192,6 +1192,125 @@
         "an argument-less structural pseudo-class has no :selector/nth-args
          entry at all")))
 
+;; ---- :root / :empty pseudo-classes ----
+;;
+;; Before this feature existed, both matched nothing at all, for any
+;; element whatsoever -- their bare pseudo-class names were already
+;; captured into :selector/pseudos just fine (pseudo-class-pattern doesn't
+;; care what follows the name), but matches-pseudo? had no case for either
+;; and fell through to its unrecognized-pseudo-class default of `false`.
+;; These tests exercise the real fix through the full `parse-rules` ->
+;; `apply-cascade` pipeline, the same discipline the rest of this file uses.
+
+(deftest root-matches-only-the-documents-actual-root-element-and-empty-matches-a-genuinely-childless-element
+  ;; The exact repro that exposed the gap in the first place: an <html>
+  ;; root with two <div> children, one genuinely empty, one holding a real
+  ;; text node. `padding` is used as a second, :root-only property (nothing
+  ;; else in this rule set ever sets it) so ":root doesn't match the divs"
+  ;; can be checked unambiguously, independent of div:empty's own (higher-
+  ;; specificity) `color` declaration on empty-div.
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        [empty-div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root empty-div)
+        [full-div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root full-div)
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc full-div t)
+        rules (css/parse-rules
+               "* { outline: 1px }
+                :root { color: purple; padding: 9px }
+                div:empty { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 1 (get-in doc [:nodes root :attrs :style/outline]))
+        "sanity check: `*` applies to the root too -- confirms the cascade
+         wiring itself, independent of :root/:empty")
+    (is (= 1 (get-in doc [:nodes empty-div :attrs :style/outline])))
+    (is (= 1 (get-in doc [:nodes full-div :attrs :style/outline])))
+    (is (= "purple" (get-in doc [:nodes root :attrs :style/color]))
+        ":root matches the document's actual root element")
+    (is (= 9 (get-in doc [:nodes root :attrs :style/padding]))
+        ":root's OTHER declaration also lands on the root")
+    (is (nil? (get-in doc [:nodes empty-div :attrs :style/padding]))
+        ":root must NOT match this non-root element -- no other rule here
+         ever sets `padding`, so a non-nil value could only mean :root
+         wrongly matched it")
+    (is (nil? (get-in doc [:nodes full-div :attrs :style/padding]))
+        ":root must not match this non-root element either")
+    (is (= "red" (get-in doc [:nodes empty-div :attrs :style/color]))
+        "a genuinely childless <div></div> matches :empty")
+    (is (nil? (get-in doc [:nodes full-div :attrs :style/color]))
+        "a <div>hi</div> with a real text child does NOT match :empty")))
+
+(deftest root-pseudo-class-does-not-match-when-document-is-absent
+  ;; The document-less 2-arity `matches?`/`matches-simple?` form never has
+  ;; access to a `:root` key to compare against -- same documented
+  ;; restriction `:focus` already has.
+  (let [[div _doc] (dom/create-element dom/empty-document :div)
+        selector (-> (css/parse-selector ":root") :selector/parts first)]
+    (is (false? (css/matches? {:node/id div :node/type :element :tag :div} selector))
+        ":root can never match via the document-less arity")))
+
+(deftest empty-pseudo-class-does-not-match-a-whitespace-only-text-child
+  ;; The one easy-to-get-wrong real-CSS detail: a text node made of nothing
+  ;; but whitespace still has non-zero length, so it counts as content --
+  ;; :empty does NOT match an element containing only whitespace text, even
+  ;; though visually it looks the same as a genuinely empty element.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        [ws doc] (dom/create-text-node doc "   ")
+        doc (dom/append-child doc div ws)
+        rules (css/parse-rules "div:empty { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes div :attrs :style/color]))
+        "a whitespace-only text child disqualifies :empty, matching real
+         CSS -- <div> </div> is NOT :empty")))
+
+(deftest empty-pseudo-class-does-not-match-an-element-with-a-real-element-child
+  ;; A nested element child disqualifies :empty on the OUTER element,
+  ;; regardless of whether that inner child is itself empty.
+  (let [[outer doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc outer)
+        [inner doc] (dom/create-element doc :span)
+        doc (dom/append-child doc outer inner)
+        rules (css/parse-rules "div:empty { color: red } span:empty { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes outer :attrs :style/color]))
+        "the outer div has a real element child -- not :empty")
+    (is (= "blue" (get-in doc [:nodes inner :attrs :style/color]))
+        "the inner span itself has no children at all -- IS :empty")))
+
+(deftest empty-and-root-compose-correctly-with-other-simple-selector-parts
+  ;; :empty/:root aren't only meaningful bare -- they must keep working
+  ;; combined with a tag (the overwhelmingly common real-world usage,
+  ;; `html:root { ... }` / `div:empty { ... }`) and must still respect the
+  ;; OTHER part of the compound selector (a tag mismatch must still block
+  ;; the match even when the pseudo-class alone would otherwise match).
+  ;; `span:root` and `html:root` have IDENTICAL specificity and `span:root`
+  ;; is declared LATER, so if `span:root` wrongly matched the (tag `html`)
+  ;; root element too, its "hotpink" would win the tie over "purple" by
+  ;; source order -- the root staying "purple" is proof the tag mismatch
+  ;; correctly blocked it, not just that html:root happened to match.
+  (let [[root doc] (dom/create-element dom/empty-document :html)
+        doc (dom/set-root doc root)
+        [empty-p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc root empty-p)
+        rules (css/parse-rules
+               "html:root { color: purple }
+                span:root { color: hotpink }
+                p:empty { color: red }
+                span:empty { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "purple" (get-in doc [:nodes root :attrs :style/color]))
+        "html:root matches, and the later same-specificity span:root does
+         NOT wrongly also match the root element")
+    (is (= "red" (get-in doc [:nodes empty-p :attrs :style/color]))
+        "p:empty matches -- a genuinely childless <p>")
+    (is (= [0 1 1] (css/specificity (-> rules first :rule/selectors first)))
+        "html:root -- the tag `html` contributes 1 to the 3rd column, and
+         :root contributes ordinary pseudo-class specificity (1 to the 2nd
+         column), same as :hover/:disabled/:first-child/etc.")))
+
 ;; ---- calc() -- constant, percentage-free arithmetic ----
 ;;
 ;; parse-style-value is private, so every case below goes through the real
