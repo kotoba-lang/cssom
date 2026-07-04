@@ -317,6 +317,74 @@
     (is (= {:x 130 :y 0 :w 130 :h 10} (select-keys b [:x :y :w :h])))
     (is (= {:x 260 :y 0 :w 130 :h 10} (select-keys c [:x :y :w :h])))))
 
+;; ---- grid-template-columns: calc() (constant, percentage-free subset) ----
+;;
+;; cssom.core's parse-style-value never touches a multi-token track list
+;; like "calc(100px + 20px) 1fr" at all (it only ever coerces a WHOLE
+;; declaration value -- see parse-track-list's docstring), so a calc()
+;; track needs this file's OWN local calc() resolver (resolve-constant-calc,
+;; a small mirror of cssom.core's own same-scoped subset) -- these tests use
+;; the grid-tree helper (bypasses cssom.core's cascade, same convention
+;; every other grid-template-columns test in this file already uses) since
+;; the point under test is cssom.layout's own track-token parsing, not the
+;; cascade.
+
+(deftest grid-calc-constant-track-resolves-to-its-arithmetic-result
+  ;; calc(100px + 20px) is this engine's bounded, ALWAYS layout-independent
+  ;; calc() subset (constant px/number arithmetic only) -- a single 120px
+  ;; fixed track, then a 1fr track soaking up whatever's left in a 300px
+  ;; container: 300 - 120 = 180.
+  (let [tree (grid-tree {:grid-template-columns "calc(100px + 20px) 1fr" :gap 0 :padding 0 :width 300}
+                         [[nil 20] [nil 20]])
+        ops (layout/draw-ops tree {:width 300})
+        [container a b] (node-ops ops)]
+    (is (= 300 (:w container)))
+    (is (= {:x 0 :y 0 :w 120 :h 20} (select-keys a [:x :y :w :h])))
+    (is (= {:x 120 :y 0 :w 180 :h 20} (select-keys b [:x :y :w :h])))))
+
+(deftest grid-calc-with-a-percentage-degrades-to-a-zero-width-track-not-a-crash
+  ;; calc(50% - 10px) needs this container's own resolved size to mean
+  ;; anything -- real layout, which this file's own track-list parser
+  ;; deliberately does not attempt (see resolve-constant-calc/ns docstring)
+  ;; -- so it degrades to the same 0px fixed-track placeholder any other
+  ;; unparseable track token already falls back to (parse-track-token's
+  ;; :else), never a guessed number.
+  (let [tree (grid-tree {:grid-template-columns "calc(50% - 10px) calc(50% - 10px)" :gap 0 :padding 0 :width 300}
+                         [[nil 20] [nil 20]])
+        ops (layout/draw-ops tree {:width 300})
+        [container a b] (node-ops ops)]
+    (is (= 300 (:w container)))
+    (is (= {:x 0 :w 0} (select-keys a [:x :w])))
+    (is (= {:x 0 :w 0} (select-keys b [:x :w])))))
+
+(deftest grid-malformed-calc-track-does-not-crash-layout
+  ;; calc(100px +) -- a dangling operator with no right-hand operand --
+  ;; degrades to a 0px placeholder track exactly like any other malformed
+  ;; token already does, rather than throwing; the 1fr sibling track still
+  ;; gets the container's full remaining space.
+  (let [tree (grid-tree {:grid-template-columns "calc(100px +) 1fr" :gap 0 :padding 0 :width 200}
+                         [[nil 10] [nil 10]])
+        ops (layout/draw-ops tree {:width 200})
+        [container a b] (node-ops ops)]
+    (is (= 200 (:w container)))
+    (is (= {:x 0 :w 0} (select-keys a [:x :w])))
+    (is (= {:x 0 :w 200} (select-keys b [:x :w])))))
+
+(deftest grid-minmax-accepts-a-constant-calc-min-argument
+  ;; minmax(calc(50px + 30px), 1fr) -- calc() resolving inside a minmax()
+  ;; argument too (parse-length-px), not just a standalone track. Same
+  ;; arithmetic as grid-minmax-reserves-floor-and-grows-into-remaining-space
+  ;; above but with an 80px floor (50 + 30) instead of a plain 100px one:
+  ;; 300 - 50 (fixed sibling) - 80 (floor) = 170 leftover fr-space, all to
+  ;; the single fr-weight track -> final size 80 + 170 = 250.
+  (let [tree (grid-tree {:grid-template-columns "minmax(calc(50px + 30px), 1fr) 50px" :gap 0 :padding 0 :width 300}
+                         [[nil 20] [nil 20]])
+        ops (layout/draw-ops tree {:width 300})
+        [container a b] (node-ops ops)]
+    (is (= 300 (:w container)))
+    (is (= {:x 0 :w 250} (select-keys a [:x :w])))
+    (is (= {:x 250 :w 50} (select-keys b [:x :w])))))
+
 ;; ---- grid-column / grid-row explicit placement ----
 
 (deftest grid-explicit-single-line-column-and-row-place-item-at-exact-track
@@ -929,3 +997,80 @@
     (is (not (some #(contains? #{:head :title :script} (:tag %)) ops))
         "no draw-op of any kind (rect/text/node) traces back to
          head/title/script")))
+
+;; ---- calc() width/padding through the real cascade -> layout pipeline ----
+;;
+;; Unlike the grid-template-columns calc() tests above (which deliberately
+;; bypass cssom.core's cascade the same way every other grid-tree test in
+;; this file does, since the point under test there is cssom.layout's OWN
+;; local calc() resolver), these run the real end-to-end pipeline: CSS text
+;; -> cssom.core/parse-rules + apply-cascade -> kotoba.wasm.dom tree ->
+;; cssom.layout/draw-ops -- the only way to prove a `calc(100px + 20px)`-
+;; shaped `width`/`padding` declaration resolves to the correct real pixel
+;; value in actual draw-ops, not just cssom.core's intermediate
+;; cascade-resolved :style/* map (mirrors the ::before/::after generated-
+;; content tests' own real-pipeline convention above).
+
+(deftest calc-constant-width-and-padding-resolve-to-correct-real-pixels-in-draw-ops
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div child)
+        rules (css/parse-rules ".box { width: calc(100px + 20px); padding: calc(2 * 8px) }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)
+        child-op (some #(and (= :node (:draw/op %)) (= :span (:tag %)) %) ops)]
+    (is (= 120 (:w div-op))
+        "width: calc(100px + 20px) resolves to a real 120px box width in
+         draw-ops, cascade -> layout, end to end")
+    (is (= 16 (:x child-op))
+        "padding: calc(2 * 8px) resolves to a real 16px content inset --
+         the child (no margin of its own) starts 16px in from its
+         padding: calc(2 * 8px) parent's own x origin")))
+
+(deftest calc-with-a-percentage-does-not-resolve-a-width-through-the-real-pipeline
+  ;; calc(100% - 20px) is outside this engine's bounded constant-calc()
+  ;; subset (it needs this div's own resolved size, which only real layout
+  ;; -- not the cascade -- could ever supply) -- parse-style-value leaves
+  ;; the whole declaration as the same raw, unparsed string it always fell
+  ;; through as before calc() support existed: cssom.core NEVER resolves it
+  ;; to a number, which is the actual thing under test here. (cssom.layout's
+  ;; OWN resolve-width then applies its pre-existing, calc()-independent
+  ;; parse-int -- the same permissive leading-digit-run extraction a plain
+  ;; unresolvable `width: 50%` already goes through today, unrelated to
+  ;; this feature -- so the box still doesn't crash, it just isn't the
+  ;; interesting assertion for a calc()-specific test.)
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules ".box { width: calc(100% - 20px) }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
+    (is (= "calc(100% - 20px)" (get-in doc [:nodes div :attrs :style/width]))
+        "stays the raw unparsed string in the cascade-resolved style map --
+         cssom.core never guesses a number for it")
+    (is (number? (:w div-op))
+        "layout never crashes on the unresolved raw string")))
+
+(deftest malformed-calc-width-does-not-crash-the-real-pipeline
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules ".box { width: calc(100px +) }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
+    (is (= "calc(100px +)" (get-in doc [:nodes div :attrs :style/width]))
+        "a dangling operator with no right-hand operand never resolves at
+         the cascade level -- stays the raw unparsed string")
+    (is (number? (:w div-op))
+        "layout never crashes on the unresolved raw string")))

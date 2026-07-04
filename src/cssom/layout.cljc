@@ -7,7 +7,10 @@
    flex-wrap/justify-content/align-items/gap; display:grid with
    grid-template-columns/grid-template-rows (fixed px + fr tracks, plus
    `repeat(<n>, <track>)` and `minmax(<px>, <px-or-1fr>)` composing over
-   them) and THREE composing item-placement mechanisms — per-item
+   them, plus a constant, percentage-free `calc(...)` track --
+   `calc(100px + 20px)`, not `calc(50% - 10px)`, see resolve-constant-calc
+   -- a small local mirror of cssom.core's own same-scoped calc() support)
+   and THREE composing item-placement mechanisms — per-item
    `grid-column`/`grid-row` explicit line-based placement, per-item
    `grid-area: <name>` named-area placement resolved against the
    container's own `grid-template-areas` quoted-string template, and
@@ -349,17 +352,186 @@
   [s]
   (paren-split #(= % \,) s))
 
+;; ---- calc() -- constant, percentage-free arithmetic only ----
+;;
+;; A small, LOCAL mirror of cssom.core's own constant-calc() subset (see
+;; its namespace docstring's `calc(...)` paragraph for the full rationale
+;; and arithmetic-validity rules this honors: `*`/`/` bind tighter than
+;; `+`/`-`, left-to-right same-precedence associativity, `*` needs at least
+;; one plain-number side, `/`'s divisor must be a plain number) --
+;; deliberately NOT a call into cssom.core, for the same reason this file
+;; already owns a separate parse-int/parse-dbl instead of depending on
+;; cssom.core for numeric coercion (see parse-track-list's docstring): a
+;; grid track list is a multi-token string cssom.core's parse-style-value
+;; never touches at all (it only ever coerces a WHOLE declaration value),
+;; so a `calc(...)` token embedded in `grid-template-columns: calc(100px +
+;; 20px) 1fr` arrives here exactly as the author wrote it, needing its own
+;; resolution independent of cssom.core's cascade pass.
+
+(def ^:private calc-pattern
+  "Matches a whole TOKEN that is one `calc(...)` call, case-insensitively --
+   see resolve-constant-calc, called on a single already-split track/length
+   token (split-tracks-toplevel/split-args-toplevel already keep a
+   calc(...) call's own parens from being split apart, the same paren-depth
+   tracking that already protects repeat(...)/minmax(...) calls)."
+  #"(?is)calc\((.*)\)")
+
+(defn- calc-number-at
+  "Attempts to match a numeric literal -- optionally decimal, optionally
+   with an immediately-following `px` unit glued on with no space -- at
+   index `idx` of calc() tokenizer input `s`. Returns `[token next-idx]`,
+   or nil if `idx` isn't the start of one (a `%`/other unit, or stray
+   text), signalling to tokenize-calc that this token isn't this engine's
+   constant-calc() subset at all."
+  [s idx]
+  (when-let [num-str (re-find #"^[0-9]*\.?[0-9]+" (subs s idx))]
+    (let [after (+ idx (count num-str))
+          px? (and (<= (+ after 2) (count s)) (= "px" (subs s after (+ after 2))))
+          end (if px? (+ after 2) after)]
+      [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value (parse-dbl num-str 0.0)}
+       end])))
+
+(defn- tokenize-calc
+  "Tokenizes the inside of a `calc(...)` call into a flat token vector --
+   bare operator/paren tokens plus number-or-px-length operand tokens (see
+   calc-number-at) -- for parse-calc-level, skipping whitespace (ws-char?,
+   the same helper split-tracks-toplevel already uses). Returns nil if any
+   character isn't part of a recognized token (e.g. a `%`/`em`/other unit
+   anywhere inside), the same 'stop, don't guess' contract every other
+   token-matching helper in this file already uses (parse-track-token's
+   :else, parse-minmax-token's fallbacks, ...)."
+  [s]
+  (let [n (count s)]
+    (loop [idx 0 tokens []]
+      (cond
+        (= idx n) tokens
+        (ws-char? (nth s idx)) (recur (inc idx) tokens)
+        :else
+        (case (nth s idx)
+          \+ (recur (inc idx) (conj tokens {:calc/type :plus}))
+          \- (recur (inc idx) (conj tokens {:calc/type :minus}))
+          \* (recur (inc idx) (conj tokens {:calc/type :star}))
+          \/ (recur (inc idx) (conj tokens {:calc/type :slash}))
+          \( (recur (inc idx) (conj tokens {:calc/type :lparen}))
+          \) (recur (inc idx) (conj tokens {:calc/type :rparen}))
+          (if-let [[operand next-idx] (calc-number-at s idx)]
+            (recur next-idx (conj tokens operand))
+            nil))))))
+
+(defn- parse-calc-level
+  "Parses a calc() token vector (tokenize-calc) into an AST node (`:calc/op`
+   one of `:num`/`:neg`/`:add`/`:sub`/`:mul`/`:div`, see eval-calc-node) via
+   PRECEDENCE CLIMBING -- `level` 0 = lowest precedence (`+`/`-`), 1 =
+   `*`/`/`, 2 = unary `+`/`-` and a primary (an operand, or a parenthesized
+   sub-expression restarting at level 0). Returns `[node remaining-tokens]`
+   or nil on any parse failure. A single self-recursive function
+   (recursing into itself at a different `level`) rather than the classic
+   four mutually-recursive expr/term/factor/primary grammar functions --
+   mirrors cssom.core's own parse-calc-level and its docstring for exactly
+   why (this file's own no-declare convention can't satisfy a true
+   mutual-recursion grammar cycle, so the whole grammar folds into one
+   precedence-parameterized function instead)."
+  [tokens level]
+  (if (= level 2)
+    (when (seq tokens)
+      (let [t (first tokens)]
+        (case (:calc/type t)
+          :minus (when-let [[node toks] (parse-calc-level (rest tokens) 2)]
+                   [{:calc/op :neg :calc/arg node} toks])
+          :plus (parse-calc-level (rest tokens) 2)
+          :operand [{:calc/op :num :calc/unit (:calc/unit t) :calc/value (:calc/value t)}
+                    (rest tokens)]
+          :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
+                    (when (and (seq toks) (= :rparen (:calc/type (first toks))))
+                      [node (rest toks)]))
+          nil)))
+    (let [ops (if (= level 0) #{:plus :minus} #{:star :slash})
+          op->ast (fn [op] (case op :plus :add :minus :sub :star :mul :slash :div))]
+      (when-let [[left toks] (parse-calc-level tokens (inc level))]
+        (loop [left left toks toks]
+          (if (and (seq toks) (contains? ops (:calc/type (first toks))))
+            (let [op (:calc/type (first toks))]
+              (if-let [[right toks2] (parse-calc-level (rest toks) (inc level))]
+                (recur {:calc/op (op->ast op) :calc/left left :calc/right right} toks2)
+                nil))
+            [left toks]))))))
+
+(defn- eval-calc-node
+  "Evaluates a parsed calc() AST node (parse-calc-level) into a `[value
+   unit]` pair (`unit` `:number` or `:px`), or nil on an arithmetic-type
+   violation -- mirrors cssom.core's own eval-calc-node: `+`/`-` require
+   both sides the same unit; `*` requires at least one side to be a plain
+   `:number`; `/` requires the right (divisor) side to be a plain, non-zero
+   `:number`."
+  [node]
+  (case (:calc/op node)
+    :num [(:calc/value node) (:calc/unit node)]
+
+    :neg (when-let [[v u] (eval-calc-node (:calc/arg node))]
+           [(- v) u])
+
+    :add (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (= lu ru) [(+ lv rv) lu])))
+
+    :sub (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (= lu ru) [(- lv rv) lu])))
+
+    :mul (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (cond
+               (= lu :number) [(* lv rv) ru]
+               (= ru :number) [(* lv rv) lu]
+               :else nil)))
+
+    :div (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (and (= ru :number) (not (zero? rv)))
+               [(/ lv rv) lu])))
+
+    nil))
+
+(defn- resolve-constant-calc
+  "Resolves a single whole TOKEN (e.g. \"calc(100px + 20px)\", already
+   isolated by split-tracks-toplevel/split-args-toplevel's paren-aware
+   splitting) to a plain px number when it is a whole-value `calc(...)`
+   call whose entire contents are this engine's constant-calc() subset
+   (plain numbers/px lengths, `+`/`-`/`*`/`/`/parens -- no `%`/`em`/other
+   relative unit), or nil otherwise (not a calc() call at all, a
+   percentage/other-unit operand anywhere inside, an arithmetic-type
+   violation, or a malformed expression) -- callers (parse-track-token,
+   parse-length-px) treat nil exactly like any other unsupported token
+   already degrades in this file (a 0px fixed track / an unconstrained
+   1fr minmax() fallback), never guessing a number. An exact-integer
+   result is returned as a plain integer (matching this file's other
+   integer-pixel track sizes); a genuinely fractional result (e.g.
+   `calc(100px / 3)`) is returned as a double rather than losing
+   precision."
+  [tok]
+  (when-let [[_ inner] (re-matches calc-pattern tok)]
+    (when-let [tokens (tokenize-calc inner)]
+      (when-let [[node toks] (parse-calc-level tokens 0)]
+        (when (empty? toks)
+          (when-let [[value _unit] (eval-calc-node node)]
+            (let [truncated (long value)]
+              (if (== value truncated) truncated value))))))))
+
 (defn- parse-length-px
   "Parses a single px length or bare-integer token -- the two plain-length
    forms this file accepts everywhere a track size is expected -- to a
    pixel value, or nil if `tok` is neither. Used for minmax()'s `min`
    argument (always a plain length in this engine's honestly-scoped
-   subset, never `fr`) and for a `max` argument that isn't `Nfr`."
+   subset, never `fr`) and for a `max` argument that isn't `Nfr`. Also
+   accepts a constant-calc() token (resolve-constant-calc) resolving to
+   the same subset a bare `Npx`/integer already does -- e.g. `minmax(calc(
+   100px - 20px), 1fr)` -- falling back to nil (this function's existing
+   contract) for anything outside that subset."
   [tok]
   (cond
     (re-matches #"-?[0-9]*\.?[0-9]+px" tok) (parse-int (subs tok 0 (- (count tok) 2)) 0)
     (re-matches #"-?[0-9]*\.?[0-9]+" tok) (parse-int tok 0)
-    :else nil))
+    :else (resolve-constant-calc tok)))
 
 (declare parse-track-token)
 
@@ -372,30 +544,38 @@
    cssom.core's cascade — mirrors how this file already owns its own
    parse-int/parse-dbl numeric coercion instead of depending on cssom.core
    for it. cssom.core/parse-declarations (parse-style-value) passes any
-   value that isn't a bare integer or a single `Npx` token through
-   untouched as a raw string, so a multi-token track list like
-   \"100px 1fr 2fr\" always arrives here exactly as the CSS author wrote it
-   (verified against cssom.core/parse-style-value, which only special-cases
-   a whole-value match of `-?\\d+` or `-?\\d+px`). A bare integer input
-   (cssom.core coerces a lone single-track `Npx` value, e.g.
-   `grid-template-columns: 200px`, to the plain integer 200) is treated as
-   a single fixed-px track for symmetry with that string case.
+   value that isn't a bare integer, a single `Npx` token, or a whole-value
+   constant-`calc(...)` call through untouched as a raw string, so a
+   multi-token track list like \"100px 1fr 2fr\" -- or one with a `calc(...)`
+   among its tokens, like \"calc(100px + 20px) 1fr\" -- always arrives here
+   exactly as the CSS author wrote it (verified against
+   cssom.core/parse-style-value, which only special-cases a WHOLE-value
+   match, never a multi-token string). A bare NUMBER input (cssom.core
+   coerces a lone single-track `Npx` value, e.g. `grid-template-columns:
+   200px`, to a plain number -- and, since this namespace's own
+   constant-calc() support was added, a lone single-track whole-value
+   `calc(...)`, e.g. `grid-template-columns: calc(200px)`, the same way --
+   see cssom.core's namespace docstring) is treated as a single fixed-px
+   track for symmetry with that string case.
 
-   Supports fixed `Npx` and fractional `Nfr` tracks, plus `repeat(...)` and
-   `minmax(...)` (see parse-track-token for the full per-token grammar and
-   each helper's own docstring for the honestly-scoped subset it supports).
-   Splits on top-level whitespace only (split-tracks-toplevel), so
-   whitespace nested inside a repeat(...) argument list doesn't fracture
-   that call into separate tokens. Any token this file can't make sense of
-   degrades to a 0px fixed track rather than throwing, so an unsupported
-   keyword never crashes layout — see parse-track-token's :else branch.
+   Supports fixed `Npx` and fractional `Nfr` tracks, plus `repeat(...)`,
+   `minmax(...)`, and a constant-`calc(...)` token (see parse-track-token
+   for the full per-token grammar and each helper's own docstring for the
+   honestly-scoped subset it supports -- resolve-constant-calc for exactly
+   which calc() expressions resolve here, mirroring cssom.core's own
+   subset). Splits on top-level whitespace only (split-tracks-toplevel), so
+   whitespace nested inside a repeat(...)/calc(...) argument list doesn't
+   fracture that call into separate tokens. Any token this file can't make
+   sense of degrades to a 0px fixed track rather than throwing, so an
+   unsupported keyword never crashes layout — see parse-track-token's :else
+   branch.
 
    nil/blank input returns [] — callers decide the no-explicit-tracks
    fallback (layout-grid falls back to a single full-width column when
    grid-template-columns is absent)."
   [v]
   (cond
-    (integer? v) [{:type :fixed :size v}]
+    (number? v) [{:type :fixed :size v}]
     (string? v) (vec (mapcat parse-track-token (split-tracks-toplevel (str/trim v))))
     :else []))
 
@@ -477,10 +657,18 @@
    into one or more track specs (a vector, since repeat(...) expands to
    more than one). Supported forms: a bare `Nfr`/`Npx`/plain-integer length
    (as before repeat()/minmax() existed), plus `repeat(count, track)`
-   (parse-repeat-token) and `minmax(min, max)` (parse-minmax-token). Any
-   other token — `auto`, percentages, `repeat(auto-fill, ...)`, anything
-   malformed — degrades to a single 0px fixed track rather than throwing,
-   so an unsupported keyword never crashes layout."
+   (parse-repeat-token) and `minmax(min, max)` (parse-minmax-token), plus a
+   whole-value constant-`calc(...)` token (resolve-constant-calc, e.g.
+   `calc(100px + 20px)` -> a single 120px fixed track) -- but ONLY when
+   every operand inside is this engine's bounded, always layout-independent
+   subset (plain numbers/px lengths, no `%`/`em`/other relative unit). Any
+   other token — `auto`, percentages, `repeat(auto-fill, ...)`, a
+   `calc(...)` mixing in a percentage (e.g. `calc(50% - 10px)`, which needs
+   real layout against this container's own resolved size to mean anything
+   -- deliberately out of scope, see cssom.core's namespace docstring's
+   `calc(...)` paragraph for why) or any other unrecognized/malformed form
+   — degrades to a single 0px fixed track rather than throwing, so an
+   unsupported keyword never crashes layout."
   [tok]
   (cond
     (re-matches #"-?[0-9]*\.?[0-9]+fr" tok)
@@ -497,6 +685,11 @@
 
     (re-matches #"minmax\(.*\)" tok)
     (parse-minmax-token tok)
+
+    (re-matches calc-pattern tok)
+    (if-let [size (resolve-constant-calc tok)]
+      [{:type :fixed :size size}]
+      [{:type :fixed :size 0}])
 
     :else
     [{:type :fixed :size 0}]))
