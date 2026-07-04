@@ -122,6 +122,34 @@
      overwhelming majority of real-world usage: `:not(.hidden)`,
      `:is(h1, h2, h3)`, `:where(.card, .panel)` are all compound-selector-
      only in practice.
+   - Structural pseudo-classes `:first-child`/`:last-child`/`:only-child`
+     and `:nth-child(<An+B>)`, plus their same-tag-only counterparts
+     `:first-of-type`/`:last-of-type`/`:nth-of-type(<An+B>)`. Unlike
+     `:not()`/`:is()`/`:where()` (a NEW parsing category -- a
+     selector-LIST argument needing `functional-pseudo-class-pattern` +
+     `split-selector-list`), these fit the EXISTING plain-pseudo-class path
+     (`pseudo-class-pattern` already captures the bare `:name`, parens and
+     all, exactly as it always has -- see `parse-simple-selector`): only
+     `:nth-child()`/`:nth-of-type()` carry an argument at all, and it is
+     always a short An+B micro-syntax token (a bare integer, `even`/`odd`,
+     or `<n-coefficient>n<+-offset>` like `2n+1`/`-n+3`/`n+2`) that never
+     itself contains parens -- so a small dedicated regex
+     (`nth-pseudo-class-pattern`) captures just that argument string
+     alongside the existing pseudo-name capture, parsed separately by
+     `parse-nth-expression` into an `[A B]` pair. Matching (`nth-matches?`,
+     `matches-pseudo?`) reuses the same sibling-traversal building blocks
+     the `+`/`~` combinators already established (`parent-node-id`,
+     document-order children filtered to `:element`-type only -- text
+     nodes never count toward sibling position, matching real CSS): a
+     node's 1-indexed position among its parent's element children (ALL of
+     them, for the `:nth-child`/`:first-child`/`:last-child`/`:only-child`
+     family) or among only its SAME-TAG-NAME siblings (for the
+     `:nth-of-type`/`:first-of-type`/`:last-of-type` family -- e.g. among
+     alternating `<p>`/`<span>` siblings, `:nth-of-type` position resets
+     per tag while `:nth-child` position does not). `p = A*n + B` for some
+     integer `n >= 0` is the real CSS An+B matching rule (`nth-matches?`);
+     an element with no parent at all (a detached/root node) never matches
+     any of these, same as real CSS.
    - CSS custom properties (`--foo: value`) and `var(--foo[, fallback])`
      resolution, inherited top-down the same way `apply-cascade` walks the
      document from its root.
@@ -456,6 +484,32 @@
    pattern's parens."
   #"(?i):(not|is|where)\(([^()]*)\)")
 
+(def nth-pseudo-class-pattern
+  "Matches a single `:nth-child(...)` / `:nth-of-type(...)` occurrence,
+   capturing its name (group 1) and its raw parenthesized An+B argument
+   text (group 2, e.g. `\"2n+1\"`, `\"even\"`, `\"-n+3\"` -- see
+   `parse-nth-expression` for the micro-syntax this argument is parsed
+   with). Unlike `functional-pseudo-class-pattern` (:not()/:is()/:where()'s
+   own argument, a full comma-separated SELECTOR LIST that needs
+   `split-selector-list`'s paren/bracket-depth-aware splitting), this
+   argument is always a short keyword/integer/An+B token that never itself
+   contains parens, so a plain non-nested `[^()]*` capture is enough -- no
+   companion selector-list-splitting machinery needed.
+
+   The bare pseudo-class NAME (`:nth-child`, alongside the argument-less
+   `:first-child`/`:last-child`/`:only-child`/`:first-of-type`/
+   `:last-of-type` structural pseudo-classes) is already picked up by the
+   existing `pseudo-class-pattern` exactly as it always has been -- that
+   regex's own `:name` match doesn't care what follows, parens included, so
+   `:selector/pseudos` already contained `:nth-child`/`:nth-of-type` before
+   this pattern existed (the actual pre-existing gap was that nothing ever
+   looked at those keywords in `matches-pseudo?`, and the argument text was
+   simply discarded). This pattern exists ONLY to additionally capture that
+   argument text, which `pseudo-class-pattern` alone cannot (its match
+   stops at the pseudo name, never consuming a trailing `(...)`) -- see
+   `parse-simple-selector`'s `:selector/nth-args`."
+  #"(?i):(nth-child|nth-of-type)\(([^()]*)\)")
+
 (defn- append-token
   [tokens token]
   (cond-> tokens
@@ -630,7 +684,22 @@
    occurrence like this is never correctly parsed, though it also never
    crashes). This covers the overwhelming majority of real-world usage:
    `:not(.hidden)`, `:is(h1, h2, h3)`, `:where(.card, .panel)` are all
-   compound-selector-only in practice."
+   compound-selector-only in practice.
+
+   Structural pseudo-classes (`:first-child`/`:last-child`/`:only-child`/
+   `:nth-child()` and their `:first-of-type`/`:last-of-type`/
+   `:nth-of-type()` same-tag counterparts) need none of the above
+   selector-list machinery -- their bare names are already captured into
+   `:selector/pseudos` by the ordinary `pseudo-class-pattern` regex just
+   like `:hover`/`:disabled` always were (parens or not, that regex's match
+   stops at the name either way). Only `:nth-child()`/`:nth-of-type()`
+   carry an argument, and it is always a short An+B micro-syntax token,
+   never a selector -- `nth-pseudo-class-pattern` captures that argument
+   text alongside the pseudo name into `:selector/nth-args` (a
+   `{pseudo-keyword raw-arg-string}` map), left for `matches-pseudo?` to
+   parse (`parse-nth-expression`) and evaluate against the element's actual
+   sibling position at match time (see the namespace docstring's
+   structural-pseudo-classes paragraph)."
   [selector]
   (let [raw (str/trim selector)
         functional-matches (re-seq functional-pseudo-class-pattern raw)
@@ -638,6 +707,10 @@
                       (->> functional-matches
                            (filter (fn [[_ fn-name _]] (= kind (str/lower-case fn-name))))
                            (mapv (fn [[_ _ arg]] (mapv parse-simple-selector (split-selector-list arg))))))
+        nth-args (into {}
+                       (map (fn [[_ pseudo-name arg]]
+                              [(keyword (str/lower-case pseudo-name)) (str/trim arg)]))
+                       (re-seq nth-pseudo-class-pattern raw))
         s (str/replace raw functional-pseudo-class-pattern "")
         selector-without-attrs (str/replace s attribute-selector-pattern "")
         pseudo-element (some-> (re-find pseudo-element-pattern selector-without-attrs)
@@ -660,7 +733,8 @@
      :selector/pseudo-element pseudo-element
      :selector/not (parse-group "not")
      :selector/is (parse-group "is")
-     :selector/where (parse-group "where")}))
+     :selector/where (parse-group "where")
+     :selector/nth-args nth-args}))
 
 (defn parse-selector
   [selector]
@@ -1324,8 +1398,147 @@
        (not (constraint-validation-barred-control? node))
        (not (constraint-invalid? document node))))
 
+;; ---- structural pseudo-classes (:first-child/:last-child/:only-child/
+;;      :nth-child() and their :first-of-type/:last-of-type/:nth-of-type()
+;;      same-tag counterparts) ----
+
+(defn- element-children
+  "All `:element`-type children of `parent-id`, in document order -- text
+   nodes are ignored, matching real CSS sibling-position semantics (the
+   same filtering `preceding-element-siblings`, further down this file,
+   already applies to just the PRECEDING subset for the `+`/`~` sibling
+   combinators -- the structural pseudo-classes below reuse that same
+   traversal approach for the FULL sibling list rather than reinventing
+   it)."
+  [document parent-id]
+  (->> (get-in document [:nodes parent-id :children] [])
+       (filter #(= :element (get-in document [:nodes % :node/type])))))
+
+(defn- structural-siblings
+  "Element-type siblings of `node`, INCLUDING `node` itself, in document
+   order -- `parent-node-id` finds `node`'s parent (the same document-map
+   walk `disabled-by-fieldset?`/`disabled-by-optgroup?` above already use
+   to find an ancestor), then `element-children` lists that parent's
+   element children. When `same-tag?` is true, narrows to only siblings
+   sharing `node`'s own tag name -- real CSS's `:nth-of-type`/
+   `:first-of-type`/`:last-of-type` family counts only same-tag-name
+   siblings, while `:nth-child`/`:first-child`/`:last-child`/`:only-child`
+   count every element sibling regardless of tag (`same-tag?` false).
+   Returns nil when `node` has no parent in `document` at all (a detached
+   or root node) -- real CSS never matches any structural pseudo-class on
+   an element with no parent."
+  [document node same-tag?]
+  (when-let [parent-id (parent-node-id document (:node/id node))]
+    (let [siblings (element-children document parent-id)]
+      (if same-tag?
+        (filter #(= (:tag node) (get-in document [:nodes % :tag])) siblings)
+        siblings))))
+
+(defn- sibling-position
+  "1-indexed position of `node-id` within `siblings` (a seq of node-ids in
+   document order, see `structural-siblings`), or nil if not present."
+  [siblings node-id]
+  (some (fn [[idx id]] (when (= id node-id) (inc idx)))
+        (map-indexed vector siblings)))
+
+(def ^:private nth-an-b-pattern
+  "Matches the general `An+B` form of real CSS's nth-child micro-syntax: an
+   optional signed integer coefficient on `n` (`2n`, `-2n`, a bare `n`
+   implicitly meaning coefficient 1, `-n` implicitly meaning coefficient
+   -1, `+n`), optionally followed by a signed integer offset (`+3`, `-1` --
+   real CSS also tolerates whitespace around that sign, e.g. `2n + 1`).
+   `parse-nth-expression` separately handles the `even`/`odd` keywords and
+   a bare signed integer (`3`, `-2`, meaning A=0) -- neither of which
+   contains a literal `n`, so neither matches this pattern."
+  #"(?i)([+-]?)(\d*)n(?:\s*([+-])\s*(\d+))?")
+
+(defn- parse-nth-int
+  "Parses a `[+-]?\\d+` integer token from An+B micro-syntax parsing (see
+   `parse-nth-expression`) via the existing `parse-int` -- which only
+   accepts a leading `-`, not `+` (real CSS's An+B syntax allows a leading
+   `+` on either A or B, e.g. `+2n-1`) -- by stripping a leading `+` first
+   rather than reinventing integer parsing from scratch."
+  [s]
+  (parse-int (str/replace s #"^\+" "")))
+
+(defn- parse-nth-expression
+  "Parses a `:nth-child()`/`:nth-of-type()` raw argument (see
+   `nth-pseudo-class-pattern`) into an `[A B]` pair per real CSS's An+B
+   micro-syntax (see `nth-matches?` for how A/B are then tested against a
+   1-indexed sibling position):
+   - `even` -> `[2 0]`, `odd` -> `[2 1]` (real CSS keywords).
+   - A bare signed integer with no `n` at all (`3`, `-2`, `0`) -> `[0 B]`
+     (a constant position, no periodic term).
+   - The general `An+B` form (`nth-an-b-pattern`) -- an optionally signed
+     coefficient on `n` (a bare `n`/`-n` implicitly means 1/-1) optionally
+     followed by a signed integer offset.
+   Returns nil for anything unparseable -- `nth-pseudo-matches?` treats
+   that the same as 'never matches', the same conservative default this
+   namespace uses everywhere else for an unparseable value, rather than
+   guessing."
+  [s]
+  (let [s (str/trim (str s))
+        lower (str/lower-case s)]
+    (cond
+      (= lower "even") [2 0]
+      (= lower "odd") [2 1]
+
+      (re-matches #"[+-]?\d+" s)
+      [0 (parse-nth-int s)]
+
+      :else
+      (when-let [[_ a-sign a-digits b-sign b-digits] (re-matches nth-an-b-pattern s)]
+        (let [a (cond
+                  (seq a-digits) (parse-nth-int (str a-sign a-digits))
+                  (= a-sign "-") -1
+                  :else 1)
+              b (if b-digits (parse-nth-int (str b-sign b-digits)) 0)]
+          [a b])))))
+
+(defn- nth-matches?
+  "Whether 1-indexed position `p` satisfies the An+B pattern `[a b]` -- real
+   CSS semantics: there must exist an integer n >= 0 such that
+   `p = A*n + B`. When A is zero this simplifies to 'p equals B exactly'
+   (a plain `:nth-child(3)`-style constant); when A is nonzero, solving for
+   n gives `n = (p - B) / A`, which matches iff that division is EXACT
+   (`mod`/`quot`, not float/ratio division, so this holds identically for
+   negative A) AND its quotient is >= 0 -- a negative n, or an inexact
+   quotient, both mean no natural number n produces this exact p."
+  [p [a b]]
+  (and (pos? p)
+       (if (zero? a)
+         (= p b)
+         (let [diff (- p b)]
+           (and (zero? (mod diff a))
+                (>= (quot diff a) 0))))))
+
+(defn- nth-pseudo-matches?
+  "Whether `node` matches `:nth-child(arg)` (`same-tag?` false) or
+   `:nth-of-type(arg)` (`same-tag?` true) -- resolves `node`'s 1-indexed
+   position among the relevant sibling set (`structural-siblings`/
+   `sibling-position`) and tests it against `arg`'s parsed An+B pattern
+   (`parse-nth-expression`/`nth-matches?`). False for an unparseable `arg`
+   or a `node` with no parent, the same conservative defaults their own
+   docstrings describe."
+  [document node same-tag? arg]
+  (boolean
+   (when-let [an-b (parse-nth-expression arg)]
+     (let [siblings (structural-siblings document node same-tag?)
+           position (sibling-position siblings (:node/id node))]
+       (and position (nth-matches? position an-b))))))
+
 (defn- matches-pseudo?
-  [document node selector-pseudo]
+  "Whether `node` matches bare pseudo-class `selector-pseudo`, given its raw
+   argument text `arg` (nil for every pseudo-class except `:nth-child`/
+   `:nth-of-type`, see `parse-simple-selector`'s `:selector/nth-args`).
+
+   `:first-child`/`:last-child`/`:only-child` and `:first-of-type`/
+   `:last-of-type` need no argument -- they test `node`'s position
+   (`structural-siblings`/`sibling-position`) against a fixed constant
+   (1st, last, or 'only one at all'); `:nth-child`/`:nth-of-type` delegate
+   to `nth-pseudo-matches?`, which additionally parses+evaluates `arg`'s
+   An+B micro-syntax."
+  [document node selector-pseudo arg]
   (case selector-pseudo
     :disabled (disabled-control? document node)
     :enabled (and (form-control? node)
@@ -1351,6 +1564,17 @@
                   (constraint-invalid? document node))
     :valid (constraint-valid? document node)
     :focus (and document (= (:node/id node) (:focus document)))
+    :first-child (= 1 (sibling-position (structural-siblings document node false) (:node/id node)))
+    :last-child (let [siblings (structural-siblings document node false)]
+                  (and (seq siblings)
+                       (= (count siblings) (sibling-position siblings (:node/id node)))))
+    :only-child (= 1 (count (structural-siblings document node false)))
+    :first-of-type (= 1 (sibling-position (structural-siblings document node true) (:node/id node)))
+    :last-of-type (let [siblings (structural-siblings document node true)]
+                    (and (seq siblings)
+                         (= (count siblings) (sibling-position siblings (:node/id node)))))
+    :nth-child (nth-pseudo-matches? document node false arg)
+    :nth-of-type (nth-pseudo-matches? document node true arg)
     false))
 
 (defn- matches-simple?
@@ -1374,7 +1598,17 @@
    Each group's selectors are matched via `matches-simple?` itself,
    recursively -- ordinary self-recursion (`document`/node stay the same,
    only the selector being tested changes to a simpler argument selector),
-   not a forward reference to some other function defined later."
+   not a forward reference to some other function defined later.
+
+   Every :selector/pseudos entry is checked via `matches-pseudo?`, given
+   its matching raw argument text from :selector/nth-args when present
+   (nil for every pseudo-class except `:nth-child`/`:nth-of-type` -- see
+   `parse-simple-selector`). Structural pseudo-classes (`:first-child` and
+   friends) need `document` to look up `node`'s parent/siblings, exactly
+   like `:focus`/`:disabled` already need it for other reasons -- the
+   document-less 2-arity form below passes `document` nil, so those never
+   match there either, the same documented restriction `matches?`'s own
+   document-less arity already has."
   ([node selector]
    (matches-simple? nil node selector))
   ([document node selector]
@@ -1400,7 +1634,9 @@
                                    (str/starts-with? (str actual) (str value "-")))
                            false))))
                 (:selector/attrs selector))
-        (every? #(matches-pseudo? document node %) (:selector/pseudos selector))
+        (every? (fn [pseudo]
+                  (matches-pseudo? document node pseudo (get (:selector/nth-args selector) pseudo)))
+                (:selector/pseudos selector))
         (every? (fn [group] (not-any? #(matches-simple? document node %) group))
                 (:selector/not selector))
         (every? (fn [group] (some #(matches-simple? document node %) group))
