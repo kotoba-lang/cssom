@@ -477,14 +477,74 @@
 (deftest unparseable-content-value-does-not-crash-and-produces-no-box
   (let [[span doc] (dom/create-element dom/empty-document :span)
         doc (dom/set-root doc span)
-        rules (css/parse-rules "span::before { content: attr(data-x) }")
+        rules (css/parse-rules "span::before { content: counter(item) }")
         doc (css/apply-cascade doc rules)
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 200})]
     (is (empty? (filterv #(= :text (:draw/op %)) ops))
-        "attr()/counter()/url() content is out of scope -- must not crash
+        "counter()/url()/none content is out of scope -- must not crash
          layout, and produces no generated-content box")))
+
+;; ---- ::before/::after generated `content: attr(name)` ----
+;;
+;; Same real end-to-end pipeline as the section above (CSS text ->
+;; cssom.core/parse-rules + apply-cascade -> kotoba.wasm.dom tree ->
+;; cssom.layout/draw-ops) -- proves attr() resolves against a REAL element's
+;; REAL attribute and paints through the identical layout-text path a
+;; quoted `content: \"...\"` literal already uses, not a forked one.
+
+(deftest before-content-attr-renders-the-elements-own-attribute-value-as-real-text
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        doc (dom/set-attribute doc p :data-x "hello")
+        [child doc] (dom/create-text-node doc "middle")
+        doc (dom/append-child doc p child)
+        rules (css/parse-rules "p::before { content: attr(data-x); color: red }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 2 (count text-ops))
+        "::before's resolved attr() text + the real child text = 2 :text draw-ops")
+    (is (= ["hello" "middle"] (mapv :text text-ops))
+        "content: attr(data-x) renders the element's own real data-x
+         attribute value as real, painted text -- not the literal
+         'attr(data-x)' source text, and not nothing")
+    (is (= "red" (:color (first text-ops)))
+        "::before still paints with its own declared color")))
+
+(deftest before-content-attr-missing-attribute-still-produces-an-empty-text-draw-op
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        rules (css/parse-rules "span::before { content: attr(data-missing); }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops))
+        "a missing attr() attribute is still a real generated-content box --
+         same as content: \"\" -- not the same as no content at all")
+    (is (= "" (:text (first text-ops))))))
+
+(deftest before-content-composes-string-literal-and-attr-reference-into-real-text
+  ;; Stretch goal, end to end: `content: \"Price: \" attr(data-price);`
+  ;; renders as one concatenated real :text draw-op.
+  (let [[span doc] (dom/create-element dom/empty-document :span)
+        doc (dom/set-root doc span)
+        doc (dom/set-attribute doc span :data-price "10")
+        rules (css/parse-rules "span::before { content: \"Price: \" attr(data-price); }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops)))
+    (is (= "Price: 10" (:text (first text-ops)))
+        "the quoted literal and the resolved attr() value concatenate into
+         one real painted text run")))
 
 (deftest generated-content-wraps-long-text-through-the-same-word-wrap-path
   ;; Proves ::before/::after content flows through the exact same

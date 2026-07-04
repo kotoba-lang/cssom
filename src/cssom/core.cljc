@@ -18,12 +18,21 @@
      queryable via `pseudo-element-style-for` without a full apply-cascade
      round trip. A `content` declaration that is a quoted string literal
      (`content: \"...\";` / `'...'`, including the empty string) is unquoted
-     into a plain string under `:content`; unsupported forms (`attr(...)`,
-     `counter(...)`, `url(...)`, `none`/`normal`, unquoted text) simply leave
-     `:content` unset rather than storing something unusable. `cssom.layout`
-     reads these attributes and paints generated content as real text
-     immediately before/after the element's real children -- see its
-     namespace docstring.
+     into a plain string under `:content`; a bare `attr(name)` reference
+     (`content: attr(data-foo);` -- e.g. the common `[title]::after {
+     content: \" (\" attr(title) \")\"; }` idiom) resolves to the
+     *originating* element's own real HTML attribute value at
+     cascade-resolution time (a missing attribute resolves to `\"\"`,
+     matching real CSS -- not the same as `content` being absent), also
+     ending up as a plain string under `:content`; a mix of quoted-literal
+     and `attr()` terms in one declaration (`content: \"Price: \"
+     attr(data-price);`) is supported too, concatenated in source order.
+     Other unsupported forms (`counter(...)`, `url(...)`, `none`/`normal`,
+     unquoted text, `attr()`'s extended `name type, fallback` syntax) simply
+     leave `:content` unset rather than storing something unusable.
+     `cssom.layout` reads these attributes and paints generated content as
+     real text immediately before/after the element's real children -- see
+     its namespace docstring.
    - `@media (min-width: Npx)` / `(max-width: Npx)` conditional rule blocks
      (optionally combined with `and`), evaluated against a viewport width
      passed to `apply-cascade` via an options map (default
@@ -65,30 +74,132 @@
   #"\"([^\"]*)\"|'([^']*)'")
 
 (defn- parse-content-literal
-  "Parses a CSS `content` declaration's raw value into the literal string it
-   designates, for the narrow, common real-world case of a single quoted
-   string (`content: \"some text\";` / `content: '...';`), including the
-   empty string (`content: \"\";` -- a common icon-only generated-content
-   idiom, still a real declared value, not the same as `content` being
-   absent). Anything else this engine doesn't support (`attr(...)`,
-   `counter(...)`, `url(...)`, `none`, `normal`, unquoted/unmatched text)
-   returns nil rather than guessing -- callers treat nil exactly like
-   `content` being absent: no generated-content box, no crash."
+  "Parses a single CSS `content` TERM into the literal string it designates,
+   for the narrow, common real-world case of a single quoted string
+   (`content: \"some text\";` / `content: '...';`), including the empty
+   string (`content: \"\";` -- a common icon-only generated-content idiom,
+   still a real declared value, not the same as `content` being absent).
+   Returns nil for anything else -- including a bare `attr(...)` reference
+   (see `parse-content-attr-ref`, its sibling parser for that case) and any
+   other unsupported form -- rather than guessing. `parse-content-term`
+   combines this with `parse-content-attr-ref` to parse either kind of term,
+   and `parse-content-value` combines those over one or more terms."
   [v]
   (when-let [[_ double-quoted single-quoted] (re-matches content-literal-pattern (str/trim (str v)))]
     (or double-quoted single-quoted "")))
 
+(def ^:private content-attr-pattern
+  "Matches a single bare `attr(name)` reference -- an unquoted identifier
+   inside `attr(...)`, no surrounding quotes, no fallback/type argument (CSS
+   5's `attr(name type, fallback)` extended syntax is out of scope -- see
+   `parse-content-attr-ref`)."
+  #"attr\(\s*([A-Za-z_][-A-Za-z0-9_]*)\s*\)")
+
+(defn- parse-content-attr-ref
+  "Parses a single CSS `content` TERM into an *attr() reference* marker -- a
+   map, `{:content/attr-name \"data-foo\"}` -- for the narrow, common
+   real-world case of a single bare `attr(name)` call (`content:
+   attr(data-foo);` / `content: attr(title);`): no quotes, no fallback, no
+   type coercion. Unlike a quoted string literal (`parse-content-literal`),
+   this term's actual text isn't known yet -- it depends on whatever
+   specific element the declaration ends up cascade-winning on, not a fixed
+   string the declaration itself carries -- so it stays an unresolved
+   marker all the way through rule parsing and cascade priority resolution,
+   and is only resolved to the real string at the very end of
+   `resolve-style-for`, keyed off that call's own `node` (the *originating*
+   element `attr()` always targets, never any hypothetical pseudo-element
+   node -- see `resolve-content-value`). Returns nil for anything else, same
+   contract as `parse-content-literal`."
+  [v]
+  (when-let [[_ attr-name] (re-matches content-attr-pattern (str/trim (str v)))]
+    {:content/attr-name attr-name}))
+
+(defn- parse-content-term
+  "Parses a single content TERM -- no combination with any other term --
+   into whichever of `parse-content-literal` (a quoted string literal) or
+   `parse-content-attr-ref` (a bare `attr(name)` call) matches, or nil if
+   neither does. Used both for the common single-term case and, by
+   `parse-content-value`, for each term of a multi-term composed value."
+  [v]
+  (let [literal (parse-content-literal v)]
+    (if (some? literal) literal (parse-content-attr-ref v))))
+
+(defn- content-ws-char? [c] (boolean (re-matches #"\s" (str c))))
+
+(defn- split-content-terms
+  "Splits a `content` declaration's raw value into its top-level
+   whitespace-separated terms, without breaking a quoted string literal
+   apart on any whitespace *inside* it (e.g. `\"Price: \" attr(data-price)`
+   splits into exactly two terms, not four) -- tracks a quote-char state
+   while scanning, the same technique `selector-tokens`/
+   `split-selector-list` already use elsewhere in this namespace for the
+   same reason."
+  [v]
+  (let [s (str v)
+        n (count s)]
+    (loop [idx 0 start 0 quote-char nil terms []]
+      (if (= idx n)
+        (let [term (str/trim (subs s start idx))]
+          (if (str/blank? term) terms (conj terms term)))
+        (let [ch (nth s idx)]
+          (cond
+            (and quote-char (= ch quote-char))
+            (recur (inc idx) start nil terms)
+
+            quote-char
+            (recur (inc idx) start quote-char terms)
+
+            (or (= ch \") (= ch \'))
+            (recur (inc idx) start ch terms)
+
+            (content-ws-char? ch)
+            (let [term (str/trim (subs s start idx))]
+              (recur (inc idx) (inc idx) nil (if (str/blank? term) terms (conj terms term))))
+
+            :else
+            (recur (inc idx) start quote-char terms)))))))
+
+(defn- parse-content-value
+  "Parses a CSS `content` declaration's raw value. Supports:
+   1. A single quoted string literal (`parse-content-literal`) -- returns a
+      plain string, exactly as before `attr()` support existed.
+   2. A single bare `attr(name)` call (`parse-content-attr-ref`) -- returns
+      an attr() reference marker (resolved later, per-element -- see
+      `resolve-content-value`), since its text isn't a fixed string the
+      declaration itself carries.
+   3. Two or more whitespace-separated terms, each itself a quoted literal
+      or an `attr()` call (e.g. `\"Price: \" attr(data-price)`, a real,
+      common composition) -- returns a marker map holding the ordered
+      parsed terms under :content/parts, concatenated later the same way
+      (`resolve-content-value`). If ANY term in a multi-term value fails to
+      parse (some other, unsupported form mixed in), the WHOLE declaration
+      is dropped (nil) rather than silently rendering a partial string.
+
+   Anything else this engine doesn't support (`counter(...)`, `url(...)`,
+   `none`/`normal`, unquoted/unmatched text, `attr()`'s extended `name type,
+   fallback` syntax) returns nil rather than guessing -- callers treat nil
+   exactly like `content` being absent: no generated-content box, no
+   crash."
+  [v]
+  (or (parse-content-term v)
+      (let [terms (split-content-terms v)]
+        (when (> (count terms) 1)
+          (let [parsed (mapv parse-content-term terms)]
+            (when (every? some? parsed)
+              {:content/parts parsed}))))))
+
 (defn- parse-property-value
   "Parses a single declaration's raw value string for property `k` (still a
    raw string at this point, not yet keywordized). `content` gets its own
-   quoted-string-literal parsing (see `parse-content-literal`); every other
-   property keeps the existing numeric/px coercion (`parse-style-value`).
-   May return nil (currently only possible for an unparseable `content`
-   value) -- callers drop the declaration entirely in that case rather than
-   storing an unusable value."
+   parsing (see `parse-content-value`: a quoted string literal, a bare
+   `attr(name)` reference, or a mix of both terms); every other property
+   keeps the existing numeric/px coercion (`parse-style-value`). May return
+   nil (currently only possible for an unparseable `content` value) --
+   callers drop the declaration entirely in that case rather than storing
+   an unusable value."
   [k v]
   (if (= "content" (str/lower-case k))
-    (parse-content-literal v)
+    (parse-content-value v)
     (parse-style-value v)))
 
 (defn parse-declarations
@@ -883,6 +994,36 @@
   [selector]
   (:selector/pseudo-element (last (:selector/parts selector))))
 
+(defn- resolve-content-term
+  "Resolves a single already-parsed content TERM (see `parse-content-term`)
+   against `node`'s own real HTML attribute values: an attr() reference
+   marker (`{:content/attr-name \"data-foo\"}`) becomes that attribute's
+   real value, or `\"\"` if `node` doesn't carry it -- real CSS's attr()
+   behavior for an absent attribute (an empty string, not \"no value\"),
+   matching how `content: \"\"` already behaves; a plain string term passes
+   through as itself."
+  [node term]
+  (if (map? term)
+    (str (or (get-in node [:attrs (keyword (:content/attr-name term))]) ""))
+    (str term)))
+
+(defn- resolve-content-value
+  "Resolves a cascade-winning `content` value (see `parse-content-value`)
+   into the plain string `cssom.layout` expects under :content: a
+   :content/parts marker (a mix of literal/attr() terms) resolves each term
+   (`resolve-content-term`) and concatenates them in source order; a lone
+   attr() reference marker resolves the same way; anything else (already a
+   plain string, from a quoted literal, or nil) passes through unchanged."
+  [node value]
+  (cond
+    (and (map? value) (contains? value :content/parts))
+    (str/join "" (map #(resolve-content-term node %) (:content/parts value)))
+
+    (and (map? value) (contains? value :content/attr-name))
+    (resolve-content-term node value)
+
+    :else value))
+
 (defn- resolve-style-for
   "Cascade-resolves the declarations that target `pseudo-element` (nil for
    the real element itself, :before/:after for its generated content) on
@@ -955,7 +1096,28 @@
    today. Wiring real inline `!important` through would mean changing that
    attribute's shape in `htmldom` (and re-checking every other consumer of
    `:style-inline`/`:style`), which is a separate, larger cross-repo change
-   left out of scope here."
+   left out of scope here.
+
+   `content: attr(name)` resolution: a `content` declaration's raw value may
+   parse (see `parse-content-value`) not to a plain string but to an attr()
+   reference marker (or a marker holding a mix of string-literal and attr()
+   terms) -- its actual text isn't known until the winning declaration for
+   *this specific* `node` is resolved, since attr()'s value is that node's
+   own real HTML attribute value, not anything the stylesheet text itself
+   carries. `node` here is always the *originating* real element regardless
+   of whether `pseudo-element` is nil or :before/:after (`computed-style`/
+   `pseudo-element-style-for` always pass the real element in, never a
+   synthetic pseudo-element node -- kotoba.wasm.dom has no such node concept,
+   see the namespace docstring), which is exactly attr()'s real-CSS target:
+   it always reads the attribute off the element the pseudo-element is
+   generated FOR. So once the cascade above has picked this node's winning
+   `content` declaration, `resolve-content-value` resolves any attr()
+   reference(s) in it against `node`'s own :attrs immediately below, before
+   returning -- a missing attribute resolves to `\"\"` (real CSS behavior:
+   attr() on an absent attribute is an empty string, not \"no content\"),
+   matching how `content: \"\"` already behaves. Every other property, and
+   every already-a-plain-string `content` value, passes through this step
+   unaffected."
   [document rules node pseudo-element]
   (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rules
                             selector selectors
@@ -987,11 +1149,13 @@
                                                :layer max-layer-priority
                                                :order idx})
                                             (inline-style node)))]
-    (reduce (fn [m {:keys [property value]}]
-              (assoc m property value))
-            {}
-            (sort-by (juxt :important? :inline? :unlayered? :layer :specificity :order)
-                     (concat declarations inline-declarations)))))
+    (let [m (reduce (fn [m {:keys [property value]}]
+                       (assoc m property value))
+                     {}
+                     (sort-by (juxt :important? :inline? :unlayered? :layer :specificity :order)
+                              (concat declarations inline-declarations)))]
+      (cond-> m
+        (contains? m :content) (update :content #(resolve-content-value node %))))))
 
 (defn computed-style
   "Cascade-resolved style map for `node`. Regular declarations are flat
@@ -1024,10 +1188,14 @@
    perform internally (attaching the result to the real element's own
    computed style under :pseudo/before / :pseudo/after) -- exposed directly
    here so callers can resolve a node's pseudo-element style without a full
-   apply-cascade + DOM-attrs round trip. `content` values are already
-   unquoted plain strings when parseable (see `parse-content-literal`);
-   `attr()`/`counter()`/`url()`/unsupported `content` forms simply have no
-   :content key in the returned map, same as `content` being absent.
+   apply-cascade + DOM-attrs round trip. `content` values are already plain
+   strings by the time they land in the returned map -- a quoted literal
+   (see `parse-content-literal`) already was one, and a `content: attr(name)`
+   reference (see `parse-content-attr-ref`/`resolve-content-value`) has
+   already been resolved against `node`'s own real HTML attribute (`\"\"` if
+   absent) by `resolve-style-for` above; `counter()`/`url()`/other
+   unsupported `content` forms simply have no :content key in the returned
+   map, same as `content` being absent.
 
    Mirrors `computed-style`'s own two arities -- the document-less 3-arity
    form has the same pseudo-class-matching restriction `matches?`'s
