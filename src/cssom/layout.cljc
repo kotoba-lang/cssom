@@ -11,8 +11,15 @@
    stacking; opacity (multiplicatively inherited); background/
    background-color; borders; overflow+scroll-top/scroll-left clipping;
    form-control value/checked/selected-option-label projection; text input
-   caret/selection. Real hosts can still swap this for text shaping/WebGPU
-   buffers etc — the draw-ops data boundary is unchanged.
+   caret/selection; ::before/::after generated `content` (see
+   with-generated-content) — cssom.core's cascade already resolves each
+   element's ::before/::after style onto its :attrs (:pseudo/before /
+   :pseudo/after, e.g. `{:content \"→ \" :color \"red\"}`); this namespace
+   reads that and synthesizes a layout-only child that flows through the
+   exact same text-wrapping/paint path (layout-text) real text already
+   uses, positioned immediately before/after the element's real children.
+   Real hosts can still swap this for text shaping/WebGPU buffers etc — the
+   draw-ops data boundary is unchanged.
 
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
   (:require [clojure.string :as str]))
@@ -103,6 +110,31 @@
 
                     :else
                     (recur words nil (conj lines cur))))))))))))
+
+(defn- layout-text
+  "Word-wraps and lays out `text` as one or more :text draw-ops -- exactly
+   the algorithm layout-node's real-DOM-text-node branch uses, factored out
+   so generated ::before/::after content (see with-generated-content) can
+   flow through the identical text-measurement/wrapping/paint path instead
+   of a second, forked implementation. `color`/`font-size` are taken as
+   explicit args (rather than read off `inherited` internally) so a
+   pseudo-element's own resolved style can override either one while still
+   falling back to whatever a real text child in the same spot would use."
+  [theme x y avail-width opacity color font-size text]
+  (let [line-height (:line-height theme)
+        padding (:padding theme)
+        char-w (long (* 0.6 font-size))
+        content-w (max 0 (- avail-width (* 2 padding)))
+        lines (text-lines char-w content-w text)
+        max-line-w (apply max 0 (map #(* (count %) char-w) lines))
+        w (min avail-width (+ max-line-w (* 2 padding)))
+        h (+ (* (count lines) line-height) (* 2 padding))]
+    {:box {:x x :y y :w w :h h}
+     :draw (vec (map-indexed
+                 (fn [i line]
+                   {:draw/op :text :x (+ x padding) :y (+ y padding (* i line-height))
+                    :text line :color color :font-size font-size :opacity opacity})
+                 lines))}))
 
 ;; ---- per-node computed style bag ----
 
@@ -345,6 +377,56 @@
           (if (= :fixed (:type t))
             (recur (rest ts) frs (conj out (long (:size t))))
             (recur (rest ts) (rest frs) (conj out (long (or (first frs) 0))))))))))
+
+;; ---- ::before / ::after generated content ----
+;;
+;; cssom.core's apply-cascade already resolves each element's ::before/
+;; ::after cascade into a plain style map (content/color/font-size/...)
+;; under the element's own :attrs, at :pseudo/before / :pseudo/after (see
+;; cssom.core's namespace docstring and computed-style). This file doesn't
+;; need to run any cascade itself -- it just reads those attrs, same as it
+;; already reads every other :style/* attr via `style` above, and
+;; synthesizes a layout-only (never a DOM node) child that flows through
+;; the exact same code paths (layout-text, layout-block/-flex/-grid's
+;; child-stacking) as a real child would.
+
+(defn- pseudo-style
+  [node pseudo-key]
+  (attr node (keyword "pseudo" (name pseudo-key))))
+
+(defn- generated-content-node
+  "Synthesizes a layout-only child node representing `node`'s `pseudo-key`
+   (:before/:after) generated content, if cssom.core's cascade resolved a
+   usable `content` value for it (a quoted string literal, including the
+   empty string -- see cssom.core/parse-content-literal; attr()/counter()/
+   url()/none/absent all leave no :content key). Returns nil when there's
+   nothing to generate, so a node with no matching ::before/::after rule
+   lays out exactly as it did before this feature existed."
+  [node pseudo-key]
+  (let [style (pseudo-style node pseudo-key)]
+    (when-let [content (:content style)]
+      {:generated/pseudo pseudo-key
+       :generated/text (str content)
+       :generated/style style})))
+
+(defn- generated-node?
+  [node]
+  (and (map? node) (boolean (:generated/pseudo node))))
+
+(defn- with-generated-content
+  "Returns `children` with `node`'s ::before/::after generated-content nodes
+   (see generated-content-node) spliced in as the first/last entries
+   respectively -- generated content is always positioned immediately
+   before a node's real children and immediately after them, mirroring how
+   real CSS pseudo-elements are always the first/last box in their
+   originating element's box tree."
+  [node children]
+  (let [before (generated-content-node node :before)
+        after (generated-content-node node :after)
+        children (vec children)
+        children (if before (into [before] children) children)
+        children (if after (conj children after) children)]
+    children))
 
 (declare layout-node)
 
@@ -612,22 +694,14 @@
      (nil? node)
      {:box {:x x :y y :w 0 :h 0} :draw []}
 
+     (generated-node? node)
+     (let [gstyle (:generated/style node)
+           color (or (:color gstyle) (:color inherited))
+           font-size (parse-int (:font-size gstyle) (:font-size inherited))]
+       (layout-text theme x y avail-width opacity color font-size (:generated/text node)))
+
      (text-node? node)
-     (let [{:keys [color font-size]} inherited
-           line-height (:line-height theme)
-           padding (:padding theme)
-           char-w (long (* 0.6 font-size))
-           content-w (max 0 (- avail-width (* 2 padding)))
-           lines (text-lines char-w content-w node)
-           max-line-w (apply max 0 (map #(* (count %) char-w) lines))
-           w (min avail-width (+ max-line-w (* 2 padding)))
-           h (+ (* (count lines) line-height) (* 2 padding))]
-       {:box {:x x :y y :w w :h h}
-        :draw (vec (map-indexed
-                    (fn [i line]
-                      {:draw/op :text :x (+ x padding) :y (+ y padding (* i line-height))
-                       :text line :color color :font-size font-size :opacity opacity})
-                    lines))})
+     (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -640,13 +714,14 @@
                color (or (:color st) (:color inherited))
                font-size (parse-int (:font-size st) (:font-size inherited))
                inherited (assoc inherited :color color :font-size font-size)
-               tag (:tag node)]
+               tag (:tag node)
+               children (with-generated-content node (:children node))]
            (cond
              (contains? #{:input :select :textarea} tag)
              (layout-form-control theme x y avail-width opacity st node)
 
              (= "flex" (:display st))
-             (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node (:children node))]
+             (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node children)]
                {:box {:x x :y y :w box-w :h box-h}
                 :draw (vec (concat
                             (or (border-ops st x y box-w box-h opacity) [])
@@ -659,7 +734,7 @@
                             draws))})
 
              (= "grid" (:display st))
-             (let [{:keys [box-w box-h draws]} (layout-grid theme x y avail-width opacity inherited st node (:children node))]
+             (let [{:keys [box-w box-h draws]} (layout-grid theme x y avail-width opacity inherited st node children)]
                {:box {:x x :y y :w box-w :h box-h}
                 :draw (vec (concat
                             (or (border-ops st x y box-w box-h opacity) [])
@@ -672,7 +747,7 @@
                             draws))})
 
              :else
-             (layout-block theme x y avail-width opacity inherited st node)))))
+             (layout-block theme x y avail-width opacity inherited st (assoc node :children children))))))
 
      :else
      (recur theme x y avail-width opacity inherited (str node)))))
