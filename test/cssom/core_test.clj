@@ -577,3 +577,232 @@
         "within the same layer, higher specificity still breaks ties for
          !important declarations too -- the layer-order reversal only
          affects cross-layer comparisons, not within-layer specificity")))
+
+;; ---- @container (min-width/max-width/width, optionally named) ----
+;;
+;; See cssom.core's own namespace docstring (@container paragraph) and
+;; apply-cascade's docstring for the bounded, two-cascade-pass mechanism
+;; these tests exercise: a container's OWN explicit, literal width (never
+;; auto/percentage/flex-or-grid-computed) is resolved in a first pass, then
+;; @container rules are matched against that in a second pass -- no real
+;; layout, no relayout loop.
+
+(deftest parses-container-blocks-with-and-without-a-name
+  (let [rules (css/parse-rules
+               ".card-title { font-size: 16px }
+                @container (min-width: 400px) { .card-title { font-size: 24px } }
+                @container sidebar (min-width: 300px) { .card-title { font-size: 20px } }")]
+    (is (= 3 (count rules)))
+    (is (nil? (:rule/container (first rules))))
+    (is (nil? (:rule/container-name (first rules))))
+    (is (= "(min-width: 400px)" (:rule/container (second rules))))
+    (is (nil? (:rule/container-name (second rules))))
+    (is (= "(min-width: 300px)" (:rule/container (nth rules 2))))
+    (is (= "sidebar" (:rule/container-name (nth rules 2))))
+    (is (= [0 1 2] (mapv :rule/order rules))
+        "rule order stays stable across plain and @container-wrapped rules")))
+
+(deftest container-condition-matches-supports-min-max-and-exact-width-features
+  (is (true? (css/container-condition-matches? "(min-width: 300px)" 400)))
+  (is (false? (css/container-condition-matches? "(min-width: 300px)" 200)))
+  (is (true? (css/container-condition-matches? "(max-width: 300px)" 200)))
+  (is (false? (css/container-condition-matches? "(max-width: 300px)" 400)))
+  (is (true? (css/container-condition-matches? "(width: 400px)" 400)))
+  (is (false? (css/container-condition-matches? "(width: 400px)" 401)))
+  (is (true? (css/container-condition-matches? "(min-width: 300px) and (max-width: 500px)" 400)))
+  (is (false? (css/container-condition-matches? "(min-width: 300px) and (max-width: 350px)" 400))))
+
+(deftest container-condition-matches-is-false-when-the-known-width-is-nil
+  (is (false? (css/container-condition-matches? "(min-width: 300px)" nil))
+      "an unresolvable container size means the condition honestly does not
+       match -- a deliberate divergence from @media's own 'unrecognized
+       feature still matches' convention, since here the queried VALUE
+       itself (not just the feature keyword) is what's unknown"))
+
+(deftest container-query-applies-when-ancestor-has-an-explicit-width-that-satisfies-it
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :class "card")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".card { container-type: inline-size; width: 400px }
+                .card-title { font-size: 16px }
+                @container (min-width: 300px) { .card-title { font-size: 24px } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 400 (get-in doc [:nodes card :attrs :style/width])))
+    (is (= 24 (get-in doc [:nodes title :attrs :style/font-size]))
+        "the container's explicit 400px width satisfies (min-width: 300px),
+         so the @container-gated rule wins over the unconditional 16px one")))
+
+(deftest container-query-does-not-apply-when-ancestor-width-fails-the-condition
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :class "card")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".card { container-type: inline-size; width: 200px }
+                .card-title { font-size: 16px }
+                @container (min-width: 300px) { .card-title { font-size: 24px } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 16 (get-in doc [:nodes title :attrs :style/font-size]))
+        "the container's explicit 200px width does NOT satisfy
+         (min-width: 300px), so only the unconditional rule applies")))
+
+(deftest container-query-does-not-apply-when-ancestor-width-is-not-resolvable
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :class "card")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".card { container-type: inline-size }
+                .card-title { font-size: 16px }
+                @container (min-width: 300px) { .card-title { font-size: 24px } }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes card :attrs :style/width]))
+        "the container never declared its own width at all")
+    (is (= 16 (get-in doc [:nodes title :attrs :style/font-size]))
+        "with no resolvable container width -- this engine runs no real
+         layout to find one -- the @container rule honestly does NOT apply;
+         it is not guessed at either way")))
+
+(deftest container-query-does-not-apply-when-ancestor-width-is-a-percentage
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :class "card")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".card { container-type: inline-size; width: 50% }
+                .card-title { font-size: 16px }
+                @container (min-width: 300px) { .card-title { font-size: 24px } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "50%" (get-in doc [:nodes card :attrs :style/width]))
+        "a percentage width is outside this engine's numeric-literal
+         subset -- it stays a raw string, never coerced to a number")
+    (is (= 16 (get-in doc [:nodes title :attrs :style/font-size]))
+        "a non-numeric container width is exactly as unresolvable as no
+         width at all")))
+
+(deftest container-known-width-is-clamped-by-the-containers-own-explicit-max-width
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :class "card")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".card { container-type: inline-size; width: 500px; max-width: 250px }
+                .card-title { font-size: 16px }
+                @container (min-width: 300px) { .card-title { font-size: 24px } }
+                @container (max-width: 250px) { .card-title { font-size: 12px } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 12 (get-in doc [:nodes title :attrs :style/font-size]))
+        "the container's own max-width:250px clamps its known width down
+         from 500 to 250 -- mirroring cssom.layout/resolve-width's own
+         clamp -- so (min-width: 300px) does NOT match but
+         (max-width: 250px) does")))
+
+(deftest container-query-with-a-name-only-matches-a-container-declaring-that-name
+  (let [[outer doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc outer)
+        doc (dom/set-attribute doc outer :class "outer")
+        [inner doc] (dom/create-element doc :div)
+        doc (dom/append-child doc outer inner)
+        doc (dom/set-attribute doc inner :class "inner")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc inner title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".outer { container-type: inline-size; container-name: sidebar; width: 400px }
+                .inner { container-type: inline-size; width: 100px }
+                .card-title { font-size: 16px }
+                @container sidebar (min-width: 300px) { .card-title { font-size: 24px } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 24 (get-in doc [:nodes title :attrs :style/font-size]))
+        "the nearer container (.inner, 100px) doesn't carry the queried
+         `sidebar` name, so matching skips past it to the outer container
+         that does (400px, satisfies min-width: 300px)")))
+
+(deftest container-query-with-a-name-does-not-match-when-no-ancestor-declares-that-name
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :class "card")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".card { container-type: inline-size; width: 400px }
+                .card-title { font-size: 16px }
+                @container sidebar (min-width: 300px) { .card-title { font-size: 24px } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 16 (get-in doc [:nodes title :attrs :style/font-size]))
+        "no ancestor declares container-name: sidebar at all, so the named
+         query never finds a matching container and honestly does not
+         apply")))
+
+(deftest computed-style-standalone-cannot-resolve-a-container-query
+  ;; Documented, honest limitation mirroring
+  ;; pseudo-element-style-for-standalone-cannot-resolve-counter-reference
+  ;; above: computed-style called standalone -- no real apply-cascade
+  ;; two-pass tree walk behind it -- has no container-ctx (containers +
+  ;; parent-index) to resolve a nearest matching container against, so an
+  ;; @container-gated declaration is honestly never applied rather than
+  ;; guessed at either way.
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :style/container-type "inline-size")
+        doc (dom/set-attribute doc card :style/width 400)
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        rules (css/parse-rules
+               "div { font-size: 16px }
+                @container (min-width: 300px) { div { font-size: 24px } }")
+        style (css/computed-style doc rules (dom/node doc title))]
+    (is (= 16 (:font-size style))
+        "no container-ctx at all outside apply-cascade's own tree walk, so
+         the @container-gated declaration never applies here, even though
+         the DOM already carries a container-type/width that WOULD satisfy
+         it were this going through apply-cascade")))
+
+(deftest container-composes-with-media-and-layer-nesting
+  ;; Deliberately no unconditional `.card-title { font-size: ... }` baseline
+  ;; here -- one always sitting alongside a *layered* rule would trivially
+  ;; win via the pre-existing, unrelated "unlayered always beats layered of
+  ;; the same importance" cascade-layers rule (see
+  ;; important-still-beats-non-important-across-layers-after-the-reversal-fix
+  ;; above), which would mask whether @media/@container/@layer nesting
+  ;; itself actually composed correctly. So this test checks presence/
+  ;; absence of :style/font-size instead of a fallback value.
+  (let [[card doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc card)
+        doc (dom/set-attribute doc card :class "card")
+        [title doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card title)
+        doc (dom/set-attribute doc title :class "card-title")
+        rules (css/parse-rules
+               ".card { container-type: inline-size; width: 400px }
+                @media (min-width: 320px) {
+                  @container (min-width: 300px) {
+                    @layer boosted {
+                      .card-title { font-size: 28px }
+                    }
+                  }
+                }")]
+    (is (= 1 (count (filter #(= "(min-width: 300px)" (:rule/container %)) rules)))
+        "the nested @container rule parsed and carries its own condition")
+    (let [doc-wide (css/apply-cascade doc rules {:viewport-width 800})
+          doc-narrow (css/apply-cascade doc rules {:viewport-width 200})]
+      (is (= 28 (get-in doc-wide [:nodes title :attrs :style/font-size]))
+          "media (800 >= 320) AND container (400 >= 300) both hold, and the
+           further-nested @layer rule still applies")
+      (is (nil? (get-in doc-narrow [:nodes title :attrs :style/font-size]))
+          "the outer @media (min-width: 320px) fails at a 200px viewport, so
+           the whole nested block -- including its @container rule -- never
+           applies, regardless of the container's own width"))))

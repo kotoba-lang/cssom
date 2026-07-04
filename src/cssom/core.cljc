@@ -63,6 +63,41 @@
      (optionally combined with `and`), evaluated against a viewport width
      passed to `apply-cascade` via an options map (default
      `default-viewport-width`).
+   - `@container [<name>]? (min-width: Npx)` / `(max-width: Npx)` /
+     `(width: Npx)` conditional rule blocks (optionally combined with `and`,
+     optionally named -- `@container sidebar (min-width: 400px)` -- via the
+     `container-name` property; `container-type: inline-size` / `size`
+     marks an element as a query container in the first place -- see
+     `parse-rules`/`split-container-segments` for the at-rule grammar and
+     `container-condition-matches?`/`container-rule-matches?` for matching).
+     Unlike `@media`'s single, globally-known viewport width, a container's
+     size is normally only known once real layout has run -- this engine's
+     cascade/layout pipeline is a strict one-directional pipe (`apply-cascade`
+     finishes completely, writing every element's final `:style/*` attrs,
+     and only then does `cssom.layout` consume them; there is no
+     re-cascade-after-layout step or relayout loop). Rather than adding one,
+     `apply-cascade` supports the one honestly-scoped case that does NOT
+     need real layout at all: a container whose OWN `width` (and, if
+     present, `min-width`/`max-width`) is a literal, already-cascade-resolved
+     NUMBER -- i.e. the author wrote a plain `<n>`/`<n>px` value, not `auto`,
+     a percentage, `fit-content`, `calc(...)`, or anything flex/grid/
+     content-driven -- via one extra, bounded (never iterated/looped)
+     cascade pass that resolves every container's own width BEFORE any
+     `@container` rule is allowed to match anything (see apply-cascade's
+     docstring for exactly how the two passes fit together, and
+     `container-rule-matches?`'s docstring for why an unresolvable
+     container width, or no matching container ancestor at all, makes an
+     `@container` rule honestly NOT apply -- never a guess). Known,
+     documented non-goals: a container whose own size depends on layout
+     (auto/percentage/flex-basis/grid-driven widths), NESTED/chained
+     container queries (a container whose own qualifying width is itself
+     set by an ANCESTOR container's `@container` rule -- this engine only
+     resolves one level, see apply-cascade), the block-size/height axis
+     (`container-type: size` is accepted but this engine has no height
+     query feature to offer regardless), the `container` shorthand property
+     (only the `container-type`/`container-name` longhands are parsed), and
+     `or`/range syntax/`style()`/`scroll-state()` container queries (same
+     narrow feature/combinator subset `@media` already has).
    - CSS custom properties (`--foo: value`) and `var(--foo[, fallback])`
      resolution, inherited top-down the same way `apply-cascade` walks the
      document from its root.
@@ -562,6 +597,59 @@
                                        :segment/condition condition
                                        :segment/text (subs s (inc brace-open) brace-close)}))))))))))))
 
+(defn- split-container-segments
+  "Splits raw CSS text into an ordered sequence of
+   {:segment/type :plain :segment/text \"...\"} and
+   {:segment/type :container :segment/name \"sidebar\" (or nil, unnamed)
+   :segment/condition \"(min-width: 400px)\" :segment/text \"...\"}
+   segments, preserving source order -- mirrors split-media-segments exactly
+   (same brace-depth-aware find-matching-brace), extended to also pull an
+   optional leading container-name token out of the at-rule's own header
+   text (real CSS's `@container [<container-name>]? <container-condition>`
+   grammar -- e.g. `@container sidebar (min-width: 400px)` vs the unnamed
+   `@container (min-width: 400px)`): everything before the header's first
+   top-level `(` is the name (blank collapses to nil, the unnamed-query
+   case), everything from that `(` onward is the condition text (verbatim,
+   handed to container-condition-matches? later, exactly like
+   split-media-segments already hands :segment/condition to
+   media-condition-matches? verbatim).
+
+   A header with no `(` at all (a malformed/unsupported at-rule, e.g. a
+   `style()`/`scroll-state()` container query this engine doesn't parse)
+   still produces a :container segment (name nil, condition = the raw
+   header text) rather than being silently dropped or misfiled as :plain --
+   container-condition-matches? then honestly fails to recognize any
+   feature in that raw text and returns false, the same conservative
+   default this engine already uses everywhere else for an unrecognized
+   form, rather than this segment's rules silently becoming unconditional."
+  [css]
+  (let [s (str (or css ""))
+        n (count s)]
+    (loop [idx 0 segments []]
+      (let [at-idx (str/index-of s "@container" idx)]
+        (if (nil? at-idx)
+          (cond-> segments
+            (< idx n) (conj {:segment/type :plain :segment/text (subs s idx)}))
+          (let [brace-open (str/index-of s "{" at-idx)]
+            (if (nil? brace-open)
+              (conj segments {:segment/type :plain :segment/text (subs s idx)})
+              (let [header (str/trim (subs s (+ at-idx (count "@container")) brace-open))
+                    paren-idx (str/index-of header "(")
+                    container-name (when (and paren-idx (pos? paren-idx))
+                                      (not-empty (str/trim (subs header 0 paren-idx))))
+                    condition (if paren-idx (subs header paren-idx) header)
+                    brace-close (find-matching-brace s brace-open)]
+                (if (nil? brace-close)
+                  (conj segments {:segment/type :plain :segment/text (subs s idx)})
+                  (recur (inc brace-close)
+                         (cond-> segments
+                           (> at-idx idx) (conj {:segment/type :plain
+                                                 :segment/text (subs s idx at-idx)})
+                           true (conj {:segment/type :container
+                                       :segment/name container-name
+                                       :segment/condition condition
+                                       :segment/text (subs s (inc brace-open) brace-close)}))))))))))))
+
 (defn- split-layer-segments
   "Splits raw CSS text into an ordered sequence of
    {:segment/type :plain :segment/text \"...\"} and
@@ -682,13 +770,30 @@
    (real CSS: unlayered author styles beat every layered one). Downstream,
    `resolve-style-for` sorts on :rule/layer-priority, not the raw name.
 
+   Rules nested inside an `@container [<name>]? (<condition>) { ... }` block
+   (see `split-container-segments` for the at-rule grammar) carry that raw
+   condition text under :rule/container and the optional name under
+   :rule/container-name; top-level (non-`@container`) rules have both nil.
+   `apply-cascade` decides which :rule/container conditions currently hold
+   (see its own docstring and `container-rule-matches?` -- unlike
+   :rule/media, this needs a container's own resolved size, not a single
+   global number, so it is NOT decided up front here the way
+   rule-applies-to-viewport? decides :rule/media).
+
+   Segment nesting order is media -> container -> layer -> plain rules, so
+   all three at-rules compose (`@media (...) { @container (...) { @layer x
+   { ... } } }`), mirroring how media -> layer nesting already worked before
+   `@container` support existed.
+
    Known simplifications:
    - Anonymous `@layer { ... }` blocks (no name) are treated as unlayered
      rather than as their own distinct anonymous layer.
    - `@media` nested inside `@layer` loses the outer layer tag on that
      nested block's rules (they still get :rule/media correctly, just fall
      back to :rule/layer nil); `@layer` nested inside `@media` is fully
-     supported."
+     supported. The same applies to `@container` nested inside `@layer`
+     (loses the layer tag; a `@layer` nested inside `@container` is fully
+     supported, same media/layer precedent)."
   [css]
   (let [css (str (or css ""))
         layer-order (layer-priority-order css)
@@ -701,15 +806,22 @@
     (->> (split-media-segments css)
          (mapcat (fn [{:segment/keys [type text condition]}]
                    (let [media (when (= type :media) condition)]
-                     (->> (split-layer-segments text)
-                          (mapcat (fn [layer-segment]
-                                    (let [layer-name (when (= :layer (:segment/type layer-segment))
-                                                        (:segment/name layer-segment))]
-                                      (map #(assoc %
-                                                   :rule/media media
-                                                   :rule/layer layer-name
-                                                   :rule/layer-priority (priority-for layer-name))
-                                           (parse-rules-raw (:segment/text layer-segment))))))))))
+                     (->> (split-container-segments text)
+                          (mapcat (fn [container-segment]
+                                    (let [container? (= :container (:segment/type container-segment))
+                                          container (when container? (:segment/condition container-segment))
+                                          container-name (when container? (:segment/name container-segment))]
+                                      (->> (split-layer-segments (:segment/text container-segment))
+                                           (mapcat (fn [layer-segment]
+                                                     (let [layer-name (when (= :layer (:segment/type layer-segment))
+                                                                         (:segment/name layer-segment))]
+                                                       (map #(assoc %
+                                                                    :rule/media media
+                                                                    :rule/container container
+                                                                    :rule/container-name container-name
+                                                                    :rule/layer layer-name
+                                                                    :rule/layer-priority (priority-for layer-name))
+                                                            (parse-rules-raw (:segment/text layer-segment))))))))))))))
          (map-indexed (fn [idx rule] (assoc rule :rule/order idx)))
          vec)))
 
@@ -757,6 +869,60 @@
   [rule viewport-width]
   (let [media (:rule/media rule)]
     (or (nil? media) (media-condition-matches? media viewport-width))))
+
+(def ^:private container-feature-pattern
+  "Mirrors media-feature-pattern, plus a bare `width` equality feature (real
+   CSS's @container also supports `(width: Npx)`, an exact-match query --
+   less common than min-width/max-width but trivial to support once the
+   parsing machinery for the other two exists, so it is included rather than
+   arbitrarily left out)."
+  #"(?i)\(\s*(min-width|max-width|width)\s*:\s*(\d+)(?:px)?\s*\)")
+
+(defn container-condition-matches?
+  "Evaluates a raw @container condition (as stored in :rule/container, see
+   parse-rules/split-container-segments) against `known-width` -- the
+   nearest matching container's own already-resolved width in px (see
+   container-rule-matches?'s docstring for exactly how/when that is
+   computed: a first, @container-rule-free cascade pass over every
+   container-marked element's own explicit width -- see apply-cascade's
+   docstring), or nil when it isn't honestly resolvable at all.
+
+   Supports `(min-width: Npx)` / `(max-width: Npx)` / `(width: Npx)`,
+   combined with `and` -- deliberately the exact same narrow feature/
+   combinator subset media-condition-matches? already supports, for
+   consistency (no `or`, no range syntax like `(400px <= width <= 800px)`,
+   no style()/scroll-state() container queries).
+
+   Unlike media-condition-matches?'s own 'an unrecognized feature still
+   matches' fallback (safe there because @media's underlying queried value
+   -- the viewport -- is always a known number; only the FEATURE keyword
+   might be unrecognized), this function returns false for ANY unrecognized
+   feature/part, and ALSO false outright when `known-width` itself is nil.
+   That different default is deliberate, not an oversight: @container's
+   problem is categorically different from an unrecognized @media
+   feature -- the queried VALUE itself is structurally unknowable here
+   (this engine does not run real layout to find it, see apply-cascade's
+   docstring), so treating that the same as @media's 'probably fine, don't
+   hide the rule' convention would be exactly the silently-wrong
+   approximation this namespace's content()/counter() docstrings already
+   refuse to make."
+  [condition known-width]
+  (boolean
+   (when (some? known-width)
+     (let [condition (str/replace (str condition) #"(?i)^\s*@container\s*" "")
+           parts (->> (str/split condition #"(?i)\s+and\s+")
+                      (map str/trim)
+                      (remove str/blank?))]
+       (and (seq parts)
+            (every? (fn [part]
+                      (when-let [[_ kind value] (re-matches container-feature-pattern part)]
+                        (let [n (parse-media-width value)]
+                          (case (str/lower-case kind)
+                            "min-width" (>= known-width n)
+                            "max-width" (<= known-width n)
+                            "width" (= known-width n)
+                            false))))
+                    parts))))))
 
 (defn- classes
   [node]
@@ -1121,6 +1287,147 @@
   [selector]
   (:selector/pseudo-element (last (:selector/parts selector))))
 
+;; ---- @container containers / matching ----
+;;
+;; See the namespace docstring's `@container` paragraph and apply-cascade's
+;; own docstring for the two-cascade-pass mechanism this composes into:
+;; build-containers scans a document ALREADY styled by a first,
+;; @container-rule-free cascade pass (so every container-marked element's
+;; OWN width -- if it's a plain, literal number -- is already resolved on
+;; its :style/* attrs, exactly as `cssom.layout` would also read it, without
+;; needing any actual layout pass) into a lookup apply-cascade's real second
+;; pass threads through resolve-style-for as part of `container-ctx`.
+
+(defn- container-type-of
+  [document node-id]
+  (some-> (get-in document [:nodes node-id :attrs :style/container-type]) str str/lower-case))
+
+(defn- container-names-of
+  "An element's own `container-name` declaration, split on whitespace into a
+   set (real CSS allows more than one name, e.g. `container-name: sidebar
+   wide;`, matched by any `@container <name> (...)` referencing either one) --
+   empty when the element has no such declaration. Only the `container-name`
+   longhand is parsed; the `container` shorthand (`container: sidebar /
+   inline-size`) is explicitly out of scope (see the namespace docstring)."
+  [document node-id]
+  (set (remove str/blank?
+               (str/split (str (or (get-in document [:nodes node-id :attrs :style/container-name]) "")) #"\s+"))))
+
+(defn- resolvable-container-width
+  "The 'known container size' (px) a container-marked element's own,
+   already-cascade-resolved style contributes for @container matching, or
+   nil when it isn't honestly knowable without running real layout (see the
+   namespace docstring's @container section). Mirrors the WIDTH half of
+   cssom.layout/resolve-width's own base/min/max-clamp arithmetic -- but
+   ONLY when every one of :width/:min-width/:max-width that IS present
+   already resolved (via this namespace's own parse-style-value, during the
+   first cascade pass) to a plain number, i.e. the CSS author wrote a
+   literal `<n>`/`<n>px` value for it, not `auto`, a percentage,
+   `fit-content`, `calc(...)`, or any other keyword/expression this
+   engine's numeric coercion doesn't collapse to a number. A container with
+   no numeric :width at all -- the common case, since most containers size
+   from their own content/flex/grid context, which this engine cannot know
+   without an actual layout pass it deliberately does not run for this
+   feature (see apply-cascade's docstring) -- honestly returns nil here
+   rather than guessing at whatever avail-width layout might eventually hand
+   it. A present :min-width/:max-width that ISN'T a plain number is simply
+   skipped (not applied as a clamp) rather than erroring, the same
+   'degrade, don't crash' posture the rest of this namespace already takes
+   for unparseable values."
+  [document node-id]
+  (let [attrs (get-in document [:nodes node-id :attrs])
+        width (:style/width attrs)]
+    (when (number? width)
+      (let [min-w (:style/min-width attrs)
+            max-w (:style/max-width attrs)
+            width (if (number? min-w) (max width min-w) width)
+            width (if (number? max-w) (min width max-w) width)]
+        width))))
+
+(defn- build-containers
+  "Scans `document` (the result of apply-cascade's own first,
+   @container-rule-free pass -- see its docstring) for every element whose
+   own cascade-resolved `container-type` is `inline-size` or `size` (this
+   engine's width-only subset never offers a block-size/height axis feature
+   to query in the first place, so treating `size` -- which real CSS also
+   uses to enable block-size querying -- identically to `inline-size` here
+   has no observable difference; anything else, including `normal` -- real
+   CSS's own default, 'not a query container' -- or no container-type
+   declaration at all, is simply not a container), returning a `node-id ->
+   {:names #{...} :known-width (a number or nil)}` map (see
+   resolvable-container-width for exactly when :known-width is nil rather
+   than a number). Threaded into apply-cascade's real second pass as part of
+   its container-ctx (alongside parent-index) so container-rule-matches?
+   can walk from any descendant up to its nearest matching container."
+  [document]
+  (into {}
+        (keep (fn [[node-id node]]
+                (when (and (= :element (:node/type node))
+                           (contains? #{"inline-size" "size"} (container-type-of document node-id)))
+                  [node-id {:names (container-names-of document node-id)
+                            :known-width (resolvable-container-width document node-id)}])))
+        (:nodes document)))
+
+(defn- nearest-container
+  "Walks up from `node-id`'s PARENT (never `node-id` itself -- real CSS
+   never lets an element be its own query container, precisely to avoid the
+   circularity of an element's style depending on a size that depends on
+   that same element's own style; see apply-cascade's docstring) via
+   `parent-index`, returning the first (nearest) `containers` entry -- see
+   build-containers -- whose :names includes `container-name` (or the very
+   first container entry found at all, when `container-name` is nil, i.e.
+   an unnamed @container query just wants 'the nearest container, whatever
+   it's called'). A container ancestor whose OWN name doesn't match is
+   skipped over -- the walk continues further up looking for one that does
+   -- but once a MATCHING container is found (by name, or the nearest one
+   at all for an unnamed query), that is definitively the query container
+   for this rule on this node, whether or not its :known-width turned out
+   to be resolvable (container-rule-matches? is what turns an unresolvable
+   :known-width into an honest non-match; this function's job is purely
+   finding WHICH container, never approximating one)."
+  [containers parent-index node-id container-name]
+  (loop [pid (get parent-index node-id)]
+    (when pid
+      (if-let [container (get containers pid)]
+        (if (or (nil? container-name) (contains? (:names container) container-name))
+          container
+          (recur (get parent-index pid)))
+        (recur (get parent-index pid))))))
+
+(defn- container-rule-matches?
+  "Whether a rule carrying `:rule/container`/`:rule/container-name` (see
+   parse-rules) applies to `node-id`, given `container-ctx` -- nil outside
+   apply-cascade's real second pass (see resolve-style-for's own docstring
+   for exactly which callers pass nil: computed-style/
+   pseudo-element-style-for, called standalone with no real tree walk
+   behind them, and apply-cascade's own FIRST pass, which must not let any
+   @container rule contribute before container widths are even known). A
+   rule with no :rule/container at all (an ordinary, non-@container rule)
+   always passes here -- this predicate only ever filters the @container
+   subset, exactly like rule-applies-to-viewport? only ever filters the
+   @media subset.
+
+   Honestly returns false (the rule does NOT apply), rather than guessing,
+   in every case where the query genuinely cannot be answered: no
+   container-ctx, no matching container ancestor at all (nearest-container
+   returns nil), or a matching container whose own :known-width is nil (an
+   explicit-width-only container -- see resolvable-container-width -- with
+   no resolvable width, e.g. an auto-sized/percentage/flex-or-grid-computed
+   container). See container-condition-matches?'s docstring for why this
+   false-by-default posture is a deliberate divergence from
+   media-condition-matches?'s own 'unrecognized feature still matches'
+   convention, not an inconsistency."
+  [rule node-id container-ctx]
+  (let [condition (:rule/container rule)]
+    (or (nil? condition)
+        (and (some? container-ctx)
+             (some? node-id)
+             (let [{:keys [containers parent-index]} container-ctx
+                   container (nearest-container containers parent-index node-id (:rule/container-name rule))]
+               (and container
+                    (some? (:known-width container))
+                    (container-condition-matches? condition (:known-width container))))))))
+
 (defn- resolve-content-term
   "Resolves a single already-parsed content TERM (see `parse-content-term`):
    an attr() reference marker (`{:content/attr-name \"data-foo\"}`) becomes
@@ -1289,16 +1596,31 @@
    counter() reference unresolved (dropping :content entirely, same as any
    other unsupported form) rather than fabricating a number. This is a real,
    documented limitation of calling `computed-style`/`pseudo-element-style-for`
-   outside `apply-cascade`, not a bug."
+   outside `apply-cascade`, not a bug.
+
+   `@container` matching -- the 6-arity form's `container-ctx` argument:
+   any rule carrying `:rule/container` (see `parse-rules`) additionally
+   needs `container-rule-matches?` to pass, given `node`'s own
+   :node/id and `container-ctx` (nil by default, same treatment as
+   `counters` above and for the same reason -- see
+   `container-rule-matches?`'s own docstring for exactly which callers ever
+   have a real one: only `apply-cascade`'s own second pass, never
+   `computed-style`/`pseudo-element-style-for`, and never apply-cascade's
+   own FIRST pass either, which must not let any @container rule contribute
+   before container widths are even known)."
   ([document rules node pseudo-element]
-   (resolve-style-for document rules node pseudo-element nil))
+   (resolve-style-for document rules node pseudo-element nil nil))
   ([document rules node pseudo-element counters]
-   (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rules
+   (resolve-style-for document rules node pseudo-element counters nil))
+  ([document rules node pseudo-element counters container-ctx]
+   (let [declarations (for [rule rules
+                             :let [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rule]
                              selector selectors
                              :when (= pseudo-element (pseudo-element-of selector))
                              :when (if document
                                      (matches? document node selector)
                                      (matches? node selector))
+                             :when (container-rule-matches? rule (:node/id node) container-ctx)
                              [property value] declarations]
                          (let [{:keys [important?]} (get declaration-meta property)
                                important? (boolean important?)
@@ -1497,14 +1819,19 @@
    declarations are read FROM that very same base-style resolution call, so
    `node-counters` isn't known yet at the point the base style resolves.
    Since real CSS doesn't render a plain element's own `content` anyway,
-   this ordering choice has no real-world-visible consequence."
-  [document rules node inherited-counters]
-  (let [base (resolve-style-for document rules node nil inherited-counters)
+   this ordering choice has no real-world-visible consequence.
+
+   `container-ctx` (see `resolve-style-for`'s own docstring) is threaded
+   through unchanged to all three `resolve-style-for` calls below -- nil
+   during apply-cascade's first pass (and from any standalone caller), the
+   real containers/parent-index map during its second pass."
+  [document rules node inherited-counters container-ctx]
+  (let [base (resolve-style-for document rules node nil inherited-counters container-ctx)
         node-counters (-> inherited-counters
                           (apply-counter-pairs :reset (:counter-reset base))
                           (apply-counter-pairs :increment (:counter-increment base)))
-        before (resolve-style-for document rules node :before node-counters)
-        after (resolve-style-for document rules node :after node-counters)
+        before (resolve-style-for document rules node :before node-counters container-ctx)
+        after (resolve-style-for document rules node :after node-counters container-ctx)
         style (cond-> base
                 (seq before) (assoc :pseudo/before before)
                 (seq after) (assoc :pseudo/after after))]
@@ -1520,10 +1847,13 @@
    properties, unchanged from before counters existed); `node-counters` is
    the counters map children AND subsequent siblings should continue
    accumulating from (`inherited-counters` updated by this element's own
-   `counter-reset`/`counter-increment`, see `style-with-counters`)."
-  [document rules node-id inherited-env inherited-counters]
+   `counter-reset`/`counter-increment`, see `style-with-counters`).
+   `container-ctx` is threaded straight through to `style-with-counters`
+   (nil unless this is apply-cascade's real second pass -- see its
+   docstring)."
+  [document rules node-id inherited-env inherited-counters container-ctx]
   (let [node (get-in document [:nodes node-id])
-        [style node-counters] (style-with-counters document rules node inherited-counters)
+        [style node-counters] (style-with-counters document rules node inherited-counters container-ctx)
         pseudo-keys #{:pseudo/before :pseudo/after}
         regular (into {} (remove (fn [[k _]] (contains? pseudo-keys k))) style)
         pseudo (select-keys style pseudo-keys)
@@ -1542,6 +1872,44 @@
                   (clear-style-attrs document node-id)
                   final-style)]
     [document node-env node-counters]))
+
+(defn- run-cascade-walk
+  "The actual top-down tree walk apply-cascade performs (see its own
+   docstring for the custom-property environment / running-counters
+   threading this does) -- factored out so apply-cascade can run it TWICE
+   when `rules` contains any `@container` rule (see apply-cascade's
+   docstring for why two passes, never more, are enough): once with
+   `container-ctx` nil (no @container rule ever contributes -- see
+   `container-rule-matches?`) purely to discover every container-marked
+   element's own width from its non-@container declarations, and once more
+   with the real `container-ctx` built from that first pass's result, this
+   time letting @container rules compete on equal footing with every other
+   declaration. When `rules` has no @container rule at all, apply-cascade
+   calls this exactly once with container-ctx nil -- byte-for-byte the same
+   single walk this namespace always performed, so stylesheets that never
+   use `@container` see no behavior or performance change."
+  [document rules container-ctx]
+  (letfn [(walk [document node-id inherited-env inherited-counters visited]
+            (let [node (get-in document [:nodes node-id])
+                  [document node-env node-counters]
+                  (if (= :element (:node/type node))
+                    (style-element document rules node-id inherited-env inherited-counters container-ctx)
+                    [document inherited-env inherited-counters])
+                  visited (conj visited node-id)]
+              (reduce (fn [[document visited counters] child-id]
+                        (walk document child-id node-env counters visited))
+                      [document visited node-counters]
+                      (:children node))))]
+    (let [[document visited] (if-let [root (:root document)]
+                                (walk document root {} {} #{})
+                                [document #{}])]
+      (reduce-kv
+       (fn [document node-id node]
+         (if (and (= :element (:node/type node)) (not (contains? visited node-id)))
+           (first (style-element document rules node-id {} {} container-ctx))
+           document))
+       document
+       (:nodes document)))))
 
 (defn apply-cascade
   "Applies the cascade over `document`, writing each element's resolved
@@ -1575,30 +1943,56 @@
 
    `opts` (optional, 3-arity) may include :viewport-width (default
    `default-viewport-width`) used to decide whether `@media (min-width:...)`
-   / `(max-width:...)` rule blocks apply."
+   / `(max-width:...)` rule blocks apply.
+
+   `@container` support (see the namespace docstring's own `@container`
+   paragraph for the feature's scope) is why this function may run
+   `run-cascade-walk` TWICE rather than once -- and why it never needs a
+   third time, or a loop, to do it:
+
+   1. If `rules` contains no `@container` rule at all (`(some :rule/container
+      rules)` is nil), this is exactly the single walk this function always
+      performed -- no new code path, no behavior change, no extra cost.
+
+   2. Otherwise, PASS 1 runs `run-cascade-walk` over only the non-@container
+      rules (`container-ctx` nil, so even if it were somehow passed an
+      @container rule, `container-rule-matches?` would drop it) -- this
+      resolves every element's OWN `width`/`min-width`/`max-width` (among
+      everything else) exactly as real, unconditional, non-@container CSS
+      would set them. `build-containers` then scans that pass's resulting
+      document for every `container-type: inline-size`/`size` element and
+      records its resolved width (`resolvable-container-width`) -- a NUMBER
+      only when the author wrote a literal `<n>`/`<n>px` value, honestly
+      nil otherwise (see that function's docstring): this engine does not
+      run real layout, so any width that depends on layout (auto/
+      percentage/flex/grid-driven sizing) is, and stays, unknown here,
+      never guessed at.
+
+   3. PASS 2 runs `run-cascade-walk` again, this time over the FULL `rules`
+      (including @container ones) and a real `container-ctx` (the
+      containers map from step 2, plus `parent-index` so
+      `container-rule-matches?` can walk from any node up to its nearest
+      matching container) -- letting @container-conditioned declarations
+      compete on specificity/layer/order exactly like any other declaration
+      for every node, now that container widths are known. This pass's
+      result is what `apply-cascade` returns.
+
+   This is deliberately bounded -- one extra full pass, never an iterated
+   fixpoint/relayout loop -- which is exactly why it is scoped the way it
+   is: a container whose own width isn't resolvable from pass 1 (because it
+   depends on layout, or on ANOTHER, ancestor container's own @container
+   rule -- nested/chained container queries are explicitly unsupported, see
+   the namespace docstring) simply makes @container rules inside it not
+   apply, rather than this function looping passes until things stabilize."
   ([document rules]
    (apply-cascade document rules {}))
   ([document rules opts]
    (let [viewport-width (or (:viewport-width opts) default-viewport-width)
          rules (filterv #(rule-applies-to-viewport? % viewport-width) rules)]
-     (letfn [(walk [document node-id inherited-env inherited-counters visited]
-               (let [node (get-in document [:nodes node-id])
-                     [document node-env node-counters]
-                     (if (= :element (:node/type node))
-                       (style-element document rules node-id inherited-env inherited-counters)
-                       [document inherited-env inherited-counters])
-                     visited (conj visited node-id)]
-                 (reduce (fn [[document visited counters] child-id]
-                           (walk document child-id node-env counters visited))
-                         [document visited node-counters]
-                         (:children node))))]
-       (let [[document visited] (if-let [root (:root document)]
-                                   (walk document root {} {} #{})
-                                   [document #{}])]
-         (reduce-kv
-          (fn [document node-id node]
-            (if (and (= :element (:node/type node)) (not (contains? visited node-id)))
-              (first (style-element document rules node-id {} {}))
-              document))
-          document
-          (:nodes document)))))))
+     (if (some :rule/container rules)
+       (let [pass1-rules (filterv #(nil? (:rule/container %)) rules)
+             pass1-document (run-cascade-walk document pass1-rules nil)
+             container-ctx {:containers (build-containers pass1-document)
+                            :parent-index (parent-index pass1-document)}]
+         (run-cascade-walk document rules container-ctx))
+       (run-cascade-walk document rules nil)))))
