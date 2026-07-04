@@ -309,3 +309,72 @@
     (is (= "blue" (get-in doc [:nodes div :attrs :style/color]))
         "within the same layer, the higher-specificity #hero selector still
          wins -- ordinary cascade resolution is unchanged by cascade layers")))
+
+;; ---- `!important` reverses cascade-layer order (CSS Cascading and
+;;      Inheritance Level 5) ----
+
+(deftest important-declarations-reverse-layer-order-earlier-layer-wins
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules
+               "@layer a { p { color: red !important } }
+                @layer b { p { color: blue !important } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p :attrs :style/color]))
+        "b is declared after a, so a plain (non-important) declaration in b
+         would beat a -- but because both declarations are !important, real
+         CSS reverses layer order for importance purposes, so the
+         earlier-declared layer (a) wins instead")))
+
+(deftest later-declared-layer-still-wins-for-non-important-declarations-alongside-the-reversal-fix
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules
+               "@layer a { p { color: red } }
+                @layer b { p { color: blue } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes p :attrs :style/color]))
+        "non-important declarations are unaffected by the !important
+         reversal -- the later-declared layer (b) still wins, exactly as
+         before")))
+
+(deftest unlayered-important-declaration-still-beats-every-layered-important-declaration
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        rules (css/parse-rules
+               "@layer a { #hero { color: red !important } }
+                @layer b { #hero { color: blue !important } }
+                div { color: green !important }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes div :attrs :style/color]))
+        "even though !important reverses layer order among layered
+         declarations, an unlayered !important declaration still wins over
+         every layered !important declaration, no matter the layer or
+         specificity of the layered rules -- unlayered-beats-layered holds
+         for both importance groups")))
+
+(deftest important-still-beats-non-important-across-layers-after-the-reversal-fix
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules
+               "@layer b { p { color: blue } }
+                @layer a { p { color: red !important } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes p :attrs :style/color]))
+        "importance still trumps layer order overall -- a's !important
+         declaration wins even though a is declared (and its layer would
+         normally be considered lower-priority) before b's plain
+         declaration")))
+
+(deftest specificity-still-decides-ties-within-a-single-layer-for-important-declarations
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        rules (css/parse-rules
+               "@layer base { div { color: red !important } #hero { color: blue !important } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes div :attrs :style/color]))
+        "within the same layer, higher specificity still breaks ties for
+         !important declarations too -- the layer-order reversal only
+         affects cross-layer comparisons, not within-layer specificity")))

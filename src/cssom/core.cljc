@@ -33,13 +33,18 @@
      document from its root.
    - `@layer <name> { ... }` cascade layers, plus the bare
      `@layer name1, name2;` ordering statement. For normal (non-`!important`)
-     declarations, a later-declared layer beats an earlier one, and any
-     unlayered declaration beats every layered one regardless of specificity
-     -- layer membership is checked before specificity, not instead of it.
-     See `parse-rules` for exactly how layer name -> priority resolution
-     works, and its docstring for the known simplifications (no `!important`
-     layer-order reversal, anonymous `@layer { ... }` blocks treated as
-     unlayered, `@media` nested inside `@layer` loses its layer tag)."
+     declarations, a later-declared layer beats an earlier one; for
+     `!important` declarations, real CSS *reverses* that order (an
+     earlier-declared layer beats a later one), and this engine implements
+     that reversal too. Either way, any unlayered declaration beats every
+     layered one of the same importance regardless of specificity -- layer
+     membership is checked before specificity, not instead of it. See
+     `parse-rules` for exactly how layer name -> priority resolution works,
+     and its docstring for the remaining known simplifications (anonymous
+     `@layer { ... }` blocks treated as unlayered, `@media` nested inside
+     `@layer` loses its layer tag); see `resolve-style-for` for the
+     `!important` reversal mechanics and a known gap in inline-style
+     `!important` support."
   (:require [clojure.string :as str]
             [kotoba.wasm.dom :as dom]))
 
@@ -440,9 +445,6 @@
    `resolve-style-for` sorts on :rule/layer-priority, not the raw name.
 
    Known simplifications:
-   - No `!important` layer-order reversal: real CSS inverts layer priority
-     for `!important` declarations (earlier layer wins); this engine keeps
-     the same later-wins order for `!important` as for normal declarations.
    - Anonymous `@layer { ... }` blocks (no name) are treated as unlayered
      rather than as their own distinct anonymous layer.
    - `@media` nested inside `@layer` loses the outer layer tag on that
@@ -888,32 +890,90 @@
    when `pseudo-element` is nil, so existing behavior is unchanged.
 
    Cascade layers: each rule-based entry carries its :rule/layer-priority
-   (see `parse-rules`) as :layer, and the sort tuple below checks :layer
-   *before* :specificity -- so layer membership decides first, specificity
-   only breaks ties within the same layer, exactly like real CSS cascade
-   layers. Inline declarations have no layer concept in real CSS and always
-   win over any rule-based declaration of the same importance; that already
-   falls out of :inline? being compared before :layer in the tuple (once
-   :important? ties, a difference in :inline? decides the comparison and
-   :layer is never consulted), so the concrete :layer value given to inline
-   entries is inert for correctness -- it is set to tie with (rather than
-   lose to) the stylesheet's highest resolved layer priority, purely for
-   documentation."
+   (see `parse-rules`) as :layer, and the sort tuple below checks :unlayered?
+   and :layer *before* :specificity -- so layer membership decides first,
+   specificity only breaks ties within the same layer, exactly like real CSS
+   cascade layers.
+
+   `!important` layer-order reversal (CSS Cascading and Inheritance Level 5,
+   the importance/cascade-origin step): for normal (non-`!important`)
+   declarations, a later-declared layer beats an earlier one -- :layer sorts
+   ascending and the last-sorted entry wins, so a higher :rule/layer-priority
+   (later-declared layer) naturally wins. For `!important` declarations, real
+   CSS *reverses* that: an earlier-declared layer beats a later one. Each
+   entry's :layer value is negated when that entry's own :important? is true
+   (see the `if important? (- raw-layer) raw-layer` below) so a lower
+   :rule/layer-priority (earlier-declared layer) sorts *last* -- and wins --
+   within the important group, while the non-important group is untouched.
+   This negation is safe because: (1) it is keyed off each entry's own
+   :important?, and :important? is compared *before* :layer in the tuple, so
+   two entries only ever reach the :layer comparison once they've already
+   tied on :important? -- meaning both sides use the same sign, never mixed;
+   (2) negation is a strictly order-reversing map, so it flips relative order
+   between different layers but leaves within-layer ties (same raw value,
+   same sign) exactly as ties, falling through to :specificity/:order
+   unaffected -- \"specificity/order tie-breaking within a layer\" is
+   unchanged, as required.
+
+   Unlayered-beats-layered is deliberately *not* encoded as a magic \"one
+   past the highest layer index\" sentinel riding on :layer's numeric
+   magnitude (as it effectively was before this negation existed) -- doing
+   that would make the sentinel itself losable to negation (an unlayered
+   entry's sentinel would need its own reversal-proofing to stay above every
+   negated layer index, which the negation above does not attempt). Instead
+   it's a dedicated :unlayered? boolean (true iff the originating rule's
+   :rule/layer name is nil), compared *before* :layer: an unlayered
+   declaration beats every layered one of the same importance regardless of
+   either side's :layer value. Because :unlayered? sits above :layer in the
+   tuple and is unaffected by the negation above, this holds in *both* the
+   important and non-important groups -- matching real CSS, where an
+   unlayered `!important` declaration still beats every layered `!important`
+   declaration.
+
+   Inline declarations have no layer concept in real CSS; per the Level 5
+   spec they are treated like an unlayered declaration for cascade-layer
+   purposes, and (like any unlayered declaration) always win over a layered
+   rule-based declaration of the same importance. Both of those already fall
+   out structurally here without needing any special-casing: :inline? is
+   compared *before* :unlayered?/:layer in the tuple, so once :important?
+   ties, a difference in :inline? decides the comparison and :unlayered?/
+   :layer are never consulted -- the concrete :unlayered?/:layer values given
+   to inline entries are inert for correctness (set to true / tied with the
+   stylesheet's highest resolved layer priority, respectively, purely for
+   documentation, matching the \"treated as unlayered\" framing). This
+   reasoning is unaffected by the :important? negation above, since :inline?
+   sits above :layer in the tuple regardless of :layer's sign.
+
+   Known gap: inline declarations (`inline-style`) carry no real
+   `!important` parsing of their own -- every inline entry here is hardcoded
+   :important? false regardless of what the raw `style=\"...\"` attribute
+   text said (real CSS/HTML allows `style=\"color: red !important\"`).
+   `inline-style` reads an already-parsed `:style-inline` attrs map (property
+   -> value only, no importance) that `kotoba-lang/htmldom`
+   (`htmldom.core/parse-style`, called from `apply-attrs`) populates outside
+   this namespace; that parser doesn't strip or record `!important` at all
+   today. Wiring real inline `!important` through would mean changing that
+   attribute's shape in `htmldom` (and re-checking every other consumer of
+   `:style-inline`/`:style`), which is a separate, larger cross-repo change
+   left out of scope here."
   [document rules node pseudo-element]
-  (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order layer-priority]} rules
+  (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rules
                             selector selectors
                             :when (= pseudo-element (pseudo-element-of selector))
                             :when (if document
                                     (matches? document node selector)
                                     (matches? node selector))
                             [property value] declarations]
-                        (let [{:keys [important?]} (get declaration-meta property)]
+                        (let [{:keys [important?]} (get declaration-meta property)
+                              important? (boolean important?)
+                              raw-layer (or layer-priority 0)]
                           {:property property
                            :value value
-                           :important? (boolean important?)
+                           :important? important?
                            :specificity (specificity selector)
                            :inline? false
-                           :layer (or layer-priority 0)
+                           :unlayered? (nil? layer)
+                           :layer (if important? (- raw-layer) raw-layer)
                            :order order}))
         max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
         inline-declarations (when (nil? pseudo-element)
@@ -923,13 +983,14 @@
                                                :important? false
                                                :specificity [1 0 0]
                                                :inline? true
+                                               :unlayered? true
                                                :layer max-layer-priority
                                                :order idx})
                                             (inline-style node)))]
     (reduce (fn [m {:keys [property value]}]
               (assoc m property value))
             {}
-            (sort-by (juxt :important? :inline? :layer :specificity :order)
+            (sort-by (juxt :important? :inline? :unlayered? :layer :specificity :order)
                      (concat declarations inline-declarations)))))
 
 (defn computed-style
