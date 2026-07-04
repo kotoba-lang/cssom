@@ -7,12 +7,16 @@
    flex-wrap/justify-content/align-items/gap; display:grid with
    grid-template-columns/grid-template-rows (fixed px + fr tracks, plus
    `repeat(<n>, <track>)` and `minmax(<px>, <px-or-1fr>)` composing over
-   them, auto-placement only — see layout-grid for the exact subset and
-   its documented limitations); position:relative/absolute with z-index
+   them) and per-item `grid-column`/`grid-row` explicit placement composing
+   with auto-placement for everything else — see layout-grid for the exact
+   subset and its documented limitations; position:relative/absolute with z-index
    stacking; opacity (multiplicatively inherited); background/
    background-color; borders; overflow+scroll-top/scroll-left clipping;
    form-control value/checked/selected-option-label projection; text input
-   caret/selection; ::before/::after generated `content` (see
+   caret/selection; grid item explicit placement via `grid-column`/
+   `grid-row` composing with auto-placement for everything else (see
+   layout-grid/parse-grid-placement/place-grid-items for the exact subset);
+   ::before/::after generated `content` (see
    with-generated-content) — cssom.core's cascade already resolves each
    element's ::before/::after style onto its :attrs (:pseudo/before /
    :pseudo/after, e.g. `{:content \"→ \" :color \"red\"}`); this namespace
@@ -164,6 +168,8 @@
    :flex-wrap (or (style node :flex-wrap) "nowrap")
    :grid-template-columns (style node :grid-template-columns)
    :grid-template-rows (style node :grid-template-rows)
+   :grid-column (style node :grid-column)
+   :grid-row (style node :grid-row)
    :gap (parse-int (style node :gap) (:gap theme))
    :pointer-events (style node :pointer-events)
    :overflow (attr node :overflow)
@@ -571,6 +577,304 @@
                    (conj out (long (+ (if (= :minmax (:type t)) (:min t) 0) (or (first frs) 0)))))
             (recur (rest ts) frs (conj out (long (fixed-contribution t))))))))))
 
+;; ---- grid item explicit placement (grid-column / grid-row) ----
+;;
+;; Real CSS lets an author place a grid item at a specific track *line*
+;; (`grid-column`/`grid-row`, or their `-start`/`-end` longhands -- only the
+;; shorthand is parsed here) instead of relying purely on auto-placement.
+;; This engine supports the common subset: a bare line number
+;; (`grid-column: 2`), the two-value `<start> / <end>` shorthand
+;; (`grid-column: 1 / 3`), and `<start> / span <n>` (`grid-column: 2 / span
+;; 2`) -- see parse-grid-placement for the exact per-form grammar and
+;; resolve-grid-line for how a negative line number resolves. Explicitly out
+;; of scope: the `-start`/`-end` longhand properties, `grid-template-areas`
+;; name references, dense packing, and implicit track creation for an
+;; out-of-range line (see clamp-col-range for the fallback used instead).
+;; See layout-grid's docstring and place-grid-items below for exactly how
+;; explicitly- and auto-placed items compose.
+
+(defn- rect-cells
+  "Every [row col] cell in the half-open rectangle [row-start row-end) x
+   [col-start col-end) -- the unit place-grid-items' occupancy set (below)
+   tracks cells in."
+  [row-start row-end col-start col-end]
+  (for [r (range row-start row-end) c (range col-start col-end)] [r c]))
+
+(defn- rect-free?
+  [occupied row-start row-end col-start col-end]
+  (not-any? occupied (rect-cells row-start row-end col-start col-end)))
+
+(defn- find-free-row
+  "Smallest row-idx >= 0 at which the single row [row-idx (inc row-idx)) x
+   [col-start col-end) is entirely free in `occupied` -- resolves the row
+   for an item that declares an explicit grid-column but no grid-row (see
+   place-grid-items). Always terminates: a row beyond every row touched so
+   far is trivially free, since rows are not a fixed axis in this engine
+   (unlike columns -- see find-free-col)."
+  [occupied col-start col-end]
+  (loop [row 0]
+    (if (rect-free? occupied row (inc row) col-start col-end)
+      row
+      (recur (inc row)))))
+
+(defn- find-free-col
+  "Smallest col-idx in [0 n-cols) at which [row-start row-end) x [col-idx
+   (inc col-idx)) is entirely free in `occupied` -- resolves the column for
+   an item that declares an explicit grid-row but no grid-column (see
+   place-grid-items). Unlike find-free-row, this search IS bounded (columns
+   are a fixed, finite axis in this engine); if every column is already
+   occupied across the whole row-span, this falls back to column 0
+   (accepting an overlap) rather than searching forever -- an honest
+   edge-case fallback for a rare, self-contradictory declaration set."
+  [occupied row-start row-end n-cols]
+  (or (first (filter #(rect-free? occupied row-start row-end % (inc %)) (range n-cols)))
+      0))
+
+(defn- parse-grid-line-token
+  "Parses a single grid-line token into a signed integer line number, or nil
+   if it isn't a plain integer. cssom.core's parse-style-value already
+   coerces a whole-value bare-integer declaration (e.g. `grid-column: 2`)
+   straight to a Long before this file ever sees it (see node-style) -- this
+   handles that already-coerced-integer case AND the raw-string case (a
+   token split out of a multi-part value like `1 / 3`, which arrives here as
+   a string since the whole declaration wasn't itself a bare integer)."
+  [tok]
+  (cond
+    (integer? tok) tok
+    (and (string? tok) (re-matches #"-?\d+" tok)) (parse-int tok nil)
+    :else nil))
+
+(defn- resolve-grid-line
+  "Resolves a raw 1-based grid LINE number to a positive 1-based line,
+   supporting real CSS's negative 'counts from the end' convention (`-1` is
+   the last line, `-2` the one before it, ...) against `track-count` tracks
+   (-> track-count + 1 lines total, lines being the dividers between/around
+   tracks, not the tracks themselves). Positive lines pass through
+   unchanged. A non-positive/zero result (e.g. -1 against track-count 0)
+   falls back to line 1 rather than producing a zero/negative track index.
+
+   Used only for the START/END values of the two-value and `span` forms in
+   parse-grid-placement (below) -- NOT for a lone single-value declaration,
+   which resolves a negative number differently (as a track index counted
+   from the end, not a line -- see parse-grid-placement's docstring for
+   exactly why those two need different arithmetic)."
+  [line track-count]
+  (let [num-lines (inc (max 0 track-count))
+        resolved (if (pos? line) line (+ num-lines line 1))]
+    (if (pos? resolved) resolved 1)))
+
+(defn- parse-grid-placement
+  "Parses a grid-column/grid-row declaration's already-normalized value (see
+   node-style/style: cssom.core's parse-style-value coerces a whole-value
+   bare integer like `grid-column: 2` to a Long; anything else -- containing
+   a `/` or the `span` keyword -- arrives as the original raw string) into a
+   0-based half-open [start end) track-index range along this axis, or nil
+   when the value is absent or in a form this engine doesn't parse (an
+   unsupported/malformed value degrades to nil, which callers treat exactly
+   like the declaration being absent -- 'auto-place this item on this axis'
+   -- instead of crashing).
+
+   Supported forms:
+     - a single line number N (`grid-column: 2`) -> [N-1, N), exactly the
+       one track starting at that line -- mirrors real CSS's own default of
+       `grid-column-end: auto` (= span 1) when only a start line is given.
+       A NEGATIVE N here (`grid-column: -1`, a deliberately pragmatic
+       stretch goal) is resolved directly as a 0-based TRACK index counted
+       from the end (-1 -> the last track, -2 -> the second-to-last, ...)
+       rather than through resolve-grid-line's line-number arithmetic:
+       resolving it as a line instead (line = num-lines + N + 1, then
+       occupying [line-1, line)) would make a lone `-1` land one track PAST
+       the last real track (real CSS's actual behavior there, which needs
+       an implicit track this engine doesn't create) while `-2` would land
+       ON the last track -- a confusing off-by-one for exactly the idiom
+       this stretch goal exists for ('the last column'). Track-index
+       arithmetic sidesteps that: `-1` always means the last track.
+     - `<start> / <end>` (`grid-column: 1 / 3`) -> [start-1, end-1), every
+       track between the two lines (both resolved via resolve-grid-line, so
+       a negative end here DOES use real line-number semantics -- e.g.
+       `1 / -1` spans every declared track, the common 'span the whole
+       grid' idiom, matching real CSS). An end line at or before start
+       degrades to a 1-track span from start (never an empty/reversed
+       range).
+     - `<start> / span <n>` (`grid-column: 2 / span 2`) -> [start-1,
+       start-1+n), n clamped to >= 1.
+
+   `track-count` is the number of tracks currently known along this axis
+   (n-cols for grid-column, the parsed grid-template-rows track count for
+   grid-row), used only to resolve a negative line/index."
+  [v track-count]
+  (letfn [(single [line]
+            (if (neg? line)
+              (let [idx (max 0 (+ track-count line))]
+                [idx (inc idx)])
+              (let [l (max 1 line)]
+                [(dec l) l])))]
+    (cond
+      (integer? v) (single v)
+
+      (string? v)
+      (let [parts (str/split v #"/")]
+        (cond
+          (= 1 (count parts))
+          (when-let [line (parse-grid-line-token (str/trim (first parts)))]
+            (single line))
+
+          (= 2 (count parts))
+          (let [start-tok (str/trim (first parts))
+                end-tok (str/trim (second parts))]
+            (when-let [start-line-raw (parse-grid-line-token start-tok)]
+              (let [start-line (resolve-grid-line start-line-raw track-count)
+                    span-match (re-matches #"(?i)span\s+([0-9]+)" end-tok)]
+                (cond
+                  span-match
+                  (let [n (max 1 (parse-int (second span-match) 1))]
+                    [(dec start-line) (+ (dec start-line) n)])
+
+                  (parse-grid-line-token end-tok)
+                  (let [end-line (resolve-grid-line (parse-grid-line-token end-tok) track-count)
+                        end-line (if (> end-line start-line) end-line (inc start-line))]
+                    [(dec start-line) (dec end-line)])
+
+                  :else nil))))
+
+          :else nil))
+
+      :else nil)))
+
+(defn- clamp-col-range
+  "Clamps a parsed [start end) column range (see parse-grid-placement) into
+   the fixed [0 n-cols) column-track space this engine always has (n-cols is
+   never 0 -- layout-grid falls back to a single full-width column when
+   grid-template-columns is absent). An out-of-range column line (e.g.
+   `grid-column: 5` with only 3 declared column tracks) is a real, common
+   case that real CSS handles by implicitly creating new tracks -- out of
+   scope here (see layout-grid's docstring) -- so instead this clamps the
+   range to whatever of it fits inside the declared tracks, down to a
+   1-track minimum at the last column, rather than indexing past the
+   col-widths/col-offsets vectors or crashing. Only ever applied to columns
+   -- rows have no fixed track count to clamp against in this engine (an
+   out-of-range row just becomes another auto-sized row, see layout-grid)."
+  [[start end] n-cols]
+  (let [last-idx (dec n-cols)
+        start (-> start (max 0) (min last-idx))
+        end (-> end (max (inc start)) (min n-cols))]
+    [start end]))
+
+(defn- item-grid-placement
+  "The child's own explicit grid-column/grid-row placement request, each
+   parsed to a 0-based [start end) range or nil for an axis it doesn't
+   declare (see parse-grid-placement). A non-element child (e.g. a raw text
+   node, which can't carry a :style/* attr) always gets {:col nil :row nil}
+   -- i.e. treated as fully auto-placed, same as before this feature
+   existed. `theme` is only needed because node-style requires it (neither
+   grid-column nor grid-row depend on any theme value)."
+  [theme child n-cols n-row-tracks]
+  (if (map? child)
+    (let [cst (node-style child theme)]
+      {:col (parse-grid-placement (:grid-column cst) n-cols)
+       :row (parse-grid-placement (:grid-row cst) n-row-tracks)})
+    {:col nil :row nil}))
+
+(defn- place-grid-items
+  "Resolves every in-flow grid child's [row-start row-end) x [col-start
+   col-end) cell range, honoring explicit grid-column/grid-row declarations
+   (parse-grid-placement) and auto-placing everything else in DOM order.
+   Returns a vector, parallel to `children` (DOM order preserved regardless
+   of placement order), of {:row-start :row-end :col-start :col-end}.
+
+   Simplification (this engine's documented subset -- real CSS Grid's own
+   auto-placement-around-explicit-items algorithm, CSS Grid section 8.5, is
+   genuinely complex and deliberately NOT replicated here):
+
+     1. Every child with an explicit grid-column and/or grid-row is placed
+        FIRST, in DOM order among themselves, before any fully-auto child --
+        mirroring real CSS's own two-phase placement (explicit items are
+        placed before auto-placement runs at all, regardless of where they
+        fall in DOM order relative to auto items). A child with only ONE
+        axis explicit gets the OTHER axis resolved by searching for the
+        first free row (find-free-row, if grid-column was given) or column
+        (find-free-col, if grid-row was given) against only the explicit
+        items placed so far -- not a full 2D bin-pack, but enough to avoid
+        colliding with an earlier explicit item on the same row/column.
+
+     2. Every remaining (fully auto -- neither axis declared) child is then
+        placed, in DOM order among themselves, into the next unoccupied
+        SINGLE cell (1 col x 1 row, exactly this engine's original
+        pre-explicit-placement auto-placement grain) found by scanning
+        row-major from (row 0, col 0), via a cursor that only ever advances
+        (never revisits a cell). Cells already claimed by an explicit item
+        are skipped -- this is the 'auto-placed items skip
+        explicitly-occupied cells but don't attempt sophisticated backfill'
+        simplification: once the scan has moved past a gap, it never
+        backtracks into it, even if a later cell the scan reaches is itself
+        a dead end (the loop's occupied-cell check keeps advancing until it
+        finds a free cell, so it can't get stuck, but it also can't go
+        backwards).
+
+   When there are NO explicitly-placed items at all, this degenerates to
+   exactly the row-major scan every auto item always got before this
+   feature existed (the cursor never encounters an already-occupied cell,
+   so it always accepts the first cell it lands on) -- a pure
+   backwards-compatibility guarantee, not a special case in the code."
+  [theme children n-cols n-row-tracks]
+  (let [n (count children)
+        requests (mapv #(item-grid-placement theme % n-cols n-row-tracks) children)
+        idx-range (range n)
+        explicit? (fn [i] (let [{:keys [col row]} (nth requests i)] (boolean (or col row))))
+        explicit-idxs (filter explicit? idx-range)
+        auto-idxs (remove explicit? idx-range)
+        resolve-explicit
+        (fn [occupied {:keys [col row]}]
+          (cond
+            (and col row)
+            (let [[cs ce] (clamp-col-range col n-cols)
+                  [rs re] row]
+              [cs ce rs re])
+
+            col
+            (let [[cs ce] (clamp-col-range col n-cols)
+                  rs (find-free-row occupied cs ce)]
+              [cs ce rs (inc rs)])
+
+            :else
+            (let [[rs re] row
+                  cs (find-free-col occupied rs re n-cols)]
+              [cs (inc cs) rs re])))
+        phase1 (reduce
+                (fn [{:keys [occupied placements]} i]
+                  (let [[cs ce rs re] (resolve-explicit occupied (nth requests i))]
+                    {:occupied (into occupied (rect-cells rs re cs ce))
+                     :placements (assoc placements i {:col-start cs :col-end ce
+                                                       :row-start rs :row-end re})}))
+                {:occupied #{} :placements (vec (repeat n nil))}
+                explicit-idxs)
+        phase2 (reduce
+                (fn [{:keys [occupied placements cursor-row cursor-col]} i]
+                  (loop [r cursor-row c cursor-col]
+                    (if (contains? occupied [r c])
+                      (if (< (inc c) n-cols)
+                        (recur r (inc c))
+                        (recur (inc r) 0))
+                      (let [wrap? (>= (inc c) n-cols)]
+                        {:occupied (conj occupied [r c])
+                         :placements (assoc placements i {:col-start c :col-end (inc c)
+                                                           :row-start r :row-end (inc r)})
+                         :cursor-row (if wrap? (inc r) r)
+                         :cursor-col (if wrap? 0 (inc c))}))))
+                (assoc phase1 :cursor-row 0 :cursor-col 0)
+                auto-idxs)]
+    (:placements phase2)))
+
+(defn- span-width
+  "The combined pixel width an item spanning column tracks [col-start
+   col-end) occupies: the sum of those tracks' own widths plus one `gap`
+   between every adjacent pair spanned (never a gap before the first or
+   after the last, same convention place-main-axis already uses for the
+   whole track list)."
+  [col-widths gap col-start col-end]
+  (+ (reduce + 0 (subvec col-widths col-start col-end))
+     (* gap (max 0 (dec (- col-end col-start))))))
+
 ;; ---- ::before / ::after generated content ----
 ;;
 ;; cssom.core's apply-cascade already resolves each element's ::before/
@@ -714,10 +1018,12 @@
 (defn- layout-grid
   "display:grid subset: explicit `grid-template-columns`/`grid-template-rows`
    track lists (fixed px + fr, plus `repeat()`/`minmax()` composing over
-   them — see parse-track-list) with auto-placement in
-   DOM order, row-major (fills a row left-to-right before wrapping to the
-   next row). `gap` — the same style key flex already reuses — spaces both
-   rows and columns.
+   them — see parse-track-list), per-item explicit placement via
+   `grid-column`/`grid-row` (see parse-grid-placement), and auto-placement
+   in DOM order, row-major (fills a row left-to-right before wrapping to the
+   next row) for everything else — see place-grid-items for exactly how
+   explicit and auto placement compose. `gap` — the same style key flex
+   already reuses — spaces both rows and columns.
 
    Column count = the number of parsed grid-template-columns tracks. With no
    (or a blank) grid-template-columns, this falls back to a single
@@ -726,21 +1032,55 @@
    grid-template-rows set. Column track sizes are always resolved against
    the container's definite content-width (`cw`), exactly like flexbox's
    main-axis sizing whenever the main size is known — so `fr` columns are
-   always well-defined (see track-sizes).
+   always well-defined (see track-sizes). An item spanning more than one
+   column (`grid-column: 1 / 3`) gets the combined width of every column it
+   spans plus the gaps between them (span-width), and is measured against
+   that combined width exactly like a plain single-column item is measured
+   against its one column's width (so it stretches to fill the whole span
+   when it has no explicit width of its own).
 
-   Row sizing: rows are auto-generated (row-major wrap) to fit however many
-   children there are, regardless of how many grid-template-rows tracks were
-   given — there is no implicit-grid concept beyond 'add another row'. A row
-   whose index has an explicit *fixed*-px grid-template-rows track uses that
-   literal height. Every other row — an `fr` row track, or any row beyond
-   the explicit track list — is auto-sized to the tallest child placed in
-   that row (mirrors flexbox's own auto cross-axis convention elsewhere in
-   this file), UNLESS the grid container has an explicit :height, in which
-   case the explicit row tracks (fixed + fr) are resolved proportionally
-   against that height the same way columns are. Without an explicit
-   container height there is no definite total to share `fr` row tracks
-   against, so this is the one deliberate asymmetry versus columns in this
-   subset — documented here rather than silently guessed at.
+   Explicit placement (`grid-column`/`grid-row`, see parse-grid-placement):
+   a plain 1-based line number (`grid-column: 2`), the two-value `<start> /
+   <end>` shorthand (`grid-column: 1 / 3`), and `<start> / span <n>`
+   (`grid-column: 2 / span 2`) are all supported for both axes. A negative
+   line/index (`grid-column: -1`, 'the last column') is also supported as a
+   deliberately pragmatic stretch goal. NOT supported: the `-start`/`-end`
+   longhand properties, `grid-template-areas` name references, and dense
+   packing (see parse-grid-placement's own docstring for the precise
+   grammar/arithmetic). An out-of-range column line (e.g. `grid-column: 5`
+   with only 3 declared column tracks) does NOT implicitly create a new
+   column track the way real CSS does (explicitly out of scope) — instead
+   it's CLAMPED into the declared column range (clamp-col-range), landing
+   on/overlapping the last column rather than indexing past
+   col-widths/col-offsets or crashing. Auto-placed items that don't declare
+   either property compose with explicitly-placed ones per the
+   documented simplification in place-grid-items (short version: explicit
+   items are placed first in DOM order, then auto items fill remaining
+   single cells row-major, skipping whatever's already occupied — no
+   sophisticated backfill).
+
+   Row sizing: rows are auto-generated (row-major wrap, extended as needed
+   by any explicit grid-row placement that reaches further than
+   auto-placement alone would) to fit however many rows are actually
+   needed, regardless of how many grid-template-rows tracks were given —
+   there is no implicit-grid concept beyond 'add another row', and (unlike
+   columns) no clamping: a row is not a fixed, finite axis in this engine to
+   begin with, so an out-of-range grid-row line just means however many
+   more (possibly empty, 0px-tall) rows are needed to reach it. A row whose
+   index has an explicit *fixed*-px grid-template-rows track uses that
+   literal height. Every other row — an `fr` row track, any row beyond the
+   explicit track list, or an empty row nothing was placed into — is
+   auto-sized to the tallest child whose placement STARTS in that row
+   (mirrors flexbox's own auto cross-axis convention elsewhere in this
+   file; a multi-row-span item's height only contributes to its start row's
+   auto-sizing, not any row it merely passes through — a documented
+   simplification, row spans are not this feature's must-have), UNLESS the
+   grid container has an explicit :height, in which case the explicit row
+   tracks (fixed + fr) are resolved proportionally against that height the
+   same way columns are. Without an explicit container height there is no
+   definite total to share `fr` row tracks against, so this is the one
+   deliberate asymmetry versus columns in this subset — documented here
+   rather than silently guessed at.
 
    Absolute-positioned children are NOT extracted via partition-flow here —
    this matches layout-flex's current behavior (today only layout-block
@@ -751,9 +1091,11 @@
    `repeat(<integer>, <track>)` and `minmax(<px>, <px-or-1fr>)` ARE
    supported and compose (e.g. `repeat(3, minmax(80px, 1fr))`) — see
    parse-track-list/parse-track-token/track-sizes. Explicitly out of scope:
-   `auto` tracks, percentage tracks, `repeat(auto-fill|auto-fit, ...)`
-   (real content-based auto-sizing this engine doesn't do), explicit
-   grid-column/grid-row placement, grid-template-areas, dense packing."
+   `auto` tracks, percentage tracks, `repeat(auto-fill|auto-fit, ...)` (real
+   content-based auto-sizing this engine doesn't do), implicit track
+   creation, grid-template-areas, dense packing, and the grid-column-start/
+   grid-column-end/grid-row-start/grid-row-end longhand properties (only the
+   grid-column/grid-row shorthand is parsed)."
   [theme x y avail-width opacity inherited st node in-flow]
   (let [w (resolve-width st avail-width)
         inset (content-inset st)
@@ -767,35 +1109,38 @@
         col-widths (track-sizes col-tracks gap cw)
         col-offsets (place-main-axis "flex-start" col-widths gap 0)
         row-tracks (parse-track-list (:grid-template-rows st))
+        n-row-tracks (count row-tracks)
         explicit-h (:height st)
         row-track-fr-sizes (when explicit-h (track-sizes row-tracks gap explicit-h))
-        rows-of-children (partition-all n-cols in-flow)
-        measured-rows (mapv (fn [row-children]
-                              (vec (map-indexed
-                                    (fn [col-idx child]
-                                      (measure-child theme (nth col-widths col-idx cw) opacity inherited child))
-                                    row-children)))
-                            rows-of-children)
-        row-heights (vec (map-indexed
-                          (fn [row-idx measured]
-                            (let [track (nth row-tracks row-idx nil)]
-                              (cond
-                                (and track (= :fixed (:type track)))
-                                (:size track)
+        placements (place-grid-items theme in-flow n-cols n-row-tracks)
+        total-rows (if (seq placements) (apply max 0 (map :row-end placements)) 0)
+        measured (mapv (fn [child pl]
+                          (let [item-w (span-width col-widths gap (:col-start pl) (:col-end pl))]
+                            (measure-child theme item-w opacity inherited child)))
+                        in-flow placements)
+        row-heights (vec (map (fn [row-idx]
+                                 (let [track (nth row-tracks row-idx nil)]
+                                   (cond
+                                     (and track (= :fixed (:type track)))
+                                     (:size track)
 
-                                (and track row-track-fr-sizes)
-                                (nth row-track-fr-sizes row-idx)
+                                     (and track row-track-fr-sizes)
+                                     (nth row-track-fr-sizes row-idx)
 
-                                :else
-                                (apply max 0 (mapv #(:h (:box %)) measured)))))
-                          measured-rows))
+                                     :else
+                                     (let [hs (keep-indexed
+                                               (fn [i pl]
+                                                 (when (= row-idx (:row-start pl))
+                                                   (:h (:box (nth measured i)))))
+                                               placements)]
+                                       (if (seq hs) (apply max 0 hs) 0)))))
+                               (range total-rows)))
         row-offsets (place-main-axis "flex-start" row-heights gap 0)
-        draws (vec (mapcat (fn [measured row-y]
-                             (mapcat
-                              (fn [col-idx m]
-                                (translate-ops (+ cx (nth col-offsets col-idx)) (+ cy row-y) (:draw m)))
-                              (range) measured))
-                           measured-rows row-offsets))
+        draws (vec (mapcat (fn [pl m]
+                              (translate-ops (+ cx (nth col-offsets (:col-start pl)))
+                                             (+ cy (nth row-offsets (:row-start pl)))
+                                             (:draw m)))
+                            placements measured))
         content-h (+ (reduce + 0 row-heights) (* gap (max 0 (dec (count row-heights)))))
         node-h (or explicit-h (+ content-h (* 2 inset)))]
     {:box-w w :box-h node-h :draws draws}))

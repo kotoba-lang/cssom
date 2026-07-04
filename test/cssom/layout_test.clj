@@ -70,21 +70,33 @@
 
 (defn- grid-tree
   "Builds a :main display:grid element with `container-style` (merged onto
-   {:display \"grid\"}) and one :span child per [w h] pair in `child-sizes`
-   (either may be nil to leave that style unset -- an unset width lets the
-   child stretch to fill its column, the same way a plain block child
-   already fills its container's content-width). Sets style attrs directly
-   via kotoba.wasm.dom, bypassing cssom.core's cascade entirely -- same
-   convention the rest of this test file already uses."
+   {:display \"grid\"}) and one :span child per entry in `child-sizes`.
+   Each entry is either a [w h] pair (either may be nil to leave that style
+   unset -- an unset width lets the child stretch to fill its column, the
+   same way a plain block child already fills its container's
+   content-width) or a [w h extra-style] triple, where `extra-style` is
+   merged onto that child's style map on top of :width/:height -- used by
+   the explicit grid-column/grid-row placement tests below to set
+   e.g. {:grid-column 2 :grid-row \"1 / 3\"} directly on one child without
+   every other grid-tree caller needing to know about it. Sets style attrs
+   directly via kotoba.wasm.dom, bypassing cssom.core's cascade entirely --
+   same convention the rest of this test file already uses (so an integer
+   grid-column/grid-row value here is a genuine integer the way
+   cssom.core's parse-style-value would already have coerced a bare-integer
+   declaration to, and a string value like \"1 / 3\" is the genuine raw
+   string cssom.core would pass through unchanged -- both forms this test
+   file bypasses cssom.core to set directly are exactly what
+   cssom.layout/parse-grid-placement expects to receive)."
   [container-style child-sizes]
   (let [[root doc] (dom/create-element dom/empty-document :main)
         doc (dom/set-root doc root)
         doc (dom/set-style doc root (merge {:display "grid"} container-style))
-        doc (reduce (fn [doc [w h]]
+        doc (reduce (fn [doc [w h extra]]
                       (let [[child doc] (dom/create-element doc :span)
-                            doc (dom/set-style doc child (cond-> {}
-                                                            w (assoc :width w)
-                                                            h (assoc :height h)))]
+                            doc (dom/set-style doc child (merge (cond-> {}
+                                                                   w (assoc :width w)
+                                                                   h (assoc :height h))
+                                                                 extra))]
                         (dom/append-child doc root child)))
                     doc
                     child-sizes)
@@ -304,6 +316,91 @@
     (is (= {:x 0 :y 0 :w 130 :h 10} (select-keys a [:x :y :w :h])))
     (is (= {:x 130 :y 0 :w 130 :h 10} (select-keys b [:x :y :w :h])))
     (is (= {:x 260 :y 0 :w 130 :h 10} (select-keys c [:x :y :w :h])))))
+
+;; ---- grid-column / grid-row explicit placement ----
+
+(deftest grid-explicit-single-line-column-and-row-place-item-at-exact-track
+  ;; grid-column: 2 / grid-row: 2 (plain 1-based line numbers, matching real
+  ;; CSS's own grid-line numbering) must occupy 0-based column track 1 (the
+  ;; 80px track) and 0-based row track 1 (the 30px track) -- not row/col 0.
+  (let [tree (grid-tree {:grid-template-columns "50px 80px 30px"
+                          :grid-template-rows "20px 30px"
+                          :gap 0 :padding 0 :width 160}
+                         [[nil 10 {:grid-column 2 :grid-row 2}]])
+        ops (layout/draw-ops tree {:width 160})
+        [container item] (node-ops ops)]
+    (is (= 160 (:w container)))
+    (is (= 50 (:h container)))                              ; 20 + 30, no gap/padding
+    (is (= {:x 50 :y 20 :w 80 :h 10} (select-keys item [:x :y :w :h])))))
+
+(deftest grid-column-two-value-span-occupies-combined-track-width
+  ;; grid-column: 1 / 3 spans column lines 1->3, i.e. 0-based column tracks
+  ;; 0 and 1 (50px + 80px = 130px combined) -- a real, extremely common way
+  ;; to make an item span multiple columns. No grid-row declared, so the
+  ;; row is auto-placed (lands in row 0, same as any fully-auto item would).
+  (let [tree (grid-tree {:grid-template-columns "50px 80px 30px 20px" :gap 0 :padding 0 :width 180}
+                         [[nil 10 {:grid-column "1 / 3"}]])
+        ops (layout/draw-ops tree {:width 180})
+        [container item] (node-ops ops)]
+    (is (= 180 (:w container)))
+    (is (= {:x 0 :y 0 :w 130 :h 10} (select-keys item [:x :y :w :h])))))
+
+(deftest grid-column-start-span-n-shorthand
+  ;; grid-column: 2 / span 2 -- starts at line 2 (0-based track 1) and spans
+  ;; 2 tracks (0-based tracks 1 and 2, 50px + 60px = 110px), the extremely
+  ;; common `span` keyword form real stylesheets use.
+  (let [tree (grid-tree {:grid-template-columns "40px 50px 60px 70px" :gap 0 :padding 0 :width 220}
+                         [[nil 10 {:grid-column "2 / span 2"}]])
+        ops (layout/draw-ops tree {:width 220})
+        [container item] (node-ops ops)]
+    (is (= {:x 40 :y 0 :w 110 :h 10} (select-keys item [:x :y :w :h])))))
+
+(deftest grid-negative-column-line-means-last-column
+  ;; Stretch goal: grid-column: -1 resolves to the last declared column
+  ;; track (0-based index 2 of 3, the 60px track) -- real CSS's own
+  ;; "counts from the end" negative-line convention, in this engine's
+  ;; pragmatic single-value form (see parse-grid-placement's docstring for
+  ;; exactly why the single-value case resolves differently than the
+  ;; two-value case's negative end).
+  (let [tree (grid-tree {:grid-template-columns "40px 50px 60px" :gap 0 :padding 0 :width 150}
+                         [[nil 10 {:grid-column -1}]])
+        ops (layout/draw-ops tree {:width 150})
+        [container item] (node-ops ops)]
+    (is (= {:x 90 :y 0 :w 60 :h 10} (select-keys item [:x :y :w :h])))))
+
+(deftest grid-explicit-item-does-not-collide-with-auto-placed-siblings
+  ;; 2-column grid, 3 children in DOM order: auto A, explicit B pinned at
+  ;; grid-column:2/grid-row:1 (0-based col1/row0 -- the SAME cell A's
+  ;; auto-placement would otherwise land in first), auto C. Auto-placed
+  ;; items must skip the cell B explicitly claims: A takes (row0,col0), C
+  ;; is pushed past B's occupied (row0,col1) into (row1,col0) -- proving
+  ;; explicit and auto placement compose without overlap.
+  (let [tree (grid-tree {:grid-template-columns "40px 40px" :gap 0 :padding 0 :width 80}
+                         [[nil 10]
+                          [nil 10 {:grid-column 2 :grid-row 1}]
+                          [nil 10]])
+        ops (layout/draw-ops tree {:width 80})
+        [container a b c] (node-ops ops)]
+    (is (= {:x 0 :y 0 :w 40 :h 10} (select-keys a [:x :y :w :h])))   ; auto -> row0 col0
+    (is (= {:x 40 :y 0 :w 40 :h 10} (select-keys b [:x :y :w :h])))  ; explicit -> row0 col1
+    (is (= {:x 0 :y 10 :w 40 :h 10} (select-keys c [:x :y :w :h])))  ; auto skips row0 col1, wraps to row1 col0
+    ;; No two items share the same (x,y).
+    (is (= 3 (count (distinct [(select-keys a [:x :y]) (select-keys b [:x :y]) (select-keys c [:x :y])]))))))
+
+(deftest grid-out-of-range-column-clamps-while-out-of-range-row-grows
+  ;; grid-column: 5 with only 2 declared column tracks doesn't crash and
+  ;; doesn't implicitly create a new track (out of scope) -- it clamps to
+  ;; the last column (0-based index 1). grid-row: 5 with NO declared row
+  ;; tracks isn't clamped at all (rows are not a fixed axis in this engine)
+  ;; -- it simply grows however many (empty, 0px-tall) rows are needed to
+  ;; reach row index 4, each still consuming one `gap` -- so the item lands
+  ;; at y = 4 * (0 + gap) = 8 with gap:2, not at row 0.
+  (let [tree (grid-tree {:grid-template-columns "50px 80px" :gap 2 :padding 0 :width 130}
+                         [[nil 10 {:grid-column 5 :grid-row 5}]])
+        ops (layout/draw-ops tree {:width 130})
+        [container item] (node-ops ops)]
+    (is (= 2 (count (node-ops ops))))                        ; container + 1 child, no crash
+    (is (= {:x 52 :y 8 :w 80 :h 10} (select-keys item [:x :y :w :h])))))
 
 ;; ---- ::before / ::after generated content ----
 ;;
