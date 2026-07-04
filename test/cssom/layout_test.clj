@@ -195,6 +195,116 @@
     ;; uses (border-width only offsets content when box-sizing: border-box).
     (is (= {:x 4 :y 4 :w 50 :h 10} (select-keys child [:x :y :w :h])))))
 
+;; ---- grid-template-columns: repeat() / minmax() ----
+
+(deftest grid-repeat-expands-identically-to-writing-tracks-out
+  ;; grid-template-columns: repeat(3, 140px) must place items identically to
+  ;; writing out "140px 140px 140px" by hand -- repeat() is a pure expansion
+  ;; at parse time (see parse-repeat-token), not a separate sizing path.
+  (let [repeat-tree (grid-tree {:grid-template-columns "repeat(3, 140px)"
+                                 :gap 0 :padding 0 :width 420}
+                                [[nil 10] [nil 10] [nil 10]])
+        spelled-out-tree (grid-tree {:grid-template-columns "140px 140px 140px"
+                                      :gap 0 :padding 0 :width 420}
+                                     [[nil 10] [nil 10] [nil 10]])
+        rects (fn [ops] (mapv #(select-keys % [:x :y :w :h]) (node-ops ops)))
+        repeat-rects (rects (layout/draw-ops repeat-tree {:width 420}))
+        spelled-out-rects (rects (layout/draw-ops spelled-out-tree {:width 420}))]
+    (is (= spelled-out-rects repeat-rects))
+    (is (= [{:x 0 :y 0 :w 140 :h 10} {:x 140 :y 0 :w 140 :h 10} {:x 280 :y 0 :w 140 :h 10}]
+           (rest repeat-rects)))))
+
+(deftest grid-repeat-fr-splits-space-into-equal-tracks
+  ;; repeat(2, 1fr) in a 300px container with no gap -> two equal 150px
+  ;; columns, same as writing "1fr 1fr" by hand.
+  (let [tree (grid-tree {:grid-template-columns "repeat(2, 1fr)" :gap 0 :padding 0 :width 300}
+                         [[nil 20] [nil 20]])
+        ops (layout/draw-ops tree {:width 300})
+        [container a b] (node-ops ops)]
+    (is (= 300 (:w container)))
+    (is (= {:x 0 :y 0 :w 150 :h 20} (select-keys a [:x :y :w :h])))
+    (is (= {:x 150 :y 0 :w 150 :h 20} (select-keys b [:x :y :w :h])))))
+
+(deftest grid-repeat-with-multi-track-argument-expands-the-whole-pattern
+  ;; Stretch goal: repeat(2, 100px 1fr) expands the whole 2-track *pattern*
+  ;; twice (100px 1fr 100px 1fr = 4 tracks), not a single repeated track.
+  (let [tree (grid-tree {:grid-template-columns "repeat(2, 100px 1fr)" :gap 0 :padding 0 :width 400}
+                         [[nil 5] [nil 5] [nil 5] [nil 5]])
+        ops (layout/draw-ops tree {:width 400})
+        [container a b c d] (node-ops ops)]
+    (is (= 400 (:w container)))
+    (is (= {:x 0 :w 100} (select-keys a [:x :w])))
+    (is (= {:x 100 :w 100} (select-keys b [:x :w])))
+    (is (= {:x 200 :w 100} (select-keys c [:x :w])))
+    (is (= {:x 300 :w 100} (select-keys d [:x :w])))))
+
+(deftest grid-repeat-malformed-form-does-not-crash-layout
+  ;; repeat(auto-fill, ...) is explicitly out of scope (needs real
+  ;; content-based auto-sizing this engine doesn't do) -- it must degrade
+  ;; gracefully (a single dropped/zero-width placeholder track, the same
+  ;; convention any other unparseable token already uses) rather than throw.
+  (let [tree (grid-tree {:grid-template-columns "repeat(auto-fill, 100px)" :gap 0 :padding 0 :width 200}
+                         [[nil 10] [nil 10] [nil 10]])
+        ops (layout/draw-ops tree {:width 200})]
+    (is (= 4 (count (node-ops ops))))                    ; container + 3 children, no crash
+    (is (= 200 (:w (first (node-ops ops)))))))
+
+(deftest grid-minmax-reserves-floor-and-grows-into-remaining-space
+  ;; minmax(100px, 1fr) alongside a 50px fixed column in a 300px container:
+  ;; the minmax track reserves its 100px floor, then gets 100% of whatever
+  ;; fr-space is left after every fixed contribution (including that floor)
+  ;; is subtracted: 300 - 50 - 100 = 150 leftover, all of it going to the
+  ;; single fr-weight track -> final size 100 + 150 = 250.
+  (let [tree (grid-tree {:grid-template-columns "minmax(100px, 1fr) 50px" :gap 0 :padding 0 :width 300}
+                         [[nil 20] [nil 20]])
+        ops (layout/draw-ops tree {:width 300})
+        [container a b] (node-ops ops)]
+    (is (= 300 (:w container)))
+    (is (= {:x 0 :y 0 :w 250 :h 20} (select-keys a [:x :y :w :h])))
+    (is (= {:x 250 :y 0 :w 50 :h 20} (select-keys b [:x :y :w :h])))))
+
+(deftest grid-minmax-floors-at-min-when-space-is-tight
+  ;; The same minmax(100px, 1fr) track alongside a 400px fixed column packed
+  ;; into a 300px container leaves 0px of remaining fr-space (300 - 400 -
+  ;; 100 clamps to 0) -- the track's size never drops below its 100px floor
+  ;; even though the row now honestly overflows the container, the same
+  ;; "let it overflow" convention this file already uses elsewhere.
+  (let [tree (grid-tree {:grid-template-columns "minmax(100px, 1fr) 400px" :gap 0 :padding 0 :width 300}
+                         [[nil 20] [nil 20]])
+        ops (layout/draw-ops tree {:width 300})
+        [_ a b] (node-ops ops)]
+    (is (= {:x 0 :w 100} (select-keys a [:x :w])))
+    (is (= {:x 100 :w 400} (select-keys b [:x :w])))))
+
+(deftest grid-minmax-with-fixed-max-clamps-like-a-fixed-track
+  ;; minmax(100px, 200px): both args are plain px lengths, so the track
+  ;; resolves to max(min,max) = 200px, same as writing a plain 200px fixed
+  ;; track (see fixed-contribution) -- the 50px leftover from the 300px
+  ;; container (200 + 50 = 250, 50px short of 300) is simply unused, the
+  ;; same "no fr track to soak up leftover space" convention any all-fixed
+  ;; track list already has in this engine.
+  (let [tree (grid-tree {:grid-template-columns "minmax(100px, 200px) 50px" :gap 0 :padding 0 :width 300}
+                         [[nil 20] [nil 20]])
+        ops (layout/draw-ops tree {:width 300})
+        [_ a b] (node-ops ops)]
+    (is (= {:x 0 :w 200} (select-keys a [:x :w])))
+    (is (= {:x 200 :w 50} (select-keys b [:x :w])))))
+
+(deftest grid-repeat-and-minmax-compose
+  ;; repeat(3, minmax(80px, 1fr)) -- the extremely common "responsive
+  ;; equal-width grid with a floor" pattern. 390px container, no gap: each
+  ;; track reserves its 80px floor (240px total), leaving 150px of
+  ;; fr-space split evenly 3 ways (50px each) -> three 130px columns
+  ;; exactly filling 390px.
+  (let [tree (grid-tree {:grid-template-columns "repeat(3, minmax(80px, 1fr))" :gap 0 :padding 0 :width 390}
+                         [[nil 10] [nil 10] [nil 10]])
+        ops (layout/draw-ops tree {:width 390})
+        [container a b c] (node-ops ops)]
+    (is (= 390 (:w container)))
+    (is (= {:x 0 :y 0 :w 130 :h 10} (select-keys a [:x :y :w :h])))
+    (is (= {:x 130 :y 0 :w 130 :h 10} (select-keys b [:x :y :w :h])))
+    (is (= {:x 260 :y 0 :w 130 :h 10} (select-keys c [:x :y :w :h])))))
+
 ;; ---- ::before / ::after generated content ----
 ;;
 ;; Unlike the rest of this file (which sets style attrs directly via

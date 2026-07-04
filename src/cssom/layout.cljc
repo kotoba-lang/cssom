@@ -5,9 +5,10 @@
    Covers: padding/border/margin box model with min/max-width and
    content-box/border-box sizing; display:flex with flex-direction/
    flex-wrap/justify-content/align-items/gap; display:grid with
-   grid-template-columns/grid-template-rows (fixed px + fr tracks,
-   auto-placement only — see layout-grid for the exact subset and its
-   documented limitations); position:relative/absolute with z-index
+   grid-template-columns/grid-template-rows (fixed px + fr tracks, plus
+   `repeat(<n>, <track>)` and `minmax(<px>, <px-or-1fr>)` composing over
+   them, auto-placement only — see layout-grid for the exact subset and
+   its documented limitations); position:relative/absolute with z-index
    stacking; opacity (multiplicatively inherited); background/
    background-color; borders; overflow+scroll-top/scroll-left clipping;
    form-control value/checked/selected-option-label projection; text input
@@ -290,6 +291,66 @@
 
 ;; ---- grid track-size parsing / sizing ----
 
+(defn- paren-split
+  "Splits `s` into trimmed, non-blank segments wherever `delim?` matches a
+   character AND paren nesting depth is 0 -- so a delimiter that appears
+   inside a nested repeat(...)/minmax(...) argument list doesn't split that
+   call apart (e.g. splitting \"repeat(2, minmax(80px, 1fr)) 50px\" on
+   top-level whitespace must yield [\"repeat(2, minmax(80px, 1fr))\" \"50px\"],
+   not fall apart on the commas/spaces *inside* the nested calls). Shared by
+   split-tracks-toplevel (splits a whole track-list on whitespace) and
+   split-args-toplevel (splits a repeat()/minmax() argument list on
+   commas)."
+  [delim? s]
+  (let [n (count s)]
+    (loop [i 0 depth 0 start 0 out []]
+      (if (= i n)
+        (let [seg (str/trim (subs s start i))]
+          (if (str/blank? seg) out (conj out seg)))
+        (let [c (nth s i)]
+          (cond
+            (= c \() (recur (inc i) (inc depth) start out)
+            (= c \)) (recur (inc i) (max 0 (dec depth)) start out)
+
+            (and (zero? depth) (delim? c))
+            (let [seg (str/trim (subs s start i))
+                  out (if (str/blank? seg) out (conj out seg))]
+              (recur (inc i) depth (inc i) out))
+
+            :else (recur (inc i) depth start out)))))))
+
+(defn- ws-char? [c] (boolean (re-matches #"\s" (str c))))
+
+(defn- split-tracks-toplevel
+  "Splits a `grid-template-columns`/`grid-template-rows` string into its
+   top-level track tokens on whitespace, without breaking apart whitespace
+   nested inside a repeat(...) argument list (see paren-split; e.g.
+   `repeat(2, 100px 1fr)` is one token here, not four)."
+  [s]
+  (paren-split ws-char? s))
+
+(defn- split-args-toplevel
+  "Splits the inside of a repeat(...)/minmax(...) call on its top-level
+   commas (see paren-split; a comma nested inside a further repeat()/
+   minmax() argument, e.g. the one inside `repeat(3, minmax(80px, 1fr))`,
+   doesn't split that inner call apart)."
+  [s]
+  (paren-split #(= % \,) s))
+
+(defn- parse-length-px
+  "Parses a single px length or bare-integer token -- the two plain-length
+   forms this file accepts everywhere a track size is expected -- to a
+   pixel value, or nil if `tok` is neither. Used for minmax()'s `min`
+   argument (always a plain length in this engine's honestly-scoped
+   subset, never `fr`) and for a `max` argument that isn't `Nfr`."
+  [tok]
+  (cond
+    (re-matches #"-?[0-9]*\.?[0-9]+px" tok) (parse-int (subs tok 0 (- (count tok) 2)) 0)
+    (re-matches #"-?[0-9]*\.?[0-9]+" tok) (parse-int tok 0)
+    :else nil))
+
+(declare parse-track-token)
+
 (defn- parse-track-list
   "Parses a `grid-template-columns`/`grid-template-rows` value into a vector
    of track specs, e.g. \"100px 1fr 2fr\" -> [{:type :fixed :size 100}
@@ -308,10 +369,14 @@
    `grid-template-columns: 200px`, to the plain integer 200) is treated as
    a single fixed-px track for symmetry with that string case.
 
-   Supports fixed `Npx` and fractional `Nfr` tracks only. Explicitly out of
-   scope: `auto`, `minmax()`, `repeat()`, percentage tracks — any token that
-   doesn't match `Npx`/`Nfr` degrades to a 0px fixed track rather than
-   throwing, so an unsupported keyword doesn't crash layout.
+   Supports fixed `Npx` and fractional `Nfr` tracks, plus `repeat(...)` and
+   `minmax(...)` (see parse-track-token for the full per-token grammar and
+   each helper's own docstring for the honestly-scoped subset it supports).
+   Splits on top-level whitespace only (split-tracks-toplevel), so
+   whitespace nested inside a repeat(...) argument list doesn't fracture
+   that call into separate tokens. Any token this file can't make sense of
+   degrades to a 0px fixed track rather than throwing, so an unsupported
+   keyword never crashes layout — see parse-track-token's :else branch.
 
    nil/blank input returns [] — callers decide the no-explicit-tracks
    fallback (layout-grid falls back to a single full-width column when
@@ -319,23 +384,110 @@
   [v]
   (cond
     (integer? v) [{:type :fixed :size v}]
-    (string? v)
-    (->> (str/split (str/trim v) #"\s+")
-         (remove str/blank?)
-         (mapv (fn [tok]
-                 (cond
-                   (re-matches #"-?[0-9]*\.?[0-9]+fr" tok)
-                   {:type :fr :size (parse-dbl (subs tok 0 (- (count tok) 2)) 1.0)}
-
-                   (re-matches #"-?[0-9]*\.?[0-9]+px" tok)
-                   {:type :fixed :size (parse-int (subs tok 0 (- (count tok) 2)) 0)}
-
-                   (re-matches #"-?[0-9]*\.?[0-9]+" tok)
-                   {:type :fixed :size (parse-int tok 0)}
-
-                   :else
-                   {:type :fixed :size 0}))))
+    (string? v) (vec (mapcat parse-track-token (split-tracks-toplevel (str/trim v))))
     :else []))
+
+(defn- parse-minmax-token
+  "Parses a `minmax(min, max)` token into a single :minmax track spec (see
+   track-sizes for how it resolves to a concrete px size). Only the two
+   px/fr combinations this engine can size honestly (no content-based
+   auto-sizing, see the ns docstring) are recognized:
+     - `min` a plain px length (or bare integer), `max` a plain px length
+       -> {:type :minmax :min <px> :max-type :fixed :max <px>} — sized like
+       a fixed track clamped up to at least `min` (see track-sizes).
+     - `min` a plain px length, `max` literally `Nfr`
+       -> {:type :minmax :min <px> :max-type :fr :max <N>} — participates
+       in fr-space distribution like a plain fr track, floored at `min`
+       (see track-sizes).
+
+   `minmax(min-content, ...)`/`minmax(auto, ...)`/anything else that isn't
+   one of the two forms above (including a malformed argument list) falls
+   back to a plain, unconstrained 1fr track rather than crashing — chosen
+   over the 0px-fixed-track fallback parse-track-token's :else uses for a
+   wholly-unrecognized token, since minmax(...) unambiguously asked for
+   *some* share of the available space, not zero."
+  [tok]
+  (let [inner (subs tok (count "minmax(") (dec (count tok)))
+        args (split-args-toplevel inner)]
+    (if (= 2 (count args))
+      (let [[min-tok max-tok] args
+            min-px (parse-length-px min-tok)]
+        (cond
+          (nil? min-px)
+          [{:type :fr :size 1.0}]
+
+          (re-matches #"-?[0-9]*\.?[0-9]+fr" max-tok)
+          [{:type :minmax :min min-px :max-type :fr
+            :max (parse-dbl (subs max-tok 0 (- (count max-tok) 2)) 1.0)}]
+
+          (parse-length-px max-tok)
+          [{:type :minmax :min min-px :max-type :fixed :max (parse-length-px max-tok)}]
+
+          :else
+          [{:type :fr :size 1.0}]))
+      [{:type :fr :size 1.0}])))
+
+(defn- parse-repeat-token
+  "Parses a `repeat(count, track)` token by literally expanding it into
+   `count` copies of `track`'s parsed tracks (see parse-track-list) --
+   identical in effect to writing the track(s) out `count` times, which is
+   exactly repeat()'s real-CSS semantics for the fixed-count case. `track`
+   may itself be more than one space-separated track (e.g.
+   `repeat(2, 100px 1fr)` expands to 4 tracks: 100px 1fr 100px 1fr) and may
+   itself be a minmax(...) call (e.g. `repeat(3, minmax(80px, 1fr))`) --
+   composes for free since both repeat() and minmax() bottom out in
+   parse-track-list/parse-track-token, no special-casing needed.
+
+   `repeat(auto-fill, ...)`/`repeat(auto-fit, ...)` are explicitly out of
+   scope (they need real content-based auto-sizing this engine doesn't do,
+   see the ns docstring) — and so is any other non-plain-integer count, or
+   a malformed argument list. Rather than throwing, these degrade to the
+   same single 0px fixed-track placeholder parse-track-token's :else branch
+   uses for any other currently-unparseable token, so a malformed/
+   unsupported repeat() drops out of the visual layout instead of crashing
+   it."
+  [tok]
+  (let [inner (subs tok (count "repeat(") (dec (count tok)))
+        args (split-args-toplevel inner)]
+    (if (= 2 (count args))
+      (let [[count-tok track-tok] args]
+        (if (re-matches #"[0-9]+" count-tok)
+          (let [cnt (parse-int count-tok 0)
+                one-repeat (parse-track-list track-tok)]
+            (if (and (pos? cnt) (seq one-repeat))
+              (vec (mapcat identity (repeat cnt one-repeat)))
+              [{:type :fixed :size 0}]))
+          [{:type :fixed :size 0}]))
+      [{:type :fixed :size 0}])))
+
+(defn- parse-track-token
+  "Parses a single top-level track-list token (see split-tracks-toplevel)
+   into one or more track specs (a vector, since repeat(...) expands to
+   more than one). Supported forms: a bare `Nfr`/`Npx`/plain-integer length
+   (as before repeat()/minmax() existed), plus `repeat(count, track)`
+   (parse-repeat-token) and `minmax(min, max)` (parse-minmax-token). Any
+   other token — `auto`, percentages, `repeat(auto-fill, ...)`, anything
+   malformed — degrades to a single 0px fixed track rather than throwing,
+   so an unsupported keyword never crashes layout."
+  [tok]
+  (cond
+    (re-matches #"-?[0-9]*\.?[0-9]+fr" tok)
+    [{:type :fr :size (parse-dbl (subs tok 0 (- (count tok) 2)) 1.0)}]
+
+    (re-matches #"-?[0-9]*\.?[0-9]+px" tok)
+    [{:type :fixed :size (parse-int (subs tok 0 (- (count tok) 2)) 0)}]
+
+    (re-matches #"-?[0-9]*\.?[0-9]+" tok)
+    [{:type :fixed :size (parse-int tok 0)}]
+
+    (re-matches #"repeat\(.*\)" tok)
+    (parse-repeat-token tok)
+
+    (re-matches #"minmax\(.*\)" tok)
+    (parse-minmax-token tok)
+
+    :else
+    [{:type :fixed :size 0}]))
 
 (defn- distribute-fr
   "Splits `remaining` px across `weights` (fr weights, in track order)
@@ -353,30 +505,71 @@
           (update sizes (dec (count sizes)) + leftover)
           sizes)))))
 
+(defn- fixed-contribution
+  "The px this track reserves up front, before fr-space distribution: a
+   :fixed track's own size; for a :minmax track (see parse-minmax-token),
+   `min` px if its max is `fr` (that min is a floor reserved off the top,
+   topped up from fr-space below in track-sizes) or max(min,max) if its max
+   is a fixed px length (no fr participation at all — see fr-weight); 0 for
+   a plain :fr track (nothing reserved, it only ever gets an fr-space
+   share)."
+  [t]
+  (case (:type t)
+    :fixed (:size t)
+    :minmax (if (= :fixed (:max-type t)) (max (:min t) (:max t)) (:min t))
+    0))
+
+(defn- fr-weight
+  "The fr weight this track contributes to fr-space distribution, or nil if
+   it doesn't participate at all: a plain :fr track's own weight; a
+   :minmax track's `max` count when its max is `fr` (its `min` floor is
+   already reserved via fixed-contribution — see track-sizes for how the
+   two combine); nil for :fixed tracks and for a :minmax track whose max is
+   a fixed px length (fully resolved by fixed-contribution alone)."
+  [t]
+  (case (:type t)
+    :fr (:size t)
+    :minmax (when (= :fr (:max-type t)) (:max t))
+    nil))
+
 (defn- track-sizes
   "Resolves parsed tracks (see parse-track-list) to concrete pixel sizes.
    `definite-total` is the space available along this axis to distribute fr
    tracks against: always the container's content-width for columns; for
    rows it is the container's explicit :height if given, else nil. When nil,
-   fr tracks resolve to 0px here and layout-grid falls back to auto/content
-   sizing for that row instead (mirroring flexbox's own auto cross-axis
-   convention elsewhere in this file) — there is no definite total to share
-   proportionally when the grid container's height is itself content-driven."
+   fr tracks (and the fr-space portion of a :minmax fr-max track) resolve
+   to 0px extra here and layout-grid falls back to auto/content sizing for
+   that row instead (mirroring flexbox's own auto cross-axis convention
+   elsewhere in this file) — there is no definite total to share
+   proportionally when the grid container's height is itself content-driven
+   (a :minmax fr-max track still gets its `min` floor even then, since that
+   floor never depended on fr-space).
+
+   Every track resolves one of three ways (see fixed-contribution/
+   fr-weight above for the exact per-type rules):
+     - :fixed -- always its own px size, no fr participation.
+     - :fr -- its proportional share of `remaining` (distribute-fr).
+     - :minmax -- a fixed px max resolves like a :fixed track at
+       max(min,max); an `fr` max reserves `min` px up front (subtracted
+       from `remaining` alongside every other track's fixed contribution)
+       and then ALSO gets a proportional fr-space share of whatever is left
+       over once every reservation is subtracted — so its final size is
+       `min` PLUS that share, never less than `min`."
   [tracks gap definite-total]
   (let [n (count tracks)
         gap-total (* gap (max 0 (dec n)))
-        fixed-total (reduce + 0 (keep #(when (= :fixed (:type %)) (:size %)) tracks))
+        fixed-total (reduce + 0 (mapv fixed-contribution tracks))
         remaining (when definite-total (max 0 (- definite-total fixed-total gap-total)))
-        fr-sizes (if remaining
-                   (distribute-fr remaining (mapv :size (filter #(= :fr (:type %)) tracks)))
-                   [])]
+        fr-weights (keep fr-weight tracks)
+        fr-sizes (if remaining (distribute-fr remaining fr-weights) [])]
     (loop [ts tracks frs fr-sizes out []]
       (if (empty? ts)
         out
         (let [t (first ts)]
-          (if (= :fixed (:type t))
-            (recur (rest ts) frs (conj out (long (:size t))))
-            (recur (rest ts) (rest frs) (conj out (long (or (first frs) 0))))))))))
+          (if (some? (fr-weight t))
+            (recur (rest ts) (rest frs)
+                   (conj out (long (+ (if (= :minmax (:type t)) (:min t) 0) (or (first frs) 0)))))
+            (recur (rest ts) frs (conj out (long (fixed-contribution t))))))))))
 
 ;; ---- ::before / ::after generated content ----
 ;;
@@ -520,7 +713,8 @@
 
 (defn- layout-grid
   "display:grid subset: explicit `grid-template-columns`/`grid-template-rows`
-   track lists (fixed px + fr — see parse-track-list) with auto-placement in
+   track lists (fixed px + fr, plus `repeat()`/`minmax()` composing over
+   them — see parse-track-list) with auto-placement in
    DOM order, row-major (fills a row left-to-right before wrapping to the
    next row). `gap` — the same style key flex already reuses — spaces both
    rows and columns.
@@ -554,9 +748,12 @@
    container is placed as an ordinary grid item, the same limitation flex
    already has.
 
-   Explicitly out of scope: `auto`/`minmax()`/`repeat()`/percentage tracks,
-   explicit grid-column/grid-row placement, grid-template-areas, dense
-   packing."
+   `repeat(<integer>, <track>)` and `minmax(<px>, <px-or-1fr>)` ARE
+   supported and compose (e.g. `repeat(3, minmax(80px, 1fr))`) — see
+   parse-track-list/parse-track-token/track-sizes. Explicitly out of scope:
+   `auto` tracks, percentage tracks, `repeat(auto-fill|auto-fit, ...)`
+   (real content-based auto-sizing this engine doesn't do), explicit
+   grid-column/grid-row placement, grid-template-areas, dense packing."
   [theme x y avail-width opacity inherited st node in-flow]
   (let [w (resolve-width st avail-width)
         inset (content-inset st)
