@@ -170,3 +170,78 @@
         rules (css/parse-rules "p { --size: 12px; font-size: var(--size) }")
         doc (css/apply-cascade doc rules)]
     (is (= 12 (get-in doc [:nodes p :attrs :style/font-size])))))
+
+;; ---- @layer cascade layers ----
+
+(deftest parses-layer-blocks-and-tags-nested-rules-with-their-name
+  (let [rules (css/parse-rules
+               "p { color: black }
+                @layer base { p { color: blue } .a { color: green } }")]
+    (is (= 3 (count rules)))
+    (is (nil? (:rule/layer (first rules))))
+    (is (= "base" (:rule/layer (second rules))))
+    (is (= "base" (:rule/layer (nth rules 2))))
+    (is (= [0 1 2] (mapv :rule/order rules))
+        "rule order stays stable across plain and @layer-wrapped rules")))
+
+(deftest resolves-layer-names-to-priority-indices-honoring-encounter-order
+  (let [rules (css/parse-rules
+               "@layer base { p { color: red } }
+                @layer theme { p { color: blue } }
+                p { color: green }")]
+    (is (= 0 (:rule/layer-priority (first rules)))
+        "base is encountered first -> lowest priority")
+    (is (= 1 (:rule/layer-priority (second rules)))
+        "theme is encountered second -> higher priority than base")
+    (is (= 2 (:rule/layer-priority (nth rules 2)))
+        "the unlayered rule resolves one past the highest named layer's index")))
+
+(deftest later-declared-layer-beats-earlier-layer-regardless-of-specificity
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        rules (css/parse-rules
+               "@layer base { #hero { color: red } }
+                @layer override { div { color: blue } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes div :attrs :style/color]))
+        "the later-declared layer (override) wins even though base's #hero
+         selector has higher specificity -- the defining behavior of
+         cascade layers, which specificity alone would get wrong")))
+
+(deftest unlayered-rule-beats-every-layered-rule-regardless-of-specificity
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        rules (css/parse-rules
+               "@layer base { #hero { color: red } }
+                @layer override { #hero { color: blue } }
+                div { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes div :attrs :style/color]))
+        "an unlayered declaration wins over every layered declaration, no
+         matter the layer or specificity of the layered rules")))
+
+(deftest bare-layer-order-statement-fixes-priority-even-when-blocks-appear-later-in-a-different-order
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules
+               "@layer a, b;
+                @layer b { div { color: blue } }
+                @layer a { div { color: red } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes div :attrs :style/color]))
+        "the bare `@layer a, b;` statement declares b after a, so b's rule
+         wins even though b's own block appears before a's block later in
+         the stylesheet")))
+
+(deftest specificity-still-decides-ties-within-a-single-layer
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        rules (css/parse-rules
+               "@layer base { div { color: red } #hero { color: blue } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes div :attrs :style/color]))
+        "within the same layer, the higher-specificity #hero selector still
+         wins -- ordinary cascade resolution is unchanged by cascade layers")))
