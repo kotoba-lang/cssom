@@ -79,9 +79,14 @@
      `apply-cascade` supports the one honestly-scoped case that does NOT
      need real layout at all: a container whose OWN `width` (and, if
      present, `min-width`/`max-width`) is a literal, already-cascade-resolved
-     NUMBER -- i.e. the author wrote a plain `<n>`/`<n>px` value, not `auto`,
-     a percentage, `fit-content`, `calc(...)`, or anything flex/grid/
-     content-driven -- via one extra, bounded (never iterated/looped)
+     NUMBER -- i.e. the author wrote a plain `<n>`/`<n>px` value (or a
+     CONSTANT `calc(...)` this namespace's own numeric coercion already
+     collapses to one, e.g. `calc(400px - 100px)` -- see `parse-style-value`
+     -- since by the time this pass runs, that's already indistinguishable
+     from a literal number), not `auto`, a percentage, a non-constant
+     `calc(...)` (one mixing in `%`/`em`/any other relative unit), `fit-
+     content`, or anything flex/grid/content-driven -- via one extra,
+     bounded (never iterated/looped)
      cascade pass that resolves every container's own width BEFORE any
      `@container` rule is allowed to match anything (see apply-cascade's
      docstring for exactly how the two passes fit together, and
@@ -166,18 +171,284 @@
      `@layer { ... }` blocks treated as unlayered, `@media` nested inside
      `@layer` loses its layer tag); see `resolve-style-for` for the
      `!important` reversal mechanics and a known gap in inline-style
-     `!important` support."
+     `!important` support.
+   - `calc(...)` arithmetic expressions -- but only the genuinely bounded,
+     ALWAYS layout-independent subset: an expression whose ENTIRE contents
+     are constant numeric literals (plain numbers and/or `px` lengths --
+     NOT `%`/`em`/`vh`/`vw`/any other unit) combined with `+`/`-`/`*`/`/`
+     and parens, e.g. `calc(100px + 20px)` -> `120`, `calc(2 * 8px)` ->
+     `16`, `calc(100px / 4)` -> `25`. Real CSS `calc()` can mix absolute
+     (`px`) with relative (`%`/`em`/viewport units/...) lengths that only
+     resolve at LAYOUT time against a container's actual size -- the same
+     'needs layout, which this cascade-then-layout pipeline doesn't have at
+     cascade time' gap `@container` queries hit (see
+     `resolvable-container-width`) -- so that general case is deliberately
+     out of scope, not approximated. See `parse-calc`/`parse-calc-ast`/
+     `eval-calc-node` for the tokenize -> parse (correct `*`/`/`-before-
+     `+`/`-` precedence, left-to-right same-precedence associativity, so
+     `calc(10px - 5px - 2px)` -> `3`, not `10 - (5 - 2)`) -> evaluate
+     pipeline, and real CSS's own arithmetic-validity rules this honors:
+     `+`/`-` require both sides to be the SAME kind (both plain numbers or
+     both px lengths); `*` requires AT LEAST ONE side to be a plain
+     unitless number (you can't multiply two lengths together); `/`'s
+     divisor must be a plain unitless number (and non-zero). Wired into
+     `parse-style-value` -- the general numeric/px coercion every
+     declaration already goes through -- so every property gets it for
+     free (`width`, `padding`, `margin`, `gap`, `top`/`left`, etc.); a
+     `calc(...)` outside this subset (a percentage/other relative unit
+     anywhere inside, an arithmetic-type violation, or a malformed
+     expression) degrades to the SAME 'unusable, falls through as a raw
+     unparsed string' treatment `calc()` already had before this subset was
+     supported, never a guessed number. `cssom.layout` has its own SEPARATE,
+     small mirror of this same constant-subset resolver for grid track
+     lists (`grid-template-columns`/`grid-template-rows` are multi-token
+     strings `parse-style-value` never touches at all -- see
+     `parse-track-list`'s docstring), since that file already owns its own
+     numeric coercion independent of this namespace (see its ns docstring)."
   (:require [clojure.string :as str]
             [kotoba.wasm.dom :as dom]))
 
+;; ---- calc() -- constant, percentage-free arithmetic only ----
+;;
+;; See the namespace docstring's `calc(...)` paragraph for the scope this
+;; honors and why (bounded to plain numbers/px lengths, real CSS's own
+;; arithmetic-validity rules, wired into parse-style-value below). This is a
+;; small, real tokenize -> parse (recursive descent, precedence climbing) ->
+;; evaluate pipeline, not a regex hack -- calc() genuinely nests
+;; (parentheses, `*`/`/` binding tighter than `+`/`-`), and getting
+;; precedence/associativity/negative-number handling right needs real
+;; parsing.
+
+(def ^:private calc-pattern
+  "Matches a whole-value `calc(...)` declaration -- the ENTIRE value is one
+   calc() call, case-insensitively (real CSS's `calc` keyword is
+   case-insensitive), with the parenthesized contents captured (group 1)
+   for `parse-calc-ast`. A value with anything besides the call itself
+   (leading/trailing text, `calc(1px) calc(2px)`, math mixed with a
+   keyword) does not match -- multiple/composed calc() terms in one
+   declaration are out of scope, matching parse-style-value's existing
+   'ENTIRE-value' coercion approach (a bare number or px length also only
+   ever coerces when it is the WHOLE value). The greedy `(.*)` capture
+   between the outer `calc(` and the final `)` is safe for NESTED parens
+   (`calc((10px + 6px) * 2)`) precisely because `re-matches` anchors both
+   ends: greedy matching grabs everything up to the LAST `)` in the string,
+   which for a well-formed whole-value calc() is exactly the call's own
+   closing paren."
+  #"(?is)calc\((.*)\)")
+
+(defn- calc-number-at
+  "Attempts to match a numeric literal -- optionally decimal, optionally
+   with an immediately-following `px` unit (no space allowed between the
+   number and its unit, matching real CSS) -- starting at index `idx` of
+   calc() tokenizer input `s`. Returns `[token next-idx]`, or nil if `idx`
+   isn't the start of one -- signalling to `tokenize-calc-expr` that
+   whatever is at `idx` isn't part of this engine's constant-calc()
+   subset at all (a `%`/`em`/any other unit, or stray text), the same
+   'stop, don't guess' contract every other token-matching helper in this
+   namespace already uses (e.g. `content-attr-pattern`)."
+  [s idx]
+  (when-let [num-str (re-find #"^\d+(?:\.\d+)?" (subs s idx))]
+    (let [after (+ idx (count num-str))
+          px? (and (<= (+ after 2) (count s)) (= "px" (subs s after (+ after 2))))
+          end (if px? (+ after 2) after)
+          value #?(:clj (Double/parseDouble num-str) :cljs (js/parseFloat num-str))]
+      [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value value} end])))
+
+(defn- tokenize-calc-expr
+  "Tokenizes the inside of a `calc(...)` call (see calc-pattern) into a flat
+   token vector -- bare operator/paren tokens (`:calc/type` one of `:plus`/
+   `:minus`/`:star`/`:slash`/`:lparen`/`:rparen`) plus number-or-px-length
+   operand tokens (`calc-number-at`) -- for `parse-calc-level`, skipping
+   whitespace. Returns nil if any character isn't part of one of those
+   recognized tokens (e.g. a `%`/`em`/other unit anywhere in the
+   expression, or any other unrecognized character) -- signalling 'not this
+   engine's constant-calc() subset' all the way up to `parse-calc`, which
+   then degrades the whole calc() exactly like any other unparseable value
+   in this namespace degrades (see parse-style-value)."
+  [s]
+  (let [n (count s)]
+    (loop [idx 0 tokens []]
+      (cond
+        (= idx n) tokens
+        (re-matches #"\s" (str (nth s idx))) (recur (inc idx) tokens)
+        :else
+        (case (nth s idx)
+          \+ (recur (inc idx) (conj tokens {:calc/type :plus}))
+          \- (recur (inc idx) (conj tokens {:calc/type :minus}))
+          \* (recur (inc idx) (conj tokens {:calc/type :star}))
+          \/ (recur (inc idx) (conj tokens {:calc/type :slash}))
+          \( (recur (inc idx) (conj tokens {:calc/type :lparen}))
+          \) (recur (inc idx) (conj tokens {:calc/type :rparen}))
+          (if-let [[operand next-idx] (calc-number-at s idx)]
+            (recur next-idx (conj tokens operand))
+            nil))))))
+
+(defn- parse-calc-level
+  "Parses a calc() token vector (see tokenize-calc-expr) into an AST node
+   (`:calc/op` one of `:num`/`:neg`/`:add`/`:sub`/`:mul`/`:div`, see
+   eval-calc-node) via PRECEDENCE CLIMBING, `level` 0 = lowest precedence
+   (`+`/`-`), 1 = `*`/`/`, 2 = unary `+`/`-` and a primary (a number/px
+   operand, or a parenthesized sub-expression which always restarts at
+   level 0). Returns `[node remaining-tokens]`, or nil on any parse failure
+   (an operator with no right-hand operand, an unclosed paren, an empty
+   expression) -- `parse-calc-ast` additionally requires `remaining-tokens`
+   to be exhausted, catching a malformed trailing fragment
+   (`calc(1px 2px)`, `calc(1px))`) that this function alone would otherwise
+   silently ignore.
+
+   Written as ONE self-recursive function (recursing into itself with a
+   different `level`, including for a parenthesized sub-expression
+   restarting at level 0) rather than the classic four mutually-recursive
+   `expr`/`term`/`factor`/`primary` grammar functions: this namespace
+   deliberately avoids declare-based forward references (see
+   `parse-counter-amount`'s docstring for that precedent), and parens in a
+   real grammar want exactly that kind of forward-referencing mutual
+   recursion (a primary needs to call back into the top-level expression
+   parser) -- folding the whole grammar into one precedence-parameterized
+   function sidesteps the need for `declare` entirely while still encoding
+   correct `*`/`/`-before-`+`/`-` binding and left-to-right same-level
+   associativity (each level's own `loop` folds left, so
+   `calc(10px - 5px - 2px)` parses as `(10px - 5px) - 2px`, not
+   `10px - (5px - 2px)`)."
+  [tokens level]
+  (if (= level 2)
+    (when (seq tokens)
+      (let [t (first tokens)]
+        (case (:calc/type t)
+          :minus (when-let [[node toks] (parse-calc-level (rest tokens) 2)]
+                   [{:calc/op :neg :calc/arg node} toks])
+          :plus (parse-calc-level (rest tokens) 2)
+          :operand [{:calc/op :num :calc/unit (:calc/unit t) :calc/value (:calc/value t)}
+                    (rest tokens)]
+          :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
+                    (when (and (seq toks) (= :rparen (:calc/type (first toks))))
+                      [node (rest toks)]))
+          nil)))
+    (let [ops (if (= level 0) #{:plus :minus} #{:star :slash})
+          op->ast (fn [op] (case op :plus :add :minus :sub :star :mul :slash :div))]
+      (when-let [[left toks] (parse-calc-level tokens (inc level))]
+        (loop [left left toks toks]
+          (if (and (seq toks) (contains? ops (:calc/type (first toks))))
+            (let [op (:calc/type (first toks))]
+              (if-let [[right toks2] (parse-calc-level (rest toks) (inc level))]
+                (recur {:calc/op (op->ast op) :calc/left left :calc/right right} toks2)
+                nil))
+            [left toks]))))))
+
+(defn- parse-calc-ast
+  "Tokenizes and parses a `calc(...)` call's inner text (see
+   tokenize-calc-expr/parse-calc-level) into a full AST, or nil if it
+   isn't a well-formed expression in this engine's constant-calc() subset
+   (tokenization failed, parsing failed, or leftover unconsumed tokens
+   remained -- a malformed trailing fragment)."
+  [expr-text]
+  (when-let [tokens (tokenize-calc-expr expr-text)]
+    (when-let [[node toks] (parse-calc-level tokens 0)]
+      (when (empty? toks) node))))
+
+(defn- eval-calc-node
+  "Evaluates a parsed calc() AST node (see parse-calc-ast) into a
+   `[value unit]` pair, `unit` one of `:number` (a plain, dimensionless
+   number) or `:px` (a resolved pixel length) -- or nil if this node (or
+   any descendant) violates real CSS calc()'s own arithmetic-validity
+   rules for this engine's px-or-plain-number subset:
+     - `:add`/`:sub` (`+`/`-`) require BOTH operands to be the SAME unit
+       (both `:number` or both `:px`) -- real CSS's own same-type addition
+       rule -- and the result keeps that unit.
+     - `:mul` (`*`) requires AT LEAST ONE operand to be a plain `:number`
+       (real CSS: 'at most one operand of a product can carry a unit',
+       i.e. you can't multiply two lengths together) -- the result's unit
+       is whichever operand ISN'T `:number` (or `:number` if both are).
+     - `:div` (`/`) requires the RIGHT operand (the divisor) to be a plain
+       `:number`, and non-zero -- the result's unit is the left operand's
+       (dividend's) own unit. Division by the number zero is rejected
+       (nil) rather than producing Infinity/NaN, matching real CSS
+       (division by zero is invalid calc())."
+  [node]
+  (case (:calc/op node)
+    :num [(:calc/value node) (:calc/unit node)]
+
+    :neg (when-let [[v u] (eval-calc-node (:calc/arg node))]
+           [(- v) u])
+
+    :add (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (= lu ru) [(+ lv rv) lu])))
+
+    :sub (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (= lu ru) [(- lv rv) lu])))
+
+    :mul (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (cond
+               (= lu :number) [(* lv rv) ru]
+               (= ru :number) [(* lv rv) lu]
+               :else nil)))
+
+    :div (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (and (= ru :number) (not (zero? rv)))
+               [(/ lv rv) lu])))
+
+    nil))
+
+(defn- calc-result->number
+  "Normalizes an evaluated calc() result (see eval-calc-node) to a plain
+   number in this namespace's own convention: an exact integer (matching
+   parse-style-value's existing Long/parseLong coercion for a literal
+   `<n>`/`<n>px` value) when the arithmetic came out whole -- e.g.
+   `calc(100px / 4)` -> `25`, not `25.0` -- and a double (not rounded, so no
+   precision is thrown away) for a genuinely fractional result, e.g.
+   `calc(100px / 3)`."
+  [value]
+  (let [truncated (long value)]
+    (if (== value truncated) truncated value)))
+
+(defn- parse-calc
+  "Parses a whole-value CSS `calc(...)` expression's already-extracted
+   inner text (see calc-pattern) into the single plain number it resolves
+   to, for the bounded, ALWAYS layout-independent subset this engine
+   supports -- see the namespace docstring's `calc(...)` paragraph for the
+   full scope and rationale. Returns nil for anything outside that subset
+   (a percentage/other non-px unit anywhere inside, an arithmetic-type
+   violation -- e.g. `calc(1px * 1px)`, `calc(1px / 1px)`, `calc(1px + 1)`
+   -- or a malformed expression), so callers (`parse-style-value`) treat it
+   exactly like every other unparseable value in this namespace: the
+   declaration falls through/degrades rather than guessing a number."
+  [expr-text]
+  (when-let [node (parse-calc-ast expr-text)]
+    (when-let [[value _unit] (eval-calc-node node)]
+      (calc-result->number value))))
+
 (defn- parse-style-value
+  "Parses a single declaration's raw value string into a number when it is
+   ENTIRELY a bare integer (`-?\\d+`) or a single `<n>px` length (`-?\\d+px`)
+   -- both coerced via a plain Long/parseInt, this namespace's simple
+   numeric-literal subset used everywhere a CSS property's value gets
+   generic numeric coercion (`parse-property-value`) -- or when it is
+   ENTIRELY a whole-value `calc(...)` call (see calc-pattern) whose inner
+   arithmetic is this engine's bounded constant-calc() subset (plain
+   numbers/px lengths, `+`/`-`/`*`/`/`/parens, no percentage or other
+   relative unit -- see the namespace docstring's `calc(...)` paragraph and
+   `parse-calc`), in which case it resolves to that single plain number
+   too (e.g. `calc(100px + 20px)` -> `120`). Anything else -- `auto`, a
+   percentage, `fit-content`, a `calc(...)` outside the constant subset
+   (mixing in `%`/`em`/other relative units, or otherwise malformed/
+   arithmetically invalid), any other keyword/expression -- is returned
+   completely unchanged as a trimmed raw string rather than guessing,
+   exactly this namespace's existing 'degrade, don't crash' posture for
+   every other unparseable value."
   [v]
   (let [v (str/trim (str v))]
     (cond
       (re-matches #"-?\d+" v) #?(:clj (Long/parseLong v) :cljs (js/parseInt v 10))
       (re-matches #"-?\d+px" v) #?(:clj (Long/parseLong (subs v 0 (- (count v) 2)))
                                    :cljs (js/parseInt v 10))
-      :else v)))
+      :else
+      (if-let [[_ inner] (re-matches calc-pattern v)]
+        (or (parse-calc inner) v)
+        v))))
 
 (def ^:private content-literal-pattern
   "Matches a single quoted string literal, double- or single-quoted --
@@ -1774,8 +2045,11 @@
    ONLY when every one of :width/:min-width/:max-width that IS present
    already resolved (via this namespace's own parse-style-value, during the
    first cascade pass) to a plain number, i.e. the CSS author wrote a
-   literal `<n>`/`<n>px` value for it, not `auto`, a percentage,
-   `fit-content`, `calc(...)`, or any other keyword/expression this
+   literal `<n>`/`<n>px` value for it -- or a CONSTANT `calc(...)`
+   `parse-style-value` already collapsed to one, e.g. `width: calc(400px -
+   100px)` (see its own docstring) -- not `auto`, a percentage, a
+   non-constant `calc(...)` (mixing in `%`/`em`/any other relative unit),
+   `fit-content`, or any other keyword/expression this
    engine's numeric coercion doesn't collapse to a number. A container with
    no numeric :width at all -- the common case, since most containers size
    from their own content/flex/grid context, which this engine cannot know

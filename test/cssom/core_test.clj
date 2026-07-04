@@ -1191,3 +1191,91 @@
     (is (empty? (:selector/nth-args first-child-sel))
         "an argument-less structural pseudo-class has no :selector/nth-args
          entry at all")))
+
+;; ---- calc() -- constant, percentage-free arithmetic ----
+;;
+;; parse-style-value is private, so every case below goes through the real
+;; parse-rules -> apply-cascade pipeline (same convention every other test
+;; in this file already uses), reading the resulting cascade-resolved
+;; :style/* attr straight off the real node.
+
+(defn- calc-probe
+  "Applies a single-property rule (`.box { <prop>: <value> }`) to a fresh
+   real <div class=\"box\"> through the real parse-rules -> apply-cascade
+   pipeline, returning that property's cascade-resolved :style/* value."
+  [prop value]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules (str ".box { " prop ": " value " }"))
+        doc (css/apply-cascade doc rules)]
+    (get-in doc [:nodes div :attrs (keyword "style" prop)])))
+
+(deftest calc-constant-expression-resolves-to-a-plain-number-through-the-cascade
+  (is (= 120 (calc-probe "width" "calc(100px + 20px)"))
+      "two px lengths added together")
+  (is (= 16 (calc-probe "padding" "calc(2 * 8px)"))
+      "a plain number times a px length")
+  (is (= 25 (calc-probe "gap" "calc(100px / 4)"))
+      "a px length divided by a plain number")
+  (is (= 120 (calc-probe "width" "calc( 100px + 20px )"))
+      "whitespace immediately inside the parens is insignificant"))
+
+(deftest calc-multiplication-and-division-bind-tighter-than-addition-and-subtraction
+  (is (= 116 (calc-probe "width" "calc(100px + 2 * 8px)"))
+      "* must bind before + -- 100px + (2 * 8px) = 116, not (100 + 2) * 8 = 816"))
+
+(deftest calc-same-precedence-operators-associate-left-to-right
+  (is (= 3 (calc-probe "margin" "calc(10px - 5px - 2px)"))
+      "(10 - 5) - 2 = 3, NOT the right-associative 10 - (5 - 2) = 7"))
+
+(deftest calc-nested-parens-override-default-precedence
+  (is (= 32 (calc-probe "width" "calc((10px + 6px) * 2)"))))
+
+(deftest calc-supports-negative-numbers
+  (is (= 15 (calc-probe "width" "calc(-5px + 20px)"))
+      "a leading unary minus on the first operand")
+  (is (= 5 (calc-probe "padding" "calc(10px + -5px)"))
+      "a unary minus on a later operand, right after a binary +"))
+
+(deftest calc-keyword-is-case-insensitive-like-real-css
+  (is (= 120 (calc-probe "width" "CALC(100px + 20px)"))))
+
+(deftest calc-division-by-zero-does-not-resolve
+  (is (= "calc(100px / 0)" (calc-probe "width" "calc(100px / 0)"))
+      "real CSS: division by the number zero is invalid calc(), not
+       Infinity/NaN -- falls through as the same raw unparsed string"))
+
+(deftest calc-fractional-result-is-not-rounded-or-truncated
+  (is (= (/ 100.0 3) (calc-probe "width" "calc(100px / 3)"))
+      "a genuinely fractional result keeps its precision as a double
+       rather than being silently rounded/floored to an integer"))
+
+(deftest calc-with-a-percentage-stays-unresolved-same-as-before-calc-support-existed
+  (is (= "calc(100% - 20px)" (calc-probe "width" "calc(100% - 20px)"))
+      "a percentage inside calc() needs real layout against the
+       container's own actual size -- out of this engine's bounded
+       constant-calc() subset -- so the whole declaration falls through as
+       the same raw, unparsed string calc() already fell through as before
+       this subset was supported, never a guessed number"))
+
+(deftest calc-arithmetic-type-violations-stay-unresolved
+  (is (= "calc(100px * 20px)" (calc-probe "width" "calc(100px * 20px)"))
+      "real CSS forbids multiplying two lengths together -- at least one
+       side of * must be a plain unitless number")
+  (is (= "calc(100px / 4px)" (calc-probe "height" "calc(100px / 4px)"))
+      "real CSS requires a division's divisor to be a plain unitless
+       number, never a length")
+  (is (= "calc(100px + 5)" (calc-probe "margin" "calc(100px + 5)"))
+      "+ requires both sides to be the SAME kind -- a length and a bare
+       number don't add in real CSS either"))
+
+(deftest malformed-calc-does-not-crash-and-stays-unresolved
+  (is (= "calc(100px +)" (calc-probe "width" "calc(100px +)"))
+      "a dangling operator with no right-hand operand")
+  (is (= "calc(100px 20px)" (calc-probe "height" "calc(100px 20px)"))
+      "two operands with no operator between them")
+  (is (= "calc(100px))" (calc-probe "padding" "calc(100px))"))
+      "an unbalanced extra closing paren")
+  (is (= "calc()" (calc-probe "margin" "calc()"))
+      "empty parens"))
