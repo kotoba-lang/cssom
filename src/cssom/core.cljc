@@ -23,7 +23,16 @@
      `default-viewport-width`).
    - CSS custom properties (`--foo: value`) and `var(--foo[, fallback])`
      resolution, inherited top-down the same way `apply-cascade` walks the
-     document from its root."
+     document from its root.
+   - `@layer <name> { ... }` cascade layers, plus the bare
+     `@layer name1, name2;` ordering statement. For normal (non-`!important`)
+     declarations, a later-declared layer beats an earlier one, and any
+     unlayered declaration beats every layered one regardless of specificity
+     -- layer membership is checked before specificity, not instead of it.
+     See `parse-rules` for exactly how layer name -> priority resolution
+     works, and its docstring for the known simplifications (no `!important`
+     layer-order reversal, anonymous `@layer { ... }` blocks treated as
+     unlayered, `@media` nested inside `@layer` loses its layer tag)."
   (:require [clojure.string :as str]
             [kotoba.wasm.dom :as dom]))
 
@@ -265,6 +274,98 @@
                                        :segment/condition condition
                                        :segment/text (subs s (inc brace-open) brace-close)}))))))))))))
 
+(defn- split-layer-segments
+  "Splits raw CSS text into an ordered sequence of
+   {:segment/type :plain :segment/text \"...\"} and
+   {:segment/type :layer :segment/name \"foo\" :segment/text \"...\"}
+   segments, preserving source order -- mirrors `split-media-segments`
+   exactly, brace-depth-aware via the same `find-matching-brace`.
+
+   Also recognizes the bare `@layer name1, name2;` ordering statement (no
+   braces -- CSS's way of fixing layer priority up front, before any of
+   those layers' rules are actually written). That statement carries no
+   rules of its own, so it is simply dropped from the segment stream here;
+   its declared order is picked up separately by `layer-declaration-order`,
+   which scans the same text independently."
+  [css]
+  (let [s (str (or css ""))
+        n (count s)]
+    (loop [idx 0 segments []]
+      (let [at-idx (str/index-of s "@layer" idx)]
+        (if (nil? at-idx)
+          (cond-> segments
+            (< idx n) (conj {:segment/type :plain :segment/text (subs s idx)}))
+          (let [brace-idx (str/index-of s "{" at-idx)
+                semi-idx (str/index-of s ";" at-idx)
+                bare-statement? (and semi-idx (or (nil? brace-idx) (< semi-idx brace-idx)))]
+            (cond
+              bare-statement?
+              (recur (inc semi-idx)
+                     (cond-> segments
+                       (> at-idx idx) (conj {:segment/type :plain
+                                             :segment/text (subs s idx at-idx)})))
+
+              (nil? brace-idx)
+              (conj segments {:segment/type :plain :segment/text (subs s idx)})
+
+              :else
+              (let [layer-name (str/trim (subs s (+ at-idx (count "@layer")) brace-idx))
+                    brace-close (find-matching-brace s brace-idx)]
+                (if (nil? brace-close)
+                  (conj segments {:segment/type :plain :segment/text (subs s idx)})
+                  (recur (inc brace-close)
+                         (cond-> segments
+                           (> at-idx idx) (conj {:segment/type :plain
+                                                 :segment/text (subs s idx at-idx)})
+                           true (conj {:segment/type :layer
+                                       :segment/name layer-name
+                                       :segment/text (subs s (inc brace-idx) brace-close)}))))))))))))
+
+(defn- layer-declaration-order
+  "Scans `css` left-to-right for every point a layer name is *first named* --
+   either a bare `@layer a, b;` ordering statement's comma list, or a
+   `@layer name { ... }` block's opening -- and returns those names in
+   source order (not yet deduped; callers dedup keeping the first
+   occurrence). Matches real CSS: a layer's priority is fixed at the point
+   it is first named, whichever form that takes, so a bare ordering
+   statement earlier in the source wins over a later block's position."
+  [css]
+  (let [s (str (or css ""))
+        n (count s)]
+    (loop [idx 0 names []]
+      (let [at-idx (str/index-of s "@layer" idx)]
+        (if (nil? at-idx)
+          names
+          (let [brace-idx (str/index-of s "{" at-idx)
+                semi-idx (str/index-of s ";" at-idx)
+                bare-statement? (and semi-idx (or (nil? brace-idx) (< semi-idx brace-idx)))]
+            (cond
+              bare-statement?
+              (let [declared (->> (str/split (subs s (+ at-idx (count "@layer")) semi-idx) #",")
+                                   (map str/trim)
+                                   (remove str/blank?))]
+                (recur (inc semi-idx) (into names declared)))
+
+              (nil? brace-idx)
+              names
+
+              :else
+              (let [layer-name (str/trim (subs s (+ at-idx (count "@layer")) brace-idx))
+                    brace-close (find-matching-brace s brace-idx)]
+                (if (nil? brace-close)
+                  names
+                  (recur (inc brace-close)
+                         (cond-> names
+                           (not (str/blank? layer-name)) (conj layer-name))))))))))))
+
+(defn- layer-priority-order
+  "Distinct layer names in declared/encountered priority order (see
+   `layer-declaration-order`): index 0 is the lowest priority (loses ties),
+   higher indices win -- a later-declared/encountered layer beats an
+   earlier one, matching real CSS cascade-layer semantics."
+  [css]
+  (vec (distinct (layer-declaration-order css))))
+
 (defn- parse-rules-raw
   "Parses `selector { decls }` pairs with no @media awareness. Returns rule
    maps without :rule/order or :rule/media (callers attach those)."
@@ -279,14 +380,53 @@
   "Parses raw CSS text into rule maps. Rules nested inside an `@media (...)`
    block carry that condition (raw text, e.g. \"(min-width: 600px)\") under
    :rule/media; top-level rules have :rule/media nil (always applies).
-   `apply-cascade` decides which :rule/media conditions currently hold."
+   `apply-cascade` decides which :rule/media conditions currently hold.
+
+   Rules nested inside an `@layer <name> { ... }` block carry that name
+   under :rule/layer; top-level (non-`@layer`) rules have :rule/layer nil,
+   meaning \"unlayered\". Each rule also carries :rule/layer-priority, an
+   integer resolved from the whole stylesheet's declared/encountered layer
+   order (see `layer-priority-order`): a bare `@layer a, b;` ordering
+   statement fixes priority up front if present, otherwise a layer's
+   priority is the order it is first named, by that statement or its first
+   `@layer name { ... }` block, whichever comes first in the source.
+   Unlayered rules always resolve to one past the highest named-layer index
+   (real CSS: unlayered author styles beat every layered one). Downstream,
+   `resolve-style-for` sorts on :rule/layer-priority, not the raw name.
+
+   Known simplifications:
+   - No `!important` layer-order reversal: real CSS inverts layer priority
+     for `!important` declarations (earlier layer wins); this engine keeps
+     the same later-wins order for `!important` as for normal declarations.
+   - Anonymous `@layer { ... }` blocks (no name) are treated as unlayered
+     rather than as their own distinct anonymous layer.
+   - `@media` nested inside `@layer` loses the outer layer tag on that
+     nested block's rules (they still get :rule/media correctly, just fall
+     back to :rule/layer nil); `@layer` nested inside `@media` is fully
+     supported."
   [css]
-  (->> (split-media-segments css)
-       (mapcat (fn [{:segment/keys [type text condition]}]
-                 (let [media (when (= type :media) condition)]
-                   (map #(assoc % :rule/media media) (parse-rules-raw text)))))
-       (map-indexed (fn [idx rule] (assoc rule :rule/order idx)))
-       vec))
+  (let [css (str (or css ""))
+        layer-order (layer-priority-order css)
+        layer-index (into {} (map-indexed (fn [idx name] [name idx]) layer-order))
+        unlayered-priority (count layer-order)
+        priority-for (fn [layer-name]
+                       (if (nil? layer-name)
+                         unlayered-priority
+                         (get layer-index layer-name unlayered-priority)))]
+    (->> (split-media-segments css)
+         (mapcat (fn [{:segment/keys [type text condition]}]
+                   (let [media (when (= type :media) condition)]
+                     (->> (split-layer-segments text)
+                          (mapcat (fn [layer-segment]
+                                    (let [layer-name (when (= :layer (:segment/type layer-segment))
+                                                        (:segment/name layer-segment))]
+                                      (map #(assoc %
+                                                   :rule/media media
+                                                   :rule/layer layer-name
+                                                   :rule/layer-priority (priority-for layer-name))
+                                           (parse-rules-raw (:segment/text layer-segment))))))))))
+         (map-indexed (fn [idx rule] (assoc rule :rule/order idx)))
+         vec)))
 
 (defn- parse-media-width
   [s]
@@ -700,9 +840,22 @@
   "Cascade-resolves the declarations that target `pseudo-element` (nil for
    the real element itself, :before/:after for its generated content) on
    `node`. Mirrors the pre-pseudo-element `computed-style` algorithm exactly
-   when `pseudo-element` is nil, so existing behavior is unchanged."
+   when `pseudo-element` is nil, so existing behavior is unchanged.
+
+   Cascade layers: each rule-based entry carries its :rule/layer-priority
+   (see `parse-rules`) as :layer, and the sort tuple below checks :layer
+   *before* :specificity -- so layer membership decides first, specificity
+   only breaks ties within the same layer, exactly like real CSS cascade
+   layers. Inline declarations have no layer concept in real CSS and always
+   win over any rule-based declaration of the same importance; that already
+   falls out of :inline? being compared before :layer in the tuple (once
+   :important? ties, a difference in :inline? decides the comparison and
+   :layer is never consulted), so the concrete :layer value given to inline
+   entries is inert for correctness -- it is set to tie with (rather than
+   lose to) the stylesheet's highest resolved layer priority, purely for
+   documentation."
   [document rules node pseudo-element]
-  (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order]} rules
+  (let [declarations (for [{:rule/keys [selectors declarations declaration-meta order layer-priority]} rules
                             selector selectors
                             :when (= pseudo-element (pseudo-element-of selector))
                             :when (if document
@@ -715,7 +868,9 @@
                            :important? (boolean important?)
                            :specificity (specificity selector)
                            :inline? false
+                           :layer (or layer-priority 0)
                            :order order}))
+        max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
         inline-declarations (when (nil? pseudo-element)
                                (map-indexed (fn [idx [property value]]
                                               {:property property
@@ -723,12 +878,13 @@
                                                :important? false
                                                :specificity [1 0 0]
                                                :inline? true
+                                               :layer max-layer-priority
                                                :order idx})
                                             (inline-style node)))]
     (reduce (fn [m {:keys [property value]}]
               (assoc m property value))
             {}
-            (sort-by (juxt :important? :inline? :specificity :order)
+            (sort-by (juxt :important? :inline? :layer :specificity :order)
                      (concat declarations inline-declarations)))))
 
 (defn computed-style
