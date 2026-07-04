@@ -95,7 +95,7 @@
                        (append-token (str/trim (subs s start idx)))
                        (conj ">")))
 
-            (and (Character/isWhitespace ch) (zero? bracket-depth))
+            (and (str/blank? (str ch)) (zero? bracket-depth))
             (recur (inc idx)
                    (inc idx)
                    bracket-depth
