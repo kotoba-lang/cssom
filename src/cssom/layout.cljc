@@ -59,10 +59,47 @@
 
 (defn- text-node? [node] (string? node))
 
-(defn- text-size [font-size line-height padding text]
-  (let [char-w (long (* 0.6 font-size))]
-    {:w (+ (* (count text) char-w) (* 2 padding))
-     :h (+ line-height (* 2 padding))}))
+(defn- text-lines
+  "Word-wraps text into lines that each fit within max-w pixels, using the
+   char-w-per-character heuristic already used elsewhere in this file for
+   text metrics (no real glyph shaping).
+
+   If the whole string already fits in max-w it is returned completely
+   unmodified as the single line -- this keeps today's single-line
+   behavior byte-for-byte identical (including any incidental whitespace)
+   for every text run that doesn't actually need to wrap.
+
+   When wrapping is needed, the text is split on whitespace runs into
+   words and greedily packed: as many words as fit are joined with a
+   single space, then a new line starts. A word that alone is wider than
+   max-w is placed on its own (overflowing) line rather than being split
+   mid-word or dropped -- this file has no glyph-level shaping to make a
+   principled break point inside a word, so an overflowing single-word
+   line is the same 'let it overflow the box' behavior already used
+   elsewhere in the box model (e.g. min/max-width clamps without
+   hyphenation)."
+  [char-w max-w text]
+  (let [text (str text)]
+    (if (<= (* (count text) char-w) (max 0 max-w))
+      [text]
+      (let [words (remove str/blank? (str/split text #"\s+"))]
+        (if (empty? words)
+          [text]
+          (let [max-chars (max 1 (long (quot max-w (max 1 char-w))))]
+            (loop [words words cur nil lines []]
+              (if (empty? words)
+                (conj lines cur)
+                (let [word (first words)
+                      more (rest words)]
+                  (cond
+                    (nil? cur)
+                    (recur more word lines)
+
+                    (<= (+ (count cur) 1 (count word)) max-chars)
+                    (recur more (str cur " " word) lines)
+
+                    :else
+                    (recur words nil (conj lines cur))))))))))))
 
 ;; ---- per-node computed style bag ----
 
@@ -395,10 +432,20 @@
 
      (text-node? node)
      (let [{:keys [color font-size]} inherited
-           {:keys [w h]} (text-size font-size (:line-height theme) (:padding theme) node)]
-       {:box {:x x :y y :w (min avail-width w) :h h}
-        :draw [{:draw/op :text :x (+ x (:padding theme)) :y (+ y (:padding theme))
-                :text node :color color :font-size font-size :opacity opacity}]})
+           line-height (:line-height theme)
+           padding (:padding theme)
+           char-w (long (* 0.6 font-size))
+           content-w (max 0 (- avail-width (* 2 padding)))
+           lines (text-lines char-w content-w node)
+           max-line-w (apply max 0 (map #(* (count %) char-w) lines))
+           w (min avail-width (+ max-line-w (* 2 padding)))
+           h (+ (* (count lines) line-height) (* 2 padding))]
+       {:box {:x x :y y :w w :h h}
+        :draw (vec (map-indexed
+                    (fn [i line]
+                      {:draw/op :text :x (+ x padding) :y (+ y padding (* i line-height))
+                       :text line :color color :font-size font-size :opacity opacity})
+                    lines))})
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
