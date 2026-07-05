@@ -883,6 +883,57 @@
       (= "counter-increment" k-lower) (parse-counter-property v 1)
       :else (parse-style-value v))))
 
+(def ^:private border-style-keywords
+  #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
+
+(defn- border-shorthand-width-token?
+  [tok]
+  (boolean (or (re-matches #"-?\d+" tok) (re-matches #"-?\d+px" tok))))
+
+(defn- expand-border-shorthand
+  "Parses a `border` shorthand value (real CSS's own order-independent
+   grammar, `<line-width> || <line-style> || <color>`) into a map of
+   whichever of `:border-width`/`:border-style`/`:border-color` it
+   actually specifies -- a real, legal shorthand may omit any of the
+   three (e.g. `border: solid red` has no width at all). Before this,
+   `border` wasn't expanded at all -- it was stored verbatim as a single
+   `:border` key (e.g. `\"2px solid #00ff00\"`), which `border-ops`'s own
+   `:border-width`/`:border-color` lookups never recognize, so a real,
+   extremely common author pattern like `border: 2px solid red` silently
+   painted NO border at all even after last cycle's fix taught this
+   engine to paint borders in the first place -- confirmed via direct
+   REPL reproduction (an ordinary `<div>` with the shorthand and one
+   with the equivalent three longhands resolved to visibly different
+   `:style/*` shapes, only the longhand form actually painting).
+
+   Deliberately scoped to the single most common real-world token forms:
+   width as a bare integer/`px` length (not the `thin`/`medium`/`thick`
+   keyword forms), and color as a SINGLE whitespace-delimited token
+   (a hex value or named keyword -- NOT a functional-notation color
+   with internal spaces, e.g. `rgb(0 0 0 / 0.5)`'s newer space syntax,
+   which this shorthand's naive whitespace tokenizing would incorrectly
+   split apart; the far more common comma syntax, `rgb(0, 0, 0)`, has no
+   internal spaces and tokenizes correctly as-is)."
+  [v]
+  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
+    (reduce (fn [result tok]
+              (let [lower (str/lower-case tok)]
+                (cond
+                  (and (not (contains? result :border-width))
+                       (border-shorthand-width-token? tok))
+                  (assoc result :border-width (parse-style-value tok))
+
+                  (and (not (contains? result :border-style))
+                       (contains? border-style-keywords lower))
+                  (assoc result :border-style tok)
+
+                  (not (contains? result :border-color))
+                  (assoc result :border-color tok)
+
+                  :else result)))
+            {}
+            tokens)))
+
 (defn parse-declarations-with-importance
   "Parses a raw `property: value; ...` declaration-block string (e.g. a
    `<style>` rule body, or a JS-mutated `element.style.cssText`) into a
@@ -894,15 +945,20 @@
    `:value` either way."
   [text]
   (->> (str/split (or text "") #";")
-       (keep (fn [decl]
-               (let [[k v] (map str/trim (str/split decl #":" 2))]
-                 (when (and (seq k) (seq v))
-                   (let [important? (boolean (re-find #"(?i)!important\s*$" v))
-                         value (str/replace v #"(?i)\s*!important\s*$" "")
-                         parsed (parse-property-value k value)]
-                     (when (some? parsed)
-                       [(keyword k) {:value parsed
-                                     :important? important?}]))))))
+       (mapcat (fn [decl]
+                 (let [[k v] (map str/trim (str/split decl #":" 2))]
+                   (if (and (seq k) (seq v))
+                     (let [important? (boolean (re-find #"(?i)!important\s*$" v))
+                           value (str/replace v #"(?i)\s*!important\s*$" "")]
+                       (if (= "border" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-border-shorthand value))
+                         (let [parsed (parse-property-value k value)]
+                           (if (some? parsed)
+                             [[(keyword k) {:value parsed :important? important?}]]
+                             []))))
+                     []))))
        (into {})))
 
 (defn parse-declarations

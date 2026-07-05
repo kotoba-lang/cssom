@@ -21,6 +21,42 @@
            (-> rules first :rule/selectors second :selector/parts first :selector/attrs)))
     (is (= true (get-in (first rules) [:rule/declaration-meta :border-width :important?])))))
 
+;; ---- `border` shorthand expansion ----
+
+(deftest border-shorthand-expands-into-its-three-longhands
+  ;; The confirmed repro from the bug report: before this, `border` was
+  ;; stored verbatim as a single :border key, which border-ops's own
+  ;; :border-width/:border-color lookups never recognize -- a real,
+  ;; extremely common author pattern like `border: 2px solid red`
+  ;; silently painted no border at all.
+  (let [rules (css/parse-rules "#f { border: 2px solid #00ff00 }")]
+    (is (= {:border-width 2 :border-style "solid" :border-color "#00ff00"}
+           (:rule/declarations (first rules))))
+    (is (not (contains? (:rule/declarations (first rules)) :border))
+        "no bare :border key should remain -- it's fully expanded")))
+
+(deftest border-shorthand-is-order-independent-per-real-css-grammar
+  (let [rules (css/parse-rules "#f { border: red 3px dashed }")]
+    (is (= {:border-color "red" :border-width 3 :border-style "dashed"}
+           (:rule/declarations (first rules))))))
+
+(deftest border-shorthand-omits-whichever-longhands-it-does-not-specify
+  (let [rules (css/parse-rules "#f { border: solid red }")]
+    (is (= {:border-style "solid" :border-color "red"}
+           (:rule/declarations (first rules)))
+        "a real, legal border shorthand may omit the width entirely")))
+
+(deftest border-shorthand-importance-applies-to-every-expanded-longhand
+  (let [rules (css/parse-rules "#f { border: 2px solid red !important }")]
+    (is (= true (get-in (first rules) [:rule/declaration-meta :border-width :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :border-style :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :border-color :important?])))))
+
+(deftest border-longhands-declared-separately-are-unaffected-by-shorthand-expansion
+  (let [rules (css/parse-rules "#f { border-width: 2px; border-color: #00ff00 }")]
+    (is (= {:border-width 2 :border-color "#00ff00"}
+           (:rule/declarations (first rules))))))
+
 (deftest parses-attribute-selector-operators
   (let [rules (css/parse-rules "[class~=\"primary\"] { color: red }
                                 [lang|=\"en\"] { font-size: 12px }
