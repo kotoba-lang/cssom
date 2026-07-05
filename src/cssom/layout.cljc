@@ -267,12 +267,63 @@
    :align-items (:align-items st)
    :flex-wrap (:flex-wrap st)})
 
+(defn- explicit-length
+  "Defensively coerces an OPTIONAL, already-cascade-resolved style value to a
+   plain integer px number, or nil when absent OR when cssom.core
+   intentionally left the raw value an unparsed string -- a percentage
+   (`50%`), `auto`, or any other keyword/expression outside this engine's
+   bounded numeric subset (see cssom.core's parse-style-value docstring, and
+   the calc-with-a-percentage-does-not-resolve-a-width-through-the-real-pipeline
+   test in layout_test.clj for why this is a REAL, expected shape reaching
+   this file, not a hypothetical). Uses this file's own permissive parse-int
+   (leading-digit-run extraction, e.g. \"50%\" -> 50) for the same reason
+   resolve-width already does for :width -- consistency with that
+   pre-existing, documented behavior, not a new leniency -- but resolves to
+   nil (not a fallback number) when parse-int finds no digits at all (e.g.
+   `auto`), so a caller's own `(or (explicit-length ...) auto-fallback)`
+   correctly falls through to auto/content-driven sizing instead of the
+   fallback silently winning over a genuine (if imprecise) numeric read.
+
+   This exists because :width has exactly ONE place in this file that reads
+   its raw cascade value directly into arithmetic (resolve-width's own
+   `parse-int` call, which already defends against a raw string via its own
+   avail fallback) -- but :height, :min-width, :max-width, :left, and :top
+   each have their OWN separate raw-read call sites (layout-flex's
+   cross/main-content, resolve-width's min/max clamp, layout-grid/
+   layout-block/layout-form-control's explicit-h, layout-absolute-children's
+   left/top) that used to read the raw style value directly into `+`/`-`/
+   `max`/`min` with no coercion at all -- crashing with a ClassCastException
+   (String cannot be cast to Number) the moment cssom.core ever left one of
+   those properties an unresolved raw string (any percentage/auto/keyword
+   value -- real and common, not just a contrived edge case). Every one of
+   those call sites now goes through this (or resolve-height, its
+   :height-shaped wrapper) instead."
+  [v]
+  (when (some? v) (parse-int v nil)))
+
 (defn- resolve-width
   [st avail]
   (let [base (parse-int (:width st) avail)
-        base (if-let [mn (:min-width st)] (max base mn) base)
-        base (if-let [mx (:max-width st)] (min base mx) base)]
+        base (if-let [mn (explicit-length (:min-width st))] (max base mn) base)
+        base (if-let [mx (explicit-length (:max-width st))] (min base mx) base)]
     base))
+
+(defn- resolve-height
+  "The :height counterpart to resolve-width's own defensive numeric
+   coercion (see explicit-length for the shared 'a raw, cascade-unresolved
+   string never reaches raw arithmetic' philosophy both mirror). Unlike
+   resolve-width -- which always resolves to SOME number via its avail-width
+   fallback, since a box always has a width -- an explicit :height is
+   genuinely OPTIONAL everywhere it's read in this file: absent (or
+   unparseable, e.g. `auto`) means 'no explicit height here, fall back to
+   auto/content-driven sizing', which is exactly why every caller already
+   wraps this in its own `(or (resolve-height st) content-driven-fallback)`
+   -- so this returns nil (via explicit-length), not a fallback number, for
+   that `or` to correctly detect 'nothing explicit was given' the same way
+   `(:height st)` being nil already did before any raw string could reach
+   here."
+  [st]
+  (explicit-length (:height st)))
 
 (defn- content-inset
   [st]
@@ -1423,14 +1474,14 @@
         measured (mapv #(measure-child theme cw opacity inherited %) in-flow)]
     (if wrap?
       (let [{:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw opacity inherited st measured)
-            node-h (or (:height st) (+ cross-total (* 2 inset)))]
+            node-h (or (resolve-height st) (+ cross-total (* 2 inset)))]
         {:box-w w :box-h node-h :draws draws})
       (let [main-sizes (mapv (fn [m] (if column? (:h (:box m)) (:w (:box m)))) measured)
             cross-sizes (mapv (fn [m] (if column? (:w (:box m)) (:h (:box m)))) measured)
             auto-cross (if (seq cross-sizes) (apply max 0 cross-sizes) 0)
-            cross-content (or (if column? (:width st) (:height st)) auto-cross)
+            cross-content (or (explicit-length (if column? (:width st) (:height st))) auto-cross)
             auto-main (+ (reduce + 0 main-sizes) (* gap (max 0 (dec (count main-sizes)))))
-            main-content (or (if column? (:height st) (:width st)) auto-main)
+            main-content (or (explicit-length (if column? (:height st) (:width st))) auto-main)
             offsets (place-main-axis (:justify-content st) main-sizes gap main-content)
             draws (mapcat
                    (fn [m off]
@@ -1585,7 +1636,7 @@
         col-offsets (place-main-axis "flex-start" col-widths gap 0)
         row-tracks (parse-track-list (:grid-template-rows st))
         n-row-tracks (count row-tracks)
-        explicit-h (:height st)
+        explicit-h (resolve-height st)
         row-track-fr-sizes (when explicit-h (track-sizes row-tracks gap explicit-h))
         placements (place-grid-items theme in-flow n-cols n-row-tracks (:areas template-areas))
         total-rows (if (seq placements) (apply max 0 (map :row-end placements)) 0)
@@ -1638,8 +1689,8 @@
   [theme content-x content-y content-w opacity inherited children]
   (let [placed (mapv (fn [child]
                         (let [cst (node-style child theme)
-                              left (or (:left cst) 0)
-                              top (or (:top cst) 0)
+                              left (or (explicit-length (:left cst)) 0)
+                              top (or (explicit-length (:top cst)) 0)
                               cx (+ content-x left)
                               cy (+ content-y top)
                               m (layout-node theme cx cy content-w opacity inherited child)]
@@ -1661,7 +1712,7 @@
   (let [tag (:tag node)
         w (resolve-width st avail-width)
         inset (content-inset st)
-        h (or (:height st) (+ (:line-height theme) (* 2 inset)))
+        h (or (resolve-height st) (+ (:line-height theme) (* 2 inset)))
         value (attr node :value)
         checked (true? (attr node :checked))
         input-type (str/lower-case (str (or (attr node :type) "text")))
@@ -1707,7 +1758,7 @@
         scroll-y (:scroll-top st)
         {:keys [in-flow out-of-flow]} (partition-flow theme (:children node))
         {:keys [draw h]} (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y) content-w opacity inherited in-flow)
-        explicit-h (:height st)
+        explicit-h (resolve-height st)
         node-h (or explicit-h (+ h (* 2 inset)))
         node-w w
         absolute-draws (layout-absolute-children theme content-x content-y content-w opacity inherited out-of-flow)
