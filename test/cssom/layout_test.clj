@@ -739,6 +739,14 @@
 ;; hand-set attr.
 
 (deftest before-and-after-generated-content-renders-as-real-text-around-children
+  ;; p's real content is a SINGLE text child sandwiched between ::before
+  ;; and ::after -- this exercises with-generated-content's documented
+  ;; "::before and ::after both wrapping one shared real text child" tie
+  ;; -break: ::before (checked first) merges with that one real text
+  ;; child onto one shared line; by the time ::after is checked there is
+  ;; no real text child left for it to see, so ::after stays its own
+  ;; separate, unmerged row -- never a three-way merge of all of
+  ;; ::before+text+::after into a single run.
   (let [[p doc] (dom/create-element dom/empty-document :p)
         doc (dom/set-root doc p)
         [child doc] (dom/create-text-node doc "middle")
@@ -752,24 +760,31 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= 3 (count text-ops))
-        "::before text + the real child text + ::after text = 3 :text draw-ops")
-    (is (= ["→ " "middle" " ←"] (mapv :text text-ops))
-        "generated ::before text precedes the real child text, which
-         precedes generated ::after text -- document order, real content")
+    (is (= 2 (count text-ops))
+        "::before merges with the real child text into ONE draw-op; ::after
+         stays a separate second draw-op (the real text child it would
+         otherwise adjoin was already consumed by the ::before merge) --
+         2 :text draw-ops total, not 3 (unmerged) and not 1 (a three-way
+         merge this feature deliberately does not attempt)")
+    (is (= ["→ middle" " ←"] (mapv :text text-ops))
+        "generated ::before text is concatenated with the real child text
+         it merged with, in document order; generated ::after text
+         remains on its own, separate, in document order after that")
     (is (= "red" (:color (first text-ops)))
-        "::before paints with its own declared color, not the element's
-         inherited black")
+        "the merged ::before+text run paints with ::before's own declared
+         color, not the element's inherited black -- see
+         merge-generated-with-text's documented single-color-per-merged-run
+         simplification")
     (is (= "black" (:color (second text-ops)))
-        "the real text node still inherits the element's own color, unaffected")
-    (is (= "black" (:color (nth text-ops 2)))
-        "::after with no declared color of its own inherits the element's
-         color, exactly like any real child would")
+        "::after (unmerged here) still inherits the element's own color,
+         exactly like any real child would, unaffected by the merge
+         feature")
     (is (< (:y (first text-ops)) (:y (second text-ops)))
-        "::before is positioned above (before) the real child in this
-         engine's vertical block flow")
-    (is (< (:y (second text-ops)) (:y (nth text-ops 2)))
-        "::after is positioned below (after) the real child")))
+        "::after still lays out as its own separate row BELOW the merged
+         ::before+text run, in this engine's vertical block flow -- the
+         merge only ever collapses a pseudo with ITS OWN adjacent real
+         text onto one shared line, it doesn't turn ::after into part of
+         that same line")))
 
 (deftest before-content-empty-string-still-produces-a-real-empty-text-draw-op
   ;; content: ""; is a common icon-only generated-content idiom -- still a
@@ -832,14 +847,25 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= 2 (count text-ops))
-        "::before's resolved attr() text + the real child text = 2 :text draw-ops")
-    (is (= ["hello" "middle"] (mapv :text text-ops))
+    ;; p's only real child is a text node directly adjacent to ::before,
+    ;; so this is exactly the bounded merge case with-generated-content
+    ;; implements (see its docstring) -- one merged :text draw-op sharing
+    ;; one line, not two stacked block rows.
+    (is (= 1 (count text-ops))
+        "::before's resolved attr() text is immediately followed by the
+         element's own real text child with nothing else in between, so
+         they merge into ONE :text draw-op sharing one line")
+    (is (= ["hellomiddle"] (mapv :text text-ops))
         "content: attr(data-x) renders the element's own real data-x
          attribute value as real, painted text -- not the literal
-         'attr(data-x)' source text, and not nothing")
+         'attr(data-x)' source text, and not nothing -- concatenated with
+         the adjacent real text child by the merge")
     (is (= "red" (:color (first text-ops)))
-        "::before still paints with its own declared color")))
+        "the merged run paints with ::before's own declared color (the
+         merge keeps the generated node's own :generated/style, see
+         merge-generated-with-text) -- a documented simplification versus
+         real CSS's separate-per-run coloring, since this file's :text
+         draw-op has no way to paint two colors on one line")))
 
 (deftest before-content-attr-missing-attribute-still-produces-an-empty-text-draw-op
   (let [[span doc] (dom/create-element dom/empty-document :span)
@@ -884,8 +910,14 @@
 
 (deftest three-sibling-list-items-render-sequential-counter-numbers-as-real-text
   ;; THE canonical real-world CSS-counters use case: automatic sequential
-  ;; numbering across sibling <li> elements, purely from CSS, painted as
-  ;; three genuinely distinct :text draw-ops.
+  ;; numbering across sibling <li> elements, purely from CSS -- and THE
+  ;; exact pattern (confirmed live in kotoba-lang/browser's own
+  ;; `#step-counter` demo) that exposed the "generated content renders as
+  ;; a separate stacked line instead of sharing one line with the
+  ;; element's own text" bug with-generated-content's adjacent-text merge
+  ;; now fixes: each <li>'s ::before is immediately followed by that same
+  ;; <li>'s own real text child, so each pair merges into ONE :text
+  ;; draw-op (three total, one per <li>), not six stacked block rows.
   (let [[ul doc] (dom/create-element dom/empty-document :ul)
         doc (dom/set-root doc ul)
         [li1 doc] (dom/create-element doc :li)
@@ -908,12 +940,19 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. " "one" "2. " "two" "3. " "three"] (mapv :text text-ops))
+    (is (= ["1. one" "2. two" "3. three"] (mapv :text text-ops))
         "each <li>'s ::before renders that <li>'s OWN incremented counter
-         value (\"1. \"/\"2. \"/\"3. \"), immediately before its own real
-         text child, in document order -- a genuine running total across
-         siblings, not three independently-resolved copies of the same
-         value")))
+         value (\"1. \"/\"2. \"/\"3. \"), MERGED with its own real text
+         child (\"one\"/\"two\"/\"three\") into one run, in document order
+         -- a genuine running total across siblings, not three
+         independently-resolved copies of the same value, and (the fix
+         under test) sharing one line with the real text rather than
+         sitting on a separate stacked line above it")
+    (is (apply < (mapv :y text-ops))
+        "the three <li>s still stack as three separate lines (one merged
+         run per <li>) -- this merge only collapses a ::before with its
+         OWN adjacent real text onto one line, it does not affect normal
+         block stacking across sibling elements")))
 
 (deftest counter-never-reset-or-incremented-still-produces-a-real-zero-text-draw-op
   (let [[span doc] (dom/create-element dom/empty-document :span)
@@ -949,6 +988,164 @@
     (is (= (str/split "the quick brown fox jumps over" #"\s+")
            (mapcat #(str/split (:text %) #"\s+") text-ops))
         "word-wrapping must not lose or reorder any words")))
+
+;; ---- ::before/::after merged with ONE directly-adjacent real text-node
+;;      sibling (see with-generated-content/merge-generated-with-text) ----
+;;
+;; This is the fix for a real bug found via kotoba-lang/browser's own live
+;; demo (public/browser-demo.html): `#step-counter li::before { content:
+;; counter(step) \". \" }` immediately followed by that <li>'s own real
+;; text child rendered as TWO SEPARATE stacked block rows (draw-ops
+;; `{:text \"1. \" :y 828}` / `{:text \"...\" :y 860}`, 32px apart -- a
+;; full extra line) instead of real CSS's ONE shared line. The existing
+;; smoke test covering that demo only ever asserted on generated content's
+;; COMPUTED STRING value, never its actual on-screen line position, so
+;; this divergence from real CSS was invisible until verified against
+;; live draw-ops. These tests prove the narrow, bounded merge fix (see
+;; with-generated-content's docstring for its exact scope) and that
+;; everything explicitly OUT of that scope is unaffected.
+
+(deftest before-immediately-followed-by-real-text-merges-onto-one-shared-line
+  ;; The general (non-counter, non-attr) case of the bug above: a literal
+  ;; ::before content string immediately followed by the element's own
+  ;; real text child, nothing else in between.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [child doc] (dom/create-text-node doc "world")
+        doc (dom/append-child doc p child)
+        rules (css/parse-rules "p::before { content: \"hello \" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)
+        node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops)
+        ;; Reference: an otherwise-identical <p> with no ::before at all,
+        ;; whose own real text is the SAME already-concatenated string --
+        ;; a genuine, unambiguous single line. The merged case's box
+        ;; height must match this exactly (not be taller by a whole extra
+        ;; line, which is exactly what the real bug produced).
+        [p2 doc2] (dom/create-element dom/empty-document :p)
+        doc2 (dom/set-root doc2 p2)
+        [child2 doc2] (dom/create-text-node doc2 "hello world")
+        doc2 (dom/append-child doc2 p2 child2)
+        [_ doc2] (dom/consume-ops doc2)
+        tree2 (dom/tree doc2)
+        ops2 (layout/draw-ops tree2 {:width 480})
+        ref-node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops2)]
+    (is (= 1 (count text-ops))
+        "::before immediately followed by the element's own real text
+         child merges into ONE :text draw-op -- not two separate block
+         rows the way this engine renders every other pair of children")
+    (is (= "hello world" (:text (first text-ops)))
+        "the generated ::before string and the real text node's string
+         are concatenated in document order into a single text run")
+    (is (= (:h ref-node-op) (:h node-op))
+        "the element's own content box is exactly as tall as a plain <p>
+         whose only child is the SAME already-concatenated text -- proving
+         this really is one shared line box, not two stacked lines (the
+         real bug produced a content box a whole extra line-height taller
+         than this reference)")))
+
+(deftest after-immediately-preceded-by-real-text-merges-onto-one-shared-line
+  ;; The symmetric ::after case: a real text child immediately followed by
+  ;; ::after generated content, with no ::before involved at all (unlike
+  ;; before-and-after-generated-content-renders-as-real-text-around-children,
+  ;; which covers the ::before-and-::after-together tie-break instead).
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [child doc] (dom/create-text-node doc "hello")
+        doc (dom/append-child doc p child)
+        rules (css/parse-rules "p::after { content: \" world\" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)
+        node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops)
+        ;; Same reference-box comparison as the ::before-side test above.
+        [p2 doc2] (dom/create-element dom/empty-document :p)
+        doc2 (dom/set-root doc2 p2)
+        [child2 doc2] (dom/create-text-node doc2 "hello world")
+        doc2 (dom/append-child doc2 p2 child2)
+        [_ doc2] (dom/consume-ops doc2)
+        tree2 (dom/tree doc2)
+        ops2 (layout/draw-ops tree2 {:width 480})
+        ref-node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops2)]
+    (is (= 1 (count text-ops))
+        "the real text child immediately followed by ::after merges into
+         ONE :text draw-op, same as the ::before-side merge")
+    (is (= "hello world" (:text (first text-ops)))
+        "the real text node's string and the generated ::after string are
+         concatenated in document order (real text first) into a single
+         text run")
+    (is (= (:h ref-node-op) (:h node-op))
+        "one shared line box, exactly like the ::before-side merge")))
+
+(deftest before-content-with-first-real-child-an-element-does-not-merge
+  ;; Explicit out-of-scope case #1: the element's FIRST real child is
+  ;; itself an ELEMENT (a <span> with its own nested text), not a text
+  ;; node -- real-text-child returns nil for it, so ::before does NOT
+  ;; merge with anything here. This must stay IDENTICAL to this engine's
+  ;; pre-existing (still-broken, still out of scope) two-separate-rows
+  ;; behavior: no regression, not a fix, just unchanged.
+  (let [[li doc] (dom/create-element dom/empty-document :li)
+        doc (dom/set-root doc li)
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc li span)
+        [span-text doc] (dom/create-text-node doc "nested")
+        doc (dom/append-child doc span span-text)
+        rules (css/parse-rules "li::before { content: \"X \" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["X " "nested"] (mapv :text text-ops))
+        "::before and the <span>'s own nested text stay two genuinely
+         separate draw-ops -- no merge fires when the immediately
+         adjacent real child is an element, not a text node")
+    (is (< (:y (first text-ops)) (:y (second text-ops)))
+        "still two stacked rows, exactly as before this fix existed --
+         this case is a deliberate, documented scope boundary, not a
+         regression")))
+
+(deftest before-merges-with-first-adjacent-text-but-a-later-element-sibling-is-unaffected
+  ;; Explicit out-of-scope case #2: `<li>text<b>bold</b></li>` with a
+  ;; ::before -- the FIRST real child ('text') IS a genuine adjacent text
+  ;; node, so ::before DOES merge with it (that's this fix, working
+  ;; exactly as scoped); the <b>bold</b> element that follows is NOT part
+  ;; of that merge (this feature only ever combines a pseudo with ONE
+  ;; directly-adjacent real text-node sibling, never a whole run of mixed
+  ;; children) and keeps stacking as its own separate block row below,
+  ;; exactly as broken/unmerged as it already was -- proving the merge is
+  ;; correctly bounded to just the first pair, not a slippery slope into
+  ;; general inline flow.
+  (let [[li doc] (dom/create-element dom/empty-document :li)
+        doc (dom/set-root doc li)
+        [t doc] (dom/create-text-node doc "text")
+        doc (dom/append-child doc li t)
+        [b doc] (dom/create-element doc :b)
+        doc (dom/append-child doc li b)
+        [b-text doc] (dom/create-text-node doc "bold")
+        doc (dom/append-child doc b b-text)
+        rules (css/parse-rules "li::before { content: \"X \" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["X text" "bold"] (mapv :text text-ops))
+        "::before merges with the immediately-adjacent real text child
+         ('text') into one run; the <b>'s own text ('bold') is a
+         genuinely separate draw-op, unaffected by the merge")
+    (is (< (:y (first text-ops)) (:y (second text-ops)))
+        "the merged run and the <b> element still stack as two separate
+         rows -- this fix narrows the FIRST gap (pseudo-to-adjacent-text)
+         without attempting to also merge the remaining text-vs-element
+         gap, which stays exactly as unmerged as this engine's general
+         lack of inline flow already made it (see this namespace's own
+         docstring)")))
 
 ;; ---- non-rendered (metadata) elements ----
 ;;
