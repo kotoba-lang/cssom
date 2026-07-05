@@ -722,6 +722,65 @@
          !important declarations too -- the layer-order reversal only
          affects cross-layer comparisons, not within-layer specificity")))
 
+;; ---- inline style `!important` (real per-property importance, read via
+;;      :style-inline-important -- see resolve-style-for's own docstring) ----
+
+(deftest inline-important-beats-a-rule-based-important-declaration
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        doc (dom/set-attribute doc div :style-inline {:color "red"})
+        doc (dom/set-attribute doc div :style-inline-important #{:color})
+        rules (css/parse-rules "#hero { color: blue !important }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes div :attrs :style/color]))
+        "an inline !important declaration is still treated as the highest
+         possible specificity within its importance group, so it beats a
+         rule-based !important declaration -- matching real CSS")))
+
+(deftest rule-based-important-beats-a-plain-inline-declaration
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        doc (dom/set-attribute doc div :style-inline {:color "red"})
+        rules (css/parse-rules "#hero { color: blue !important }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes div :attrs :style/color]))
+        "a plain (non-important) inline declaration -- :style-inline-important
+         entirely absent, the common real-world case -- still loses to a
+         rule-based !important declaration")))
+
+(deftest plain-inline-declaration-still-beats-a-plain-rule-unaffected-by-this-fix
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        doc (dom/set-attribute doc div :style-inline {:color "red"})
+        rules (css/parse-rules "#hero { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes div :attrs :style/color]))
+        "pre-existing, unaffected behavior: an ordinary inline declaration
+         still beats an ordinary rule-based one regardless of importance
+         wiring")))
+
+(deftest inline-important-set-only-affects-the-properties-actually-marked
+  ;; A single inline style commonly mixes important and non-important
+  ;; properties (e.g. `style="color: red !important; padding: 4px"") --
+  ;; the importance set must be per-property, not all-or-nothing for the
+  ;; whole inline declaration.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        doc (dom/set-attribute doc div :style-inline {:color "red" :padding 4})
+        doc (dom/set-attribute doc div :style-inline-important #{:color})
+        rules (css/parse-rules "#hero { color: blue !important; padding: 8px !important }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes div :attrs :style/color]))
+        "color was marked !important inline, so it still wins over the
+         rule's own !important color")
+    (is (= 8 (get-in doc [:nodes div :attrs :style/padding]))
+        "padding was NOT marked !important inline, so the rule's
+         !important padding wins, exactly like the no-importance case")))
+
 ;; ---- @container (min-width/max-width/width, optionally named) ----
 ;;
 ;; See cssom.core's own namespace docstring (@container paragraph) and

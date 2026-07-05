@@ -327,7 +327,7 @@
      and its docstring for the remaining known simplifications (anonymous
      `@layer { ... }` blocks treated as unlayered, `@media` nested inside
      `@layer` loses its layer tag); see `resolve-style-for` for the
-     `!important` reversal mechanics and a known gap in inline-style
+     `!important` reversal mechanics, including real inline-style
      `!important` support.
    - `calc(...)` arithmetic expressions -- but only the genuinely bounded,
      ALWAYS layout-independent subset: an expression whose ENTIRE contents
@@ -883,18 +883,15 @@
       (= "counter-increment" k-lower) (parse-counter-property v 1)
       :else (parse-style-value v))))
 
-(defn parse-declarations
-  [text]
-  (->> (str/split (or text "") #";")
-       (keep (fn [decl]
-               (let [[k v] (map str/trim (str/split decl #":" 2))]
-                 (when (and (seq k) (seq v))
-                   (let [value (parse-property-value k (str/replace v #"(?i)\s*!important\s*$" ""))]
-                     (when (some? value)
-                       [(keyword k) value]))))))
-       (into {})))
-
-(defn- parse-declarations-with-importance
+(defn parse-declarations-with-importance
+  "Parses a raw `property: value; ...` declaration-block string (e.g. a
+   `<style>` rule body, or a JS-mutated `element.style.cssText`) into a
+   `{property {:value v :important? bool}}` map -- for callers that need
+   real per-property `!important` tracking, not just a corruption-free
+   value (see `parse-declarations` for the simpler bare-value form).
+   `important?` is true iff that declaration's raw value ended in a
+   trailing `!important` (case-insensitive), which is stripped from
+   `:value` either way."
   [text]
   (->> (str/split (or text "") #";")
        (keep (fn [decl]
@@ -907,6 +904,14 @@
                        [(keyword k) {:value parsed
                                      :important? important?}]))))))
        (into {})))
+
+(defn parse-declarations
+  "Like `parse-declarations-with-importance`, but each entry's value is
+   the bare parsed value, discarding importance -- for callers (e.g.
+   `:rule/declarations`, or `kotoba-lang/browser`'s `dom_bridge.cljc`
+   before this fix) that don't need per-property `!important` tracking."
+  [text]
+  (into {} (map (fn [[k v]] [k (:value v)])) (parse-declarations-with-importance text)))
 
 (defn- parse-attribute-selector
   "Parses a single `[...]` attribute selector (see `attribute-selector-pattern`)
@@ -2651,6 +2656,16 @@
   (or (get-in node [:attrs :style-inline])
       {}))
 
+(defn- inline-style-importance
+  "The set of `inline-style` property keywords the ORIGINAL raw inline
+   style text marked `!important` -- see `resolve-style-for`'s own
+   docstring, \"Known gap\" paragraph (now fixed) for why this has to be a
+   separate attr/accessor rather than folded into `inline-style`'s own
+   `{property value}` shape."
+  [node]
+  (or (get-in node [:attrs :style-inline-important])
+      #{}))
+
 (defn- clear-style-attrs
   [document node-id]
   (update-in document [:nodes node-id :attrs]
@@ -2926,18 +2941,24 @@
    reasoning is unaffected by the :important? negation above, since :inline?
    sits above :layer in the tuple regardless of :layer's sign.
 
-   Known gap: inline declarations (`inline-style`) carry no real
-   `!important` parsing of their own -- every inline entry here is hardcoded
-   :important? false regardless of what the raw `style=\"...\"` attribute
-   text said (real CSS/HTML allows `style=\"color: red !important\"`).
-   `inline-style` reads an already-parsed `:style-inline` attrs map (property
-   -> value only, no importance) that `kotoba-lang/htmldom`
-   (`htmldom.core/parse-style`, called from `apply-attrs`) populates outside
-   this namespace; that parser doesn't strip or record `!important` at all
-   today. Wiring real inline `!important` through would mean changing that
-   attribute's shape in `htmldom` (and re-checking every other consumer of
-   `:style-inline`/`:style`), which is a separate, larger cross-repo change
-   left out of scope here.
+   Inline `!important` (real, common CSS -- e.g. `style=\"color: red
+   !important\"`, routinely used to override a stubborn rule-based style):
+   :important? above is real per-property importance, from
+   `inline-style-importance` (a SEPARATE accessor reading a SEPARATE
+   `:style-inline-important` attr -- a set of property keywords -- rather
+   than changing `inline-style`/`:style-inline`'s own `{property value}`
+   shape, since that shape has real consumers elsewhere, e.g.
+   kotoba-lang/browser's `dom_bridge.cljc`, that must not be disturbed).
+   `kotoba-lang/htmldom` (`htmldom.core/parse-style` + the new
+   `htmldom.core/style-importance`, both called from `apply-attrs`)
+   populates both attrs outside this namespace. Before this, `!important`
+   wasn't just unranked here -- `htmldom.core/parse-style` didn't even
+   STRIP the literal `!important` suffix from the value, so an
+   `!important`-marked inline declaration's value was genuinely corrupted
+   (e.g. `:color \"red !important\"`, which no downstream color parser
+   recognizes as `\"red\"`) and silently fell back to that property's own
+   unstyled/transparent default -- a real, visible rendering bug, not
+   merely a cascade-ordering nicety.
 
    `content: attr(name)` resolution: a `content` declaration's raw value may
    parse (see `parse-content-value`) not to a plain string but to an attr()
@@ -3014,11 +3035,12 @@
                             :layer (if important? (- raw-layer) raw-layer)
                             :order order}))
          max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
+         node-inline-importance (inline-style-importance node)
          inline-declarations (when (nil? pseudo-element)
                                 (map-indexed (fn [idx [property value]]
                                                {:property property
                                                 :value value
-                                                :important? false
+                                                :important? (contains? node-inline-importance property)
                                                 :specificity [1 0 0]
                                                 :inline? true
                                                 :unlayered? true
