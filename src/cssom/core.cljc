@@ -1831,6 +1831,24 @@
         #?(:clj (Long/parseLong s)
            :cljs (js/parseInt s 10))))))
 
+(defn- parse-number
+  "A `min`/`max`/`value` attribute as a real number for range-validation
+   purposes (see `constraint-invalid?`) -- unlike `parse-int` above, this
+   also accepts a decimal fraction (`\"3.5\"`), since real HTML5
+   `<input type=\"number\">`/`<input type=\"range\">` values/`min`/`max`
+   are ordinary floating-point numbers, not just integers. Scientific
+   notation (`\"1e10\"`) is a real but rare real-world form for these
+   attributes, deliberately NOT supported here, matching this codebase's
+   existing 'most common forms, not full spec coverage' convention (see
+   `hsl()`'s hue-unit scoping in the sibling dom-gpu repo for the same
+   kind of documented, honest cut)."
+  [v]
+  (when (some? v)
+    (let [s (str/trim (str v))]
+      (when (re-matches #"-?\d+(\.\d+)?" s)
+        #?(:clj (Double/parseDouble s)
+           :cljs (js/parseFloat s))))))
+
 (def form-control-tags #{:button :input :select :textarea})
 
 (def disabled-capable-tags #{:button :fieldset :input :optgroup :option :select :textarea})
@@ -1994,6 +2012,30 @@
       (and (editable-form-control? node)
            (truthy-attr? (get-in node [:attrs :readonly])))))
 
+(defn- range-invalid?
+  "Real HTML5 range-overflow/range-underflow: `type=\"number\"`/`\"range\"`
+   with a non-blank, numerically-parseable `value` outside its own `min`/
+   `max` attributes (either bound optional; a `min`/`max` that isn't
+   itself a valid number, per `parse-number`, is simply not enforced --
+   matching this file's existing degrade-don't-guess convention for
+   malformed constraint attributes elsewhere, e.g. a non-numeric
+   `minlength` below). Before this, NEITHER `constraint-invalid?` (here)
+   NOR the separate, real form-submission-blocking `validation-reason` in
+   kotoba-lang/browser's own `document_input.cljc` checked `min`/`max` at
+   all -- a real, common pattern like `<input type=\"number\" min=\"1\"
+   max=\"10\" value=\"15\">` was silently treated as VALID by both,
+   confirmed via direct REPL reproduction through the real cascade (the
+   real out-of-range value resolved `:invalid`/`:valid` CSS to the same
+   `green`/valid color as an in-range one)."
+  [type value attrs]
+  (and (contains? #{"number" "range"} type)
+       (not (str/blank? value))
+       (when-let [n (parse-number value)]
+         (let [min (parse-number (:min attrs))
+               max (parse-number (:max attrs))]
+           (or (and min (< n min))
+               (and max (> n max)))))))
+
 (defn- constraint-invalid?
   [document node]
   (let [attrs (:attrs node)
@@ -2013,7 +2055,9 @@
                   (pos? length)
                   (< length minlength))
              (and maxlength
-                  (> length maxlength))))))
+                  (> length maxlength))
+             (and (= :input (:tag node))
+                  (range-invalid? type value attrs))))))
 
 (defn- constraint-valid?
   [document node]
