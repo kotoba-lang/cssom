@@ -1176,3 +1176,123 @@
          the cascade level -- stays the raw unparsed string")
     (is (number? (:w div-op))
         "layout never crashes on the unresolved raw string")))
+
+;; ---- explicit :height/:min-width/:max-width/:left/:top defensive numeric
+;; coercion (resolve-height/explicit-length, mirroring resolve-width's own
+;; pre-existing parse-int precedent proven by the calc()-with-a-percentage
+;; test above) ----
+;;
+;; cssom.core's parse-style-value intentionally leaves a percentage (or any
+;; other value outside this engine's bounded numeric subset, e.g. `auto`) as
+;; a raw, unparsed string on an element's own :style/* attrs -- proven above
+;; for :width. cssom.layout's resolve-width has always defended against that
+;; raw string reaching arithmetic (its own `parse-int` call on :width) -- but
+;; :height had NO equivalent defense at all before resolve-height was added:
+;; every reader of an explicit :height used the raw cascade value directly,
+;; so a raw string reaching :height threw a ClassCastException (String
+;; cannot be cast to Number) the instant it reached arithmetic. The most
+;; user-visible way that happened: TWO sibling block elements, each given an
+;; explicit (percentage, or otherwise cascade-unresolved) height -- the
+;; first sibling's raw-string box height got added directly into the
+;; running y-offset layout-children-block uses to stack the second sibling.
+;; resolve-width's own :min-width/:max-width clamp (`max`/`min` called
+;; directly on the raw cascade value, with no coercion at all -- unlike
+;; :width itself, one line above in the very same function) and
+;; layout-absolute-children's :left/:top (added directly into content-x/
+;; content-y) turned out to be two more instances of the identical bug
+;; class, fixed by the same explicit-length helper resolve-height wraps.
+
+(deftest explicit-percentage-height-on-sibling-blocks-stacks-correctly-not-a-crash
+  ;; Real end-to-end pipeline (CSS text -> cssom.core/parse-rules +
+  ;; apply-cascade -> kotoba.wasm.dom tree -> cssom.layout/draw-ops), same
+  ;; convention as the calc() tests above. `height: 40%`/`height: 60%` are
+  ;; NOT in this engine's numeric subset, so :style/height stays the raw
+  ;; string "40%"/"60%" on each div -- exactly the shape that used to reach
+  ;; layout-children-block's sibling-stacking `+` as a String and throw.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [div1 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div1)
+        doc (dom/set-attribute doc div1 :class "a")
+        [div2 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div2)
+        doc (dom/set-attribute doc div2 :class "b")
+        rules (css/parse-rules ".a { height: 40% } .b { height: 60% }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)]
+    (is (= "40%" (get-in doc [:nodes div1 :attrs :style/height]))
+        "stays the raw unparsed string in the cascade-resolved style map --
+         cssom.core never guesses a number for a percentage, same as width")
+    ;; Must not throw -- this is the actual regression under test: before
+    ;; resolve-height existed, this ClassCastException'd inside
+    ;; layout-children-block's sibling-stacking `+`.
+    (let [ops (layout/draw-ops tree {:width 480})
+          [a b] (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
+      ;; cssom.layout's own permissive digit-run parse-int (the SAME
+      ;; leading-digit-run extraction resolve-width already applies to a raw
+      ;; :width -- e.g. "50%" -> 50, see the calc()-with-a-percentage test's
+      ;; own docstring above) reads "40%"/"60%" as 40px/60px.
+      (is (= 40 (:h a)))
+      (is (= 60 (:h b)))
+      ;; The second sibling's y REFLECTS the first's real (coerced) height
+      ;; -- not a crash, and not stacked at some bogus/zero offset: default
+      ;; theme padding (4, root's own content inset) + div a's own 40px
+      ;; height + default gap (4).
+      (is (= 4 (:y a)))
+      (is (= (+ 4 40 4) (:y b))))))
+
+(deftest explicit-percentage-min-width-does-not-crash-resolve-width
+  ;; resolve-width's own :min-width clamp used to call `max` directly on the
+  ;; raw cascade value with no coercion at all, unlike :width itself (the
+  ;; line right above it in the very same function) -- crashing the same way
+  ;; the :height bug above did the moment :min-width was ever a percentage/
+  ;; otherwise-unresolved value.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules ".box { width: 50px; min-width: 90% }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
+    (is (= "90%" (get-in doc [:nodes div :attrs :style/min-width])))
+    ;; Same permissive digit-run parse-int as :width's own precedent:
+    ;; "90%" -> 90, clamping the box up from its declared 50px width.
+    (is (= 90 (:w div-op)))))
+
+(deftest explicit-percentage-max-width-does-not-crash-resolve-width
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules ".box { width: 500px; max-width: 20% }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
+    (is (= "20%" (get-in doc [:nodes div :attrs :style/max-width])))
+    ;; "20%" -> 20, clamping the box down from its declared 500px width.
+    (is (= 20 (:w div-op)))))
+
+(deftest explicit-percentage-left-top-on-absolute-child-does-not-crash
+  ;; layout-absolute-children added a position:absolute child's raw :left/
+  ;; :top straight into content-x/content-y with no coercion at all --
+  ;; the same bug class, on a different pair of properties.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules ".box { position: absolute; left: 10%; top: 5% }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
+    (is (= "10%" (get-in doc [:nodes div :attrs :style/left])))
+    ;; root :main's own default padding (4, its content inset) + the
+    ;; permissive digit-run parse of "10%"/"5%" -> 10/5.
+    (is (= (+ 4 10) (:x div-op)))
+    (is (= (+ 4 5) (:y div-op)))))
