@@ -116,10 +116,12 @@
    `<ol>` parent) with `list-style`/`list-style-type: none`, or an `<li>`
    that already has its own explicit ::before `content`, is skipped (see
    with-implicit-list-markers' own docstring for exactly why each case is
-   skipped rather than combined/overridden). Explicitly out of scope: the
-   full `list-style-type` property (circle/square/roman/alpha/...),
-   `list-style-position`, `<ol start=/reversed>` and `<li value=>`, and
-   `<menu>`.
+   skipped rather than combined/overridden). An `<ol>`'s own `start=` HTML
+   attribute is honored (real, common HTML for resuming a numbered list at
+   an arbitrary number, including negative/zero per real HTML5 semantics)
+   -- see implicit-marker-content. Explicitly out of scope: the full
+   `list-style-type` property (circle/square/roman/alpha/...),
+   `list-style-position`, `<ol reversed>` and `<li value=>`, and `<menu>`.
 
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
   (:require [clojure.string :as str]))
@@ -1759,18 +1761,25 @@
 (defn- implicit-marker-content
   "The implicit marker text for the `position`-th (1-based) direct `:li`
    child of a `parent-tag` (:ul/:ol) container -- `\"• \"` (one bullet
-   character, one space) for :ul, `\"<position>. \"` for :ol, matching real
-   browsers' own UA-stylesheet defaults (see the section comment above for
-   the exact, deliberately bounded scope: no other list-style-type values,
-   no :ol `start=`/`reversed`, no :li `value=`). Any other `parent-tag`
-   returns nil (with-implicit-list-markers never actually calls this for
-   one, but kept total rather than partial defensively), matching the 'no
-   marker' contract generated-content-node already establishes for absent
-   `:content`."
-  [parent-tag position]
+   character, one space) for :ul, `\"<start + position - 1>. \"` for :ol,
+   matching real browsers' own UA-stylesheet defaults (see the section
+   comment above for the remaining, deliberately bounded scope: no other
+   list-style-type values, no :ol `reversed`, no :li `value=`). `start`
+   (an :ol's own `start=` HTML attribute, real, common CSS/HTML for
+   resuming a numbered list at an arbitrary number -- e.g. splitting one
+   logical numbered list across two `<ol>` elements around an aside) is
+   1-based like `position` itself, so `position` 1 with `start` 5 numbers
+   \"5. \", matching real HTML5 `start=` semantics exactly (a negative or
+   zero `start` is real, legal HTML too -- `<ol start=\"-2\">` legitimately
+   starts at -2 -- so this is a plain arithmetic offset, never clamped to
+   1). Any other `parent-tag` returns nil (with-implicit-list-markers
+   never actually calls this for one, but kept total rather than partial
+   defensively), matching the 'no marker' contract generated-content-node
+   already establishes for absent `:content`."
+  [parent-tag position start]
   (case parent-tag
     :ul "• "
-    :ol (str position ". ")
+    :ol (str (+ start (dec position)) ". ")
     nil))
 
 (defn- with-implicit-list-markers
@@ -1838,33 +1847,43 @@
    marker does not renumber the ones after it, matching real CSS), and
    completely ignoring any non-<li> child (a stray text node, e.g.
    whitespace between <li> tags in real markup, or any other element)
-   without incrementing the count. This is intentionally NOT the same
-   number space as cssom.core's own counter-reset/counter-increment
-   machinery -- see the section comment above for why -- so it can never
-   collide with (or be perturbed by) a page author's own, independent
-   explicit counter usage elsewhere on the page. A NESTED <ol>/<ul> inside
+   without incrementing the count. `node`'s own `start=` HTML attribute
+   (parsed once, up front, via `parse-int` with a fallback of 1 -- i.e.
+   absent/malformed `start=` behaves exactly as before this offset
+   existed) shifts every position by a constant amount before it ever
+   reaches `implicit-marker-content`, so the position-counting logic
+   above (suppressed <li>s still counted, non-<li> children ignored) is
+   completely unaffected by it -- `start` only changes what number a
+   given position DISPLAYS as, never which position an <li> occupies.
+   This is intentionally NOT the same number space as cssom.core's own
+   counter-reset/counter-increment machinery -- see the section comment
+   above for why -- so it can never collide with (or be perturbed by) a
+   page author's own, independent explicit counter usage elsewhere on the
+   page. A NESTED <ol>/<ul> inside
    one of these <li>s gets its own, completely independent count for free:
    it is never one of THIS node's own direct children (it's a grandchild,
    nested one level deeper, inside one of the <li>s), so it is only ever
    processed by a LATER, separate call to this same function -- once
    layout-node recurses into that inner <ol>/<ul> as ITS OWN node -- which
-   starts its own loop fresh from position 1, with no shared state of any
-   kind between the two calls."
+   starts its own loop fresh from position 1 (and reads its OWN `start=`
+   attribute, if any -- entirely independent of whatever the outer <ol>'s
+   `start=` was), with no shared state of any kind between the two calls."
   [node children]
   (let [parent-tag (:tag node)]
     (if (and (contains? #{:ul :ol} parent-tag) (not (list-style-none? node)))
-      (first
-       (reduce (fn [[out n] child]
-                 (if (and (map? child) (= :li (:tag child)))
-                   (let [n (inc n)]
-                     (if (or (list-style-none? child) (pseudo-content child :before))
-                       [(conj out child) n]
-                       [(conj out (assoc-in child [:attrs :pseudo/before]
-                                             {:content (implicit-marker-content parent-tag n)}))
-                        n]))
-                   [(conj out child) n]))
-               [[] 0]
-               children))
+      (let [start (parse-int (get-in node [:attrs :start]) 1)]
+        (first
+         (reduce (fn [[out n] child]
+                   (if (and (map? child) (= :li (:tag child)))
+                     (let [n (inc n)]
+                       (if (or (list-style-none? child) (pseudo-content child :before))
+                         [(conj out child) n]
+                         [(conj out (assoc-in child [:attrs :pseudo/before]
+                                               {:content (implicit-marker-content parent-tag n start)}))
+                          n]))
+                     [(conj out child) n]))
+                 [[] 0]
+                 children)))
       children)))
 
 ;; ---- non-rendered (metadata) elements ----

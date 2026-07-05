@@ -1795,6 +1795,92 @@
          direct <li> children 1/2 (Inner1/Inner2) from its own position 1,
          never continuing or being perturbed by the outer list's count")))
 
+(deftest ol-start-attribute-shifts-every-marker-by-a-constant-offset
+  ;; A real, common HTML pattern: resuming a numbered list at an arbitrary
+  ;; number, e.g. splitting one logical numbered list across two <ol>
+  ;; elements around an aside/image.
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        doc (dom/set-attribute doc ol :start "5")
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "Five")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        [t2 doc] (dom/create-text-node doc "Six")
+        doc (dom/append-child doc li2 t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["5. Five" "6. Six"] (mapv :text text-ops))
+        "start=5 shifts both markers by +4 -- position 1 displays as 5,
+         position 2 as 6 -- while still counting positions 1/2 internally")))
+
+(deftest ol-start-accepts-a-real-negative-value-per-html5-semantics
+  ;; `<ol start="-2">` is real, legal HTML5 -- a negative or zero start is
+  ;; not an error case to clamp or reject, it's ordinary arithmetic.
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        doc (dom/set-attribute doc ol :start "-2")
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "NegTwo")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        [t2 doc] (dom/create-text-node doc "NegOne")
+        doc (dom/append-child doc li2 t2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li3)
+        [t3 doc] (dom/create-text-node doc "Zero")
+        doc (dom/append-child doc li3 t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["-2. NegTwo" "-1. NegOne" "0. Zero"] (mapv :text text-ops)))))
+
+(deftest ol-malformed-start-falls-back-to-one-not-a-crash
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        doc (dom/set-attribute doc ol :start "not-a-number")
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "Fallback")
+        doc (dom/append-child doc li1 t1)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. Fallback"] (mapv :text text-ops))
+        "a malformed start= behaves exactly as if it were absent -- a
+         graceful fallback, not a crash or a corrupted marker")))
+
+(deftest nested-ol-start-is-independent-of-outer-ols-own-start
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        doc (dom/set-attribute doc ol :start "3")
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "Outer3")
+        doc (dom/append-child doc li1 t1)
+        [inner-ol doc] (dom/create-element doc :ol)
+        doc (dom/append-child doc li1 inner-ol)
+        [inner-li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc inner-ol inner-li1)
+        [it1 doc] (dom/create-text-node doc "Inner1")
+        doc (dom/append-child doc inner-li1 it1)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["3. Outer3" "1. Inner1"] (mapv :text text-ops))
+        "the outer <ol>'s start=3 offset must not leak into the inner
+         <ol>'s own, unrelated numbering -- the inner list has no start=
+         of its own, so it correctly still begins at the plain default 1")))
+
 (deftest li-list-style-none-suppresses-only-that-lis-marker-without-renumbering
   ;; Real CSS: `list-style: none` on one <li> only hides THAT marker box --
   ;; it does not renumber the <li>s around it, since real CSS's list
