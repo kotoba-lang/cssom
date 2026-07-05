@@ -51,13 +51,37 @@
    (e.g. draw-ops `{:text \"1. \" :y 828}` / `{:text \"...\" :y 860}`) — a
    real, user-visible divergence from real CSS this file's existing tests
    never caught because they only asserted on generated content's
-   COMPUTED STRING value, never its on-screen line position. Every other
-   inline-adjacency shape (an element instead of a text child, multiple
-   real children, ::before and ::after both wrapping one shared text
-   child) is explicitly NOT covered by this exception and keeps behaving
-   exactly as this whole-file limitation already made it behave, no worse.
-   Real hosts can still swap this for text shaping/WebGPU buffers etc — the
-   draw-ops data boundary is unchanged. Word-wrap itself normally decides
+   COMPUTED STRING value, never its on-screen line position. A SECOND,
+   independent bounded exception (see merge-adjacent-text-runs, folded into
+   with-generated-content as a pre-merge pass): a RUN of two-or-more
+   consecutive real text-node DOM children with nothing but each other in
+   between — no element boundary — is collapsed into ONE text child before
+   layout, the same way real browsers always coalesce sibling DOM Text
+   nodes into one contiguous run for rendering/painting purposes (this is
+   not itself a CSS inline-layout feature, just how adjacent text nodes
+   paint). This is a REAL shape this file's own upstream HTML parser
+   produces, not a hypothetical one: kotoba-lang/htmldom's tokenizer
+   discards HTML comments as producing no token at all, so
+   `<p>Hello <!--c-->world</p>` (or any number of interleaved comments)
+   parses to a `<p>` with TWO (or more) adjacent sibling `:text` DOM nodes
+   — `\"Hello \"` and `\"world\"` — with nothing else in between, which
+   this file's block layout (absent this merge) would render as two
+   stacked lines instead of the one contiguous line real CSS renders.
+   These two exceptions compose: merge-adjacent-text-runs runs first, so a
+   ::before/::after directly bordering what was originally several real
+   text-node siblings still sees (and merges with) the WHOLE
+   already-combined run, not just its first fragment. Every other
+   inline-adjacency shape — an ELEMENT instead of a text child (e.g.
+   `<li>text<b>bold</b></li>`), ::before and ::after both wrapping one
+   shared text child — is explicitly NOT covered by either exception and
+   keeps behaving exactly as this whole-file limitation already made it
+   behave, no worse. In particular, a text run broken by an intervening
+   ELEMENT child (e.g. `<li>a<b>x</b>b</li>`) does NOT merge the `a`/`b`
+   text fragments across the `<b>` — they are not adjacent in the children
+   vector, so each surviving run (here, two separate one-node runs) merges
+   independently, same as not merging at all. Real hosts can still swap
+   this for text shaping/WebGPU buffers etc — the draw-ops data boundary
+   is unchanged. Word-wrap itself normally decides
    line breaks with a per-character `(long (* 0.6 font-size))`
    monospace-like approximation (see text-lines) since this is a pure,
    host-independent engine with no real glyph shaping and no Canvas API
@@ -1421,26 +1445,95 @@
 
 (defn- real-text-child
   "Returns the plain string content of `child` if it's a genuine DOM text
-   node, else nil -- used only by with-generated-content's adjacent-text
-   merge below. Handles both shapes a text node can have by the time it
-   reaches this file: a bare string (what kotoba.wasm.dom/tree's own :text
-   case already unwraps every real text node to, see dom.cljc's `tree`,
-   and what every test in this file that hand-builds a tree also uses
+   node, else nil -- used by both merge-adjacent-text-runs' run-detection
+   below and with-generated-content's own adjacent-text merge further
+   below. Handles both shapes a text node can have by the time it reaches
+   this file: a bare string (what kotoba.wasm.dom/tree's own :text case
+   already unwraps every real text node to, see dom.cljc's `tree`, and
+   what every test in this file that hand-builds a tree also uses
    directly) and the `{:node/type :text :text \"...\"}` map shape
    layout-node's own dispatch defensively also still recurs through. This
    is deliberately narrower than layout-node's dispatch as a whole (which
    also falls through to `(str node)` for anything else entirely, e.g. a
    stray number) -- returning nil for anything but those two literal
-   text-node shapes means the merge below never fires on a real element
+   text-node shapes means neither merge below ever fires on a real element
    child (a map with no :node/type at all, or :node/type :element) or on
    an already-generated node (see generated-node? -- a map with
-   :generated/pseudo), which is exactly the boundary section 3 of this
-   feature's scope requires."
+   :generated/pseudo), which is exactly the boundary each feature's scope
+   requires."
   [child]
   (cond
     (string? child) child
     (and (map? child) (= :text (:node/type child)) (string? (:text child))) (:text child)
     :else nil))
+
+(defn- merge-adjacent-text-runs
+  "Collapses every RUN of two-or-more consecutive real DOM text-node
+   children (real-text-child) in `children` into a single bare-string
+   child (the concatenation of each run member's own text, in document
+   order) -- a run boundary is any non-text child (an element, or --
+   though this never actually occurs pre-with-generated-content, since
+   generated nodes are synthesized only inside that function, after this
+   one has already run -- a generated-content node), so only children
+   genuinely ADJACENT in the vector, with nothing else in between, ever
+   combine. A lone text child (a 'run' of one) still passes through this
+   function, just re-wrapped as a bare string when it started as the
+   `{:node/type :text ...}` map shape -- harmless, since layout-node's own
+   dispatch already treats that map shape and the bare string it carries
+   identically (see real-text-child's docstring), so this is a no-op
+   change in output for every child that wasn't actually part of a
+   multi-node run.
+
+   This is a REAL shape this file's own upstream HTML parser produces, not
+   a hypothetical one to guard against just in case: kotoba-lang/htmldom's
+   tokenizer discards HTML comments as producing no token at all (see its
+   `tokenize`'s comment-handling branch), so `<p>Hello <!--c-->world</p>`
+   parses to a `<p>` element with TWO adjacent sibling `:text` DOM
+   children -- \"Hello \" and \"world\" -- with nothing else between them
+   (verified directly against kotoba-lang/htmldom's own
+   parse-into-document + kotoba.wasm.dom/tree: the comment contributes no
+   node of any kind, so the text before and after it end up as two
+   consecutive children of the same parent). More than one comment in a
+   row produces a correspondingly longer run (e.g. `<p>a<!--1-->b<!--2-->
+   c</p>` -> three adjacent text children `[\"a\" \"b\" \"c\"]`) -- hence
+   merging a whole RUN, not just a fixed pair. Without this merge,
+   layout-children-block would render each run member as its own stacked
+   block row (this file's general no-inline-flow behavior, see the ns
+   docstring) instead of real CSS's one contiguous line, since a real
+   browser always coalesces adjacent DOM Text nodes into one contiguous
+   run for rendering -- this isn't itself a CSS inline-layout feature, just
+   how adjacent text nodes paint, which is exactly why plain string
+   concatenation (not a new draw-op capability) is sufficient here: unlike
+   a real inline-level ELEMENT adjacent to text (which may carry its own
+   color/font-size this file's single-color-per-run `:text` draw-op has no
+   way to represent on the same line as another run, see
+   merge-generated-with-text's docstring for that exact limitation), two
+   adjacent real text nodes never carry separate styling of their own --
+   they inherit identically from the same parent -- so concatenating their
+   strings is a complete, not approximate, fix for this specific shape.
+
+   Called from with-generated-content, BEFORE its own ::before/::after
+   adjacency check, so the two features compose correctly: a ::before/
+   ::after directly bordering what was originally several real text-node
+   siblings sees (via real-text-child) the WHOLE already-merged run as its
+   one adjacent text child, not just the nearest fragment of it -- e.g.
+   `<p>::before{content:\"X \"}` immediately followed by two real text
+   children `[\"hello \" \"world\"]` merges all three (generated + both
+   real text children) into the single run \"X hello world\", not two
+   separate runs. A run interrupted by an ELEMENT child (e.g.
+   `<li>a<b>x</b>b</li>`) is NOT merged across that element -- `a` and the
+   later `b` are two separate one-node runs, each passed through
+   unmerged/unchanged, exactly this file's pre-existing (still broken,
+   still out of scope) behavior for text-vs-element adjacency (see the ns
+   docstring's `<li>text<b>bold</b></li>` example)."
+  [children]
+  (->> (vec children)
+       (partition-by #(some? (real-text-child %)))
+       (mapcat (fn [group]
+                 (if (some? (real-text-child (first group)))
+                   [(apply str (map real-text-child group))]
+                   group)))
+       vec))
 
 (defn- merge-generated-with-text
   "Merges synthesized generated-content node `gen` (see
@@ -1477,33 +1570,49 @@
    real CSS pseudo-elements are always the first/last box in their
    originating element's box tree.
 
-   ONE narrow exception to 'spliced in as its own entry': when ::before is
+   FIRST, before any ::before/::after handling at all, `children` is run
+   through merge-adjacent-text-runs (see its own docstring for the full
+   rationale): any RUN of two-or-more consecutive real text-node DOM
+   children collapses into ONE text child, a real (not hypothetical) shape
+   this file's own upstream HTML parser (kotoba-lang/htmldom, whose
+   tokenizer discards HTML comments as producing no token) actually
+   produces. Doing this FIRST, ahead of the ::before/::after adjacency
+   check below, is what makes the two exceptions compose correctly: a
+   ::before/::after directly bordering what was originally several real
+   text-node siblings sees the WHOLE already-merged run as its one
+   adjacent text child (via real-text-child), not just the nearest
+   fragment of it.
+
+   ANOTHER narrow exception to 'spliced in as its own entry': when ::before is
    immediately followed by (or ::after is immediately preceded by) a real
-   text-node child with nothing else in between (see real-text-child),
-   that pair is merged into a SINGLE node (see merge-generated-with-text)
-   instead of two separate entries -- because layout-children-block (this
-   file's block-flow child stacker) gives every entry in the children
-   vector its own row, advancing the running Y offset by that entry's full
-   height, with no concept of inline flow (multiple text/inline children
-   sharing one line box) at all. Real CSS renders a ::before immediately
-   followed by an element's own text on ONE line (e.g. `li::before {
-   content: counter(x) '. ' }` immediately followed by that <li>'s own
-   text, the canonical CSS-counters numbered-list idiom -- confirmed via
-   kotoba-lang/browser's own live `#step-counter` demo) -- without this
-   merge, this engine would instead render them as two stacked block rows,
-   a real, user-visible divergence from real CSS (see this namespace's own
-   docstring for the concrete before/after draw-op coordinates that bug
-   produced).
+   text-node child with nothing else in between (see real-text-child --
+   by this point, already merge-adjacent-text-runs' single combined entry
+   if the original real children had more than one adjacent text node
+   here), that pair is merged into a SINGLE node (see
+   merge-generated-with-text) instead of two separate entries -- because
+   layout-children-block (this file's block-flow child stacker) gives
+   every entry in the children vector its own row, advancing the running Y
+   offset by that entry's full height, with no concept of inline flow
+   (multiple text/inline children sharing one line box) at all. Real CSS
+   renders a ::before immediately followed by an element's own text on ONE
+   line (e.g. `li::before { content: counter(x) '. ' }` immediately
+   followed by that <li>'s own text, the canonical CSS-counters
+   numbered-list idiom -- confirmed via kotoba-lang/browser's own live
+   `#step-counter` demo) -- without this merge, this engine would instead
+   render them as two stacked block rows, a real, user-visible divergence
+   from real CSS (see this namespace's own docstring for the concrete
+   before/after draw-op coordinates that bug produced).
 
    This is deliberately much narrower than general inline flow (which
    would be a large layout-engine feature in its own right, well beyond
    this fix's scope -- see this namespace's docstring): it ONLY ever
    combines a ::before/::after pseudo-element's own resolved text with ONE
-   directly-adjacent real text-node sibling, checked structurally (is the
-   very next/previous entry in the children vector a bare text node?), not
-   by walking or reasoning about inline-level boxes in general. Every
-   other shape is left EXACTLY as unmerged/as broken as it already was, no
-   worse, and never crashes:
+   directly-adjacent real text-node sibling (itself possibly already the
+   product of merge-adjacent-text-runs collapsing several), checked
+   structurally (is the very next/previous entry in the children vector a
+   bare text node?), not by walking or reasoning about inline-level boxes
+   in general. Every other shape is left EXACTLY as unmerged/as broken as
+   it already was, no worse, and never crashes:
    - the first (for ::before) or last (for ::after) real child being an
      ELEMENT instead of a text node (e.g. `<li><span>nested</span></li>`,
      or `<li>text<b>bold</b></li>` where the ::after side would see the
@@ -1523,7 +1632,7 @@
   [node children]
   (let [before (generated-content-node node :before)
         after (generated-content-node node :after)
-        children (vec children)
+        children (merge-adjacent-text-runs children)
         [before children] (if-let [t (and before (seq children) (real-text-child (first children)))]
                              [(merge-generated-with-text before t true) (subvec children 1)]
                              [before children])
@@ -1807,13 +1916,16 @@
    NO inline flow here (or anywhere in this file) -- multiple inline-level
    children never share one line box the way real CSS lays out e.g. text
    next to a `<b>`/`<a>`/`<span>` -- see this namespace's own docstring
-   for why that's out of scope in general. The one narrow, already-merged
-   exception (a ::before/::after generated node combined with ONE
-   directly-adjacent real text-node sibling into a single entry) is
-   resolved upstream by with-generated-content before `children` ever
-   reaches this function -- by the time a child arrives here it is already
-   exactly one row, so this function itself needs no inline-flow concept
-   at all to honor that exception correctly."
+   for why that's out of scope in general. The two narrow, already-merged
+   exceptions -- (1) a RUN of two-or-more adjacent real text-node siblings
+   collapsed into ONE text child (see merge-adjacent-text-runs), and (2) a
+   ::before/::after generated node combined with ONE directly-adjacent
+   (possibly already-collapsed-by-(1)) real text-node sibling into a
+   single entry (see merge-generated-with-text) -- are both resolved
+   upstream by with-generated-content before `children` ever reaches this
+   function -- by the time a child arrives here it is already exactly one
+   row, so this function itself needs no inline-flow concept at all to
+   honor either exception correctly."
   [theme content-x content-y content-w opacity inherited children]
   (loop [remaining children y content-y draws [] height 0]
     (if-let [child (first remaining)]

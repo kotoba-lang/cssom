@@ -1147,6 +1147,186 @@
          lack of inline flow already made it (see this namespace's own
          docstring)")))
 
+;; ---- adjacent real DOM text-node siblings merging onto one shared line
+;;      (see merge-adjacent-text-runs) ----
+;;
+;; A SECOND, independent narrow exception to this file's general lack of
+;; inline flow (see the ns docstring and layout-children-block's own
+;; docstring): a RUN of two-or-more consecutive real text-node DOM
+;; children -- nothing but each other in between, no element boundary --
+;; is collapsed into ONE text child before layout. This is a REAL shape
+;; kotoba-lang/htmldom's own tokenizer produces (its comment handling
+;; discards an HTML comment as contributing no token at all, so
+;; `<p>Hello <!--c-->world</p>` parses to a <p> with two adjacent sibling
+;; :text DOM children -- confirmed directly against htmldom's own
+;; tokenize/parse-into-document), not a hypothetical shape invented just
+;; to exercise this code path.
+
+(deftest two-adjacent-real-text-nodes-merge-onto-one-shared-line
+  ;; The minimal shape: no ::before/::after involved at all, just two real
+  ;; DOM text-node siblings with nothing else in between -- exactly what
+  ;; htmldom's comment-discarding tokenizer produces for
+  ;; `<p>Hello <!--c-->world</p>`.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [t1 doc] (dom/create-text-node doc "Hello ")
+        doc (dom/append-child doc p t1)
+        [t2 doc] (dom/create-text-node doc "world")
+        doc (dom/append-child doc p t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)
+        node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops)
+        ;; Reference: a <p> whose only child is the SAME already-
+        ;; concatenated string as ONE real text node -- a genuine,
+        ;; unambiguous single line. The merged case's box height must
+        ;; match this exactly (not be taller by a whole extra line, which
+        ;; is exactly what this engine's general lack of inline flow would
+        ;; otherwise produce for two stacked block rows).
+        [p2 doc2] (dom/create-element dom/empty-document :p)
+        doc2 (dom/set-root doc2 p2)
+        [child2 doc2] (dom/create-text-node doc2 "Hello world")
+        doc2 (dom/append-child doc2 p2 child2)
+        [_ doc2] (dom/consume-ops doc2)
+        tree2 (dom/tree doc2)
+        ops2 (layout/draw-ops tree2 {:width 480})
+        ref-node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops2)]
+    (is (= 1 (count text-ops))
+        "two adjacent real text-node siblings merge into ONE :text
+         draw-op -- not two separate stacked block rows, this engine's
+         general (and otherwise still correct) behavior for every other
+         pair of sibling children")
+    (is (= "Hello world" (:text (first text-ops)))
+        "the two real text nodes' own strings concatenate, in document
+         order, with no extra separator inserted -- exactly as if the
+         source HTML had been one single text node all along")
+    (is (= (:h ref-node-op) (:h node-op))
+        "the element's own content box is exactly as tall as a plain <p>
+         whose only child is the SAME already-concatenated text -- proving
+         this really is one shared line box, not two stacked lines")))
+
+(deftest three-adjacent-real-text-nodes-merge-as-a-whole-run-not-just-a-pair
+  ;; More than one HTML comment in a row (`<p>a<!--1-->b<!--2-->c</p>`)
+  ;; produces a run of THREE adjacent text-node DOM children, not just
+  ;; two -- proving merge-adjacent-text-runs really walks a whole run,
+  ;; not a fixed pairwise merge.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [t1 doc] (dom/create-text-node doc "a")
+        doc (dom/append-child doc p t1)
+        [t2 doc] (dom/create-text-node doc "b")
+        doc (dom/append-child doc p t2)
+        [t3 doc] (dom/create-text-node doc "c")
+        doc (dom/append-child doc p t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops))
+        "all three adjacent real text-node siblings merge into ONE :text
+         draw-op, not two (a fixed pairwise merge would have stopped at
+         the first two, leaving the third stacked separately)")
+    (is (= "abc" (:text (first text-ops))))))
+
+(deftest text-run-interrupted-by-an-element-does-not-merge-across-it
+  ;; `<li>a<b>x</b>b</li>` -- the two real text-node fragments ('a' and
+  ;; 'b') are NOT adjacent to each other (a <b> element sits between
+  ;; them), so they must NOT merge across it -- each stays its own
+  ;; one-node run, exactly as unmerged as this engine's general lack of
+  ;; inline flow already made it. Proves merge-adjacent-text-runs only
+  ;; ever combines children that are genuinely adjacent in the children
+  ;; vector, never text nodes anywhere else on the same element.
+  (let [[li doc] (dom/create-element dom/empty-document :li)
+        doc (dom/set-root doc li)
+        [ta doc] (dom/create-text-node doc "a")
+        doc (dom/append-child doc li ta)
+        [b doc] (dom/create-element doc :b)
+        doc (dom/append-child doc li b)
+        [bx doc] (dom/create-text-node doc "x")
+        doc (dom/append-child doc b bx)
+        [tb doc] (dom/create-text-node doc "b")
+        doc (dom/append-child doc li tb)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["a" "x" "b"] (mapv :text text-ops))
+        "three genuinely separate draw-ops -- the <b> element boundary
+         blocks the 'a'/'b' text fragments from merging with each other,
+         even though both are real text-node children of the same <li>")
+    (is (apply < (mapv :y text-ops))
+        "still three stacked rows -- this engine's general lack of inline
+         flow, unaffected by the text-run merge")))
+
+(deftest mixed-bare-string-and-map-shaped-text-nodes-still-merge-as-one-run
+  ;; real-text-child accepts two shapes a text-node child can have by the
+  ;; time layout.cljc sees it: a bare string (what kotoba.wasm.dom/tree
+  ;; unwraps every real text node to) and the `{:node/type :text :text
+  ;; ...}` map shape layout-node's own dispatch also still recurs
+  ;; through. merge-adjacent-text-runs must merge a run mixing both
+  ;; shapes, not just a run of bare strings -- exercised directly here
+  ;; (rather than through dom/tree, which only ever produces the bare-
+  ;; string shape) since this is otherwise impossible to reach through
+  ;; the normal DOM-building pipeline every other test in this file uses.
+  (let [{:keys [draw]} (layout/layout-node
+                        layout/default-theme 0 0 480 1.0 inherited-text
+                        {:node/id 1 :node/type :element :tag :p :attrs {}
+                         :children ["Hello " {:node/type :text :text "world"}]})
+        text-ops (filterv #(= :text (:draw/op %)) draw)]
+    (is (= 1 (count text-ops))
+        "a bare-string text child immediately adjacent to a map-shaped
+         `{:node/type :text ...}` text child still merge into ONE run")
+    (is (= "Hello world" (:text (first text-ops))))))
+
+;; ---- composition: ::before/::after generated content immediately
+;;      adjacent to a RUN of several real text-node children ----
+;;
+;; Both this file's narrow inline-adjacency exceptions -- the
+;; ::before/::after<->text merge (merge-generated-with-text, landed in
+;; the previous fix) and this file's own adjacent-real-text-run merge
+;; (merge-adjacent-text-runs, this fix) -- must compose correctly:
+;; with-generated-content runs merge-adjacent-text-runs FIRST, so a
+;; ::before/::after directly bordering what was originally several real
+;; text-node siblings sees the WHOLE already-combined run as its one
+;; adjacent text child, not just the nearest fragment of it.
+
+(deftest before-content-composes-with-multiple-adjacent-real-text-children-into-one-line
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [t1 doc] (dom/create-text-node doc "hello ")
+        doc (dom/append-child doc p t1)
+        [t2 doc] (dom/create-text-node doc "world")
+        doc (dom/append-child doc p t2)
+        rules (css/parse-rules "p::before { content: \"X \" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)
+        node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops)
+        ;; Reference: an otherwise-identical <p> with no ::before at all,
+        ;; whose own real text is the SAME fully-concatenated string as
+        ;; ONE text node -- a genuine, unambiguous single line.
+        [p2 doc2] (dom/create-element dom/empty-document :p)
+        doc2 (dom/set-root doc2 p2)
+        [child2 doc2] (dom/create-text-node doc2 "X hello world")
+        doc2 (dom/append-child doc2 p2 child2)
+        [_ doc2] (dom/consume-ops doc2)
+        tree2 (dom/tree doc2)
+        ops2 (layout/draw-ops tree2 {:width 480})
+        ref-node-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops2)]
+    (is (= 1 (count text-ops))
+        "::before merges with the WHOLE two-node adjacent real text run,
+         not just the first fragment -- ONE :text draw-op total")
+    (is (= "X hello world" (:text (first text-ops)))
+        "generated ::before text concatenated with BOTH real text
+         children's own strings, in document order")
+    (is (= (:h ref-node-op) (:h node-op))
+        "exactly one line's worth of height -- proving the composition of
+         both merges really produces a single shared line, not two (or
+         three) stacked rows")))
+
 ;; ---- non-rendered (metadata) elements ----
 ;;
 ;; <head>/<title>/<script>/<style>/<meta>/<link> are never part of a real
