@@ -1673,3 +1673,259 @@
     ;; permissive digit-run parse of "10%"/"5%" -> 10/5.
     (is (= (+ 4 10) (:x div-op)))
     (is (= (+ 4 5) (:y div-op)))))
+
+;; ---- implicit <ul>/<ol> default `<li>` markers (with-implicit-list-markers)
+;;      ----
+;;
+;; Every real browser renders a bullet ("•") before every <li> inside a bare
+;; <ul>, and an auto-incrementing decimal number ("1.", "2.", ...) before
+;; every <li> inside a bare <ol> -- purely from the UA stylesheet, with ZERO
+;; author CSS required. Before this feature, this engine had no
+;; list-style/marker/tag-name-default concept at all, so a bare
+;; `<ul><li>Apple</li></ul>` rendered ONLY the literal text "Apple" -- no
+;; marker of any kind (confirmed directly against kotoba-lang/browser's own
+;; live demo before this feature existed). These tests use the SAME real
+;; end-to-end pipeline every other section of this file uses (a real
+;; kotoba.wasm.dom tree -> cssom.layout/draw-ops, several also through the
+;; real cssom.core cascade for the CSS-driven suppression cases), never a
+;; hand-rolled stub of with-implicit-list-markers itself.
+
+(deftest plain-ul-renders-bullet-marker-before-each-li-sharing-one-line
+  ;; No CSS at all -- proves the marker is genuinely IMPLICIT, not merely
+  ;; the pre-existing explicit-::before idiom under a different name.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [t1 doc] (dom/create-text-node doc "Apple")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [t2 doc] (dom/create-text-node doc "Banana")
+        doc (dom/append-child doc li2 t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)
+        li-node-ops (filterv #(and (= :node (:draw/op %)) (= :li (:tag %))) ops)
+        ;; Reference: a <ul> whose <li> children's own real text is ALREADY
+        ;; the bullet-prefixed string, as ONE text node each -- a genuine,
+        ;; unambiguous single line per <li>. The marker case's per-<li> box
+        ;; height must match this exactly (not be a whole extra line
+        ;; taller, which is what NOT sharing one line would produce).
+        [ul2 doc2] (dom/create-element dom/empty-document :ul)
+        doc2 (dom/set-root doc2 ul2)
+        [rli1 doc2] (dom/create-element doc2 :li)
+        doc2 (dom/append-child doc2 ul2 rli1)
+        [rt1 doc2] (dom/create-text-node doc2 "• Apple")
+        doc2 (dom/append-child doc2 rli1 rt1)
+        [_ doc2] (dom/consume-ops doc2)
+        tree2 (dom/tree doc2)
+        ops2 (layout/draw-ops tree2 {:width 480})
+        ref-li-op (some #(and (= :node (:draw/op %)) (= :li (:tag %)) %) ops2)]
+    (is (= ["• Apple" "• Banana"] (mapv :text text-ops))
+        "each <li>'s implicit bullet marker is merged onto ONE shared line
+         with that <li>'s own real text -- not a separate stacked line, and
+         not shared across <li> siblings")
+    (is (= (:h ref-li-op) (:h (first li-node-ops)))
+        "the first <li>'s own content box is exactly as tall as a <li>
+         whose only child is the SAME already-prefixed text as one real
+         text node -- proving this really is one shared line, not two
+         stacked lines")))
+
+(deftest plain-ol-renders-sequential-decimal-markers-starting-at-one
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "First")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        [t2 doc] (dom/create-text-node doc "Second")
+        doc (dom/append-child doc li2 t2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li3)
+        [t3 doc] (dom/create-text-node doc "Third")
+        doc (dom/append-child doc li3 t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. First" "2. Second" "3. Third"] (mapv :text text-ops))
+        "sequential, 1-based decimal markers, one per <li>, merged onto
+         each <li>'s own shared line, with zero author CSS")))
+
+(deftest nested-ol-inside-li-of-outer-ol-numbers-independently-from-one
+  ;; `<ol><li>Outer1<ol><li>Inner1</li><li>Inner2</li></ol></li>
+  ;;  <li>Outer2</li></ol>` -- the INNER <ol>'s own <li> children must
+  ;; number 1, 2 from their own parent's perspective, completely
+  ;; unaffected by the outer <ol>'s own position (the inner <ol> lives
+  ;; inside the OUTER <ol>'s first <li>, at outer position 1 -- if
+  ;; numbering leaked across nesting levels the inner pair might wrongly
+  ;; start from 2, not 1).
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "Outer1")
+        doc (dom/append-child doc li1 t1)
+        [inner-ol doc] (dom/create-element doc :ol)
+        doc (dom/append-child doc li1 inner-ol)
+        [inner-li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc inner-ol inner-li1)
+        [it1 doc] (dom/create-text-node doc "Inner1")
+        doc (dom/append-child doc inner-li1 it1)
+        [inner-li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc inner-ol inner-li2)
+        [it2 doc] (dom/create-text-node doc "Inner2")
+        doc (dom/append-child doc inner-li2 it2)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        [t2 doc] (dom/create-text-node doc "Outer2")
+        doc (dom/append-child doc li2 t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. Outer1" "1. Inner1" "2. Inner2" "2. Outer2"] (mapv :text text-ops))
+        "the outer <ol> numbers its own two direct <li> children 1/2
+         (Outer1/Outer2); the inner <ol> -- nested one level inside the
+         outer <ol>'s FIRST <li> -- independently numbers its own two
+         direct <li> children 1/2 (Inner1/Inner2) from its own position 1,
+         never continuing or being perturbed by the outer list's count")))
+
+(deftest li-list-style-none-suppresses-only-that-lis-marker-without-renumbering
+  ;; Real CSS: `list-style: none` on one <li> only hides THAT marker box --
+  ;; it does not renumber the <li>s around it, since real CSS's list
+  ;; numbering is driven by the (independent) list-item counter, not by
+  ;; which markers happen to be visible.
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        doc (dom/set-attribute doc li1 :class "suppressed")
+        [t1 doc] (dom/create-text-node doc "First")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        [t2 doc] (dom/create-text-node doc "Second")
+        doc (dom/append-child doc li2 t2)
+        rules (css/parse-rules ".suppressed { list-style: none }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["First" "2. Second"] (mapv :text text-ops))
+        "the suppressed first <li> gets no marker of any kind (its own real
+         text renders alone); the second <li> still reads '2. Second', not
+         renumbered down to '1. Second' -- suppressing one marker does not
+         shift the numbering of the <li>s around it")))
+
+(deftest ul-list-style-type-none-suppresses-every-direct-lis-marker
+  ;; Real CSS normally sets `list-style-type: none` on the <ul>/<ol> itself
+  ;; and INHERITS it to every <li> -- this engine has no general arbitrary-
+  ;; property inheritance to lean on, so with-implicit-list-markers checks
+  ;; the CONTAINER's own style directly instead (see its docstring), which
+  ;; is the one place a real author's `list-style-type: none` almost always
+  ;; actually appears in source.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [t1 doc] (dom/create-text-node doc "Apple")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [t2 doc] (dom/create-text-node doc "Banana")
+        doc (dom/append-child doc li2 t2)
+        rules (css/parse-rules "ul { list-style-type: none }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["Apple" "Banana"] (mapv :text text-ops))
+        "list-style-type: none on the <ul> itself suppresses every one of
+         its direct <li> children's implicit markers, not just the first")))
+
+(deftest bare-li-with-no-ul-or-ol-parent-gets-no-implicit-marker
+  ;; This feature is specifically the <ul>/<ol> UA-stylesheet default, not
+  ;; a generic "every <li> gets a marker" rule -- an <li> sitting directly
+  ;; under something else (malformed/manually-styled markup) must render
+  ;; completely unaffected, exactly as it did before this feature existed.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        [li doc] (dom/create-element doc :li)
+        doc (dom/append-child doc div li)
+        [t doc] (dom/create-text-node doc "Orphan")
+        doc (dom/append-child doc li t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["Orphan"] (mapv :text text-ops))
+        "no bullet, no number, no marker of any kind -- a bare <li> with no
+         <ul>/<ol> DIRECT parent renders its own text completely
+         unaffected")))
+
+(deftest li-own-explicit-before-content-is-left-alone-not-doubled-with-implicit-marker
+  ;; If a page author ALSO writes their own explicit `<li>::before { content:
+  ;; ... }`, the implicit marker must not fire at all for that <li> -- since
+  ;; :pseudo/before is a single-value attrs key, unconditionally writing an
+  ;; implicit marker there too would SILENTLY DELETE the author's own
+  ;; explicit content rather than combining with it (there is no way to
+  ;; represent both in one :text draw-op). The explicit ::before is left
+  ;; completely alone, applying exactly as it already did before this
+  ;; feature existed -- no doubled/garbled line, no implicit marker
+  ;; competing with it.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li)
+        [t doc] (dom/create-text-node doc "Custom")
+        doc (dom/append-child doc li t)
+        rules (css/parse-rules "li::before { content: \"★ \" }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["★ Custom"] (mapv :text text-ops))
+        "the author's own explicit ::before content renders exactly as it
+         already did -- one merged line, the author's own marker, no
+         implicit bullet also competing for the same :pseudo/before slot")))
+
+(deftest explicit-counter-numbered-list-idiom-still-works-unchanged-alongside-implicit-feature
+  ;; Regression guard, end to end: the pre-existing explicit-CSS numbered-
+  ;; list idiom (`li { counter-increment: item } li::before { content:
+  ;; counter(item) \". \"; }`, already covered by
+  ;; three-sibling-list-items-render-sequential-counter-numbers-as-real-text
+  ;; above) must render IDENTICALLY now that the implicit-marker feature
+  ;; exists -- the explicit ::before content on each <li> makes
+  ;; with-implicit-list-markers skip every one of them, so this is not a
+  ;; double-numbered "1. 1. one" -- just the author's own explicit numbering,
+  ;; unaffected.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [t1 doc] (dom/create-text-node doc "one")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [t2 doc] (dom/create-text-node doc "two")
+        doc (dom/append-child doc li2 t2)
+        rules (css/parse-rules
+               "li { counter-increment: item }
+                li::before { content: counter(item) \". \"; }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. one" "2. two"] (mapv :text text-ops))
+        "the author's own explicit counter-driven numbering renders exactly
+         as before this feature existed -- not doubled, not replaced by the
+         implicit bullet this <ul>'s <li>s would otherwise get")))

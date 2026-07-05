@@ -92,6 +92,35 @@
    key (see draw-ops/layout-text), so wrapping agrees with how that host
    actually paints the already-wrapped lines.
 
+   Implicit `<ul>`/`<ol>` default `<li>` markers (see
+   with-implicit-list-markers, in the same section of this file as
+   with-generated-content, right below it): real browsers render a bullet
+   (\"•\") before every `<li>` whose DIRECT PARENT is a `<ul>`, and an
+   auto-incrementing decimal number (\"1.\", \"2.\", ...) before every `<li>`
+   whose direct parent is an `<ol>`, from the UA stylesheet, with ZERO
+   author CSS required — before this feature, this engine (which had no
+   list-style/marker/tag-default concept at all) rendered a bare
+   `<ul><li>Apple</li></ul>` as just the literal text \"Apple\", confirmed via
+   kotoba-lang/browser's own live demo. Rather than new rendering machinery,
+   this reuses the exact same ::before/generated-content pipeline described
+   above: an implicit marker is written as if it were the `<li>`'s own
+   cascade-resolved `:pseudo/before` attr, so it gets the SAME same-line
+   merge with the `<li>`'s own real text (merge-generated-with-text) the
+   explicit-CSS numbered-list idiom already gets. Numbering is a purely
+   POSITIONAL 1-based count of an `<li>`'s index among its OWN parent's
+   direct `<li>` children only — deliberately NOT cssom.core's general
+   counter-reset/counter-increment machinery, so it can never collide with
+   an author's own independent counter() usage elsewhere on the page — so a
+   nested `<ol>`/`<ul>` inside one of those `<li>`s restarts at 1
+   independently, with no shared state. An `<li>` (or its direct `<ul>`/
+   `<ol>` parent) with `list-style`/`list-style-type: none`, or an `<li>`
+   that already has its own explicit ::before `content`, is skipped (see
+   with-implicit-list-markers' own docstring for exactly why each case is
+   skipped rather than combined/overridden). Explicitly out of scope: the
+   full `list-style-type` property (circle/square/roman/alpha/...),
+   `list-style-position`, `<ol start=/reversed>` and `<li value=>`, and
+   `<menu>`.
+
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
   (:require [clojure.string :as str]))
 
@@ -1643,6 +1672,201 @@
         children (if after (conj children after) children)]
     children))
 
+;; ---- implicit <ul>/<ol> default `<li>` markers (UA-stylesheet defaults) ----
+;;
+;; Real browsers render a bullet ("•") before every <li> whose DIRECT PARENT
+;; is a <ul>, and an auto-incrementing decimal number ("1.", "2.", ...)
+;; before every <li> whose direct parent is an <ol> -- entirely from the
+;; browser's own USER-AGENT stylesheet, with ZERO author CSS required. This
+;; engine has no built-in UA-stylesheet / tag-name-based default styling
+;; concept at all (cssom.core's cascade only ever resolves declarations an
+;; author's own stylesheet or inline style actually contributed -- see its
+;; namespace docstring; confirmed via grep before this feature existed that
+;; this file had no list-style/marker/tag-default concept either), so before
+;; this feature, a bare `<ul><li>Apple</li></ul>` rendered ONLY the literal
+;; text "Apple" -- no marker of any kind, confirmed via kotoba-lang/browser's
+;; own live demo.
+;;
+;; Rather than inventing new rendering machinery, this reuses the EXACT same
+;; generated-content pipeline the canonical explicit-CSS numbered-list idiom
+;; already exercises end to end (`li::before { content: counter(x) '. ';
+;; }`, see with-generated-content/generated-content-node above): an implicit
+;; marker is synthesized as if it were the <li>'s own cascade-resolved
+;; `:pseudo/before` attr (`{:content \"1. \"}` / `{:content \"• \"}`) --
+;; so it flows through generated-content-node/with-generated-content
+;; completely unmodified the next time layout-node recurses into that <li>
+;; as its own node, including the SAME-LINE merge with the <li>'s own real
+;; text-node child (merge-generated-with-text) that already makes "1. " +
+;; "Apple" render as ONE shared line rather than two stacked block rows,
+;; exactly like the explicit-CSS idiom does.
+;;
+;; Numbering is DELIBERATELY NOT implemented via the general-purpose
+;; counter-reset/counter-increment machinery (cssom.core's per-document
+;; counters map, threaded through apply-cascade's own tree walk) -- see
+;; with-implicit-list-markers below for the much simpler, purely positional
+;; computation used instead, and why: reusing the real counters machinery
+;; here would risk interfering with a page author's OWN, independent,
+;; explicit counter-reset/counter-increment usage elsewhere on the same page
+;; (this engine's counters, per cssom.core's own documented simplification,
+;; live in ONE flat per-document namespace, not scoped per list the way real
+;; CSS technically allows). A purely positional count (this <li>'s 1-based
+;; index among its OWN parent's direct <li> children, in document order)
+;; needs no shared namespace at all, so it can never collide with -- or be
+;; perturbed by -- anything an author's stylesheet does with counter().
+;;
+;; Hooked into layout-node's :element branch (see with-implicit-list-markers'
+;; call site) at the SAME point with-generated-content already runs: every
+;; element's own DIRECT children are inspected once, right before recursing
+;; into them -- exactly the information this feature needs (a <ul>/<ol>
+;; container inspecting its own direct :li children) and nothing more, no
+;; tree-wide pass, no new traversal.
+
+(defn- pseudo-content
+  "The already-cascade-resolved `content` string of `node`'s `pseudo-key`
+   (:before/:after) generated content, or nil if no rule targets that
+   pseudo-element at all, OR one does but never resolved a usable `content`
+   value (see generated-content-node's own docstring for the several ways
+   that can honestly happen, e.g. `p::before { color: red }` with no
+   `content` declared at all -- `node`'s :pseudo/before attr would still be
+   a non-nil map in that case, just one with no :content key). Used by
+   with-implicit-list-markers to decide whether an <li> already has its OWN
+   explicit ::before content (see its docstring for why that must skip the
+   implicit marker rather than silently clobbering it) -- checking
+   specifically for :content, not merely truthiness of the whole
+   :pseudo/before attr, is what correctly still allows an implicit marker
+   on an <li> whose only ::before rule sets some other property with no
+   content of its own."
+  [node pseudo-key]
+  (:content (pseudo-style node pseudo-key)))
+
+(defn- list-style-none?
+  "True when `node`'s OWN already-cascade-resolved `list-style` or
+   `list-style-type` style property is literally `none` -- the one
+   plausible way a page author can already ask for no markers even though
+   this engine has no broader list-style-type property support yet (see
+   with-implicit-list-markers' docstring for the exact suppression rule
+   this backs). Deliberately narrow, matching this file's existing bare-
+   keyword style-value comparisons elsewhere (e.g. `(= \"border-box\"
+   (:box-sizing st))`): no shorthand-with-other-values parsing (`list-style:
+   none outside` is out of scope, since general list-style-type/list-style-
+   position support is itself out of scope, see the ns docstring), no
+   case-folding (consistent with every other bare-keyword style comparison
+   in this file)."
+  [node]
+  (or (= "none" (style node :list-style))
+      (= "none" (style node :list-style-type))))
+
+(defn- implicit-marker-content
+  "The implicit marker text for the `position`-th (1-based) direct `:li`
+   child of a `parent-tag` (:ul/:ol) container -- `\"• \"` (one bullet
+   character, one space) for :ul, `\"<position>. \"` for :ol, matching real
+   browsers' own UA-stylesheet defaults (see the section comment above for
+   the exact, deliberately bounded scope: no other list-style-type values,
+   no :ol `start=`/`reversed`, no :li `value=`). Any other `parent-tag`
+   returns nil (with-implicit-list-markers never actually calls this for
+   one, but kept total rather than partial defensively), matching the 'no
+   marker' contract generated-content-node already establishes for absent
+   `:content`."
+  [parent-tag position]
+  (case parent-tag
+    :ul "• "
+    :ol (str position ". ")
+    nil))
+
+(defn- with-implicit-list-markers
+  "Returns `children` (a container element's OWN direct children, i.e.
+   `(:children node)` before with-generated-content ever sees them) with
+   each direct `:li` element child's `:attrs` augmented with a synthetic
+   `:pseudo/before {:content <marker>}` entry -- UNLESS that child already
+   has its own explicit ::before content (see pseudo-content), or the
+   marker is suppressed (see list-style-none?) -- but ONLY when `node` (the
+   container currently being laid out) is itself a `<ul>` or `<ol>`
+   element. Every other `node` tag is a complete no-op, returning `children`
+   unchanged -- in particular a bare `<li>` with no `<ul>`/`<ol>` parent at
+   all is NEVER touched by this function, because it is only ever invoked
+   from the PARENT's own perspective (see layout-node's call site): if the
+   parent isn't itself a :ul/:ol element, this <li> simply never gets a
+   synthetic :pseudo/before written onto it by anyone, matching real
+   UA-stylesheet semantics exactly (only an <li> whose DIRECT parent is
+   <ul>/<ol> gets a default marker at all).
+
+   Once written, that synthetic :pseudo/before attr flows through the EXACT
+   same code path a real, author-written `li::before { content: ... }` rule
+   already does (generated-content-node/with-generated-content), the next
+   time layout-node recurses into that <li> as its own node -- see the
+   section comment above for why this reuse, rather than new rendering
+   machinery, is both sufficient and correct (including the same-line merge
+   with the <li>'s own real text-node child).
+
+   Suppression, checked per <li> (never globally short-circuiting the rest
+   of the function -- one suppressed <li> must not affect its siblings'
+   markers or numbering, matching real CSS: `list-style: none` only ever
+   hides that one marker BOX, it does not renumber anything):
+     - the container (`node`) itself has `list-style`/`list-style-type:
+       none` (checked ONCE up front, gating the whole function -- if the
+       container suppresses its markers, no direct <li> child gets one, and
+       `children` returns unchanged) -- real CSS normally sets this on the <ul>/<ol>
+       and INHERITS it to every <li>, but this engine has no general
+       arbitrary-property inheritance machinery to lean on (only :color/
+       :font-size are threaded through `inherited` -- see node-style/
+       layout-node), so this checks the container's OWN style directly,
+       which is the one place a real author's `list-style-type: none`
+       almost always actually appears in source.
+     - the <li> ITSELF has `list-style`/`list-style-type: none` on its own
+       cascade-resolved style (checked independently of the container-level
+       check above, so an author can suppress a single <li>'s marker
+       without touching the container at all).
+     - the <li> already has its own explicit ::before `content` (see
+       pseudo-content) -- a deliberate compose-vs-skip decision, not an
+       oversight: :pseudo/before is a single-value attrs key
+       (generated-content-node/with-generated-content only ever reads ONE
+       value from it), so unconditionally overwriting it here would
+       SILENTLY DELETE the author's own explicit ::before content rather
+       than adding to or alongside it -- a real, user-visible regression
+       (the author's own marker/icon/text vanishing) strictly worse than
+       this engine simply not adding an extra implicit one. An explicit
+       ::before is a deliberate, independent authoring choice (most
+       plausibly itself a hand-written marker, e.g. the exact
+       `li::before { content: counter(x) '. '; }` idiom this whole feature
+       generalizes) that this function leaves completely alone -- the
+       explicit ::before still applies as its own, separate mechanism,
+       unaffected by this feature's existence.
+
+   Numbering (`:ol` only): a purely POSITIONAL 1-based index among this
+   node's OWN direct `:li` element children, in document order -- counting
+   EVERY direct <li> child (even a suppressed one, so suppressing one <li>'s
+   marker does not renumber the ones after it, matching real CSS), and
+   completely ignoring any non-<li> child (a stray text node, e.g.
+   whitespace between <li> tags in real markup, or any other element)
+   without incrementing the count. This is intentionally NOT the same
+   number space as cssom.core's own counter-reset/counter-increment
+   machinery -- see the section comment above for why -- so it can never
+   collide with (or be perturbed by) a page author's own, independent
+   explicit counter usage elsewhere on the page. A NESTED <ol>/<ul> inside
+   one of these <li>s gets its own, completely independent count for free:
+   it is never one of THIS node's own direct children (it's a grandchild,
+   nested one level deeper, inside one of the <li>s), so it is only ever
+   processed by a LATER, separate call to this same function -- once
+   layout-node recurses into that inner <ol>/<ul> as ITS OWN node -- which
+   starts its own loop fresh from position 1, with no shared state of any
+   kind between the two calls."
+  [node children]
+  (let [parent-tag (:tag node)]
+    (if (and (contains? #{:ul :ol} parent-tag) (not (list-style-none? node)))
+      (first
+       (reduce (fn [[out n] child]
+                 (if (and (map? child) (= :li (:tag child)))
+                   (let [n (inc n)]
+                     (if (or (list-style-none? child) (pseudo-content child :before))
+                       [(conj out child) n]
+                       [(conj out (assoc-in child [:attrs :pseudo/before]
+                                             {:content (implicit-marker-content parent-tag n)}))
+                        n]))
+                   [(conj out child) n]))
+               [[] 0]
+               children))
+      children)))
+
 ;; ---- non-rendered (metadata) elements ----
 ;;
 ;; <head>, <title>, <script>, <style>, <meta>, <link> are never part of a
@@ -2065,7 +2289,7 @@
                font-size (parse-int (:font-size st) (:font-size inherited))
                inherited (assoc inherited :color color :font-size font-size)
                tag (:tag node)
-               children (with-generated-content node (:children node))]
+               children (with-generated-content node (with-implicit-list-markers node (:children node)))]
            (cond
              (contains? #{:input :select :textarea} tag)
              (layout-form-control theme x y avail-width opacity st node)
