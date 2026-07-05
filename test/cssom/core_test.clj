@@ -513,6 +513,45 @@
                           [:nodes div :attrs :style/color]))
         "the default viewport width (800px) behaves like a desktop-sized viewport")))
 
+;; ---- @media (prefers-color-scheme) ----
+
+(deftest media-prefers-color-scheme-conditionally-applies-rules
+  ;; Before this feature, ANY @media feature other than min-width/max-width
+  ;; was unrecognized and defaulted to always-matching -- meaning a real
+  ;; page's light AND dark variants (the single most common real-world
+  ;; prefers-color-scheme pattern) would BOTH apply simultaneously,
+  ;; regardless of the actual host color scheme.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules
+               "div { background: white }
+                @media (prefers-color-scheme: dark) { div { background: black } }")]
+    (is (= "white" (get-in (css/apply-cascade doc rules {:color-scheme "light"})
+                           [:nodes div :attrs :style/background]))
+        "a real light color-scheme must not match a dark-only media query")
+    (is (= "black" (get-in (css/apply-cascade doc rules {:color-scheme "dark"})
+                           [:nodes div :attrs :style/background]))
+        "a real dark color-scheme must match its own media query")
+    (is (= "white" (get-in (css/apply-cascade doc rules)
+                           [:nodes div :attrs :style/background]))
+        "the default color-scheme (light) behaves like a real light-mode host")))
+
+(deftest media-prefers-color-scheme-composes-with-screen-and-min-width
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules
+               "div { background: white }
+                @media screen and (prefers-color-scheme: dark) and (min-width: 600px) { div { background: black } }")]
+    (is (= "black" (get-in (css/apply-cascade doc rules {:viewport-width 1024 :color-scheme "dark"})
+                           [:nodes div :attrs :style/background]))
+        "all three AND-combined conditions genuinely matching must apply the rule")
+    (is (= "white" (get-in (css/apply-cascade doc rules {:viewport-width 320 :color-scheme "dark"})
+                           [:nodes div :attrs :style/background]))
+        "dark scheme alone is not enough if the min-width condition in the same AND chain fails")
+    (is (= "white" (get-in (css/apply-cascade doc rules {:viewport-width 1024 :color-scheme "light"})
+                           [:nodes div :attrs :style/background]))
+        "a wide viewport alone is not enough if the color-scheme condition in the same AND chain fails")))
+
 ;; ---- CSS custom properties (--foo) and var() ----
 
 (deftest resolves-custom-properties-inherited-from-an-ancestor

@@ -1681,31 +1681,19 @@
 (def ^:private media-feature-pattern
   #"(?i)\(\s*(min-width|max-width)\s*:\s*(\d+)(?:px)?\s*\)")
 
-(defn media-condition-matches?
-  "Evaluates a raw @media condition (as stored in :rule/media) against a
-   viewport width in px. Supports `(min-width: Npx)` / `(max-width: Npx)`,
-   combined with `and`; a bare `screen`/`all` media type always matches,
-   `print` never does; anything else unrecognized is treated as matching
-   (so unsupported media features don't silently hide rules)."
-  [condition viewport-width]
-  (let [condition (str/replace (str condition) #"(?i)^\s*@media\s*" "")
-        parts (->> (str/split condition #"(?i)\s+and\s+")
-                   (map str/trim)
-                   (remove str/blank?))]
-    (every? (fn [part]
-              (let [lower (str/lower-case part)]
-                (cond
-                  (= lower "print") false
-                  (contains? #{"screen" "all"} lower) true
-                  :else
-                  (if-let [[_ kind value] (re-matches media-feature-pattern part)]
-                    (let [n (parse-media-width value)]
-                      (case (str/lower-case kind)
-                        "min-width" (>= viewport-width n)
-                        "max-width" (<= viewport-width n)
-                        true))
-                    true))))
-            parts)))
+(def ^:private color-scheme-feature-pattern
+  "`(prefers-color-scheme: light|dark)` -- the one non-width media feature
+   this engine recognizes, since it's ubiquitous in real-world CSS (a page's
+   light/dark variants are almost always both written as ordinary `@media
+   (prefers-color-scheme: dark) { ... }` blocks, ordinary declarations
+   competing on specificity/order like anything else) and, unlike most other
+   Level 4 media features, has a genuine, simple binary value a host can
+   reasonably inject (see media-condition-matches?'s `color-scheme` arg and
+   apply-cascade's `:color-scheme` opt) rather than needing real hardware/
+   OS sensing this engine has no way to do (`hover`/`pointer`/`prefers-
+   reduced-motion`/etc. remain unrecognized and fall through to the
+   documented always-matching default below)."
+  #"(?i)\(\s*prefers-color-scheme\s*:\s*(light|dark)\s*\)")
 
 (def default-viewport-width
   "Viewport width (px) `apply-cascade` assumes for @media evaluation when the
@@ -1713,10 +1701,56 @@
    kotoba-lang/browser's own default viewport [800 600]."
   800)
 
+(def default-color-scheme
+  "Color scheme (\"light\"/\"dark\") `apply-cascade` assumes for
+   `prefers-color-scheme` @media evaluation when the caller doesn't pass an
+   explicit :color-scheme. \"light\" matches both most real OSes' own
+   factory-default color scheme and (per the CSS Color Adjustment spec)
+   what `prefers-color-scheme` itself resolves to when a user agent can't
+   determine an actual preference at all."
+  "light")
+
+(defn media-condition-matches?
+  "Evaluates a raw @media condition (as stored in :rule/media) against a
+   viewport width in px and a `color-scheme` (\"light\"/\"dark\", see
+   default-color-scheme). Supports `(min-width: Npx)` / `(max-width: Npx)`,
+   `(prefers-color-scheme: light|dark)`, combined with `and`; a bare
+   `screen`/`all` media type always matches, `print` never does; anything
+   else unrecognized (`hover`, `pointer`, `prefers-reduced-motion`, `not`/
+   `only` qualifiers, ...) is treated as matching (so unsupported media
+   features don't silently hide rules).
+
+   2-arity overload (`color-scheme` omitted) defaults to
+   default-color-scheme, preserving the exact behavior every caller had
+   before `prefers-color-scheme` support existed."
+  ([condition viewport-width]
+   (media-condition-matches? condition viewport-width default-color-scheme))
+  ([condition viewport-width color-scheme]
+   (let [condition (str/replace (str condition) #"(?i)^\s*@media\s*" "")
+         parts (->> (str/split condition #"(?i)\s+and\s+")
+                    (map str/trim)
+                    (remove str/blank?))]
+     (every? (fn [part]
+               (let [lower (str/lower-case part)]
+                 (cond
+                   (= lower "print") false
+                   (contains? #{"screen" "all"} lower) true
+                   :else
+                   (if-let [[_ kind value] (re-matches media-feature-pattern part)]
+                     (let [n (parse-media-width value)]
+                       (case (str/lower-case kind)
+                         "min-width" (>= viewport-width n)
+                         "max-width" (<= viewport-width n)
+                         true))
+                     (if-let [[_ scheme] (re-matches color-scheme-feature-pattern part)]
+                       (= (str/lower-case scheme) (str/lower-case (str color-scheme)))
+                       true)))))
+             parts))))
+
 (defn- rule-applies-to-viewport?
-  [rule viewport-width]
+  [rule viewport-width color-scheme]
   (let [media (:rule/media rule)]
-    (or (nil? media) (media-condition-matches? media viewport-width))))
+    (or (nil? media) (media-condition-matches? media viewport-width color-scheme))))
 
 (def ^:private container-feature-pattern
   "Mirrors media-feature-pattern, plus a bare `width` equality feature (real
@@ -3289,7 +3323,9 @@
 
    `opts` (optional, 3-arity) may include :viewport-width (default
    `default-viewport-width`) used to decide whether `@media (min-width:...)`
-   / `(max-width:...)` rule blocks apply.
+   / `(max-width:...)` rule blocks apply, and :color-scheme (default
+   `default-color-scheme`, \"light\"/\"dark\") used to decide whether
+   `@media (prefers-color-scheme: ...)` rule blocks apply.
 
    `@container` support (see the namespace docstring's own `@container`
    paragraph for the feature's scope) is why this function may run
@@ -3334,7 +3370,8 @@
    (apply-cascade document rules {}))
   ([document rules opts]
    (let [viewport-width (or (:viewport-width opts) default-viewport-width)
-         rules (filterv #(rule-applies-to-viewport? % viewport-width) rules)]
+         color-scheme (or (:color-scheme opts) default-color-scheme)
+         rules (filterv #(rule-applies-to-viewport? % viewport-width color-scheme) rules)]
      (if (some :rule/container rules)
        (let [pass1-rules (filterv #(nil? (:rule/container %)) rules)
              pass1-document (run-cascade-walk document pass1-rules nil)
