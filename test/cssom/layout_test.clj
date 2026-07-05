@@ -18,6 +18,47 @@
     (is (some #(and (= :rect (:draw/op %)) (= :button (:tag %))) ops))
     (is (some #(and (= :text (:draw/op %)) (= "Counter" (:text %))) ops))))
 
+(deftest block-background-paints-before-border-not-hidden-under-it
+  ;; The confirmed repro from the bug report: a background rect spans an
+  ;; element's FULL box, including the thin edge strips border-ops paints
+  ;; -- painting border-ops FIRST (as this used to) meant the background,
+  ;; painted second (the real webgl.cljs/webgpu.cljs painter draws :rect
+  ;; ops strictly in array order, no z-index reordering of its own),
+  ;; completely covered every border pixel. Confirmed via a real draw-ops
+  ;; dump through the full pipeline before this fix existed: an ordinary
+  ;; <div> with both an explicit background AND border-width never
+  ;; actually showed any border pixels at all.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:border-width 3 :border-color "#00ff00"
+                                     :background "#ff0000"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))
+        top-border (first (filter #(and (= :rect (:draw/op %)) (:border? %) (= :top (:edge %))) ops))]
+    (is (some? bg-rect))
+    (is (some? top-border))
+    (is (< (.indexOf ops bg-rect) (.indexOf ops top-border))
+        "background must paint BEFORE border, not after")))
+
+(deftest flex-container-background-paints-before-border-not-hidden-under-it
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :border-width 3 :border-color "#00ff00"
+                                     :background "#ff0000"})
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div span)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))
+        top-border (first (filter #(and (= :rect (:draw/op %)) (:border? %) (= :top (:edge %))) ops))]
+    (is (some? bg-rect))
+    (is (some? top-border))
+    (is (< (.indexOf ops bg-rect) (.indexOf ops top-border))
+        "background must paint BEFORE border, not after, same convention as block")))
+
 (def ^:private inherited-text
   {:color (:fg layout/default-theme) :font-size (:font-size layout/default-theme)})
 
@@ -307,7 +348,11 @@
     ;; Content is inset by padding only -- content-box box-sizing, the same
     ;; content-inset convention every display mode in this file already
     ;; uses (border-width only offsets content when box-sizing: border-box).
-    (is (= {:x 4 :y 4 :w 50 :h 10} (select-keys child [:x :y :w :h])))))
+    (is (= {:x 4 :y 4 :w 50 :h 10} (select-keys child [:x :y :w :h])))
+    (is (< (.indexOf ops bg-rect) (.indexOf ops (:top by-edge)))
+        "background must paint BEFORE border -- the background rect spans
+         the full box, including the border's own thin edge strips, so
+         painting it AFTER would completely hide the border")))
 
 ;; ---- grid-template-columns: repeat() / minmax() ----
 
@@ -1921,6 +1966,61 @@
   (is (= "[ ]" (checkbox-draw-text "false"))
       "checked=\"false\" is a real, if unusual, corner case -- the literal
        string \"false\" must NOT be treated as present"))
+
+;; ---- form-control background/border painting ----
+
+(deftest form-control-border-and-background-match-block-flex-convention
+  ;; The confirmed repro from the bug report: <input>/<select>/<textarea>
+  ;; had NO border-ops/default-bg draw-ops at all, unlike every other
+  ;; display mode this file already covers (see grid's own identically-
+  ;; named test above) -- an explicit author background/border-width/
+  ;; border-color on a real <input> was silently painted as nothing.
+  (let [[input doc] (dom/create-element dom/empty-document :input)
+        doc (dom/set-root doc input)
+        doc (dom/set-attribute doc input :value "hi")
+        doc (dom/set-style doc input {:border-width 2 :border-color "#112233"
+                                       :background "#445566"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        border-rects (filterv #(and (= :rect (:draw/op %)) (:border? %)) ops)
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))
+        by-edge (into {} (map (juxt :edge identity)) border-rects)]
+    (is (= 4 (count border-rects)))
+    (is (= "#112233" (:color (:top by-edge))))
+    (is (= "#445566" (:color bg-rect)))
+    (is (some? bg-rect) "the background rect must exist at all, not just have the right color")
+    (is (< (.indexOf ops bg-rect) (.indexOf ops (:top by-edge)))
+        "background must paint BEFORE border, same convention as layout-block/flex/grid")))
+
+(deftest form-control-with-no-author-style-still-gets-the-same-ua-default-background-every-other-element-gets
+  ;; Mirrors default-bg's own existing "everything else gets the theme's
+  ;; panel background" convention (already true for a plain <div>) --
+  ;; form controls get the identical treatment, not a special case, so an
+  ;; unstyled <input> is no longer a complete visual void.
+  (let [[input doc] (dom/create-element dom/empty-document :input)
+        doc (dom/set-root doc input)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))
+        border-rects (filterv #(and (= :rect (:draw/op %)) (:border? %)) ops)]
+    (is (= (:bg layout/default-theme) (:color bg-rect)))
+    (is (= 0 (count border-rects))
+        "no border-width was ever set -- zero border rects, exactly like an unstyled <div>")))
+
+(deftest select-and-textarea-also-get-border-and-background-painting
+  (doseq [tag [:select :textarea]]
+    (let [[el doc] (dom/create-element dom/empty-document tag)
+          doc (dom/set-root doc el)
+          doc (dom/set-style doc el {:border-width 1 :border-color "#000000" :background "#ffffff"})
+          [_ doc] (dom/consume-ops doc)
+          tree (dom/tree doc)
+          ops (layout/draw-ops tree {:width 100})
+          border-rects (filterv #(and (= :rect (:draw/op %)) (:border? %)) ops)
+          bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))]
+      (is (= 4 (count border-rects)) (str tag " must get border rects too, not just <input>"))
+      (is (= "#ffffff" (:color bg-rect)) (str tag " must get a background rect too")))))
 
 ;; ---- <details>/<summary> default disclosure hiding ----
 

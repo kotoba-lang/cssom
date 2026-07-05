@@ -2317,6 +2317,22 @@
         (:children node)))
 
 (defn- layout-form-control
+  "Unlike `layout-block`, form controls previously had NO `default-bg`/
+   `border-ops` draw-ops at all -- confirmed via a real draw-ops dump
+   through the full real pipeline: an `<input>`/`<select>`/`<textarea>`
+   with an EXPLICIT author `background`/`border` CSS rule silently
+   painted neither, a real, visible rendering bug (not merely a missing
+   UA-stylesheet default) since even author-authored styling had no
+   effect at all. Fixed by reusing the exact same `border-ops`/
+   `default-bg`/`:rect` construction `layout-block` already uses,
+   verbatim -- same fallback behavior an ordinary `<div>` already gets
+   (a real background/border-width of 0 paints nothing, exactly as
+   before), so this only ever ADDS painting where a real declared style
+   already existed and was being silently dropped. A dedicated, more
+   opinionated UA-default 'text field' look (a white/light background +
+   gray border baseline every unstyled real `<input>` gets, distinct
+   from an ordinary `<div>`'s panel background) is a separate, more
+   subjective design decision deliberately NOT invented here."
   [theme x y avail-width opacity st node]
   (let [tag (:tag node)
         w (resolve-width st avail-width)
@@ -2331,6 +2347,9 @@
                                 (if checked "[x]" "[ ]")
                                 (str value))
                        (str value))
+        border-draws (or (border-ops st x y w h opacity) [])
+        bg (default-bg tag st theme)
+        rect (when bg [{:draw/op :rect :x x :y y :w w :h h :color bg :tag tag :opacity opacity}])
         text-op (when (seq (str control-text))
                   {:draw/op :text :control? true :node/id (:node/id node)
                    :x (+ x inset) :y (+ y inset) :text control-text :opacity opacity})
@@ -2352,7 +2371,13 @@
                          :opacity opacity :value value :checked checked}
                         (style-passthrough st))]
     {:box {:x x :y y :w w :h h}
-     :draw (cond-> [semantic]
+     ;; rect (background) BEFORE border-draws, not after -- see
+     ;; layout-block's own identical ordering fix for why: the background
+     ;; rect spans the FULL box, including the thin edge strips
+     ;; border-draws paints, so if border-draws were drawn (and thus
+     ;; painted UNDER) first, the background would completely cover it,
+     ;; hiding the border entirely.
+     :draw (cond-> (vec (concat rect border-draws [semantic]))
              text-op (conj text-op)
              sel-ops (into sel-ops))}))
 
@@ -2384,7 +2409,18 @@
         clip-pop (when clip? [{:draw/op :clip :clip/op :pop :node/id (:node/id node)
                                :x x :y y :w node-w :h node-h}])]
     {:box {:x x :y y :w node-w :h node-h}
-     :draw (vec (concat border-draws rect semantic clip-push draw clip-pop absolute-draws))}))
+     ;; rect (background) BEFORE border-draws, not after: the real
+     ;; painter (kotoba-lang/dom-gpu's webgl.cljs/webgpu.cljs) draws
+     ;; :rect ops strictly in array order with no z-index reordering of
+     ;; its own, so whichever rect comes LATER paints on top. The
+     ;; background rect spans the box's FULL x/y/w/h -- including the
+     ;; thin edge strips border-draws paints -- so drawing border-draws
+     ;; FIRST (as this used to) meant the background, painted second,
+     ;; completely covered every border edge, hiding it entirely.
+     ;; Confirmed via a real draw-ops dump through the full pipeline: an
+     ;; ordinary <div> with both an explicit background AND border-width
+     ;; genuinely never showed any border pixels at all before this fix.
+     :draw (vec (concat rect border-draws semantic clip-push draw clip-pop absolute-draws))}))
 
 (defn layout-node
   ([node] (layout-node default-theme 0 0 320 1.0 {:color (:fg default-theme) :font-size (:font-size default-theme)} node))
@@ -2430,10 +2466,14 @@
              (= "flex" (:display st))
              (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node children)]
                {:box {:x x :y y :w box-w :h box-h}
+                ;; background rect BEFORE border-ops -- see layout-block's
+                ;; own identical fix's comment for why (border-ops
+                ;; painted first used to be completely hidden under the
+                ;; full-box background rect painted second).
                 :draw (vec (concat
-                            (or (border-ops st x y box-w box-h opacity) [])
                             (when-let [bg (default-bg tag st theme)]
                               [{:draw/op :rect :x x :y y :w box-w :h box-h :color bg :tag tag :opacity opacity}])
+                            (or (border-ops st x y box-w box-h opacity) [])
                             [(merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w box-w :h box-h
                                      :class (attr node :class) :listeners (listeners node)
                                      :opacity opacity}
@@ -2443,10 +2483,12 @@
              (= "grid" (:display st))
              (let [{:keys [box-w box-h draws]} (layout-grid theme x y avail-width opacity inherited st node children)]
                {:box {:x x :y y :w box-w :h box-h}
+                ;; background rect BEFORE border-ops -- see layout-block's
+                ;; own identical fix's comment for why.
                 :draw (vec (concat
-                            (or (border-ops st x y box-w box-h opacity) [])
                             (when-let [bg (default-bg tag st theme)]
                               [{:draw/op :rect :x x :y y :w box-w :h box-h :color bg :tag tag :opacity opacity}])
+                            (or (border-ops st x y box-w box-h opacity) [])
                             [(merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w box-w :h box-h
                                      :class (attr node :class) :listeners (listeners node)
                                      :opacity opacity}
