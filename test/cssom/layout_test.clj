@@ -1881,6 +1881,47 @@
          <ol>'s own, unrelated numbering -- the inner list has no start=
          of its own, so it correctly still begins at the plain default 1")))
 
+;; ---- checkbox <input checked> visual rendering ----
+
+(defn- checkbox-draw-text
+  [checked-attr-value]
+  (let [[input doc] (dom/create-element dom/empty-document :input)
+        doc (dom/set-root doc input)
+        doc (dom/set-attribute doc input :type "checkbox")
+        doc (cond-> doc
+              (some? checked-attr-value) (dom/set-attribute input :checked checked-attr-value))
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (:text (first (filter :control? ops)))))
+
+(deftest checkbox-checked-explicit-xhtml-form-renders-as-checked
+  ;; The confirmed repro from the bug report: checked="checked" (a real,
+  ;; common, valid HTML5 boolean-attribute form -- the same class of bug
+  ;; already fixed this session in browser.browser-use/truthy? for a
+  ;; different consumer of the identical semantics) previously rendered
+  ;; as UNCHECKED here, since the old check was a bare (true? ...) that
+  ;; only ever matches htmldom's own bare-attribute sentinel value, not
+  ;; any string form at all.
+  (is (= "[x]" (checkbox-draw-text "checked"))
+      "checked=\"checked\" must render checked, not unchecked"))
+
+(deftest checkbox-checked-bare-attribute-still-renders-as-checked
+  (is (= "[x]" (checkbox-draw-text true))
+      "a bare `checked` attribute (htmldom parses this to Clojure `true`) -- pre-existing, unaffected behavior"))
+
+(deftest checkbox-checked-empty-string-renders-as-checked
+  (is (= "[x]" (checkbox-draw-text ""))
+      "checked=\"\" is real, valid HTML for a present boolean attribute"))
+
+(deftest checkbox-unchecked-when-attribute-absent
+  (is (= "[ ]" (checkbox-draw-text nil))))
+
+(deftest checkbox-checked-literal-false-string-renders-as-unchecked
+  (is (= "[ ]" (checkbox-draw-text "false"))
+      "checked=\"false\" is a real, if unusual, corner case -- the literal
+       string \"false\" must NOT be treated as present"))
+
 (deftest li-list-style-none-suppresses-only-that-lis-marker-without-renumbering
   ;; Real CSS: `list-style: none` on one <li> only hides THAT marker box --
   ;; it does not renumber the <li>s around it, since real CSS's list

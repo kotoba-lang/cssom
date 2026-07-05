@@ -161,6 +161,22 @@
 (defn- attr [node k] (get-in node [:attrs k]))
 (defn- style [node k] (get-in node [:attrs (keyword "style" (name k))]))
 
+(defn- truthy-attr?
+  "Real HTML boolean-attribute presence: `true` (htmldom's own parser's
+   value for a bare attribute like `checked`), the empty string
+   (`checked=\"\"`), or any other non-blank value that isn't literally
+   \"false\" -- this last case is what actually recognizes the common
+   XHTML-compatible explicit form (`checked=\"checked\"`), which a bare
+   `(true? ...)` check never does. Mirrors htmldom.core's own private
+   `truthy-attr?` and this repo's own `browser.browser-use/truthy?`
+   (fixed earlier this session for the identical class of bug)."
+  [value]
+  (or (= true value)
+      (= "" value)
+      (and (string? value)
+           (not (str/blank? value))
+           (not= "false" (str/lower-case value)))))
+
 (defn- listeners [node]
   (let [ls (:listeners node)]
     (cond
@@ -2209,7 +2225,7 @@
         inset (content-inset st)
         h (or (resolve-height st) (+ (:line-height theme) (* 2 inset)))
         value (attr node :value)
-        checked (true? (attr node :checked))
+        checked (truthy-attr? (attr node :checked))
         input-type (str/lower-case (str (or (attr node :type) "text")))
         control-text (case tag
                        :select (option-label node value)
