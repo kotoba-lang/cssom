@@ -123,6 +123,23 @@
    `list-style-type` property (circle/square/roman/alpha/...),
    `list-style-position`, `<ol reversed>` and `<li value=>`, and `<menu>`.
 
+   `<details>`/`<summary>` default disclosure hiding (see
+   with-details-visibility, right below with-implicit-list-markers): a
+   real `<details>` without an `open` attribute renders ONLY its first
+   direct `<summary>` child, hiding every other direct child -- before
+   this feature, this engine had no notion of it at all, so a bare
+   `<details><summary>...</summary><p>...</p></details>` rendered BOTH
+   the summary and the content, permanently, defeating the entire point
+   of a real, common, no-JS disclosure/spoiler/FAQ widget. Reuses the
+   existing `:style/display \"none\"` mechanism (a hidden element child
+   gets it written onto its own attrs; a bare text-node child, which has
+   no attrs to write it onto, is dropped from the children vector
+   instead -- same visual result). Click-to-toggle interactivity (a real
+   `open` attribute flip + `toggle` event on a `<summary>` click) is a
+   SEPARATE concern implemented in kotoba-lang/browser's
+   document_input.cljc, not here -- this function only ever renders
+   whatever `open` state is already given to it.
+
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
   (:require [clojure.string :as str]))
 
@@ -1902,6 +1919,87 @@
                  children)))
       children)))
 
+;; ---- <details>/<summary> default disclosure hiding ----
+;;
+;; Real HTML5: a <details> without an `open` attribute renders ONLY its
+;; first direct <summary> child -- every other direct child (including any
+;; LATER <summary> siblings) is not rendered at all. Confirmed via direct
+;; REPL reproduction through the real browser.core/load-html pipeline
+;; before this feature existed: a bare `<details><summary>Click me</summary>
+;; <p>Hidden content</p></details>` rendered BOTH the summary AND the
+;; content, always, permanently -- since this engine had no notion of
+;; <details>'s default disclosure hiding at all, defeating the entire
+;; purpose of a real, common, no-JS-needed disclosure/spoiler/FAQ widget.
+;;
+;; Rather than inventing new hiding machinery, this reuses the EXACT same
+;; `:style/display "none"` mechanism the general :element branch above
+;; already checks per-child (`(= "none" (:display st))`) -- a hidden
+;; child's :attrs gets a synthetic :style/display "none" written onto it,
+;; so the next time layout-node recurses into that child as its own node,
+;; it naturally takes the zero-box/zero-draw-ops branch, no different from
+;; an author's own explicit `display: none` rule.
+;;
+;; Click-to-toggle interactivity (flipping the real `open` attribute when
+;; a user clicks the <summary>, and dispatching a real `toggle` event) is
+;; a SEPARATE concern, implemented in kotoba-lang/browser's
+;; document_input.cljc -- this function only ever computes what a GIVEN,
+;; already-resolved `open` state should render as; it has no click
+;; handling of its own, mirroring the same layout/interaction split every
+;; other form control in this file already has (e.g. layout-form-control
+;; renders whatever :checked already says, it doesn't decide when a click
+;; toggles it).
+
+(defn- with-details-visibility
+  "Returns `children` (a container element's OWN direct children) with
+   every direct child EXCEPT the first `:summary` element child either
+   given a synthetic `:style/display \"none\"` (an element child) or
+   dropped entirely (a bare text-node child -- see below for why it can't
+   just get the same attr treatment) -- but ONLY when `node` is itself a
+   `:details` element AND lacks a truthy `open` attribute (see
+   `truthy-attr?`). A `<details open>` (or one with no <summary> at all
+   -- an unusual, out-of-scope shape; see below) is a complete no-op,
+   returning `children` unchanged.
+
+   A bare text-node child (`(string? child)`, e.g. whitespace or literal
+   text written directly inside `<details>...</details>`, outside any
+   wrapping element -- a real, plausible shape) has no `:attrs` map to
+   write `:style/display` onto at all, unlike an element child, so it is
+   REMOVED from the returned vector instead of hidden in place -- visually
+   identical to display:none (nothing renders either way), and simpler
+   than inventing a parallel hidden-text-node representation this engine
+   has no other use for.
+
+   The forced `:style/display \"none\"` on hidden ELEMENT children
+   unconditionally overrides whatever display value that child's own
+   cascade already resolved to (real UA-stylesheet disclosure hiding is
+   not something an author's own CSS can straightforwardly defeat either)
+   -- this is a deliberate simplification, not an oversight: real HTML5's
+   actual rendering model for this uses an internal content-distribution
+   mechanism stricter than any single CSS declaration an author could
+   write, which this engine has no reason to emulate more precisely than
+   'always hidden when closed, no override'.
+
+   A `<details>` with NO `:summary` child at all is explicitly out of
+   scope: real browsers synthesize a default 'Details' disclosure label
+   in that case, which would need new synthetic content generation (like
+   `implicit-marker-content` above, but for an entirely different,
+   unrelated concern) -- this function simply hides/drops every child in
+   that case, which is honest (nothing to click to reveal it in this
+   engine either way) rather than spec-perfect."
+  [node children]
+  (if (and (= :details (:tag node)) (not (truthy-attr? (attr node :open))))
+    (let [first-summary-index (some (fn [[i child]]
+                                       (when (and (map? child) (= :summary (:tag child))) i))
+                                     (map-indexed vector children))]
+      (into []
+            (keep-indexed (fn [i child]
+                            (cond
+                              (= i first-summary-index) child
+                              (map? child) (assoc-in child [:attrs :style/display] "none")
+                              :else nil)))
+            children))
+    children))
+
 ;; ---- non-rendered (metadata) elements ----
 ;;
 ;; <head>, <title>, <script>, <style>, <meta>, <link> are never part of a
@@ -2324,7 +2422,7 @@
                font-size (parse-int (:font-size st) (:font-size inherited))
                inherited (assoc inherited :color color :font-size font-size)
                tag (:tag node)
-               children (with-generated-content node (with-implicit-list-markers node (:children node)))]
+               children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond
              (contains? #{:input :select :textarea} tag)
              (layout-form-control theme x y avail-width opacity st node)

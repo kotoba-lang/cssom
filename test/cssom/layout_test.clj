@@ -1922,6 +1922,89 @@
       "checked=\"false\" is a real, if unusual, corner case -- the literal
        string \"false\" must NOT be treated as present"))
 
+;; ---- <details>/<summary> default disclosure hiding ----
+
+(deftest closed-details-renders-only-the-first-summary
+  ;; The confirmed repro from the bug report: before this feature, a bare
+  ;; <details><summary>...</summary><p>...</p></details> rendered BOTH the
+  ;; summary AND the content, always, permanently -- since this engine had
+  ;; no notion of <details>'s default disclosure hiding at all.
+  (let [[details doc] (dom/create-element dom/empty-document :details)
+        doc (dom/set-root doc details)
+        [summary doc] (dom/create-element doc :summary)
+        doc (dom/append-child doc details summary)
+        [st doc] (dom/create-text-node doc "Click me")
+        doc (dom/append-child doc summary st)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc details p)
+        [pt doc] (dom/create-text-node doc "Hidden content")
+        doc (dom/append-child doc p pt)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["Click me"] (mapv :text text-ops))
+        "only the summary renders; the <p> content is hidden by default")))
+
+(deftest open-details-renders-both-summary-and-content
+  (let [[details doc] (dom/create-element dom/empty-document :details)
+        doc (dom/set-root doc details)
+        doc (dom/set-attribute doc details :open true)
+        [summary doc] (dom/create-element doc :summary)
+        doc (dom/append-child doc details summary)
+        [st doc] (dom/create-text-node doc "Click me")
+        doc (dom/append-child doc summary st)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc details p)
+        [pt doc] (dom/create-text-node doc "Shown content")
+        doc (dom/append-child doc p pt)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["Click me" "Shown content"] (mapv :text text-ops))
+        "a real open attribute renders everything, exactly like a
+         <details> with no hiding concept at all")))
+
+(deftest closed-details-drops-a-bare-text-node-child-too
+  ;; A bare-text-node child (real, plausible HTML: literal text written
+  ;; directly inside <details>...</details>, outside any wrapping element)
+  ;; has no :attrs map to write :style/display onto -- must be dropped
+  ;; from the children vector entirely, not silently left rendering.
+  (let [[details doc] (dom/create-element dom/empty-document :details)
+        doc (dom/set-root doc details)
+        [summary doc] (dom/create-element doc :summary)
+        doc (dom/append-child doc details summary)
+        [st doc] (dom/create-text-node doc "Click me")
+        doc (dom/append-child doc summary st)
+        [loose doc] (dom/create-text-node doc "loose text")
+        doc (dom/append-child doc details loose)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["Click me"] (mapv :text text-ops)))))
+
+(deftest closed-details-with-two-summaries-renders-only-the-first
+  (let [[details doc] (dom/create-element dom/empty-document :details)
+        doc (dom/set-root doc details)
+        [summary1 doc] (dom/create-element doc :summary)
+        doc (dom/append-child doc details summary1)
+        [t1 doc] (dom/create-text-node doc "First")
+        doc (dom/append-child doc summary1 t1)
+        [summary2 doc] (dom/create-element doc :summary)
+        doc (dom/append-child doc details summary2)
+        [t2 doc] (dom/create-text-node doc "Second")
+        doc (dom/append-child doc summary2 t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["First"] (mapv :text text-ops))
+        "real HTML5: only the FIRST direct <summary> child is ever the
+         disclosure widget -- a second <summary> is just another hidden
+         child, like any other non-summary content, when closed")))
+
 (deftest li-list-style-none-suppresses-only-that-lis-marker-without-renumbering
   ;; Real CSS: `list-style: none` on one <li> only hides THAT marker box --
   ;; it does not renumber the <li>s around it, since real CSS's list
