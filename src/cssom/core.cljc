@@ -127,6 +127,67 @@
      overwhelming majority of real-world usage: `:not(.hidden)`,
      `:is(h1, h2, h3)`, `:where(.card, .panel)` are all compound-selector-
      only in practice.
+   - `:has(<relative-selector-list>)`, the CSS 'parent selector' --
+     `.card:has(.badge)` matches a `.card` that CONTAINS a `.badge`
+     somewhere inside it, `li:has(input:checked)` matches an `<li>`
+     containing a checked input. Parses through the exact same
+     `functional-pseudo-class-pattern` + `split-selector-list` path as
+     `:not()`/`:is()`/`:where()` above (`has` is simply one more name in
+     that pattern's alternation) into its own `:selector/has` key -- but
+     unlike those three, `:has()` is architecturally NEW for this
+     namespace, not just another selector-list consumer: every OTHER
+     pseudo-class here (`:not()`/`:is()`/`:where()`, the structural
+     pseudo-classes, `:root`/`:empty`, `:lang()`, `:nth-last-child()`)
+     tests a candidate node against its ANCESTOR chain or its SIBLINGS --
+     walking UP or SIDEWAYS via `document`. `:has()` needs the OPPOSITE
+     direction: for a candidate anchor node, walking DOWN into its own
+     subtree and testing each DESCENDANT against a selector. This
+     namespace already has exactly the traversal primitive that needs,
+     though, for an unrelated feature: `descendant-node-ids` (a
+     document/node-id -> flat descendant-node-id walk, via each node's own
+     `:children` vector) already backs `selected-option-id`/
+     `radio-group-node-ids` elsewhere in this file -- `has-arg-descendant-match?`
+     reuses it verbatim rather than inventing a second downward walker.
+     Each candidate descendant is tested with `matches-simple?` (NOT
+     `matches?` -- a `:has()` argument item is always a single bare
+     compound selector, never a combinator chain, so no descendant/sibling
+     combinator walking is needed on top of the subtree walk itself),
+     short-circuiting (`some`) the instant one descendant matches (real
+     `:has()` semantics: ANY match is enough).
+
+     Scoped, documented limitation, mirroring the exact same cut
+     `:not()`/`:is()`/`:where()` already made above, for the same reason
+     (the overwhelming majority of real-world usage fits it): each
+     comma-separated item of the argument is a single compound selector
+     (tag/id/class/attr/pseudo -- including a NESTED bare pseudo-class like
+     `:has(input:checked)`, one of the most common real patterns), never a
+     combinator chain INSIDE the argument (`:has(div p)` is out of scope,
+     same as `:is(.a .b)` above). On top of that compound-selector-only
+     cut, `:has()` supports exactly one optional LEADING combinator per
+     comma-separated item, `>` (`:has(> img)`, also very common -- 'has a
+     DIRECT CHILD img', not just any img anywhere inside): `:selector/has`
+     stores each item as `{:has/selector <compound> :has/direct-child?
+     bool}` (see `parse-has-item`), and matching dispatches to
+     `has-arg-child-match?` (node's immediate `:children` only) instead of
+     `has-arg-descendant-match?` (the full subtree) for a `direct-child?`
+     item. Deliberately OUT of scope, and unsupported (never crashes, just
+     never matches that form specially): sibling-relative `:has()` forms
+     (`:has(~ p)`/`:has(+ p)` -- real CSS also allows these, testing
+     siblings instead of descendants, but they are rarer in practice than
+     the descendant/child forms above), the `:scope` pseudo-class itself,
+     and -- same as `:not()`/`:is()`/`:where()` -- any combinator chain or
+     nested functional pseudo-class inside one compound-selector argument.
+     Like `:root`/`:lang()`/the structural pseudo-classes, matching an
+     element against its own subtree obviously needs `document` (`node`'s
+     `:children` are only ids -- resolving them to real nodes needs
+     `document`), so `:has()` never matches via the document-less 2-arity
+     `matches?`/`matches-simple?` form (`has-group-matches?` honestly
+     returns false rather than attempting a documentless walk). `:has()`
+     contributes specificity exactly like `:not()`/`:is()` do (the
+     specificity of its own most specific argument, per occurrence,
+     combinators contributing nothing extra -- see
+     `simple-selector-specificity`), never `:where()`'s always-zero
+     treatment.
    - Structural pseudo-classes `:first-child`/`:last-child`/`:only-child`
      and `:nth-child(<An+B>)`, plus their same-tag-only counterparts
      `:first-of-type`/`:last-of-type`/`:nth-of-type(<An+B>)`. Unlike
@@ -891,27 +952,34 @@
   #"(?i)::?(before|after)\b")
 
 (def functional-pseudo-class-pattern
-  "Matches a single `:not(...)` / `:is(...)` / `:where(...)` occurrence --
-   the selector-FUNCTION forms of these pseudo-classes, each capturing its
-   own name (group 1) and its raw parenthesized argument text (group 2).
+  "Matches a single `:not(...)` / `:is(...)` / `:where(...)` / `:has(...)`
+   occurrence -- the selector-FUNCTION forms of these pseudo-classes, each
+   capturing its own name (group 1) and its raw parenthesized argument text
+   (group 2). `:has(...)` (see the namespace docstring's own `:has()`
+   paragraph for how its matching semantics differ from the other three)
+   shares this exact pattern/parsing path since its argument is, syntactically,
+   the same shape: a comma-separated list captured as raw text, parsed
+   downstream by `split-selector-list` -- only what happens to each parsed
+   item afterward differs (`parse-has-item` additionally
+   detects a leading `>` combinator, see `parse-simple-selector`).
    Deliberately distinct from `pseudo-class-pattern` (which matches the bare
    `:name` shape of an ordinary pseudo-class like `:hover`/`:disabled`): the
    trailing `\\(` this pattern requires right after the name is what keeps
-   the two patterns from double-matching the same `:not`/`:is`/`:where`
-   text (`pseudo-class-pattern` alone would otherwise match just the name
-   and leave the parenthesized argument as unconsumed, confusing, leftover
-   text -- see `parse-simple-selector`'s docstring for the concrete bug this
-   caused before this pattern existed).
+   the two patterns from double-matching the same `:not`/`:is`/`:where`/
+   `:has` text (`pseudo-class-pattern` alone would otherwise match just the
+   name and leave the parenthesized argument as unconsumed, confusing,
+   leftover text -- see `parse-simple-selector`'s docstring for the concrete
+   bug this caused before this pattern existed).
 
    The argument is captured as `[^()]*` -- deliberately unable to contain
    another `(` or `)` -- which scopes this pattern (and everything that
    consumes it) to NON-NESTED occurrences only: nested functional
-   pseudo-classes inside the argument (`:is(:not(.a))`) are out of scope
-   (see `parse-simple-selector`'s docstring for what happens instead of
-   crashing), and an attribute selector's own `[...]` inside the argument is
-   fine (`:not([hidden])`) since square brackets never conflict with this
-   pattern's parens."
-  #"(?i):(not|is|where)\(([^()]*)\)")
+   pseudo-classes inside the argument (`:is(:not(.a))`, `:has(:is(.a))`) are
+   out of scope (see `parse-simple-selector`'s docstring for what happens
+   instead of crashing), and an attribute selector's own `[...]` inside the
+   argument is fine (`:not([hidden])`, `:has([hidden])`) since square
+   brackets never conflict with this pattern's parens."
+  #"(?i):(not|is|where|has)\(([^()]*)\)")
 
 (def nth-pseudo-class-pattern
   "Matches a single `:nth-child(...)` / `:nth-of-type(...)` /
@@ -1092,51 +1160,73 @@
 (defn parse-simple-selector
   "Parses one compound-selector token (see `selector-tokens`) into its
    tag/id/classes/attrs/pseudos/pseudo-element parts, plus the
-   selector-FUNCTION pseudo-classes `:not(...)`/`:is(...)`/`:where(...)`
-   (see `functional-pseudo-class-pattern` -- not to be confused with a bare
-   pseudo-CLASS like `:hover`/`:disabled`, matched by `pseudo-class-pattern`
-   instead).
+   selector-FUNCTION pseudo-classes `:not(...)`/`:is(...)`/`:where(...)`/
+   `:has(...)` (see `functional-pseudo-class-pattern` -- not to be confused
+   with a bare pseudo-CLASS like `:hover`/`:disabled`, matched by
+   `pseudo-class-pattern` instead).
 
-   Every `:not(...)`/`:is(...)`/`:where(...)` occurrence is extracted FIRST
-   (`functional-matches`) and stripped out of the working text (`s`, as
-   opposed to `raw`, the untouched original) BEFORE any tag/id/class/attr/
-   pseudo extraction runs on what's left. This ordering is essential, not
-   cosmetic: without it, an argument like `.special` inside `:not(.special)`
-   would otherwise be picked up by the plain class regex as though
-   `.special` were a class on the OUTER compound selector itself -- this was
-   a real bug: `:not(.special)`/`:is(.special)` never matched anything at
-   all, because they were silently misparsed into \"has class special AND
-   has an unrecognized :not/:is pseudo-class\" (unrecognized pseudo-classes
-   never match, see `matches-pseudo?`'s default `false`), which could never
-   be true for any element.
+   Every `:not(...)`/`:is(...)`/`:where(...)`/`:has(...)` occurrence is
+   extracted FIRST (`functional-matches`) and stripped out of the working
+   text (`s`, as opposed to `raw`, the untouched original) BEFORE any
+   tag/id/class/attr/pseudo extraction runs on what's left. This ordering
+   is essential, not cosmetic: without it, an argument like `.special`
+   inside `:not(.special)` would otherwise be picked up by the plain class
+   regex as though `.special` were a class on the OUTER compound selector
+   itself -- this was a real bug: `:not(.special)`/`:is(.special)` never
+   matched anything at all, because they were silently misparsed into \"has
+   class special AND has an unrecognized :not/:is pseudo-class\"
+   (unrecognized pseudo-classes never match, see `matches-pseudo?`'s
+   default `false`), which could never be true for any element.
 
-   Each occurrence's parenthesized argument is parsed as a comma-separated
-   SELECTOR LIST via `split-selector-list` -- the exact same comma-splitting
-   logic top-level `sel1, sel2 { ... }` rules already use, so whitespace/
-   commas inside the parens behave identically (`selector-tokens`/
-   `split-selector-list` both track paren-depth for this) -- into a vector
-   of parsed compound selectors, `parse-simple-selector` itself called
-   recursively on each comma-separated item (`parse-group` below). One such
-   vector is stored as a GROUP under :selector/not / :selector/is /
-   :selector/where per occurrence (almost always zero or one group each,
-   but e.g. `:not(.a):not(.b)` correctly records two groups, both of which
-   must hold -- see `matches-simple?` for exactly how groups combine, and
-   `simple-selector-specificity` for how they contribute to specificity --
-   :where()'s groups are matched identically to :is()'s but deliberately
-   NEVER consulted for specificity, always contributing zero).
+   Each `:not()`/`:is()`/`:where()` occurrence's parenthesized argument is
+   parsed as a comma-separated SELECTOR LIST via `split-selector-list` --
+   the exact same comma-splitting logic top-level `sel1, sel2 { ... }` rules
+   already use, so whitespace/commas inside the parens behave identically
+   (`selector-tokens`/`split-selector-list` both track paren-depth for
+   this) -- into a vector of parsed compound selectors, `parse-simple-selector`
+   itself called recursively on each comma-separated item (`parse-group`
+   below). One such vector is stored as a GROUP under :selector/not /
+   :selector/is / :selector/where per occurrence (almost always zero or one
+   group each, but e.g. `:not(.a):not(.b)` correctly records two groups,
+   both of which must hold -- see `matches-simple?` for exactly how groups
+   combine, and `simple-selector-specificity` for how they contribute to
+   specificity -- :where()'s groups are matched identically to :is()'s but
+   deliberately NEVER consulted for specificity, always contributing zero).
 
-   SCOPED LIMITATION (deliberate, documented -- not a bug): the argument
-   inside the parens supports simple/compound selectors only (tag/id/class/
+   `:has()` (:selector/has) reuses this exact same
+   `functional-pseudo-class-pattern` + `split-selector-list` parsing path
+   (`has-groups` below mirrors `parse-group` almost verbatim) -- its
+   argument is syntactically the same comma-separated selector-list shape
+   -- but each parsed item is a `{:has/selector <compound>
+   :has/direct-child? bool}` map instead of a bare compound-selector map:
+   `parse-has-item` first checks for an optional LEADING `>` combinator
+   (`:has(> img)`, real CSS's direct-child form) and strips it before
+   parsing the rest as an ordinary compound selector, recording whether it
+   was present as :has/direct-child? (false, the far more common case, for
+   a plain `:has(.badge)`-style item with no leading combinator at all --
+   'has this ANYWHERE in the subtree'). See the namespace docstring's own
+   `:has()` paragraph for why this pseudo-class needs a DOWNWARD tree walk
+   -- architecturally new for this file -- and `matches-simple?`/
+   `has-group-matches?` for how :selector/has is actually matched (never
+   via `matches-pseudo?`, same as :selector/not/:selector/is/:selector/where
+   above).
+
+   SCOPED LIMITATION (deliberate, documented -- not a bug), shared by
+   `:not()`/`:is()`/`:where()`/`:has()` alike: the argument inside the
+   parens supports simple/compound selectors only (tag/id/class/
    attribute/pseudo-class combinations) -- no descendant/child/sibling
    combinators inside the parens (`:is(.a .b)` is misparsed as a single
    compound requiring both classes on the SAME element, not a descendant
-   relationship), and no NESTED functional pseudo-classes inside the
-   argument (`:is(:not(.a))` -- `functional-pseudo-class-pattern`'s argument
-   capture deliberately cannot contain another `(`/`)`, so a nested
-   occurrence like this is never correctly parsed, though it also never
-   crashes). This covers the overwhelming majority of real-world usage:
-   `:not(.hidden)`, `:is(h1, h2, h3)`, `:where(.card, .panel)` are all
-   compound-selector-only in practice.
+   relationship; `:has()`'s own leading `>` is the one deliberate, narrow
+   exception -- a single leading combinator, never a chain -- see above),
+   and no NESTED functional pseudo-classes inside the argument
+   (`:is(:not(.a))`, `:has(:is(.a))` -- `functional-pseudo-class-pattern`'s
+   argument capture deliberately cannot contain another `(`/`)`, so a
+   nested occurrence like this is never correctly parsed, though it also
+   never crashes). This covers the overwhelming majority of real-world
+   usage: `:not(.hidden)`, `:is(h1, h2, h3)`, `:where(.card, .panel)`,
+   `:has(.badge)`, `:has(> img)` are all compound-selector-only (plus, for
+   `:has()`, at most one leading `>`) in practice.
 
    Structural pseudo-classes (`:first-child`/`:last-child`/`:only-child`/
    `:nth-child()` and their `:first-of-type`/`:last-of-type`/
@@ -1175,6 +1265,14 @@
                       (->> functional-matches
                            (filter (fn [[_ fn-name _]] (= kind (str/lower-case fn-name))))
                            (mapv (fn [[_ _ arg]] (mapv parse-simple-selector (split-selector-list arg))))))
+        parse-has-item (fn [item]
+                         (let [trimmed (str/trim item)]
+                           (if-let [[_ rest] (re-matches #">\s*(.*)" trimmed)]
+                             {:has/selector (parse-simple-selector rest) :has/direct-child? true}
+                             {:has/selector (parse-simple-selector trimmed) :has/direct-child? false})))
+        has-groups (->> functional-matches
+                        (filter (fn [[_ fn-name _]] (= "has" (str/lower-case fn-name))))
+                        (mapv (fn [[_ _ arg]] (mapv parse-has-item (split-selector-list arg)))))
         nth-args (into {}
                        (map (fn [[_ pseudo-name arg]]
                               [(keyword (str/lower-case pseudo-name)) (str/trim arg)]))
@@ -1205,6 +1303,7 @@
      :selector/not (parse-group "not")
      :selector/is (parse-group "is")
      :selector/where (parse-group "where")
+     :selector/has has-groups
      :selector/nth-args nth-args
      :selector/lang-args lang-args}))
 
@@ -1253,7 +1352,19 @@
    specificity -- the one easy-to-get-wrong divergence from `:is()` this
    whole feature hinges on getting right, and why `:where()` still needs
    its own :selector/where key (matched identically to :is() by
-   `matches-simple?`) rather than reusing :selector/is verbatim."
+   `matches-simple?`) rather than reusing :selector/is verbatim.
+
+   `:has()` (:selector/has) contributes EXACTLY like `:not()`/`:is()` above
+   -- the specificity of its own most specific argument, per occurrence,
+   never `:where()`'s always-zero treatment (real CSS: `:has()` is not
+   special-cased away from specificity the way `:where()` is). Each
+   :selector/has group holds `{:has/selector <compound> :has/direct-child?
+   bool}` maps rather than bare compound-selector maps (see
+   `parse-simple-selector`), so `has-groups` first unwraps each item to its
+   own :has/selector before reusing `groups-specificity` unchanged -- the
+   `>` combinator recorded alongside it is irrelevant here, matching real
+   CSS's general rule that combinators themselves never contribute
+   specificity."
   [simple]
   (let [most-specific-in-group
         (fn [group]
@@ -1269,16 +1380,18 @@
                       [(+ a ga) (+ b gb) (+ c gc)]))
                   [0 0 0]
                   groups))
+        has-groups (mapv (fn [group] (mapv :has/selector group)) (:selector/has simple))
         [na nb nc] (groups-specificity (:selector/not simple))
-        [ia ib ic] (groups-specificity (:selector/is simple))]
-    [(+ (if (:selector/id simple) 1 0) na ia)
+        [ia ib ic] (groups-specificity (:selector/is simple))
+        [ha hb hc] (groups-specificity has-groups)]
+    [(+ (if (:selector/id simple) 1 0) na ia ha)
      (+ (count (:selector/classes simple))
         (count (:selector/attrs simple))
         (count (:selector/pseudos simple))
-        nb ib)
+        nb ib hb)
      (+ (if (:selector/tag simple) 1 0)
         (if (:selector/pseudo-element simple) 1 0)
-        nc ic)]))
+        nc ic hc)]))
 
 (defn specificity
   [selector]
@@ -2237,6 +2350,95 @@
     :lang (lang-pseudo-matches? document node arg)
     false))
 
+;; ---- :has() relational pseudo-class ----
+;;
+;; See the namespace docstring's own `:has()` paragraph for why this needs a
+;; DOWNWARD tree walk -- a genuinely new traversal direction for this file,
+;; where every other pseudo-class above only ever looks up an ancestor chain
+;; or sideways at siblings. `descendant-node-ids` (defined much earlier in
+;; this file, already backing `selected-option-id`/`radio-group-node-ids`)
+;; already provides exactly that downward walk, so nothing new needed to be
+;; invented there.
+;;
+;; `has-arg-descendant-match?`/`has-arg-child-match?`/`has-group-matches?`
+;; below each take an explicit `match-fn` parameter -- always `matches-simple?`
+;; in every real call site -- rather than calling `matches-simple?` by name
+;; directly: `matches-simple?` itself needs to call `has-group-matches?` (see
+;; its own :selector/has clause below), and this namespace deliberately never
+;; uses `declare` to paper over a forward reference between two top-level
+;; functions that need each other (see `parse-counter-amount`'s docstring for
+;; this precedent, and `parse-calc-level`'s for another shape of the same
+;; principle) -- passing the matcher in as an ordinary higher-order-function
+;; argument sidesteps the forward reference entirely without inlining this
+;; logic into `matches-simple?`'s own body.
+
+(defn- has-arg-descendant-match?
+  "Whether ANY of `node`'s DESCENDANTS ANYWHERE in its subtree (never `node`
+   itself) matches compound selector `compound`, per `match-fn` (always
+   `matches-simple?` -- see the note above this function for why it is
+   passed explicitly rather than called by name) -- the plain,
+   no-leading-combinator `:has(<compound-selector>)` case, e.g.
+   `.card:has(.badge)`: 'has a `.badge` ANYWHERE inside it, however deeply
+   nested'. Walks `node`'s full subtree via `descendant-node-ids` (the SAME
+   downward node-id walk `selected-option-id`/`radio-group-node-ids`
+   elsewhere in this namespace already use, for a different purpose --
+   reused verbatim here rather than inventing a second one), testing each
+   candidate descendant with `match-fn` and SHORT-CIRCUITING (`some`) the
+   instant one matches -- real `:has()` semantics only ever need ONE
+   matching descendant, never proof that every descendant was checked."
+  [document node compound match-fn]
+  (boolean
+   (some (fn [descendant-id]
+           (match-fn document (get-in document [:nodes descendant-id]) compound))
+         (descendant-node-ids document (:node/id node)))))
+
+(defn- has-arg-child-match?
+  "Whether ANY of `node`'s DIRECT CHILDREN ONLY (one level, never a deeper
+   descendant) matches compound selector `compound`, per `match-fn` (always
+   `matches-simple?`) -- the `:has(> <compound-selector>)` case, e.g.
+   `.gallery:has(> img)`: 'has an `<img>` as a DIRECT child', deliberately
+   NOT matching an `<img>` nested two levels deep the way
+   `has-arg-descendant-match?` above would. `node`'s own `:children` vector
+   (populated by `kotoba.wasm.dom/append-child`) already gives exactly the
+   immediate-child node-ids, of every node type -- `matches-simple?` itself
+   filters out anything that isn't `:element` (see its own `(= :element
+   (:node/type node))` first clause), so a text-node child here is simply
+   never going to match any compound selector, no separate filtering needed
+   in this function. Short-circuits (`some`) the same way as
+   `has-arg-descendant-match?`."
+  [document node compound match-fn]
+  (boolean
+   (some (fn [child-id]
+           (match-fn document (get-in document [:nodes child-id]) compound))
+         (:children node))))
+
+(defn- has-group-matches?
+  "Whether `node` matches one :has() GROUP -- one occurrence's
+   comma-separated relative-selector list, each item a `{:has/selector
+   <compound> :has/direct-child? bool}` map (see `parse-simple-selector`).
+   Real CSS: matches if AT LEAST ONE listed relative selector matches
+   (`some`) -- :has()'s own comma list is an OR, mirroring :is()/:where()'s
+   identical per-group `some` semantics (see `matches-simple?`) -- dispatching
+   each item to `has-arg-child-match?` (when :has/direct-child? is true, the
+   `>` leading-combinator case) or `has-arg-descendant-match?` (otherwise,
+   the far more common plain case).
+
+   :has() needs `document` to walk `node`'s subtree/children at all --
+   `node`'s own `:children` are only ids, resolving them to real nodes needs
+   `document` -- the same document-dependent restriction :root/:lang()/the
+   structural pseudo-classes already have (see the namespace docstring), so
+   this unconditionally returns false when `document` is nil rather than
+   attempting a documentless walk (the documentless 2-arity `matches-simple?`
+   form below passes `document` nil, so :has() never matches there either)."
+  [document node group match-fn]
+  (boolean
+   (when document
+     (some (fn [{:has/keys [selector direct-child?]}]
+             (if direct-child?
+               (has-arg-child-match? document node selector match-fn)
+               (has-arg-descendant-match? document node selector match-fn)))
+           group))))
+
 (defn- matches-simple?
   "Whether `node` matches one compound/simple selector map (see
    `parse-simple-selector`) -- tag/id/classes/attrs/pseudos as before, plus
@@ -2254,11 +2456,29 @@
      :where() are matching-behavior IDENTICAL; they differ only in
      specificity (see `simple-selector-specificity`), never in whether they
      match.
+   - :selector/has: `node` must satisfy EVERY group (`every?`, same as
+     :selector/not/:selector/is above -- e.g. `:has(.a):has(.b)` requires
+     BOTH occurrences to independently hold) via `has-group-matches?`, which
+     itself requires at least one of that group's comma-separated relative
+     selectors to match a DESCENDANT (or, for a `>`-prefixed item, a DIRECT
+     CHILD) of `node` -- see the `:has()` matching section above this
+     function and the namespace docstring's own `:has()` paragraph for why
+     this is a fundamentally different traversal DIRECTION (downward into
+     `node`'s own subtree) than every other clause in this function (upward/
+     sideways via `document`).
 
-   Each group's selectors are matched via `matches-simple?` itself,
-   recursively -- ordinary self-recursion (`document`/node stay the same,
-   only the selector being tested changes to a simpler argument selector),
-   not a forward reference to some other function defined later.
+   Each :selector/not/:selector/is/:selector/where group's selectors are
+   matched via `matches-simple?` itself, recursively -- ordinary
+   self-recursion (`document`/node stay the same, only the selector being
+   tested changes to a simpler argument selector), not a forward reference
+   to some other function defined later. :selector/has's groups are matched
+   the same way, just one level removed: `has-group-matches?`/
+   `has-arg-descendant-match?`/`has-arg-child-match?` take `matches-simple?`
+   itself as an explicit `match-fn` argument (see the comment above those
+   functions for why -- they are defined BEFORE `matches-simple?` in this
+   file, so they cannot reference it by name directly without either a
+   `declare` this namespace deliberately avoids, or inlining the logic here;
+   passing it in as a value sidesteps both).
 
    Every :selector/pseudos entry is checked via `matches-pseudo?`, given
    its matching raw argument text from :selector/nth-args or
@@ -2272,7 +2492,8 @@
    already need it for other reasons -- the document-less 2-arity form
    below passes `document` nil, so those never match there either, the
    same documented restriction `matches?`'s own document-less arity
-   already has."
+   already has. :selector/has has that identical document-less restriction
+   too, for the same underlying reason (see `has-group-matches?`)."
   ([node selector]
    (matches-simple? nil node selector))
   ([document node selector]
@@ -2310,7 +2531,9 @@
         (every? (fn [group] (some #(matches-simple? document node %) group))
                 (:selector/is selector))
         (every? (fn [group] (some #(matches-simple? document node %) group))
-                (:selector/where selector)))))
+                (:selector/where selector))
+        (every? (fn [group] (has-group-matches? document node group matches-simple?))
+                (:selector/has selector)))))
 
 (defn- parent-index
   [document]

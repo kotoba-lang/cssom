@@ -1799,3 +1799,189 @@
       "an unbalanced extra closing paren")
   (is (= "calc()" (calc-probe "margin" "calc()"))
       "empty parens"))
+
+;; ---- :has() relational pseudo-class ----
+;;
+;; Every OTHER pseudo-class this file supports (:not()/:is()/:where(), the
+;; structural pseudo-classes, :root/:empty, :lang(), :nth-last-child()) tests
+;; a candidate node against its ANCESTOR chain or its SIBLINGS -- walking UP
+;; or SIDEWAYS via `document`. `:has()` needs the OPPOSITE direction: for a
+;; candidate anchor node, walking DOWN into its own subtree and testing each
+;; DESCENDANT against a selector -- e.g. `.card:has(.badge)` matches a `.card`
+;; that CONTAINS a `.badge` somewhere inside it. These tests exercise the
+;; real `parse-rules` -> `apply-cascade` pipeline, the same discipline the
+;; rest of this file already uses, plus a couple of parser/specificity-level
+;; tests mirroring the :not()/:is()/:where() precedent directly.
+
+(deftest has-matches-a-card-containing-a-badge-nested-several-levels-deep-but-not-a-card-with-none
+  ;; .badge is nested THREE levels deep inside card1 (card > wrapper > inner
+  ;; > .badge), not just as a direct child -- proving this is a genuine
+  ;; recursive walk of the WHOLE subtree, not merely an immediate-children
+  ;; check.
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [card1 doc] (dom/create-element doc :div)
+        doc (dom/set-attribute doc card1 :class "card")
+        doc (dom/append-child doc section card1)
+        [wrapper doc] (dom/create-element doc :div)
+        doc (dom/append-child doc card1 wrapper)
+        [inner doc] (dom/create-element doc :div)
+        doc (dom/append-child doc wrapper inner)
+        [badge doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc badge :class "badge")
+        doc (dom/append-child doc inner badge)
+        [card2 doc] (dom/create-element doc :div)
+        doc (dom/set-attribute doc card2 :class "card")
+        doc (dom/append-child doc section card2)
+        rules (css/parse-rules ".card:has(.badge) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes card1 :attrs :style/color]))
+        "card1 has a .badge three levels down its subtree")
+    (is (nil? (get-in doc [:nodes card2 :attrs :style/color]))
+        "card2 has no .badge anywhere inside it at all")))
+
+(deftest has-with-a-leading-child-combinator-only-matches-a-direct-child-not-a-deeper-descendant
+  ;; `:has(> img)` -- real CSS's direct-child form -- must match gallery1
+  ;; (whose <img> is a direct child) but NOT gallery2 (whose <img> is nested
+  ;; one extra wrapper div deeper), proving the `>` restriction is real and
+  ;; not simply ignored/treated the same as the plain descendant case.
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [gallery1 doc] (dom/create-element doc :div)
+        doc (dom/set-attribute doc gallery1 :class "gallery")
+        doc (dom/append-child doc section gallery1)
+        [img1 doc] (dom/create-element doc :img)
+        doc (dom/append-child doc gallery1 img1)
+        [gallery2 doc] (dom/create-element doc :div)
+        doc (dom/set-attribute doc gallery2 :class "gallery")
+        doc (dom/append-child doc section gallery2)
+        [inner-wrapper doc] (dom/create-element doc :div)
+        doc (dom/append-child doc gallery2 inner-wrapper)
+        [img2 doc] (dom/create-element doc :img)
+        doc (dom/append-child doc inner-wrapper img2)
+        rules (css/parse-rules ".gallery:has(> img) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes gallery1 :attrs :style/color]))
+        "gallery1's img is a DIRECT child")
+    (is (nil? (get-in doc [:nodes gallery2 :attrs :style/color]))
+        "gallery2's img is nested two levels deep -- :has(> img) must NOT
+         match it")))
+
+(deftest has-composes-with-a-nested-pseudo-class-inside-its-argument
+  ;; `li:has(input:checked)` -- one of the most common real :has() patterns
+  ;; -- needs the argument's own compound selector to be matched with the
+  ;; FULL matches-simple? machinery (including its own :selector/pseudos
+  ;; clause), not some cut-down tag/class-only comparison.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [input1 doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc input1 :type "checkbox")
+        doc (dom/set-attribute doc input1 :checked "checked")
+        doc (dom/append-child doc li1 input1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [input2 doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc input2 :type "checkbox")
+        doc (dom/append-child doc li2 input2)
+        rules (css/parse-rules "li:has(input:checked) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes li1 :attrs :style/color]))
+        "li1 contains a checked input")
+    (is (nil? (get-in doc [:nodes li2 :attrs :style/color]))
+        "li2's input exists but is not checked")))
+
+(deftest has-comma-separated-argument-matches-if-either-alternative-is-present-as-a-descendant
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [d1 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d1)
+        [a doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc a :class "a")
+        doc (dom/append-child doc d1 a)
+        [d2 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d2)
+        [b doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc b :class "b")
+        doc (dom/append-child doc d2 b)
+        [d3 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d3)
+        [c doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc c :class "c")
+        doc (dom/append-child doc d3 c)
+        rules (css/parse-rules "div:has(.a, .b) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes d1 :attrs :style/color])) "d1 has a .a descendant")
+    (is (= "red" (get-in doc [:nodes d2 :attrs :style/color])) "d2 has a .b descendant")
+    (is (nil? (get-in doc [:nodes d3 :attrs :style/color])) "d3 has neither .a nor .b, only .c")))
+
+(deftest multiple-has-occurrences-are-and-combined-each-must-independently-hold
+  ;; Mirrors :not(.a):not(.b)'s own AND-combined-groups semantics
+  ;; (`not-pseudo-class-with-a-comma-separated-selector-list...` above) --
+  ;; `:has(.a):has(.b)` requires BOTH occurrences to independently hold, not
+  ;; just one of them.
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [d1 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d1)
+        [a1 doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc a1 :class "a")
+        doc (dom/append-child doc d1 a1)
+        [d2 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d2)
+        [a2 doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc a2 :class "a")
+        doc (dom/append-child doc d2 a2)
+        [b2 doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc b2 :class "b")
+        doc (dom/append-child doc d2 b2)
+        rules (css/parse-rules "div:has(.a):has(.b) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes d1 :attrs :style/color]))
+        "d1 has only a .a descendant -- :has(.b) fails, so the whole
+         compound selector fails")
+    (is (= "red" (get-in doc [:nodes d2 :attrs :style/color]))
+        "d2 has both a .a and a .b descendant -- both :has() occurrences
+         independently hold")))
+
+(deftest has-pseudo-class-does-not-match-when-document-is-absent
+  ;; Same documented restriction :root/:lang()/the structural pseudo-classes
+  ;; already have -- the document-less 2-arity form has no `document` to
+  ;; resolve any child/descendant node-id to a real node at all, so :has()
+  ;; can never match there, even for a node that would otherwise match.
+  (let [[div _doc] (dom/create-element dom/empty-document :div)
+        selector (-> (css/parse-selector ":has(.badge)") :selector/parts first)]
+    (is (false? (css/matches? {:node/id div :node/type :element :tag :div}
+                               selector))
+        ":has() can never match via the document-less arity")))
+
+(deftest parses-has-into-per-occurrence-groups-with-an-optional-leading-child-combinator
+  (let [has-sel (css/parse-simple-selector ".card:has(.badge, > img)")
+        [group] (:selector/has has-sel)
+        [badge-item img-item] group]
+    (is (= ["card"] (:selector/classes has-sel))
+        "the :has() argument's own class must NOT leak onto the outer
+         compound selector -- same discipline :not()/:is()/:where() already
+         established")
+    (is (= ["badge"] (:selector/classes (:has/selector badge-item))))
+    (is (false? (:has/direct-child? badge-item))
+        "a plain comma-separated item with no leading combinator is the
+         ANY-DESCENDANT case")
+    (is (= :img (:selector/tag (:has/selector img-item))))
+    (is (true? (:has/direct-child? img-item))
+        "a leading `>` marks the DIRECT-CHILD-only case")))
+
+(deftest has-contributes-the-specificity-of-its-most-specific-argument-unlike-where
+  ;; Mirrors `not-and-is-contribute-the-specificity-of-their-most-specific-argument`
+  ;; above exactly -- :has() is specificity-like :not()/:is(), never like
+  ;; :where()'s always-zero treatment.
+  (let [rules (css/parse-rules
+               "div:has(.a) { color: red }
+                div:has(#id, .a) { color: blue }")]
+    (is (= [0 1 1] (css/specificity (-> rules first :rule/selectors first)))
+        ":has(.a) adds .a's own specificity (0 class, contributing to the
+         middle column) on top of the bare `div` tag selector's own (0 0 1)")
+    (is (= [1 0 1] (css/specificity (-> rules second :rule/selectors first)))
+        ":has(#id, .a) adds the MOST specific of its two arguments -- #id,
+         not .a")))
