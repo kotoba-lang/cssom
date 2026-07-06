@@ -138,6 +138,85 @@
     (is (= "none" (:text-decoration overrides-op))
         "a child's own explicit text-decoration: none must win over the inherited line-through")))
 
+;; ---- text-align offsets each line's x within the real content width ----
+
+(deftest text-align-center-and-right-offset-x-by-real-line-width
+  ;; Unlike font-weight/font-style/text-decoration, text-align is a REAL,
+  ;; spec-accurate inherited CSS property here -- no simplification. An
+  ;; ordinary block with no explicit :width already fills its full
+  ;; available width (resolve-width's `avail` fallback), so centering/
+  ;; right-aligning has a real, visible effect with no styling beyond
+  ;; text-align itself, matching a real browser.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        left-x (:x (first (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 200}))))]
+    (is (= 8 left-x) "default (left) alignment is unchanged from before this feature"))
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:text-align "center"})
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        center-x (:x (first (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 200}))))]
+    (is (= 92 center-x) "centered within the real 200px content width, not left-aligned"))
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:text-align "right"})
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        right-x (:x (first (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 200}))))]
+    (is (= 176 right-x) "pushed to the far right of the real 200px content width")))
+
+(deftest text-align-justify-falls-back-to-left
+  ;; This engine has no per-space stretch-justification of its own --
+  ;; justify degrades to left rather than guessing a wrong stretch.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:text-align "justify"})
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= 8 (:x text-op)))))
+
+(deftest text-align-is-a-real-inheritable-property
+  ;; A child with no explicit text-align inherits its parent's -- the
+  ;; same shape color/font-size already have, and matches real CSS
+  ;; (text-align genuinely is an inherited property, unlike
+  ;; text-decoration above).
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:text-align "center"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "child")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        text-op (first (filter #(= :text (:draw/op %)) ops))
+        plain-tree (do
+                     (let [[parent2 doc2] (dom/create-element dom/empty-document :div)
+                           doc2 (dom/set-root doc2 parent2)
+                           [child2 doc2] (dom/create-element doc2 :span)
+                           doc2 (dom/append-child doc2 parent2 child2)
+                           [t2 doc2] (dom/create-text-node doc2 "child")
+                           doc2 (dom/append-child doc2 child2 t2)
+                           [_ doc2] (dom/consume-ops doc2)]
+                       (dom/tree doc2)))
+        plain-x (:x (first (filter #(= :text (:draw/op %)) (layout/draw-ops plain-tree {:width 200}))))]
+    (is (not= plain-x (:x text-op))
+        "the inherited center alignment must move the child's text away from its default left-aligned x")))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints

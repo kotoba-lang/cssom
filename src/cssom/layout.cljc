@@ -337,6 +337,24 @@
    engine tracks already behaves, and is flagged here rather than silently
    diverging from CSS without a note.
 
+   `text-align` -- unlike font-weight/font-style/text-decoration above,
+   this one is a REAL, spec-accurate inherited property in actual CSS too,
+   no simplification needed. Each line is offset within `content-w` (the
+   same full available content width every line already wraps within,
+   NOT this fn's own shrink-to-fit `w` below) by its own individually
+   measured width -- `center`/`right` need each line's real width
+   separately, since shorter/longer wrapped lines of the same paragraph
+   offset by different amounts. Aligning against `content-w` (rather than
+   `w`) matters for the common case: an ordinary block element with no
+   explicit `:width` already resolves to fill its full available width
+   (see resolve-width's `avail` fallback), so `text-align: center` on a
+   plain `<div>` centers within that full block width exactly like a real
+   browser, not within some auto-shrunk width that would make centering
+   invisible. Deliberately scoped to `left`/`center`/`right` -- `justify`
+   falls back to `left` (this engine has no per-space stretch-justification
+   of its own), a safe degrade rather than a wrong guess, matching this
+   codebase's existing convention for other unimplemented keyword values.
+
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
    `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
    docstring for the full rationale (this file is a pure, host-independent
@@ -348,7 +366,7 @@
    resolves to the EXACT SAME char-w-approximation code path
    (text-lines/char-w below) this file has always used, so today's
    word-wrap behavior is completely unaffected unless a host opts in."
-  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text]
+  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text]
   (let [line-height (:line-height theme)
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -357,15 +375,21 @@
         lines (if measure-text
                 (text-lines-measured #(measure-text % font-size) content-w text)
                 (text-lines char-w content-w text))
+        line-w #(if measure-text (measure-text % font-size) (* (count %) char-w))
         max-line-w (if measure-text
                      (apply max 0 (map #(measure-text % font-size) lines))
                      (apply max 0 (map #(* (count %) char-w) lines)))
         w (min avail-width (+ max-line-w (* 2 padding)))
-        h (+ (* (count lines) line-height) (* 2 padding))]
+        h (+ (* (count lines) line-height) (* 2 padding))
+        align-offset (fn [line]
+                       (case text-align
+                         "center" (/ (max 0 (- content-w (line-w line))) 2)
+                         "right" (max 0 (- content-w (line-w line)))
+                         0))]
     {:box {:x x :y y :w w :h h}
      :draw (vec (map-indexed
                  (fn [i line]
-                   (cond-> {:draw/op :text :x (+ x padding) :y (+ y padding (* i line-height))
+                   (cond-> {:draw/op :text :x (+ x padding (align-offset line)) :y (+ y padding (* i line-height))
                             :text line :color color :font-size font-size :opacity opacity}
                      font-weight (assoc :font-weight font-weight)
                      font-style (assoc :font-style font-style)
@@ -395,6 +419,7 @@
    :font-weight (style node :font-weight)
    :font-style (style node :font-style)
    :text-decoration (style node :text-decoration)
+   :text-align (style node :text-align)
    :opacity (parse-dbl (style node :opacity) 1.0)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
@@ -2481,12 +2506,14 @@
            font-size (parse-int (:font-size gstyle) (:font-size inherited))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
            font-style (or (:font-style gstyle) (:font-style inherited))
-           text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))]
-       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration (:generated/text node)))
+           text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))
+           text-align (or (:text-align gstyle) (:text-align inherited))]
+       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited)
-                  (:font-weight inherited) (:font-style inherited) (:text-decoration inherited) node)
+                  (:font-weight inherited) (:font-style inherited) (:text-decoration inherited)
+                  (:text-align inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -2509,9 +2536,10 @@
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
                text-decoration (or (:text-decoration st) (:text-decoration inherited))
+               text-align (or (:text-align st) (:text-align inherited))
                inherited (assoc inherited :color color :font-size font-size
                                 :font-weight font-weight :font-style font-style
-                                :text-decoration text-decoration)
+                                :text-decoration text-decoration :text-align text-align)
                tag (:tag node)
                children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond
