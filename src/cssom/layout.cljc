@@ -15,8 +15,13 @@
    `grid-area: <name>` named-area placement resolved against the
    container's own `grid-template-areas` quoted-string template, and
    auto-placement for everything else — see layout-grid for the exact
-   subset and its documented limitations; position:relative/absolute with z-index
-   stacking; opacity (multiplicatively inherited); background/
+   subset and its documented limitations; position:absolute (left/top/
+   right/bottom anchored against the containing block) with z-index
+   stacking; position:relative (top/left/right/bottom as a direct pixel
+   shift from the box's own normal position, affecting painting only,
+   never layout -- see relative-offset/layout-children-block; currently
+   scoped to plain block-flow children only, not yet a flex/grid item,
+   an honest, documented scope-cut); opacity (multiplicatively inherited); background/
    background-color; borders; overflow+scroll-top/scroll-left clipping;
    form-control value/checked/selected-option-label projection; text input
    caret/selection; grid item explicit placement via `grid-column`/
@@ -2763,6 +2768,26 @@
         node-h (or explicit-h (+ content-h (* 2 inset)))]
     {:box-w w :box-h node-h :draws draws}))
 
+(defn- relative-offset
+  "Real CSS `position: relative`'s own offset -- unlike `position:
+   absolute` (see `layout-absolute-children` above, which solves an
+   UNKNOWN edge against the CONTAINING block's own size), a relatively
+   positioned box's offset is always a direct pixel shift from its own
+   normal (static) position: `top` shifts the box DOWN, `left` shifts it
+   RIGHT (each winning over `bottom`/`right` respectively when both are
+   present, matching this file's own established left/top-wins
+   convention for absolute positioning above), with no containing-
+   block-size-dependent math needed at all -- `bottom`/`right` alone
+   shift the OPPOSITE physical direction (a positive `bottom` pulls the
+   box UP, a positive `right` pulls it LEFT), matching real CSS exactly."
+  [st]
+  (let [left (explicit-length (:left st))
+        right (explicit-length (:right st))
+        top (explicit-length (:top st))
+        bottom (explicit-length (:bottom st))]
+    [(cond left left right (- right) :else 0)
+     (cond top top bottom (- bottom) :else 0)]))
+
 ;; ---- block (normal-flow) layout ----
 
 (defn- layout-children-block
@@ -2782,15 +2807,32 @@
    upstream by with-generated-content before `children` ever reaches this
    function -- by the time a child arrives here it is already exactly one
    row, so this function itself needs no inline-flow concept at all to
-   honor either exception correctly."
+   honor either exception correctly.
+
+   A child with `position: relative` (see `relative-offset`) is
+   translated by its own real CSS offset AFTER being measured/laid out
+   at its normal static position -- purely a paint-time shift, deliberately
+   NOT read into `advance` (computed from the child's own real, UNSHIFTED
+   `child-h`), so a relatively positioned box never disturbs where
+   FOLLOWING siblings stack, exactly matching real CSS's own 'relative
+   positioning affects painting only, never layout' rule. Deliberately
+   scoped to this plain block-flow case only -- a `position: relative`
+   flex/grid item would need the identical treatment applied inside
+   `layout-flex`/`layout-grid`'s own placement functions instead, an
+   honest, documented scope-cut left for a future cycle."
   [theme content-x content-y content-w opacity inherited children]
   (loop [remaining children y content-y draws [] height 0]
     (if-let [child (first remaining)]
-      (let [child-margin (if (map? child) (:margin (node-style child theme)) 0)
+      (let [cst (when (map? child) (node-style child theme))
+            child-margin (or (:margin cst) 0)
             child-y (+ y child-margin)
             {:keys [box draw]} (layout-node theme (+ content-x child-margin) child-y content-w opacity inherited child)
             child-h (:h box)
-            advance (+ child-margin child-h child-margin (:gap theme))]
+            advance (+ child-margin child-h child-margin (:gap theme))
+            draw (if (and cst (= "relative" (:position cst)))
+                   (let [[dx dy] (relative-offset cst)]
+                     (translate-ops dx dy draw))
+                   draw)]
         (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance)))
       {:draw draws :h (max 0 (- height (:gap theme)))})))
 

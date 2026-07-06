@@ -2907,6 +2907,83 @@
   (let [div-op (absolute-child-op "right: auto; width: 40; height: 20")]
     (is (= 0 (:x div-op)))))
 
+;; ---- position:relative top/left/right/bottom (layout-children-block
+;;      previously read NEITHER at all -- position:relative had
+;;      byte-identical layout to position:static/unset, even though this
+;;      namespace's own docstring already claimed "position:relative/
+;;      absolute with z-index stacking" was covered) ----
+
+(defn- relative-sibling-rects
+  "Shared harness: a real block-flow parent with two direct :div children,
+   the first styled by `first-child-style` (typically position:relative
+   plus an offset), the second a plain, unstyled sibling used to prove
+   relative positioning shifts painting only, never layout. Returns
+   `[first-rect second-rect]` -- each child's own real background :rect
+   draw-op."
+  [first-child-style]
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        [a doc] (dom/create-element doc :div)
+        doc (dom/set-style doc a (merge {:background "#ff0000" :width 50 :height 50} first-child-style))
+        doc (dom/append-child doc parent a)
+        [b doc] (dom/create-element doc :div)
+        doc (dom/set-style doc b {:background "#00ff00" :width 50 :height 50})
+        doc (dom/append-child doc parent b)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        rect-for-color (fn [color] (some #(and (= :rect (:draw/op %)) (= color (:color %)) %) ops))]
+    [(rect-for-color "#ff0000") (rect-for-color "#00ff00")]))
+
+(deftest relative-top-and-left-shift-the-painted-position
+  (let [[a-before _] (relative-sibling-rects {})
+        [a-after _] (relative-sibling-rects {:position "relative" :top 10 :left 20})]
+    (is (= (+ 20 (:x a-before)) (:x a-after)))
+    (is (= (+ 10 (:y a-before)) (:y a-after)))))
+
+(deftest relative-bottom-and-right-shift-the-opposite-physical-direction
+  (let [[a-before _] (relative-sibling-rects {})
+        [a-after _] (relative-sibling-rects {:position "relative" :bottom 5 :right 8})]
+    (is (= (- (:x a-before) 8) (:x a-after))
+        "a positive right pulls the box LEFT, not right")
+    (is (= (- (:y a-before) 5) (:y a-after))
+        "a positive bottom pulls the box UP, not down")))
+
+(deftest relative-left-wins-over-right-when-both-present
+  (let [[a-before _] (relative-sibling-rects {})
+        [a-after _] (relative-sibling-rects {:position "relative" :left 15 :right 999})]
+    (is (= (+ 15 (:x a-before)) (:x a-after)))))
+
+(deftest relative-top-wins-over-bottom-when-both-present
+  (let [[a-before _] (relative-sibling-rects {})
+        [a-after _] (relative-sibling-rects {:position "relative" :top 8 :bottom 999})]
+    (is (= (+ 8 (:y a-before)) (:y a-after)))))
+
+(deftest relative-positioning-does-not-disturb-a-following-siblings-layout
+  ;; The real CSS rule this fix must honor exactly: position:relative
+  ;; shifts PAINTING only -- a later sibling must stack as if the
+  ;; relatively positioned box were still at its own normal, unshifted
+  ;; position.
+  (let [[_ b-static] (relative-sibling-rects {})
+        [a-shifted b-after-shift] (relative-sibling-rects {:position "relative" :top 50 :left 30})]
+    (is (= (+ 30 (:x b-static)) (:x a-shifted)) "sanity check: a itself really did shift")
+    (is (= b-static b-after-shift)
+        "b's own position must be byte-identical whether or not a was shifted -- a real, common bug shape where painting-only offsets leak into sibling layout math")))
+
+(deftest no-position-declared-is-an-unaffected-baseline
+  (let [[a-static _] (relative-sibling-rects {})]
+    (is (= 4 (:x a-static)))
+    (is (= 4 (:y a-static)))))
+
+(deftest position-absolute-is-not-shifted-by-this-relative-offset-logic
+  ;; Confirms the new relative-offset translate is correctly gated on
+  ;; position:relative specifically -- an absolutely positioned child (a
+  ;; wholly separate placement mechanism, see layout-absolute-children)
+  ;; must not ALSO receive this block-flow relative-offset treatment.
+  (let [div-op (absolute-child-op "left: 15; top: 8; width: 40; height: 20")]
+    (is (= 15 (:x div-op)))
+    (is (= 8 (:y div-op)))))
+
 ;; ---- implicit <ul>/<ol> default `<li>` markers (with-implicit-list-markers)
 ;;      ----
 ;;
