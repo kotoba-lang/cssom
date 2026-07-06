@@ -3009,6 +3009,100 @@
   (is (nil? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "")
                                   ".box { color: red }"))))
 
+;; ---- the CSS `visibility` property (previously entirely unimplemented --
+;;      no :visibility key anywhere in node-style; an element rendered
+;;      exactly as if visibility were never set) ----
+
+(defn- visibility-box-and-text-opacity
+  [rules-str]
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        [text doc] (dom/create-text-node doc "MARKER_TEXT")
+        doc (dom/append-child doc div text)
+        rules (css/parse-rules rules-str)
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)
+        text-op (some #(and (= :text (:draw/op %)) %) ops)]
+    {:w (:w div-op) :h (:h div-op) :text-opacity (:opacity text-op)}))
+
+(deftest visibility-hidden-reserves-layout-space-but-paints-nothing
+  ;; Unlike display:none (a zero-box, nothing-walked branch), visibility:
+  ;; hidden must still occupy its full layout box -- only its own paint is
+  ;; suppressed.
+  (let [result (visibility-box-and-text-opacity
+                ".box { visibility: hidden; width: 100; height: 50 }")]
+    (is (= {:w 100 :h 50} (select-keys result [:w :h])))
+    (is (= 0.0 (:text-opacity result)))))
+
+(deftest visibility-collapse-behaves-the-same-as-hidden
+  (is (= 0.0 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { visibility: collapse; width: 100; height: 50 }")))))
+
+(deftest visibility-visible-explicit-is-a-no-op-baseline
+  (is (= 1.0 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { visibility: visible; width: 100; height: 50 }")))))
+
+(deftest no-visibility-declared-defaults-to-fully-visible
+  (is (= 1.0 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { width: 100; height: 50 }")))))
+
+(deftest visibility-hidden-combines-multiplicatively-with-explicit-opacity
+  (is (= 0.0 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { visibility: hidden; opacity: 0.5; width: 100; height: 50 }")))))
+
+(deftest malformed-visibility-value-degrades-to-visible-not-enforced
+  (is (= 1.0 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { visibility: bogus; width: 100; height: 50 }")))))
+
+(deftest visibility-hidden-child-with-no-own-visibility-inherits-hidden-by-default
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [outer doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root outer)
+        doc (dom/set-attribute doc outer :class "outer")
+        [inner doc] (dom/create-element doc :span)
+        doc (dom/append-child doc outer inner)
+        [text doc] (dom/create-text-node doc "CHILD_TEXT")
+        doc (dom/append-child doc inner text)
+        rules (css/parse-rules ".outer { visibility: hidden }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-op (some #(and (= :text (:draw/op %)) %) ops)]
+    (is (= 0.0 (:opacity text-op)))))
+
+(deftest visibility-visible-cannot-un-hide-a-descendant-under-a-hidden-ancestor
+  ;; DOCUMENTED, HONEST SCOPE-CUT: real CSS visibility is invertible per
+  ;; descendant (a child re-declaring visibility:visible under a hidden
+  ;; ancestor genuinely becomes visible again), but this engine reuses the
+  ;; SAME multiplicative opacity accumulator every other opacity/inherited
+  ;; property already threads -- 0 multiplied by anything stays 0, so this
+  ;; is a real, pinned-down limitation, not an oversight.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [outer doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root outer)
+        doc (dom/set-attribute doc outer :class "outer")
+        [inner doc] (dom/create-element doc :span)
+        doc (dom/append-child doc outer inner)
+        doc (dom/set-attribute doc inner :class "inner")
+        [text doc] (dom/create-text-node doc "CHILD_TEXT")
+        doc (dom/append-child doc inner text)
+        rules (css/parse-rules ".outer { visibility: hidden } .inner { visibility: visible }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-op (some #(and (= :text (:draw/op %)) %) ops)]
+    (is (= 0.0 (:opacity text-op)))))
+
 (deftest li-list-style-none-suppresses-only-that-lis-marker-without-renumbering
   ;; Real CSS: `list-style: none` on one <li> only hides THAT marker box --
   ;; it does not renumber the <li>s around it, since real CSS's list

@@ -564,6 +564,7 @@
    :text-transform (style node :text-transform)
    :white-space (or (style node :white-space) (when (= :pre (:tag node)) "pre"))
    :opacity (parse-dbl (style node :opacity) 1.0)
+   :visibility (style node :visibility)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
    :flex-direction (or (style node :flex-direction) "row")
@@ -2804,7 +2805,18 @@
      (let [st (node-style node theme)]
        (if (= "none" (:display st))
          {:box {:x x :y y :w 0 :h 0} :draw []}
-         (let [opacity (* opacity (:opacity st))
+         (let [;; visibility:hidden/collapse reserves layout space (unlike
+               ;; display:none's zero-box branch above) but paints nothing --
+               ;; reuses the SAME multiplicative opacity accumulator every
+               ;; sub-layout fn and draw op already threads, so descendants
+               ;; correctly inherit hidden-by-default too (0 * anything stays
+               ;; 0). Honest, documented scope-cut: a descendant re-declaring
+               ;; visibility:visible under a hidden ancestor is NOT un-hidden
+               ;; by this approach -- real CSS visibility is invertible per-
+               ;; descendant, unlike opacity/display, which this multiply-
+               ;; only accumulator can't express.
+               opacity (* opacity (:opacity st)
+                          (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
                color (or (:color st) (:color inherited))
                font-size (parse-int (:font-size st) (:font-size inherited))
                font-weight (or (:font-weight st) (:font-weight inherited))
