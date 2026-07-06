@@ -330,18 +330,27 @@
    italic` correctly in the cascade (real, cascade-computed `:style/
    font-weight`/`:style/font-style` attrs already existed) but silently
    dropped both once layout built the actual :text draw-op, so bold/italic
-   CSS had ZERO visual effect no matter what a real author wrote. Known,
-   documented, deliberately deferred limitation: the OPTIONAL `:measure-
-   text` word-wrap path below (see its own paragraph) is NOT told about
-   font-weight/font-style, so a real host's word-wrap measurement for
-   bold/italic text uses NORMAL-weight/upright metrics -- a real, if minor
-   and rarely visible, inconsistency (bold text is typically ~5-10% wider
-   than normal at the same point size) between where a line wraps and how
-   wide that line's real glyphs actually render. Fixing that too would
-   mean threading font-weight/font-style into `measure-text`'s own
-   `(fn [text font-size] ...)` signature -- a real, separate, larger
-   change to an already-established host callback contract, left for a
-   future cycle rather than done as a side effect of this one.
+   CSS had ZERO visual effect no matter what a real author wrote.
+
+   `font-weight`/`font-style` are ALSO passed to the OPTIONAL `:measure-
+   text` word-wrap callback (see its own paragraph below) -- extended
+   from `(fn [text font-size] width-in-px)` to `(fn [text font-size
+   font-weight font-style] width-in-px)`, a real, deliberate BREAKING
+   change to this already-established host callback contract (this
+   codebase is pre-release, see ADR-2607050700's own precedent for this
+   kind of change; the two real implementers, kotoba-lang/dom-gpu's
+   webgl.cljs/webgpu.cljs, are updated in the same cycle as this change).
+   Before this, a real host's word-wrap MEASUREMENT for bold/italic text
+   always used NORMAL-weight/upright metrics even though the PAINT step
+   already correctly rendered bold/italic (confirmed via direct REPL
+   reproduction: a long bold string wrapped identically to the same
+   string in normal weight, despite bold glyphs typically measuring
+   ~5-10% wider at the same point size in a real proportional font) --
+   a real, if minor and rarely visible, mismatch between where a line
+   wraps and how wide its real glyphs actually render. This was flagged
+   as a known, deliberately deferred limitation across several earlier
+   cycles this session (and as the one remaining open item in
+   ADR-2607061100's own retrospective) before being closed here.
 
    `text-decoration` is the same shape again -- a direct follow-up gap
    found in the same text-styling-property survey that turned up the
@@ -458,12 +467,13 @@
    with, so there is no divergence to document here.
 
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
-   `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
-   docstring for the full rationale (this file is a pure, host-independent
-   layout engine with no real glyph shaping of its own; a real host that
-   DOES have one, e.g. a browser's real Canvas 2D `measureText`, can supply
-   it here so word-wrap decisions agree with how the text will actually be
-   painted). When `theme` has no `:measure-text` (the default -- absent
+   `theme` -- a `(fn [text font-size font-weight font-style] width-in-px)`
+   -- see draw-ops' docstring for the full rationale (this file is a pure,
+   host-independent layout engine with no real glyph shaping of its own; a
+   real host that DOES have one, e.g. a browser's real Canvas 2D
+   `measureText`, can supply it here so word-wrap decisions agree with how
+   the text will actually be painted, INCLUDING its real bold/italic
+   metrics). When `theme` has no `:measure-text` (the default -- absent
    from default-theme, and absent from every existing caller), this
    resolves to the EXACT SAME char-w-approximation code path
    (text-lines/char-w below) this file has always used, so today's
@@ -475,25 +485,26 @@
         char-w (long (* 0.6 font-size))
         content-w (max 0 (- avail-width (* 2 padding)))
         text (apply-text-transform text-transform text)
+        measure #(measure-text % font-size font-weight font-style)
         lines (cond
                 (= "pre" white-space) (str/split (str text) #"\n" -1)
                 (= "nowrap" white-space) [(str text)]
                 (= "pre-wrap" white-space)
                 (mapcat #(if measure-text
-                           (text-lines-measured (fn [s] (measure-text s font-size)) content-w %)
+                           (text-lines-measured measure content-w %)
                            (text-lines char-w content-w %))
                         (str/split (str text) #"\n" -1))
                 (= "pre-line" white-space)
                 (mapcat #(let [collapsed (str/replace % #"\s+" " ")]
                            (if measure-text
-                             (text-lines-measured (fn [s] (measure-text s font-size)) content-w collapsed)
+                             (text-lines-measured measure content-w collapsed)
                              (text-lines char-w content-w collapsed)))
                         (str/split (str text) #"\n" -1))
-                measure-text (text-lines-measured #(measure-text % font-size) content-w text)
+                measure-text (text-lines-measured measure content-w text)
                 :else (text-lines char-w content-w text))
-        line-w #(if measure-text (measure-text % font-size) (* (count %) char-w))
+        line-w #(if measure-text (measure %) (* (count %) char-w))
         max-line-w (if measure-text
-                     (apply max 0 (map #(measure-text % font-size) lines))
+                     (apply max 0 (map measure lines))
                      (apply max 0 (map #(* (count %) char-w) lines)))
         w (min avail-width (+ max-line-w (* 2 padding)))
         h (+ (* (count lines) line-height) (* 2 padding))
@@ -2716,8 +2727,11 @@
    :width for the root box.
 
    `opts`' `:theme` map also accepts an OPTIONAL `:measure-text` key -- a
-   `(fn [text font-size] width-in-px)` real text-width function, e.g. one
-   backed by a real browser's `CanvasRenderingContext2D.measureText` --
+   `(fn [text font-size font-weight font-style] width-in-px)` real
+   text-width function, e.g. one backed by a real browser's
+   `CanvasRenderingContext2D.measureText` (with `.font` set to match all
+   four args, so bold/italic text measures its own real, wider/narrower
+   metrics, not normal-weight/upright ones) --
    consulted by layout-text's word-wrap instead of this file's own
    char-w-per-character approximation (`(long (* 0.6 font-size))`, a
    monospace-like heuristic that can disagree with how a real,

@@ -512,14 +512,17 @@
 ;; environment it runs in (e.g. this very JVM test suite). A real host
 ;; (a real browser's Canvas 2D context, or kotoba-lang/dom-gpu's WebGL/
 ;; WebGPU hosts, which already hold one) can instead supply an OPTIONAL
-;; `:measure-text` function on `theme` -- `(fn [text font-size]
-;; width-in-px)` -- consulted instead (text-lines-measured). The two
-;; tests below prove both halves of that contract: (1) omitting
+;; `:measure-text` function on `theme` -- `(fn [text font-size font-weight
+;; font-style] width-in-px)` -- consulted instead (text-lines-measured).
+;; The tests below prove several halves of that contract: (1) omitting
 ;; `:measure-text` is byte-for-byte the SAME char-w-approximation code
 ;; path this file has always used (default-theme has no :measure-text key
 ;; at all, and every test above this comment -- unmodified by this
-;; feature -- already proves that path's exact output), and (2) supplying
-;; one is genuinely CONSULTED, not silently ignored.
+;; feature -- already proves that path's exact output), (2) supplying
+;; one is genuinely CONSULTED, not silently ignored, and (3) font-weight/
+;; font-style genuinely REACH the callback (not merely threaded through
+;; the theme and dropped) -- the closed half of the gap flagged across
+;; several earlier cycles this session and in ADR-2607061100.
 
 (deftest default-theme-has-no-measure-text-so-every-existing-caller-is-unaffected
   ;; The non-regression contract, made explicit and self-documenting:
@@ -542,7 +545,7 @@
    wider than 'i' -- unlike the production char-w approximation, which
    assumes every character is the same width regardless of which letter
    it is."
-  [text _font-size]
+  [text _font-size _font-weight _font-style]
   (reduce + 0 (map (fn [c] (case c \W 16 \i 3 \space 6 8)) text)))
 
 (deftest measure-text-is-genuinely-consulted-not-ignored
@@ -603,6 +606,37 @@
                                    :theme {:measure-text fake-proportional-measure}})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
     (is (= ["WWWWW" "WWWWW"] (mapv :text text-ops)))))
+
+(defn- fake-weight-aware-measure
+  "A FAKE measure fn that ALSO widens its result for bold text --
+   proves font-weight genuinely reaches the :measure-text callback (not
+   merely threaded through the theme and dropped), closing the gap
+   flagged across several earlier cycles this session and in
+   ADR-2607061100: the callback's OLDER `(fn [text font-size]
+   width-in-px)` 2-arg contract had no way to receive font-weight/
+   font-style at all -- a fake fn declared with this 4-arg signature
+   would throw an arity exception if layout-text still called it with
+   only 2 args, which is exactly what happens if this fix is reverted."
+  [text _font-size font-weight _font-style]
+  (cond-> (* (count text) 8)
+    (= "bold" font-weight) (* 2)))
+
+(deftest measure-text-callback-genuinely-receives-font-weight
+  ;; The identical string, at the identical available width: normal
+  ;; weight measures narrow enough to wrap onto 2 lines, but the SAME
+  ;; string in bold measures wide enough (per the fake's own doubling)
+  ;; to need a 3rd line -- a real, different wrap OUTCOME driven purely
+  ;; by font-weight reaching the measure callback, not by anything else
+  ;; about the input changing.
+  (let [text "aaaa bbbb cccc"
+        measured-theme (assoc layout/default-theme :measure-text fake-weight-aware-measure)
+        normal-inherited (assoc inherited-text :font-weight "normal")
+        bold-inherited (assoc inherited-text :font-weight "bold")
+        {normal-ops :draw} (layout/layout-node measured-theme 0 0 108 1.0 normal-inherited text)
+        {bold-ops :draw} (layout/layout-node measured-theme 0 0 108 1.0 bold-inherited text)]
+    (is (= 2 (count normal-ops)))
+    (is (= 3 (count bold-ops))
+        "bold text must measure wider and wrap onto an extra line, proving font-weight reached the fake measure fn")))
 
 ;; ---- display:grid ----
 
