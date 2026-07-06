@@ -386,9 +386,13 @@
    not the original untransformed string's.
 
    `white-space` -- the last item on this file's text-styling-property
-   survey -- is a REAL, spec-accurate inherited property, deliberately
-   scoped to `pre`/`nowrap` this cycle (`pre-wrap`/`pre-line` deferred,
-   see Follow-up in ADR-2607061100). `nowrap` skips word-wrapping
+   survey -- is a REAL, spec-accurate inherited property, originally
+   scoped to `pre`/`nowrap` (`pre-wrap`/`pre-line` deferred, see
+   Follow-up in ADR-2607061100); `pre-wrap` was added as a direct,
+   tightly-scoped follow-up the very next cycle (`pre-line` remains
+   deferred -- it needs the SAME newline-preservation as `pre`/`pre-wrap`
+   but INTER-newline whitespace COLLAPSING like `normal`, a third,
+   distinct combination not yet implemented). `nowrap` skips word-wrapping
    entirely: the WHOLE text becomes a single line, left to overflow its
    box exactly like this file's existing 'let an oversized single word
    overflow rather than hyphenate' convention. `pre` splits `text` on
@@ -422,6 +426,26 @@
    bare, unstyled `<pre>` renders its line structure correctly out of
    the box without requiring an author to write explicit CSS for it.
 
+   `pre-wrap` combines `pre`'s literal-`\\n`-splitting with `normal`'s
+   own existing per-segment word-wrap: each `\\n`-delimited segment is
+   independently re-wrapped via `text-lines`/`text-lines-measured` if it
+   doesn't fit `content-w` -- unlike a bare `pre`, an overly long
+   `pre-wrap` line DOES get broken at a word boundary rather than
+   overflowing its box. KNOWN, deliberately accepted simplification: real
+   CSS `pre-wrap` preserves EVERY whitespace character verbatim, even
+   inside a segment that needs wrapping, but `text-lines`/`text-lines-
+   measured`'s own word-packing collapses runs of inter-word whitespace
+   to a single space once a segment is long enough to actually need
+   re-wrapping (see text-lines' own docstring: the ORIGINAL string is
+   preserved byte-for-byte ONLY when it already fits on one line without
+   wrapping at all). This means `pre-wrap`'s hard line breaks and any
+   segment that already fits on one line are both fully verbatim, and
+   ONLY a segment that genuinely needs word-wrapping loses its exact
+   original inter-word spacing (collapsing to single spaces, matching
+   `normal`'s own long-standing behavior) -- a real, narrow divergence
+   from the CSS spec's own more exacting semantics, accepted rather than
+   rewriting the established word-wrap algorithm itself for this cycle.
+
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
    `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
    docstring for the full rationale (this file is a pure, host-independent
@@ -443,6 +467,11 @@
         lines (cond
                 (= "pre" white-space) (str/split (str text) #"\n" -1)
                 (= "nowrap" white-space) [(str text)]
+                (= "pre-wrap" white-space)
+                (mapcat #(if measure-text
+                           (text-lines-measured (fn [s] (measure-text s font-size)) content-w %)
+                           (text-lines char-w content-w %))
+                        (str/split (str text) #"\n" -1))
                 measure-text (text-lines-measured #(measure-text % font-size) content-w text)
                 :else (text-lines char-w content-w text))
         line-w #(if measure-text (measure-text % font-size) (* (count %) char-w))

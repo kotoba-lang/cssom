@@ -326,6 +326,47 @@
         ops (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 800}))]
     (is (= ["x" "y"] (map :text ops)))))
 
+;; ---- white-space: pre-wrap -- pre's newline-splitting + normal's re-wrap ----
+
+(deftest pre-wrap-re-wraps-a-too-long-segment-but-leaves-a-short-one-alone
+  (let [ops (text-ops-of :div {:white-space "pre-wrap"}
+                          "short\nthis is a genuinely long line that needs wrapping" 150)]
+    (is (= "short" (first (map :text ops)))
+        "a segment that already fits gets no re-wrapping at all -- WITHOUT this fix, an unrecognized \"pre-wrap\" value falls back to ordinary word-wrap on the WHOLE string (the embedded newline treated as just another whitespace run), jumbling \"short\" together with the second segment's own words instead of keeping it on its own untouched first line")
+    (is (> (count ops) 2)
+        "the long segment must be broken into more than one sub-line in this narrow box")
+    (is (apply < (map :y ops)) "every resulting line must be positioned strictly below the previous one"))
+  ;; Direct comparison against plain `pre` for the identical input: `pre`
+  ;; never re-wraps a segment no matter how long (it overflows instead),
+  ;; `pre-wrap` must actually break the same long segment into sub-lines
+  ;; -- this is the one assertion that most directly proves the two
+  ;; white-space values are genuinely different code paths, not aliases.
+  (let [pre-ops (text-ops-of :div {:white-space "pre"}
+                              "this is a genuinely long line that needs wrapping" 150)
+        pre-wrap-ops (text-ops-of :div {:white-space "pre-wrap"}
+                                   "this is a genuinely long line that needs wrapping" 150)]
+    (is (= 1 (count pre-ops)) "plain pre never re-wraps -- it just overflows")
+    (is (> (count pre-wrap-ops) 1) "pre-wrap must actually break the same long line into sub-lines")))
+
+(deftest pre-wrap-preserves-verbatim-spacing-in-a-segment-that-fits-without-wrapping
+  ;; The documented compromise: a segment that already fits on one line
+  ;; keeps its exact original spacing (text-lines' own fast path returns
+  ;; the string completely unmodified) -- only a segment that genuinely
+  ;; needs re-wrapping loses its exact inter-word spacing. Combined with
+  ;; an embedded newline so this genuinely exercises pre-wrap's own
+  ;; split-then-preserve mechanism: WITHOUT this fix, an unrecognized
+  ;; "pre-wrap" value falls back to text-lines on the WHOLE string
+  ;; (including the raw \n) -- since "a  b\nc   d" is short enough to
+  ;; fit on one line by the char-width heuristic, that fallback's own
+  ;; fits-verbatim fast path would return it as a SINGLE line with the
+  ;; literal \n still baked in, not two separately-split lines.
+  (let [ops (text-ops-of :div {:white-space "pre-wrap"} "a  b\nc   d" 800)]
+    (is (= ["a  b" "c   d"] (map :text ops)))))
+
+(deftest pre-wrap-preserves-a-blank-line-between-two-segments
+  (let [ops (text-ops-of :div {:white-space "pre-wrap"} "a\n\nb" 800)]
+    (is (= ["a" "" "b"] (map :text ops)))))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints
