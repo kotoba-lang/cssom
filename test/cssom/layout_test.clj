@@ -866,6 +866,144 @@
     (is (< (.indexOf ops shadow-rect) (.indexOf ops bg-rect))
         "box-shadow must paint before a form control's own background, same convention as block/flex/grid")))
 
+;; ---- outline: a non-layout-affecting ring painted OUTSIDE the box ----
+
+(deftest outline-paints-after-border-not-before
+  ;; Real CSS: outline is the OUTERMOST box decoration, painted on top of
+  ;; everything else this element paints -- confirmed via direct REPL
+  ;; reproduction before touching source that outline was previously read
+  ;; nowhere at all, so this ordering never had a chance to matter (no
+  ;; outline rect was ever emitted).
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:outline-width 2 :outline-color "#ff0000"
+                                     :border-width 3 :border-color "#00ff00" :background "#0000ff"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        outline-rect (first (filter #(and (= :rect (:draw/op %)) (:outline? %) (= :top (:edge %))) ops))
+        border-rect (first (filter #(and (= :rect (:draw/op %)) (:border? %) (= :top (:edge %))) ops))
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %)) (not (:outline? %))) ops))]
+    (is (some? outline-rect))
+    (is (some? border-rect))
+    (is (some? bg-rect))
+    (is (< (.indexOf ops bg-rect) (.indexOf ops border-rect))
+        "background must still paint before border, unaffected pre-existing convention")
+    (is (< (.indexOf ops border-rect) (.indexOf ops outline-rect))
+        "outline must paint AFTER border, not before -- it's the outermost decoration")))
+
+(deftest outline-with-zero-offset-sits-directly-against-the-box-edge
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:outline-width 2 :outline-color "#ff0000" :width 100 :height 50})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        by-edge (into {} (map (juxt :edge identity)) (filter #(and (= :rect (:draw/op %)) (:outline? %)) ops))]
+    (is (= -2 (:x (:top by-edge))) "the outline's own thickness (2) sits immediately outside x=0 with no offset")
+    (is (= -2 (:y (:top by-edge))))
+    (is (= 104 (:w (:top by-edge))) "spans the full box width (100) plus 2x the outline thickness")
+    (is (= 2 (:h (:top by-edge))))
+    (is (= 100 (:x (:right by-edge))) "the right edge's inner face touches the box's own right edge (x=100) directly")))
+
+(deftest outline-offset-pushes-the-ring-further-out
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:outline-width 2 :outline-offset 3 :outline-color "#ff0000"
+                                     :width 100 :height 50})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        by-edge (into {} (map (juxt :edge identity)) (filter #(and (= :rect (:draw/op %)) (:outline? %)) ops))]
+    (is (= -5 (:x (:top by-edge))) "gap (3) + thickness (2) = 5px outside the box edge")
+    (is (= -5 (:y (:top by-edge))))
+    (is (= 110 (:w (:top by-edge))) "box width (100) plus 2x (offset+thickness) = 100 + 10")))
+
+(deftest outline-negative-offset-pulls-the-ring-inward
+  ;; A real, legal outline-offset value -- unlike border, outline is not
+  ;; part of the box, so pulling it back toward (or even inside) the
+  ;; border is valid CSS, handled here by the same offset+thickness
+  ;; arithmetic with no special-casing at all.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:outline-width 2 :outline-offset -1 :outline-color "#ff0000"
+                                     :width 100 :height 50})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        by-edge (into {} (map (juxt :edge identity)) (filter #(and (= :rect (:draw/op %)) (:outline? %)) ops))]
+    (is (= -1 (:x (:top by-edge))) "gap (-1 + 2 = 1) pulls the ring 1px inward from the box edge")
+    (is (= 102 (:w (:top by-edge))))))
+
+(deftest no-outline-declared-produces-no-outline-rect-at-all
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:background "#ff0000"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})]
+    (is (not-any? :outline? ops))))
+
+(deftest outline-is-not-a-real-inherited-property
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:outline-width 2 :outline-color "#ff0000" :width 200 :height 100})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/set-style doc child {:background "#0000ff" :width 40 :height 20})
+        doc (dom/append-child doc parent child)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        outline-rects (filter :outline? ops)]
+    (is (= 4 (count outline-rects))
+        "exactly the parent's own 4 outline edges -- the child must not have inherited a second set")))
+
+(deftest flex-container-outline-paints-after-border
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :outline-width 2 :outline-color "#ff0000"
+                                     :border-width 3 :border-color "#00ff00"})
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div span)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        outline-rect (first (filter #(and (= :rect (:draw/op %)) (:outline? %)) ops))
+        border-rect (first (filter #(and (= :rect (:draw/op %)) (:border? %)) ops))]
+    (is (some? outline-rect))
+    (is (< (.indexOf ops border-rect) (.indexOf ops outline-rect))
+        "outline must paint after the flex container's own border, same convention as block")))
+
+(deftest grid-container-outline-paints-after-border
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "grid" :outline-width 2 :outline-color "#ff0000"
+                                     :border-width 3 :border-color "#00ff00"})
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div span)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        outline-rect (first (filter #(and (= :rect (:draw/op %)) (:outline? %)) ops))
+        border-rect (first (filter #(and (= :rect (:draw/op %)) (:border? %)) ops))]
+    (is (some? outline-rect))
+    (is (< (.indexOf ops border-rect) (.indexOf ops outline-rect))
+        "outline must paint after the grid container's own border, same convention as block/flex")))
+
+(deftest form-control-outline-paints-after-border
+  (let [[input doc] (dom/create-element dom/empty-document :input)
+        doc (dom/set-root doc input)
+        doc (dom/set-style doc input {:outline-width 2 :outline-color "#ff0000"
+                                       :border-width 3 :border-color "#00ff00"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        outline-rect (first (filter #(and (= :rect (:draw/op %)) (:outline? %)) ops))
+        border-rect (first (filter #(and (= :rect (:draw/op %)) (:border? %)) ops))]
+    (is (some? outline-rect))
+    (is (< (.indexOf ops border-rect) (.indexOf ops outline-rect))
+        "outline must paint after a form control's own border, same convention as block/flex/grid")))
+
 (def ^:private inherited-text
   {:color (:fg layout/default-theme) :font-size (:font-size layout/default-theme)})
 

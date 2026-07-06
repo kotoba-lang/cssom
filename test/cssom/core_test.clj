@@ -138,6 +138,48 @@
     (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-blur :important?])))
     (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-color :important?])))))
 
+;; ---- `outline` shorthand expansion ----
+
+(deftest outline-shorthand-expands-into-its-three-longhands
+  ;; The confirmed repro from the bug report: before this, outline was
+  ;; never read at all -- a repo-wide grep found nothing but a handful of
+  ;; unrelated comments -- so a real, common author pattern like
+  ;; `outline: 2px solid #ff0000` silently painted no outline at all.
+  (let [rules (css/parse-rules "#f { outline: 2px solid #ff0000 }")]
+    (is (= {:outline-width 2 :outline-style "solid" :outline-color "#ff0000"}
+           (:rule/declarations (first rules))))
+    (is (not (contains? (:rule/declarations (first rules)) :outline))
+        "no bare :outline key should remain -- it's fully expanded")))
+
+(deftest outline-shorthand-is-order-independent-per-real-css-grammar
+  (let [rules (css/parse-rules "#f { outline: red 3px dashed }")]
+    (is (= {:outline-color "red" :outline-width 3 :outline-style "dashed"}
+           (:rule/declarations (first rules))))))
+
+(deftest outline-shorthand-omits-whichever-longhands-it-does-not-specify
+  (let [rules (css/parse-rules "#f { outline: solid red }")]
+    (is (= {:outline-style "solid" :outline-color "red"}
+           (:rule/declarations (first rules)))
+        "a real, legal outline shorthand may omit the width entirely")))
+
+(deftest outline-shorthand-recognizes-the-auto-keyword-unique-to-outline-style
+  ;; outline-style's own keyword set differs from border-style's --
+  ;; "auto" (the UA-native focus-ring style) is valid for outline but not
+  ;; border, and "hidden" is valid for border but not outline.
+  (let [rules (css/parse-rules "#f { outline: auto }")]
+    (is (= {:outline-style "auto"} (:rule/declarations (first rules))))))
+
+(deftest outline-shorthand-importance-applies-to-every-expanded-longhand
+  (let [rules (css/parse-rules "#f { outline: 2px solid red !important }")]
+    (is (= true (get-in (first rules) [:rule/declaration-meta :outline-width :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :outline-style :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :outline-color :important?])))))
+
+(deftest outline-longhands-declared-separately-are-unaffected-by-shorthand-expansion
+  (let [rules (css/parse-rules "#f { outline-width: 2px; outline-color: #ff0000 }")]
+    (is (= {:outline-width 2 :outline-color "#ff0000"}
+           (:rule/declarations (first rules))))))
+
 (deftest parses-attribute-selector-operators
   (let [rules (css/parse-rules "[class~=\"primary\"] { color: red }
                                 [lang|=\"en\"] { font-size: 12px }
@@ -1685,7 +1727,14 @@
   ;; text node. `padding` is used as a second, :root-only property (nothing
   ;; else in this rule set ever sets it) so ":root doesn't match the divs"
   ;; can be checked unambiguously, independent of div:empty's own (higher-
-  ;; specificity) `color` declaration on empty-div.
+  ;; specificity) `color` declaration on empty-div. `margin` (a plain,
+  ;; non-shorthand property, picked here purely as an arbitrary "any
+  ;; recognized property" marker unrelated to its own real CSS meaning) is
+  ;; used for the `*`-applies-everywhere sanity check -- this test
+  ;; originally used `outline` for that same incidental purpose, but
+  ;; `outline` is now itself a real, expanded shorthand (see cssom.core's
+  ;; own `expand-outline-shorthand`), so `outline: 1px` no longer resolves
+  ;; to a bare `:style/outline` key at all.
   (let [[root doc] (dom/create-element dom/empty-document :html)
         doc (dom/set-root doc root)
         [empty-div doc] (dom/create-element doc :div)
@@ -1695,15 +1744,15 @@
         [t doc] (dom/create-text-node doc "hi")
         doc (dom/append-child doc full-div t)
         rules (css/parse-rules
-               "* { outline: 1px }
+               "* { margin: 1px }
                 :root { color: purple; padding: 9px }
                 div:empty { color: red }")
         doc (css/apply-cascade doc rules)]
-    (is (= 1 (get-in doc [:nodes root :attrs :style/outline]))
+    (is (= 1 (get-in doc [:nodes root :attrs :style/margin]))
         "sanity check: `*` applies to the root too -- confirms the cascade
          wiring itself, independent of :root/:empty")
-    (is (= 1 (get-in doc [:nodes empty-div :attrs :style/outline])))
-    (is (= 1 (get-in doc [:nodes full-div :attrs :style/outline])))
+    (is (= 1 (get-in doc [:nodes empty-div :attrs :style/margin])))
+    (is (= 1 (get-in doc [:nodes full-div :attrs :style/margin])))
     (is (= "purple" (get-in doc [:nodes root :attrs :style/color]))
         ":root matches the document's actual root element")
     (is (= 9 (get-in doc [:nodes root :attrs :style/padding]))

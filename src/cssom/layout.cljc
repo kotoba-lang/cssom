@@ -668,6 +668,9 @@
    :box-shadow-y (style node :box-shadow-y)
    :box-shadow-blur (style node :box-shadow-blur)
    :box-shadow-color (style node :box-shadow-color)
+   :outline-width (parse-int (style node :outline-width) 0)
+   :outline-color (or (style node :outline-color) "#000000")
+   :outline-offset (parse-int (style node :outline-offset) 0)
    :background (or (style node :background) (style node :background-color))
    :color (style node :color)
    :font-size (style node :font-size)
@@ -881,6 +884,39 @@
           dy (or (:box-shadow-y st) 0)]
       [{:draw/op :rect :box-shadow? true :color (:box-shadow-color st) :opacity opacity
         :x (+ x dx) :y (+ y dy) :w w :h h}])))
+
+(defn- outline-ops
+  "Real CSS `outline` -- a non-layout-affecting ring painted OUTSIDE the
+   border box (unlike `border`, which is part of the box itself),
+   commonly used for focus rings/accessibility. Previously read NOWHERE
+   at all, confirmed via direct REPL reproduction before touching source.
+   Mirrors `border-ops`'s exact 4-edge-`:rect` shape and corner-handling
+   convention, just computed against a VIRTUAL box expanded outward by
+   `:outline-offset` + the outline's own thickness, rather than drawn
+   inward from the real box -- a real, legal negative `outline-offset`
+   naturally pulls the ring back toward (or even inside) the border, no
+   special-casing needed, the arithmetic alone handles it. Like
+   `border-ops`, `:outline-style` is parsed but not consulted here --
+   gating purely on a positive `:outline-width` matches this engine's
+   own existing border-style simplification (parsed but never consulted
+   for suppression, so e.g. `outline-style: none` alone, with an
+   explicit nonzero width, is not honored -- an honest, documented
+   scope-cut consistent with border's own)."
+  [st x y w h opacity]
+  (when (pos? (:outline-width st))
+    (let [thickness (:outline-width st)
+          offset (:outline-offset st)
+          color (:outline-color st)
+          gap (+ offset thickness)
+          ox (- x gap)
+          oy (- y gap)
+          total-w (+ w (* 2 gap))
+          total-h (+ h (* 2 gap))
+          base {:draw/op :rect :outline? true :color color :opacity opacity}]
+      [(assoc base :edge :top :x ox :y oy :w total-w :h thickness)
+       (assoc base :edge :right :x (- (+ ox total-w) thickness) :y oy :w thickness :h total-h)
+       (assoc base :edge :bottom :x ox :y (- (+ oy total-h) thickness) :w total-w :h thickness)
+       (assoc base :edge :left :x ox :y oy :w thickness :h total-h)])))
 
 (defn- absolute? [theme child]
   (and (map? child) (= "absolute" (:position (node-style child theme)))))
@@ -2900,6 +2936,7 @@
                                   (some? placeholder))
         box-shadow-draws (or (box-shadow-ops st x y w h opacity) [])
         border-draws (or (border-ops st x y w h opacity) [])
+        outline-draws (or (outline-ops st x y w h opacity) [])
         bg (default-bg tag st theme)
         rect (when bg [{:draw/op :rect :x x :y y :w w :h h :color bg :tag tag :opacity opacity}])
         text-op (when (seq (str control-text))
@@ -2938,8 +2975,9 @@
      ;; why background must precede border-draws (else the background
      ;; would completely cover the thin border edge strips); box-shadow
      ;; is real CSS's own "paints BEHIND the element's own box" layer, so
-     ;; it goes first of all three.
-     :draw (cond-> (vec (concat box-shadow-draws rect border-draws [semantic]))
+     ;; it goes first of all three. outline-draws goes LAST -- it paints
+     ;; OUTSIDE the box, on top of everything else this element paints.
+     :draw (cond-> (vec (concat box-shadow-draws rect border-draws outline-draws [semantic]))
              text-op (conj text-op)
              sel-ops (into sel-ops))}))
 
@@ -2961,6 +2999,7 @@
         absolute-draws (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
         box-shadow-draws (or (box-shadow-ops st x y node-w node-h opacity) [])
         border-draws (or (border-ops st x y node-w node-h opacity) [])
+        outline-draws (or (outline-ops st x y node-w node-h opacity) [])
         bg (default-bg (:tag node) st theme)
         rect (when bg [{:draw/op :rect :x x :y y :w node-w :h node-h :color bg :tag (:tag node) :opacity opacity}])
         semantic [(merge {:draw/op :node :id (:node/id node) :tag (:tag node) :x x :y y :w node-w :h node-h
@@ -2985,8 +3024,10 @@
      ;; ordinary <div> with both an explicit background AND border-width
      ;; genuinely never showed any border pixels at all before this fix.
      ;; box-shadow-draws goes first of all three -- real CSS paints a
-     ;; non-inset box-shadow BEHIND the element's own box.
-     :draw (vec (concat box-shadow-draws rect border-draws semantic clip-push draw clip-pop absolute-draws))}))
+     ;; non-inset box-shadow BEHIND the element's own box. outline-draws
+     ;; goes right after border-draws -- it paints OUTSIDE the box, on
+     ;; top of everything else this element paints.
+     :draw (vec (concat box-shadow-draws rect border-draws outline-draws semantic clip-push draw clip-pop absolute-draws))}))
 
 (defn layout-node
   ([node] (layout-node default-theme 0 0 320 1.0 {:color (:fg default-theme) :font-size (:font-size default-theme)
@@ -3089,12 +3130,15 @@
                 ;; painted first used to be completely hidden under the
                 ;; full-box background rect painted second). box-shadow-ops
                 ;; goes first of all: real CSS paints a non-inset box-shadow
-                ;; BEHIND the element's own box.
+                ;; BEHIND the element's own box. outline-ops goes right
+                ;; after border-ops -- it paints OUTSIDE the box, on top of
+                ;; everything else this element paints.
                 :draw (vec (concat
                             (or (box-shadow-ops st x y box-w box-h opacity) [])
                             (when-let [bg (default-bg tag st theme)]
                               [{:draw/op :rect :x x :y y :w box-w :h box-h :color bg :tag tag :opacity opacity}])
                             (or (border-ops st x y box-w box-h opacity) [])
+                            (or (outline-ops st x y box-w box-h opacity) [])
                             [(merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w box-w :h box-h
                                      :class (attr node :class) :listeners (listeners node)
                                      :opacity opacity}
@@ -3108,12 +3152,15 @@
                 ;; background rect BEFORE border-ops -- see layout-block's
                 ;; own identical fix's comment for why. box-shadow-ops goes
                 ;; first of all: real CSS paints a non-inset box-shadow
-                ;; BEHIND the element's own box.
+                ;; BEHIND the element's own box. outline-ops goes right
+                ;; after border-ops -- it paints OUTSIDE the box, on top of
+                ;; everything else this element paints.
                 :draw (vec (concat
                             (or (box-shadow-ops st x y box-w box-h opacity) [])
                             (when-let [bg (default-bg tag st theme)]
                               [{:draw/op :rect :x x :y y :w box-w :h box-h :color bg :tag tag :opacity opacity}])
                             (or (border-ops st x y box-w box-h opacity) [])
+                            (or (outline-ops st x y box-w box-h opacity) [])
                             [(merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w box-w :h box-h
                                      :class (attr node :class) :listeners (listeners node)
                                      :opacity opacity}

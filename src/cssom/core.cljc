@@ -1038,6 +1038,51 @@
                 {}
                 tokens)))))
 
+(def ^:private outline-style-keywords
+  ;; Real CSS outline-style's own keyword set -- close to but not
+  ;; identical to border-style-keywords above (outline has no "hidden"
+  ;; value; it uniquely allows "auto", the UA-native focus-ring style,
+  ;; which this engine does not attempt to render any differently, the
+  ;; same "parsed but not visually distinguished" scope-cut border-style
+  ;; already has).
+  #{"none" "auto" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
+
+(defn- expand-outline-shorthand
+  "Parses an `outline` shorthand value (real CSS's own order-independent
+   grammar, `<line-width> || <line-style> || <color>`, identical shape to
+   `border`) into a map of whichever of `:outline-width`/`:outline-
+   style`/`:outline-color` it actually specifies -- previously read
+   NOWHERE at all (a repo-wide grep for `outline` in this file's own
+   source returned nothing but a handful of unrelated comments), so a
+   real, common author declaration like `outline: 2px solid #ff0000`
+   silently painted no outline at all, confirmed via direct REPL
+   reproduction before touching source. Deliberately scoped to the exact
+   same token forms `expand-border-shorthand` already commits to (a bare
+   integer/`px` length for width, color as a single whitespace-delimited
+   token). `outline-offset` is a real, SEPARATE (non-shorthand) CSS
+   property, not part of this grammar at all -- handled generically by
+   this file's own plain `parse-style-value` coercion, no special-casing
+   needed here."
+  [v]
+  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
+    (reduce (fn [result tok]
+              (let [lower (str/lower-case tok)]
+                (cond
+                  (and (not (contains? result :outline-width))
+                       (border-shorthand-width-token? tok))
+                  (assoc result :outline-width (parse-style-value tok))
+
+                  (and (not (contains? result :outline-style))
+                       (contains? outline-style-keywords lower))
+                  (assoc result :outline-style tok)
+
+                  (not (contains? result :outline-color))
+                  (assoc result :outline-color tok)
+
+                  :else result)))
+            {}
+            tokens)))
+
 (defn parse-declarations-with-importance
   "Parses a raw `property: value; ...` declaration-block string (e.g. a
    `<style>` rule body, or a JS-mutated `element.style.cssText`) into a
@@ -1069,6 +1114,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-box-shadow-shorthand value))
+
+                         (= "outline" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-outline-shorthand value))
 
                          :else
                          (let [parsed (parse-property-value k value)]
