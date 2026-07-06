@@ -318,6 +318,73 @@
     (is (= [:disabled :enabled :checked :required :optional :read-only :read-write :invalid :valid :focus] pseudos))
     (is (= [0 1 1] (css/specificity (-> rules first :rule/selectors first))))))
 
+;; ---- :invalid/:valid honoring a real `pattern` attribute (real HTML5
+;; patternMismatch) -- previously read NOWHERE at all in this repo's own
+;; constraint-invalid?, confirmed via direct REPL reproduction that an
+;; out-of-pattern value resolved to the identical :valid green as an
+;; in-pattern one. Fixed together with the identical gaps in
+;; kotoba-lang/browser's own document_input.cljc validation-reason and
+;; quickjs_wasm.cljc's JS-facing __kotobaValidityState. ----
+
+(deftest pattern-mismatch-input-matches-invalid-not-valid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :pattern "[0-9]+")
+        doc (dom/set-attribute doc el :value "abc")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes el :attrs :style/color]))
+        "a value not matching its own pattern must match :invalid")))
+
+(deftest pattern-match-input-matches-valid-not-invalid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :pattern "[0-9]+")
+        doc (dom/set-attribute doc el :value "123")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "a value matching its own pattern must match :valid")))
+
+(deftest pattern-on-a-blank-optional-value-does-not-force-invalid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :pattern "[0-9]+")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "pattern is not required's concern -- a blank, non-required value must still match :valid")))
+
+(deftest malformed-pattern-is-not-enforced-by-invalid-valid-matching
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :pattern "[")
+        doc (dom/set-attribute doc el :value "abc")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "an illegal regex must NOT be enforced, matching this file's degrade-don't-guess convention")))
+
+(deftest pattern-on-a-textarea-has-no-effect-on-invalid-valid-matching
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :textarea)
+        doc (dom/set-attribute doc el :pattern "[0-9]+")
+        doc (dom/set-attribute doc el :value "abc")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "textarea:invalid { color: red } textarea:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "pattern is real HTML5's own input-only restriction -- it must have zero effect on a <textarea>")))
+
 ;; ---- sibling combinators (+ / ~) ----
 
 (deftest parses-adjacent-and-general-sibling-combinators

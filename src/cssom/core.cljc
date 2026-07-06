@@ -2259,6 +2259,29 @@
            (or (and min (< n min))
                (and max (> n max)))))))
 
+(defn- pattern-invalid?
+  "Real HTML5 pattern-mismatch: a non-blank value on a text/search/url/
+   tel/email/password `<input>` (real HTML5's own restriction on which
+   control types `pattern` even applies to -- the caller's own
+   `(= :input (:tag node))` guard, the same shape `range-invalid?` above
+   already relies on, excludes `<textarea>` even though an untyped
+   `<textarea>` also resolves this file's own `type` default to
+   `\"text\"`) that doesn't fully match its own `pattern` attribute,
+   implicitly anchored `^(?:...)$` the same way `re-matches` already
+   anchors any pattern here. A malformed `pattern` (not a legal regex) is
+   simply NOT enforced -- matching this file's existing degrade-don't-
+   guess convention for malformed constraint attributes elsewhere (mirrors
+   kotoba-lang/browser's own identically-scoped compile-pattern/pattern-
+   mismatch check in document_input.cljc, fixed together for the same
+   reason `range-invalid?` above was)."
+  [type value attrs]
+  (and (contains? #{"text" "search" "url" "tel" "email" "password"} type)
+       (not (str/blank? value))
+       (when-let [pattern (:pattern attrs)]
+         (when-let [re #?(:clj (try (re-pattern pattern) (catch Exception _ nil))
+                          :cljs (try (re-pattern pattern) (catch :default _ nil)))]
+           (not (re-matches re value))))))
+
 (defn- constraint-invalid?
   [document node]
   (let [attrs (:attrs node)
@@ -2280,7 +2303,9 @@
              (and maxlength
                   (> length maxlength))
              (and (= :input (:tag node))
-                  (range-invalid? type value attrs))))))
+                  (range-invalid? type value attrs))
+             (and (= :input (:tag node))
+                  (pattern-invalid? type value attrs))))))
 
 (defn- constraint-valid?
   [document node]
