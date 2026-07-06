@@ -142,6 +142,80 @@
     (is (= "Georgia, serif" (:font-family text-op))
         "a child with no font-family of its own must inherit the parent's")))
 
+;; ---- text-shadow: previously stored verbatim as a single unrecognized
+;; :style/text-shadow string, so NO shadow :text draw-op was ever emitted
+;; no matter what a real page declared, confirmed via direct REPL
+;; reproduction ----
+
+(deftest text-draw-op-carries-a-real-text-shadow-as-an-extra-shadow-colored-op
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:text-shadow-x 2 :text-shadow-y 3 :text-shadow-color "#000000"})
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-ops (filter #(= :text (:draw/op %)) ops)]
+    (is (= 2 (count text-ops))
+        "a real shadow op plus the main text op")
+    (let [[shadow-op main-op] text-ops]
+      (is (= "#000000" (:color shadow-op)))
+      (is (= (+ 2 (:x main-op)) (:x shadow-op)))
+      (is (= (+ 3 (:y main-op)) (:y shadow-op)))
+      (is (not= "#000000" (:color main-op))
+          "the main text op's own color must be untouched by the shadow"))))
+
+(deftest text-draw-op-has-only-one-op-when-text-shadow-never-set
+  ;; Exact backward compatibility: an unstyled element's :text draw-ops
+  ;; must look byte-for-byte the same as before this feature existed --
+  ;; exactly one op per line, no shadow op inserted.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-ops (filter #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops)))))
+
+(deftest text-shadow-is-a-real-inheritable-property
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:text-shadow-x 2 :text-shadow-y 2 :text-shadow-color "red"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "child")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-ops (filter #(= :text (:draw/op %)) ops)]
+    (is (= 2 (count text-ops))
+        "a child with no text-shadow of its own must inherit the parent's")
+    (is (= "red" (:color (first text-ops))))))
+
+(deftest text-shadow-none-cancels-an-inherited-shadow-instead-of-falling-back-to-it
+  ;; text-shadow genuinely inherits in real CSS, so a child explicitly
+  ;; writing text-shadow: none must WIN over its parent's real shadow --
+  ;; not silently keep showing it, the same real-inheritance-override
+  ;; shape font-weight/font-family already prove for their own properties.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:text-shadow-x 2 :text-shadow-y 2 :text-shadow-color "red"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/set-style doc child {:text-shadow-color "none"})
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "child")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-ops (filter #(= :text (:draw/op %)) ops)]
+    (is (= 1 (count text-ops))
+        "the child's own text-shadow: none must cancel the inherited shadow, not just fall back to it")))
+
 ;; ---- line-height: previously read NOWHERE from the cascade at all --
 ;; every single line of text anywhere used the same fixed theme constant
 ;; regardless of any real author CSS, confirmed via direct REPL

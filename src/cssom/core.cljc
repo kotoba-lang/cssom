@@ -934,6 +934,58 @@
             {}
             tokens)))
 
+(defn- expand-text-shadow-shorthand
+  "Parses a `text-shadow` shorthand value (real CSS's own grammar,
+   `<offset-x> <offset-y> <blur-radius>? <color>?` -- offsets are
+   REQUIRED, blur-radius and color are each optional, and the color MAY
+   also appear before the offsets, e.g. `red 2px 2px`) into a map of
+   whichever of `:text-shadow-x`/`:text-shadow-y`/`:text-shadow-blur`/
+   `:text-shadow-color` it actually specifies. Deliberately scoped to the
+   same common token forms `expand-border-shorthand` already commits to
+   (a bare integer/`px` length per offset/blur, color as a single
+   whitespace-delimited token) -- multiple comma-separated shadows (real
+   CSS's own `text-shadow` list syntax) are NOT supported, a single
+   shadow only, an honest scope-cut consistent with this engine's
+   existing 'reasonable baseline, not full spec coverage' posture
+   elsewhere (e.g. `::selection`'s fixed UA-default highlight color).
+
+   `none` (real CSS's own explicit 'no shadow' keyword) resolves to
+   `{:text-shadow-color \"none\"}` -- a real, PRESENT sentinel value
+   rather than an empty map, so it can correctly WIN over an inherited
+   ancestor's own real shadow the same way any other explicit override
+   does (text-shadow is a genuinely inherited real CSS property, unlike
+   box-shadow) -- an empty map here would instead be indistinguishable
+   from `text-shadow` never having been declared on this element at all,
+   silently leaving an ancestor's shadow showing through when the intent
+   was to cancel it."
+  [v]
+  (let [v (str/trim (str v))]
+    (if (or (str/blank? v) (= "none" (str/lower-case v)))
+      {:text-shadow-color "none"}
+      (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
+        (reduce (fn [result tok]
+                  (cond
+                    (and (not (contains? result :text-shadow-x))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :text-shadow-x (parse-style-value tok))
+
+                    (and (contains? result :text-shadow-x)
+                         (not (contains? result :text-shadow-y))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :text-shadow-y (parse-style-value tok))
+
+                    (and (contains? result :text-shadow-y)
+                         (not (contains? result :text-shadow-blur))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :text-shadow-blur (parse-style-value tok))
+
+                    (not (contains? result :text-shadow-color))
+                    (assoc result :text-shadow-color tok)
+
+                    :else result))
+                {}
+                tokens)))))
+
 (defn parse-declarations-with-importance
   "Parses a raw `property: value; ...` declaration-block string (e.g. a
    `<style>` rule body, or a JS-mutated `element.style.cssText`) into a
@@ -950,10 +1002,18 @@
                    (if (and (seq k) (seq v))
                      (let [important? (boolean (re-find #"(?i)!important\s*$" v))
                            value (str/replace v #"(?i)\s*!important\s*$" "")]
-                       (if (= "border" (str/lower-case k))
+                       (cond
+                         (= "border" (str/lower-case k))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-border-shorthand value))
+
+                         (= "text-shadow" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-text-shadow-shorthand value))
+
+                         :else
                          (let [parsed (parse-property-value k value)]
                            (if (some? parsed)
                              [[(keyword k) {:value parsed :important? important?}]]

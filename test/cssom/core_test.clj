@@ -57,6 +57,48 @@
     (is (= {:border-width 2 :border-color "#00ff00"}
            (:rule/declarations (first rules))))))
 
+;; ---- `text-shadow` shorthand expansion ----
+
+(deftest text-shadow-shorthand-expands-into-its-four-longhands
+  ;; The confirmed repro from the bug report: before this, text-shadow
+  ;; was stored verbatim as a single :text-shadow key, which
+  ;; cssom.layout's layout-text never recognizes -- a real, common author
+  ;; pattern like `text-shadow: 2px 2px 4px #000000` silently painted no
+  ;; shadow at all.
+  (let [rules (css/parse-rules "#f { text-shadow: 2px 3px 4px #000000 }")]
+    (is (= {:text-shadow-x 2 :text-shadow-y 3 :text-shadow-blur 4 :text-shadow-color "#000000"}
+           (:rule/declarations (first rules))))
+    (is (not (contains? (:rule/declarations (first rules)) :text-shadow))
+        "no bare :text-shadow key should remain -- it's fully expanded")))
+
+(deftest text-shadow-shorthand-is-order-independent-per-real-css-grammar
+  (let [rules (css/parse-rules "#f { text-shadow: red 2px 3px }")]
+    (is (= {:text-shadow-color "red" :text-shadow-x 2 :text-shadow-y 3}
+           (:rule/declarations (first rules))))))
+
+(deftest text-shadow-shorthand-omits-whichever-longhands-it-does-not-specify
+  (let [rules (css/parse-rules "#f { text-shadow: 2px 3px red }")]
+    (is (= {:text-shadow-x 2 :text-shadow-y 3 :text-shadow-color "red"}
+           (:rule/declarations (first rules)))
+        "a real, legal text-shadow shorthand may omit the blur radius entirely")))
+
+(deftest text-shadow-none-expands-to-a-real-sentinel-not-an-empty-declaration
+  ;; text-shadow genuinely inherits in real CSS (unlike box-shadow), so
+  ;; `text-shadow: none` must produce a REAL, present value an descendant
+  ;; can see -- an empty declaration here would be indistinguishable from
+  ;; text-shadow never having been declared at all, silently leaving an
+  ;; ancestor's real shadow showing through when the intent was to cancel it.
+  (let [rules (css/parse-rules "#f { text-shadow: none }")]
+    (is (= {:text-shadow-color "none"}
+           (:rule/declarations (first rules))))))
+
+(deftest text-shadow-shorthand-importance-applies-to-every-expanded-longhand
+  (let [rules (css/parse-rules "#f { text-shadow: 2px 3px 4px red !important }")]
+    (is (= true (get-in (first rules) [:rule/declaration-meta :text-shadow-x :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :text-shadow-y :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :text-shadow-blur :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :text-shadow-color :important?])))))
+
 (deftest parses-attribute-selector-operators
   (let [rules (css/parse-rules "[class~=\"primary\"] { color: red }
                                 [lang|=\"en\"] { font-size: 12px }

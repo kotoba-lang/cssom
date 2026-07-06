@@ -504,8 +504,31 @@
    reproduction: `:style/font-family` existed on the resolved node but
    layout's own `:text` draw-op never carried it at all -- the exact
    same bug shape already fixed for font-weight/font-style/
-   text-decoration/line-height."
-  [theme x y avail-width opacity color font-size line-height font-weight font-style font-family text-decoration text-align text-transform white-space text]
+   text-decoration/line-height.
+
+   `text-shadow-x`/`text-shadow-y`/`text-shadow-blur`/`text-shadow-color`
+   -- real CSS's own `text-shadow` shorthand, already expanded into these
+   four longhand-shaped attrs at cascade-parse time (see
+   `cssom.core/expand-text-shadow-shorthand`) -- were previously read
+   NOWHERE at all, `text-shadow` stored verbatim as a single unrecognized
+   `:style/text-shadow` string, confirmed via direct REPL reproduction
+   that no shadow :text draw-op was ever emitted no matter what a real
+   page declared. When `text-shadow-color` is present and not the literal
+   string `\"none\"` (the real explicit 'no shadow' keyword, and this
+   fn's own sentinel for 'an ancestor's shadow was explicitly cancelled
+   here', since `text-shadow` genuinely inherits in real CSS), an EXTRA,
+   shadow-colored `:text` draw-op is emitted for each line, offset by
+   `text-shadow-x`/`text-shadow-y`, immediately BEFORE that line's own
+   real-color op so paint order puts the real glyphs on top. Blur radius
+   is parsed and threaded but NOT rendered -- an honest, documented
+   scope-cut (no blur/glow rendering primitive exists in this engine or
+   its real hosts), the same class of simplification as border-radius/
+   box-shadow spread being left unimplemented elsewhere. The shadow op
+   deliberately does NOT carry `text-decoration` -- underline/strikethrough
+   is this file's own separate draw-op concern, not duplicated here."
+  [theme x y avail-width opacity color font-size line-height font-weight font-style font-family
+   text-shadow-x text-shadow-y text-shadow-blur text-shadow-color
+   text-decoration text-align text-transform white-space text]
   (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -541,15 +564,23 @@
                          "right" (max 0 (- content-w (line-w line)))
                          0))]
     {:box {:x x :y y :w w :h h}
-     :draw (vec (map-indexed
+     :draw (vec (mapcat
                  (fn [i line]
-                   (cond-> {:draw/op :text :x (+ x padding (align-offset line)) :y (+ y padding (* i line-height))
-                            :text line :color color :font-size font-size :opacity opacity}
-                     font-weight (assoc :font-weight font-weight)
-                     font-style (assoc :font-style font-style)
-                     font-family (assoc :font-family font-family)
-                     text-decoration (assoc :text-decoration text-decoration)))
-                 lines))}))
+                   (let [line-x (+ x padding (align-offset line))
+                         line-y (+ y padding (* i line-height))
+                         base (cond-> {:text line :font-size font-size :opacity opacity}
+                                font-weight (assoc :font-weight font-weight)
+                                font-style (assoc :font-style font-style)
+                                font-family (assoc :font-family font-family))
+                         shadow-op (when (and text-shadow-color (not= "none" text-shadow-color))
+                                     (assoc base :draw/op :text
+                                            :x (+ line-x (or text-shadow-x 0))
+                                            :y (+ line-y (or text-shadow-y 0))
+                                            :color text-shadow-color))
+                         main-op (cond-> (assoc base :draw/op :text :x line-x :y line-y :color color)
+                                   text-decoration (assoc :text-decoration text-decoration))]
+                     (if shadow-op [shadow-op main-op] [main-op])))
+                 (range) lines))}))
 
 ;; ---- per-node computed style bag ----
 
@@ -583,6 +614,10 @@
    :font-weight (style node :font-weight)
    :font-style (style node :font-style)
    :font-family (style node :font-family)
+   :text-shadow-x (style node :text-shadow-x)
+   :text-shadow-y (style node :text-shadow-y)
+   :text-shadow-blur (style node :text-shadow-blur)
+   :text-shadow-color (style node :text-shadow-color)
    :text-decoration (style node :text-decoration)
    :text-align (style node :text-align)
    :text-transform (style node :text-transform)
@@ -2852,15 +2887,23 @@
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
            font-style (or (:font-style gstyle) (:font-style inherited))
            font-family (or (:font-family gstyle) (:font-family inherited))
+           text-shadow-x (or (:text-shadow-x gstyle) (:text-shadow-x inherited))
+           text-shadow-y (or (:text-shadow-y gstyle) (:text-shadow-y inherited))
+           text-shadow-blur (or (:text-shadow-blur gstyle) (:text-shadow-blur inherited))
+           text-shadow-color (or (:text-shadow-color gstyle) (:text-shadow-color inherited))
            text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))
            text-align (or (:text-align gstyle) (:text-align inherited))
            text-transform (or (:text-transform gstyle) (:text-transform inherited))
            white-space (or (:white-space gstyle) (:white-space inherited))]
-       (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family text-decoration text-align text-transform white-space (:generated/text node)))
+       (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family
+                    text-shadow-x text-shadow-y text-shadow-blur text-shadow-color
+                    text-decoration text-align text-transform white-space (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) (:line-height inherited)
-                  (:font-weight inherited) (:font-style inherited) (:font-family inherited) (:text-decoration inherited)
+                  (:font-weight inherited) (:font-style inherited) (:font-family inherited)
+                  (:text-shadow-x inherited) (:text-shadow-y inherited) (:text-shadow-blur inherited) (:text-shadow-color inherited)
+                  (:text-decoration inherited)
                   (:text-align inherited) (:text-transform inherited) (:white-space inherited) node)
 
      (= :text (:node/type node))
@@ -2896,12 +2939,18 @@
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
                font-family (or (:font-family st) (:font-family inherited))
+               text-shadow-x (or (:text-shadow-x st) (:text-shadow-x inherited))
+               text-shadow-y (or (:text-shadow-y st) (:text-shadow-y inherited))
+               text-shadow-blur (or (:text-shadow-blur st) (:text-shadow-blur inherited))
+               text-shadow-color (or (:text-shadow-color st) (:text-shadow-color inherited))
                text-decoration (or (:text-decoration st) (:text-decoration inherited))
                text-align (or (:text-align st) (:text-align inherited))
                text-transform (or (:text-transform st) (:text-transform inherited))
                white-space (or (:white-space st) (:white-space inherited))
                inherited (assoc inherited :color color :font-size font-size :line-height line-height
                                 :font-weight font-weight :font-style font-style :font-family font-family
+                                :text-shadow-x text-shadow-x :text-shadow-y text-shadow-y
+                                :text-shadow-blur text-shadow-blur :text-shadow-color text-shadow-color
                                 :text-decoration text-decoration :text-align text-align
                                 :text-transform text-transform :white-space white-space)
                tag (:tag node)
