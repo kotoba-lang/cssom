@@ -2267,8 +2267,22 @@
 
 (def ^:private non-rendered-tags
   "Tags that always contribute zero layout box and paint zero draw-ops, full
-   stop, no override mechanism -- see the section comment above."
-  #{:head :title :script :style :meta :link})
+   stop, no override mechanism -- see the section comment above.
+
+   `:template` joins this set for the identical reason: real HTML5's
+   <template> content is never part of the rendering tree at all -- it
+   lives in an inert `.content` DocumentFragment a script clones from,
+   not the live document -- so a real <template> holding a row/row
+   prototype for later JS cloning must never visibly render, confirmed
+   via direct REPL reproduction that its text content previously leaked
+   into the real draw-ops right alongside genuinely visible content. This
+   engine has no separate `.content` fragment concept (see this project's
+   own honestly-scoped feature set), so -- exactly like the other five
+   tags above -- the narrowest correct fix is the same tag-name gate
+   rather than inventing a fragment split; a script can still read/clone
+   a <template>'s children via the ordinary DOM tree, only PAINTING is
+   suppressed here."
+  #{:head :title :script :style :meta :link :template})
 
 (defn- non-rendered-tag? [tag]
   (contains? non-rendered-tags tag))

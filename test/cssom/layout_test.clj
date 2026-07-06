@@ -1870,6 +1870,68 @@
     (is (not (some #(contains? #{:meta :link} (:tag %)) ops))
         "no draw-op of any kind traces back to meta/link")))
 
+(deftest template-content-contributes-zero-draw-ops
+  ;; The confirmed repro: a real <template> holding a row/row prototype for
+  ;; later JS cloning (an extremely common modern pattern) previously
+  ;; rendered its content exactly like an ordinary element -- confirmed via
+  ;; direct REPL reproduction that a real, distinctive marker string inside
+  ;; a <template> leaked straight into the real draw-ops.
+  (let [[template doc] (dom/create-element dom/empty-document :template)
+        doc (dom/set-root doc template)
+        [li doc] (dom/create-element doc :li)
+        doc (dom/set-attribute doc li :class "row")
+        doc (dom/append-child doc template li)
+        [text doc] (dom/create-text-node doc "DISTINCTIVE_TEMPLATE_MARKER_554433")
+        doc (dom/append-child doc li text)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (is (= [] ops)
+        "template (and its li child, and the li's own real, non-empty
+         text content) contribute zero draw-ops of any kind -- no rect,
+         no text, no :node")))
+
+(deftest template-excluded-real-sibling-still-renders-normally
+  ;; Mirrors head-title-script-excluded-body-p-renders-normally's own
+  ;; shape: a <template> row prototype sits right next to a real,
+  ;; genuinely-rendered <li> in the SAME real <ul> -- only the template's
+  ;; own content must be excluded, the real sibling must render exactly
+  ;; as if the template weren't there.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [template doc] (dom/create-element doc :template)
+        doc (dom/append-child doc ul template)
+        [proto-li doc] (dom/create-element doc :li)
+        doc (dom/append-child doc template proto-li)
+        [proto-text doc] (dom/create-text-node doc "proto")
+        doc (dom/append-child doc proto-li proto-text)
+        [real-li doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul real-li)
+        [real-text doc] (dom/create-text-node doc "real row")
+        doc (dom/append-child doc real-li real-text)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["• real row"] (mapv :text text-ops))
+        "the template's own \"proto\" text never renders -- only the real
+         sibling <li> does, with its normal implicit list-marker intact")))
+
+(deftest template-with-no-children-is-a-safe-baseline
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [template doc] (dom/create-element doc :template)
+        doc (dom/append-child doc root template)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc root p)
+        [text doc] (dom/create-text-node doc "ok")
+        doc (dom/append-child doc p text)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["ok"] (mapv :text text-ops)))))
+
 (deftest excluded-sibling-does-not-disturb-normal-sibling-rendering
   ;; A <script> immediately before a real <p> must not change the <p>'s own
   ;; box/position, and the <p> must still render completely normally.
