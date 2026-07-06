@@ -534,7 +534,11 @@
 ;; ---- per-node computed style bag ----
 
 (defn- node-style [node theme]
-  {:display (style node :display)
+  ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
+  ;; UA-stylesheet rule, not !important -- any author :display the cascade
+  ;; already resolved wins over it, matching that real override pattern.
+  {:display (or (style node :display)
+                (when (truthy-attr? (attr node :hidden)) "none"))
    :position (or (style node :position) "static")
    :left (style node :left)
    :top (style node :top)

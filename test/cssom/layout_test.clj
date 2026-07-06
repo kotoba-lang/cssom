@@ -2962,6 +2962,53 @@
          disclosure widget -- a second <summary> is just another hidden
          child, like any other non-summary content, when closed")))
 
+;; ---- the `hidden` global boolean attribute (node-style previously never
+;;      consulted it at all -- an extremely common show/hide idiom that
+;;      silently rendered normally) ----
+
+(defn- hidden-attr-text-op
+  [attrs-fn rules-str]
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        doc (attrs-fn doc div)
+        [text doc] (dom/create-text-node doc "MARKER_TEXT")
+        doc (dom/append-child doc div text)
+        rules (css/parse-rules rules-str)
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (some #(and (= :text (:draw/op %)) %) ops)))
+
+(deftest hidden-attribute-suppresses-rendering-with-no-css-involved
+  (is (nil? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "") ""))))
+
+(deftest hidden-attribute-xhtml-explicit-form-also-suppresses
+  (is (nil? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "hidden") ""))))
+
+(deftest hidden-attribute-literal-false-string-does-not-suppress
+  ;; Mirrors truthy-attr?'s own existing convention for every other
+  ;; boolean attribute (checked/required/reversed/open, etc.).
+  (is (some? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "false") ""))))
+
+(deftest absent-hidden-attribute-renders-normally
+  (is (some? (hidden-attr-text-op (fn [doc _] doc) ""))))
+
+(deftest author-display-declaration-overrides-hidden-attribute
+  ;; Real HTML5's [hidden] { display: none } is an ordinary, low-priority
+  ;; UA-stylesheet rule, not !important -- an author's own :display always
+  ;; wins over it, a common real override pattern (e.g. using `hidden` as
+  ;; a state marker while a stylesheet controls actual visibility).
+  (is (some? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "")
+                                   ".box { display: block }"))))
+
+(deftest unrelated-author-rule-does-not-defeat-hidden-attribute
+  (is (nil? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "")
+                                  ".box { color: red }"))))
+
 (deftest li-list-style-none-suppresses-only-that-lis-marker-without-renumbering
   ;; Real CSS: `list-style: none` on one <li> only hides THAT marker box --
   ;; it does not renumber the <li>s around it, since real CSS's list
