@@ -73,6 +73,75 @@
     (is (= "normal" (:font-weight text-op))
         "the child's own explicit font-weight: normal must win over the inherited bold")))
 
+;; ---- font-family: the exact same "cascade-resolved but silently dropped
+;; at the draw-op step" bug already fixed for font-weight/font-style/
+;; text-decoration/line-height above ----
+
+(deftest text-draw-op-carries-real-font-family
+  ;; :style/font-family already resolved correctly in the real cascade,
+  ;; but layout's own :text draw-op never carried it at all -- a real
+  ;; author font-family had ZERO visual effect no matter what a real
+  ;; page declared, confirmed via a real draw-ops dump through the full
+  ;; pipeline.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:font-family "Georgia, serif"})
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= "Georgia, serif" (:font-family text-op)))))
+
+(deftest text-draw-op-has-no-font-family-key-when-never-set
+  ;; Exact backward compatibility: an unstyled element's :text draw-op
+  ;; must look byte-for-byte the same as before this feature existed --
+  ;; no :font-family key at all.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (not (contains? text-op :font-family)))))
+
+(deftest font-family-is-a-real-inheritable-property
+  ;; A child overriding font-family back to its own value must win over
+  ;; its parent's -- real CSS inheritance, the same shape color/font-size/
+  ;; font-weight already have.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:font-family "Georgia, serif"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        doc (dom/set-style doc child {:font-family "monospace"})
+        [t doc] (dom/create-text-node doc "child")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= "monospace" (:font-family text-op))
+        "the child's own explicit font-family must win over the inherited Georgia, serif")))
+
+(deftest font-family-inherits-down-through-an-uninvolved-child
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:font-family "Georgia, serif"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "child")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= "Georgia, serif" (:font-family text-op))
+        "a child with no font-family of its own must inherit the parent's")))
+
 ;; ---- line-height: previously read NOWHERE from the cascade at all --
 ;; every single line of text anywhere used the same fixed theme constant
 ;; regardless of any real author CSS, confirmed via direct REPL
@@ -625,7 +694,7 @@
    wider than 'i' -- unlike the production char-w approximation, which
    assumes every character is the same width regardless of which letter
    it is."
-  [text _font-size _font-weight _font-style]
+  [text _font-size _font-weight _font-style _font-family]
   (reduce + 0 (map (fn [c] (case c \W 16 \i 3 \space 6 8)) text)))
 
 (deftest measure-text-is-genuinely-consulted-not-ignored
@@ -697,7 +766,7 @@
    font-style at all -- a fake fn declared with this 4-arg signature
    would throw an arity exception if layout-text still called it with
    only 2 args, which is exactly what happens if this fix is reverted."
-  [text _font-size font-weight _font-style]
+  [text _font-size font-weight _font-style _font-family]
   (cond-> (* (count text) 8)
     (= "bold" font-weight) (* 2)))
 
@@ -717,6 +786,31 @@
     (is (= 2 (count normal-ops)))
     (is (= 3 (count bold-ops))
         "bold text must measure wider and wrap onto an extra line, proving font-weight reached the fake measure fn")))
+
+(defn- fake-family-aware-measure
+  "A FAKE measure fn that ALSO widens its result for \"monospace\" --
+   proves font-family genuinely reaches the :measure-text callback (not
+   merely threaded through the theme and dropped), the same shape
+   fake-weight-aware-measure above already proves for font-weight."
+  [text _font-size _font-weight _font-style font-family]
+  (cond-> (* (count text) 8)
+    (= "monospace" font-family) (* 2)))
+
+(deftest measure-text-callback-genuinely-receives-font-family
+  ;; The identical string, at the identical available width: the default
+  ;; font-family measures narrow enough to wrap onto 2 lines, but the
+  ;; SAME string in "monospace" measures wide enough (per the fake's own
+  ;; doubling) to need a 3rd line -- a real, different wrap OUTCOME driven
+  ;; purely by font-family reaching the measure callback.
+  (let [text "aaaa bbbb cccc"
+        measured-theme (assoc layout/default-theme :measure-text fake-family-aware-measure)
+        default-inherited (dissoc inherited-text :font-family)
+        monospace-inherited (assoc inherited-text :font-family "monospace")
+        {default-ops :draw} (layout/layout-node measured-theme 0 0 108 1.0 default-inherited text)
+        {monospace-ops :draw} (layout/layout-node measured-theme 0 0 108 1.0 monospace-inherited text)]
+    (is (= 2 (count default-ops)))
+    (is (= 3 (count monospace-ops))
+        "monospace text must measure wider and wrap onto an extra line, proving font-family reached the fake measure fn")))
 
 ;; ---- display:grid ----
 
@@ -2931,7 +3025,7 @@
 ;; ---- <input> caret/selection painting ----
 
 (defn- fake-char-measure
-  [text font-size _weight _style]
+  [text font-size _weight _style _family]
   (* (count text) 7))
 
 (defn- input-ops

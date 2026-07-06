@@ -480,25 +480,39 @@
    with, so there is no divergence to document here.
 
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
-   `theme` -- a `(fn [text font-size font-weight font-style] width-in-px)`
-   -- see draw-ops' docstring for the full rationale (this file is a pure,
-   host-independent layout engine with no real glyph shaping of its own; a
-   real host that DOES have one, e.g. a browser's real Canvas 2D
-   `measureText`, can supply it here so word-wrap decisions agree with how
-   the text will actually be painted, INCLUDING its real bold/italic
-   metrics). When `theme` has no `:measure-text` (the default -- absent
-   from default-theme, and absent from every existing caller), this
-   resolves to the EXACT SAME char-w-approximation code path
-   (text-lines/char-w below) this file has always used, so today's
-   word-wrap behavior is completely unaffected unless a host opts in."
-  [theme x y avail-width opacity color font-size line-height font-weight font-style text-decoration text-align text-transform white-space text]
+   `theme` -- a `(fn [text font-size font-weight font-style font-family]
+   width-in-px)` -- see draw-ops' docstring for the full rationale (this
+   file is a pure, host-independent layout engine with no real glyph
+   shaping of its own; a real host that DOES have one, e.g. a browser's
+   real Canvas 2D `measureText`, can supply it here so word-wrap
+   decisions agree with how the text will actually be painted, INCLUDING
+   its real bold/italic/font-family metrics). When `theme` has no
+   `:measure-text` (the default -- absent from default-theme, and absent
+   from every existing caller), this resolves to the EXACT SAME
+   char-w-approximation code path (text-lines/char-w below) this file
+   has always used, so today's word-wrap behavior is completely
+   unaffected unless a host opts in.
+
+   `font-family` -- like font-weight/font-style above, this is a REAL,
+   cascade-computed, real-CSS-inheritable property passed through onto
+   the resulting `:text` draw-op unchanged (a real host, e.g.
+   kotoba-lang/dom-gpu's webgl.cljs/webgpu.cljs, interpolates it into the
+   real Canvas 2D `font` string) -- before this, an author's own
+   `font-family` had ZERO visual effect no matter what a real page
+   declared, every host hardcoding the same fixed system-font fallback
+   regardless of any real author CSS, confirmed via direct REPL
+   reproduction: `:style/font-family` existed on the resolved node but
+   layout's own `:text` draw-op never carried it at all -- the exact
+   same bug shape already fixed for font-weight/font-style/
+   text-decoration/line-height."
+  [theme x y avail-width opacity color font-size line-height font-weight font-style font-family text-decoration text-align text-transform white-space text]
   (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
         char-w (long (* 0.6 font-size))
         content-w (max 0 (- avail-width (* 2 padding)))
         text (apply-text-transform text-transform text)
-        measure #(measure-text % font-size font-weight font-style)
+        measure #(measure-text % font-size font-weight font-style font-family)
         lines (cond
                 (= "pre" white-space) (str/split (str text) #"\n" -1)
                 (= "nowrap" white-space) [(str text)]
@@ -533,6 +547,7 @@
                             :text line :color color :font-size font-size :opacity opacity}
                      font-weight (assoc :font-weight font-weight)
                      font-style (assoc :font-style font-style)
+                     font-family (assoc :font-family font-family)
                      text-decoration (assoc :text-decoration text-decoration)))
                  lines))}))
 
@@ -567,6 +582,7 @@
    :line-height (style node :line-height)
    :font-weight (style node :font-weight)
    :font-style (style node :font-style)
+   :font-family (style node :font-family)
    :text-decoration (style node :text-decoration)
    :text-align (style node :text-align)
    :text-transform (style node :text-transform)
@@ -2750,7 +2766,7 @@
                         e (some-> (parse-int selection-end nil) clamp)
                         font-size (:font-size theme)
                         measure (if-let [mt (:measure-text theme)]
-                                  #(mt % font-size nil nil)
+                                  #(mt % font-size nil nil nil)
                                   #(* (count %) (long (* 0.6 font-size))))]
                     (when (and s e)
                       (if (= s e)
@@ -2835,15 +2851,16 @@
            line-height (resolve-line-height (:line-height gstyle) font-size (:line-height inherited))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
            font-style (or (:font-style gstyle) (:font-style inherited))
+           font-family (or (:font-family gstyle) (:font-family inherited))
            text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))
            text-align (or (:text-align gstyle) (:text-align inherited))
            text-transform (or (:text-transform gstyle) (:text-transform inherited))
            white-space (or (:white-space gstyle) (:white-space inherited))]
-       (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style text-decoration text-align text-transform white-space (:generated/text node)))
+       (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family text-decoration text-align text-transform white-space (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) (:line-height inherited)
-                  (:font-weight inherited) (:font-style inherited) (:text-decoration inherited)
+                  (:font-weight inherited) (:font-style inherited) (:font-family inherited) (:text-decoration inherited)
                   (:text-align inherited) (:text-transform inherited) (:white-space inherited) node)
 
      (= :text (:node/type node))
@@ -2878,12 +2895,13 @@
                line-height (resolve-line-height (:line-height st) font-size (:line-height inherited))
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
+               font-family (or (:font-family st) (:font-family inherited))
                text-decoration (or (:text-decoration st) (:text-decoration inherited))
                text-align (or (:text-align st) (:text-align inherited))
                text-transform (or (:text-transform st) (:text-transform inherited))
                white-space (or (:white-space st) (:white-space inherited))
                inherited (assoc inherited :color color :font-size font-size :line-height line-height
-                                :font-weight font-weight :font-style font-style
+                                :font-weight font-weight :font-style font-style :font-family font-family
                                 :text-decoration text-decoration :text-align text-align
                                 :text-transform text-transform :white-space white-space)
                tag (:tag node)
@@ -2941,11 +2959,11 @@
    :width for the root box.
 
    `opts`' `:theme` map also accepts an OPTIONAL `:measure-text` key -- a
-   `(fn [text font-size font-weight font-style] width-in-px)` real
-   text-width function, e.g. one backed by a real browser's
+   `(fn [text font-size font-weight font-style font-family] width-in-px)`
+   real text-width function, e.g. one backed by a real browser's
    `CanvasRenderingContext2D.measureText` (with `.font` set to match all
-   four args, so bold/italic text measures its own real, wider/narrower
-   metrics, not normal-weight/upright ones) --
+   five args, so bold/italic/a real font-family measures its own real,
+   wider/narrower metrics, not normal-weight/upright/system-default ones) --
    consulted by layout-text's word-wrap instead of this file's own
    char-w-per-character approximation (`(long (* 0.6 font-size))`, a
    monospace-like heuristic that can disagree with how a real,
