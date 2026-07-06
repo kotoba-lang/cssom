@@ -73,6 +73,86 @@
     (is (= "normal" (:font-weight text-op))
         "the child's own explicit font-weight: normal must win over the inherited bold")))
 
+;; ---- line-height: previously read NOWHERE from the cascade at all --
+;; every single line of text anywhere used the same fixed theme constant
+;; regardless of any real author CSS, confirmed via direct REPL
+;; reproduction: line-height: 60/line-height: 100/no declaration at all
+;; produced the identical box height. ----
+
+(deftest line-height-scales-both-per-line-spacing-and-overall-box-height
+  ;; Exactly long-text-wraps-onto-multiple-narrower-lines's own shape
+  ;; (real word-wrap forced by a narrow avail-width) with a non-default
+  ;; :line-height threaded through `inherited` this time, rather than the
+  ;; theme constant.
+  (let [avail 100
+        text "the quick brown fox jumps over the lazy dog"
+        line-height 60
+        inherited {:color (:fg layout/default-theme) :font-size (:font-size layout/default-theme)
+                   :line-height line-height}
+        {:keys [box draw]} (layout/layout-node layout/default-theme 0 0 avail 1.0 inherited text)]
+    (is (> (count draw) 1) "sanity: the text actually wrapped onto multiple real lines")
+    (is (every? #(= line-height %) (map - (map :y (rest draw)) (map :y draw)))
+        "every consecutive line must be spaced exactly at the real declared line-height, not the theme default")
+    (is (= (+ (* (count draw) line-height) (* 2 (:padding layout/default-theme))) (:h box))
+        "the box's own height must grow to fit every real line at the real line-height, not the fixed default")))
+
+(deftest line-height-defaults-to-the-theme-constant-when-absent-or-unparseable
+  (let [box-h (fn [style]
+                (let [[div doc] (dom/create-element dom/empty-document :div)
+                      doc (dom/set-root doc div)
+                      doc (dom/set-style doc div style)
+                      [t doc] (dom/create-text-node doc "hi")
+                      doc (dom/append-child doc div t)
+                      [_ doc] (dom/consume-ops doc)
+                      tree (dom/tree doc)]
+                  (:h (:box (layout/layout-node tree)))))]
+    (is (= (box-h {}) (box-h {:line-height "normal"}))
+        "an unparseable keyword like normal must degrade to the exact same baseline as no declaration at all, not crash or zero out")))
+
+(deftest unitless-line-height-is-a-real-per-element-multiplier-of-font-size-not-a-literal-pixel-count
+  ;; Real CSS's own most common line-height form -- a bare unitless number
+  ;; -- is a MULTIPLIER of that element's own font-size, not a literal
+  ;; pixel count. cssom.core/parse-style-value only ever coerces a value
+  ;; to a number for a bare integer or an integer px length -- a decimal
+  ;; like 1.5 survives the cascade as the untouched STRING "1.5", which
+  ;; is exactly how cssom.layout/resolve-line-height tells the two real
+  ;; forms apart.
+  (let [box-h (fn [style]
+                (let [[div doc] (dom/create-element dom/empty-document :div)
+                      doc (dom/set-root doc div)
+                      doc (dom/set-style doc div style)
+                      [t doc] (dom/create-text-node doc "hi")
+                      doc (dom/append-child doc div t)
+                      [_ doc] (dom/consume-ops doc)
+                      tree (dom/tree doc)]
+                  (:h (:box (layout/layout-node tree)))))]
+    (is (= (box-h {:font-size 40 :line-height 60})
+           (box-h {:font-size 40 :line-height "1.5"}))
+        "line-height: 1.5 at font-size: 40 must resolve to the SAME effective 60px line-height as an explicit absolute line-height: 60")
+    (is (not= (box-h {:font-size 20 :line-height "1.5"})
+              (box-h {:font-size 40 :line-height "1.5"}))
+        "the SAME 1.5 multiplier must scale with a DIFFERENT font-size, proving it is genuinely re-resolved as a multiplier, not cached/misread as a literal pixel value")))
+
+(deftest line-height-is-a-real-inheritable-property
+  ;; The child SPAN declares no line-height of its own at all -- its own
+  ;; wrapped lines' y-spacing must reflect the PARENT's inherited 60px,
+  ;; not the theme default, the same shape font-weight-and-style-are-
+  ;; real-inheritable-properties above already proves for font-weight.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:line-height 60})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "the quick brown fox jumps over the lazy dog")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-ops (filter #(= :text (:draw/op %)) ops)]
+    (is (> (count text-ops) 1) "sanity: the child's own text actually wrapped onto multiple real lines")
+    (is (every? #(= 60 %) (map - (map :y (rest text-ops)) (map :y text-ops)))
+        "the child's own line spacing must reflect the parent's inherited line-height, not the theme default")))
+
 ;; ---- text-decoration pass-through onto :text draw-ops ----
 
 (deftest text-draw-op-carries-real-text-decoration

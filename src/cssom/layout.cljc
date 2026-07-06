@@ -325,11 +325,16 @@
    the algorithm layout-node's real-DOM-text-node branch uses, factored out
    so generated ::before/::after content (see with-generated-content) can
    flow through the identical text-measurement/wrapping/paint path instead
-   of a second, forked implementation. `color`/`font-size`/`font-weight`/
-   `font-style` are taken as explicit args (rather than read off `inherited`
-   internally) so a pseudo-element's own resolved style can override any of
-   them while still falling back to whatever a real text child in the same
-   spot would use.
+   of a second, forked implementation. `color`/`font-size`/`line-height`/
+   `font-weight`/`font-style` are taken as explicit args (rather than read
+   off `inherited`/`theme` internally) so a pseudo-element's own resolved
+   style can override any of them while still falling back to whatever a
+   real text child in the same spot would use. `line-height` is already a
+   resolved, absolute pixel number by the time it reaches here -- see
+   `resolve-line-height`, which every caller applies to its own
+   cascade-resolved `:line-height` (falling back to `(:line-height theme)`
+   the same way this arg always effectively did before this fix, so a
+   page with no author `line-height` anywhere sees no behavior change).
 
    `font-weight`/`font-style` are passed through to each resulting :text
    draw-op unchanged (real hosts, e.g. kotoba-lang/dom-gpu's webgl.cljs/
@@ -486,8 +491,8 @@
    resolves to the EXACT SAME char-w-approximation code path
    (text-lines/char-w below) this file has always used, so today's
    word-wrap behavior is completely unaffected unless a host opts in."
-  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform white-space text]
-  (let [line-height (:line-height theme)
+  [theme x y avail-width opacity color font-size line-height font-weight font-style text-decoration text-align text-transform white-space text]
+  (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
         char-w (long (* 0.6 font-size))
@@ -559,6 +564,7 @@
    :background (or (style node :background) (style node :background-color))
    :color (style node :color)
    :font-size (style node :font-size)
+   :line-height (style node :line-height)
    :font-weight (style node :font-weight)
    :font-style (style node :font-style)
    :text-decoration (style node :text-decoration)
@@ -672,6 +678,33 @@
   (let [height (if-let [mn (explicit-length (:min-height st))] (max height mn) height)
         height (if-let [mx (explicit-length (:max-height st))] (min height mx) height)]
     height))
+
+(defn- resolve-line-height
+  "Real CSS `line-height` is either an absolute length (`24`/`24px`, already
+   coerced to a plain number by `cssom.core/parse-style-value` before this
+   ever runs) or -- far more common in real-world CSS -- a bare UNITLESS
+   number (`1.5`), a real per-element MULTIPLIER of that same element's own
+   `font-size`, not a literal pixel count. `parse-style-value` only ever
+   coerces a value to a number when it is ENTIRELY a bare INTEGER or an
+   integer `px` length (see its own docstring) -- a decimal like `1.5` has
+   no unit to strip and isn't a whole integer either, so it survives to
+   here as the untouched STRING `\"1.5\"`, letting this fn tell the two
+   real forms apart by type alone: a number is already resolved pixels;
+   a string is a raw multiplier (or `normal`/anything else unparseable,
+   which reasonably falls back to the theme default the exact same way an
+   absent `line-height` always has). Before this fix, `line-height` was
+   read from `node-style` NOWHERE at all -- every single line of text
+   anywhere on any page used the SAME fixed `(:line-height theme)` pixel
+   constant regardless of any real author CSS, confirmed via direct REPL
+   reproduction: `line-height: 60`/`line-height: 100`/no declaration at
+   all produced the identical box height."
+  [raw font-size theme-default]
+  (cond
+    (number? raw) (long raw)
+    (string? raw) (if-let [multiplier (parse-dbl raw nil)]
+                    (long (* multiplier font-size))
+                    theme-default)
+    :else theme-default))
 
 (defn- content-inset
   [st]
@@ -2690,7 +2723,9 @@
   (let [tag (:tag node)
         w (resolve-width st avail-width)
         inset (content-inset st)
-        h (clamp-height st (or (resolve-height st) (+ (:line-height theme) (* 2 inset))))
+        control-font-size (parse-int (:font-size st) (:font-size theme))
+        control-line-height (resolve-line-height (:line-height st) control-font-size (:line-height theme))
+        h (clamp-height st (or (resolve-height st) (+ control-line-height (* 2 inset))))
         value (attr node :value)
         checked (truthy-attr? (attr node :checked))
         input-type (str/lower-case (str (or (attr node :type) "text")))
@@ -2786,7 +2821,8 @@
      :draw (vec (concat rect border-draws semantic clip-push draw clip-pop absolute-draws))}))
 
 (defn layout-node
-  ([node] (layout-node default-theme 0 0 320 1.0 {:color (:fg default-theme) :font-size (:font-size default-theme)} node))
+  ([node] (layout-node default-theme 0 0 320 1.0 {:color (:fg default-theme) :font-size (:font-size default-theme)
+                                                  :line-height (:line-height default-theme)} node))
   ([theme x y avail-width opacity inherited node]
    (cond
      (nil? node)
@@ -2796,16 +2832,17 @@
      (let [gstyle (:generated/style node)
            color (or (:color gstyle) (:color inherited))
            font-size (parse-int (:font-size gstyle) (:font-size inherited))
+           line-height (resolve-line-height (:line-height gstyle) font-size (:line-height inherited))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
            font-style (or (:font-style gstyle) (:font-style inherited))
            text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))
            text-align (or (:text-align gstyle) (:text-align inherited))
            text-transform (or (:text-transform gstyle) (:text-transform inherited))
            white-space (or (:white-space gstyle) (:white-space inherited))]
-       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform white-space (:generated/text node)))
+       (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style text-decoration text-align text-transform white-space (:generated/text node)))
 
      (text-node? node)
-     (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited)
+     (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) (:line-height inherited)
                   (:font-weight inherited) (:font-style inherited) (:text-decoration inherited)
                   (:text-align inherited) (:text-transform inherited) (:white-space inherited) node)
 
@@ -2838,13 +2875,14 @@
                           (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
                color (or (:color st) (:color inherited))
                font-size (parse-int (:font-size st) (:font-size inherited))
+               line-height (resolve-line-height (:line-height st) font-size (:line-height inherited))
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
                text-decoration (or (:text-decoration st) (:text-decoration inherited))
                text-align (or (:text-align st) (:text-align inherited))
                text-transform (or (:text-transform st) (:text-transform inherited))
                white-space (or (:white-space st) (:white-space inherited))
-               inherited (assoc inherited :color color :font-size font-size
+               inherited (assoc inherited :color color :font-size font-size :line-height line-height
                                 :font-weight font-weight :font-style font-style
                                 :text-decoration text-decoration :text-align text-align
                                 :text-transform text-transform :white-space white-space)
