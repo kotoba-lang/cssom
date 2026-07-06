@@ -2583,7 +2583,43 @@
    opinionated UA-default 'text field' look (a white/light background +
    gray border baseline every unstyled real `<input>` gets, distinct
    from an ordinary `<div>`'s panel background) is a separate, more
-   subjective design decision deliberately NOT invented here."
+   subjective design decision deliberately NOT invented here.
+
+   The caret/selection ops (`sel-ops`) previously emitted `{:draw/op
+   :text :caret? true ...}`/`{:draw/op :text :selection? true ...}` with
+   NO `:text` key at all -- both real hosts' `:text` paint case
+   unconditionally calls `(.fillText ... (:text op) ...)`, and JS's
+   `fillText` coerces a missing/nil argument to the STRING `\"null\"`,
+   so every focused `<input>`'s caret/selection painted the literal word
+   \"null\" instead of a cursor bar or highlight, confirmed via a real
+   draw-ops dump. Fixed by emitting `:draw/op :rect` instead (a caret is
+   just a thin filled rect; a selection highlight is just a wider one) --
+   reusing the SAME already-fully-implemented `:rect` case both hosts
+   already paint backgrounds/borders with, needing zero host-side changes
+   at all, the same 'reuse existing machinery' approach this fn's own
+   background/border fix above already established. Also fixed two
+   smaller bugs discovered alongside it: neither op added `inset` to
+   `x`/`y` (so a caret/selection painted at the control's raw box edge,
+   ignoring its own padding, inconsistent with `text-op`'s identical
+   `(+ x inset)`/`(+ y inset)` positioning right above it), and neither
+   accounted for the character OFFSET of `s`/`e` at all -- the caret
+   always painted at the box's left edge regardless of cursor position,
+   and the selection highlight's own left edge never moved past `x`
+   either. Fixed by computing real pixel offsets via the same OPTIONAL
+   `:measure-text` theme callback `layout-text` already established
+   (falling back to the identical `0.6 * font-size` per-character
+   estimate this fn's own selection-width calculation already used, so
+   behavior is byte-for-byte unchanged for every existing caller with no
+   `:measure-text` configured). The caret op's own raw `:caret` index key
+   is kept alongside the new pixel `:x` (a downstream consumer,
+   `browser.core-test`, already asserted on it, and it costs nothing to
+   keep as introspection data even though the paint path itself no
+   longer needs it). A dedicated `::selection` pseudo-element
+   background color (real CSS lets an author style the highlight) is
+   deliberately NOT implemented -- the highlight uses a fixed UA-default
+   translucent blue, the same class of 'reasonable baseline, not full
+   spec coverage' decision as this fn's own default-bg/default-border
+   above."
   [theme x y avail-width opacity st node]
   (let [tag (:tag node)
         w (resolve-width st avail-width)
@@ -2607,16 +2643,25 @@
         selection-start (attr node :selection-start)
         selection-end (attr node :selection-end)
         sel-ops (when (and (= tag :input) selection-start selection-end)
-                  (let [s (parse-int selection-start nil)
-                        e (parse-int selection-end nil)]
+                  (let [len (count control-text)
+                        clamp #(max 0 (min len %))
+                        s (some-> (parse-int selection-start nil) clamp)
+                        e (some-> (parse-int selection-end nil) clamp)
+                        font-size (:font-size theme)
+                        measure (if-let [mt (:measure-text theme)]
+                                  #(mt % font-size nil nil)
+                                  #(* (count %) (long (* 0.6 font-size))))]
                     (when (and s e)
                       (if (= s e)
-                        [{:draw/op :text :caret? true :node/id (:node/id node) :caret s :w 1
-                          :x x :y y :opacity opacity}]
-                        [{:draw/op :text :selection? true :node/id (:node/id node)
-                          :selection/start s :selection/end e
-                          :w (max 1 (* (- e s) (long (* 0.6 (:font-size theme)))))
-                          :x x :y y :opacity opacity}]))))
+                        [{:draw/op :rect :caret? true :caret s :node/id (:node/id node)
+                          :x (+ x inset (measure (subs control-text 0 s))) :y (+ y inset)
+                          :w 1 :h font-size :color (:fg theme) :opacity opacity}]
+                        (let [lo (min s e) hi (max s e)]
+                          [{:draw/op :rect :selection? true :node/id (:node/id node)
+                            :selection/start lo :selection/end hi
+                            :x (+ x inset (measure (subs control-text 0 lo))) :y (+ y inset)
+                            :w (max 1 (measure (subs control-text lo hi))) :h font-size
+                            :color "rgba(70,130,220,0.4)" :opacity opacity}])))))
         semantic (merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w w :h h
                          :class (attr node :class) :listeners (listeners node)
                          :opacity opacity :value value :checked checked}

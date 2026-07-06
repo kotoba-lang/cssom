@@ -2664,6 +2664,98 @@
       (is (= 4 (count border-rects)) (str tag " must get border rects too, not just <input>"))
       (is (= "#ffffff" (:color bg-rect)) (str tag " must get a background rect too")))))
 
+;; ---- <input> caret/selection painting ----
+
+(defn- fake-char-measure
+  [text font-size _weight _style]
+  (* (count text) 7))
+
+(defn- input-ops
+  [{:keys [value start end theme]}]
+  (let [[input doc] (dom/create-element dom/empty-document :input)
+        doc (dom/set-root doc input)
+        doc (dom/set-attribute doc input :value value)
+        doc (cond-> doc
+              start (dom/set-attribute input :selection-start start)
+              end (dom/set-attribute input :selection-end end))
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)]
+    (layout/draw-ops tree (cond-> {:width 200} theme (assoc :theme theme)))))
+
+(deftest input-caret-renders-as-a-real-rect-not-literal-null-text
+  ;; The confirmed repro from the bug report: the caret op was
+  ;; `{:draw/op :text ...}` with NO `:text` key at all, and both real
+  ;; hosts' `:text` paint case unconditionally calls `.fillText` with
+  ;; whatever `(:text op)` is -- JS coerces the missing/nil argument to
+  ;; the literal STRING "null", so every focused <input>'s caret actually
+  ;; painted the word "null" instead of a cursor bar.
+  (let [ops (input-ops {:value "hello" :start "3" :end "3"})
+        caret-op (first (filter :caret? ops))]
+    (is (= :rect (:draw/op caret-op))
+        "a caret is a thin filled rect, not a :text op with nothing to draw")
+    (is (not (contains? caret-op :text)))))
+
+(deftest input-selection-renders-as-a-real-rect-not-literal-null-text
+  (let [ops (input-ops {:value "hello world" :start "1" :end "4"})
+        sel-op (first (filter :selection? ops))]
+    (is (= :rect (:draw/op sel-op)))
+    (is (not (contains? sel-op :text)))
+    (is (str/starts-with? (:color sel-op) "rgba")
+        "a translucent highlight so the text underneath stays legible")))
+
+(deftest input-caret-keeps-its-raw-character-index-alongside-the-pixel-x
+  ;; browser.core-test's own form-control-caret-and-selection-project-
+  ;; into-draw-ops asserts on this raw index directly -- kept as harmless
+  ;; introspection data even though the paint path itself only needs the
+  ;; computed pixel :x now.
+  (let [caret-op (first (filter :caret? (input-ops {:value "hello" :start "2" :end "2"})))]
+    (is (= 2 (:caret caret-op)))))
+
+(deftest input-caret-x-offset-uses-real-measure-text-when-configured
+  ;; Previously the caret always painted at the control's raw box edge
+  ;; (`:x x`) regardless of the cursor's actual character position --
+  ;; confirmed via direct reproduction that a caret at index 3 and a
+  ;; caret at index 0 painted at the IDENTICAL x. Fixed by measuring the
+  ;; substring up to the caret via the same optional `:measure-text`
+  ;; theme callback `layout-text` already established.
+  (let [at-0 (first (filter :caret? (input-ops {:value "hello" :start "0" :end "0"
+                                                :theme {:measure-text fake-char-measure}})))
+        at-3 (first (filter :caret? (input-ops {:value "hello" :start "3" :end "3"
+                                                :theme {:measure-text fake-char-measure}})))]
+    (is (= 4 (:x at-0)) "just the control's own inset, zero characters in")
+    (is (= (+ 4 (* 3 7)) (:x at-3)) "inset plus 3 characters at 7px each")))
+
+(deftest input-caret-x-offset-falls-back-to-the-average-char-width-heuristic
+  ;; With no :measure-text configured (every pre-existing caller), the
+  ;; offset must fall back to the SAME 0.6*font-size-per-character
+  ;; estimate this fn's own selection-width calculation already used --
+  ;; not simply stay at the box edge like before this fix.
+  (let [caret-op (first (filter :caret? (input-ops {:value "hello" :start "3" :end "3"})))]
+    (is (= (+ 4 (* 3 (long (* 0.6 (:font-size layout/default-theme))))) (:x caret-op)))))
+
+(deftest input-selection-reversed-indices-normalize-to-a-valid-forward-range
+  ;; A real, if unusual, corner case: selection-start > selection-end
+  ;; (e.g. a right-to-left drag). Previously left completely unswapped --
+  ;; :selection/start and :selection/end were literally backwards and the
+  ;; width calc's own (- e s) went negative, silently clamped to a
+  ;; meaningless 1px sliver via the pre-existing (max 1 ...) guard.
+  (let [sel-op (first (filter :selection? (input-ops {:value "hello world" :start "4" :end "1"
+                                                       :theme {:measure-text fake-char-measure}})))]
+    (is (= 1 (:selection/start sel-op)))
+    (is (= 4 (:selection/end sel-op)))
+    (is (= (* 3 7) (:w sel-op)) "a real 3-character width, not the old negative-clamped 1px sliver")))
+
+(deftest input-selection-out-of-range-index-clamps-not-a-crash
+  (let [sel-op (first (filter :selection? (input-ops {:value "hi" :start "0" :end "999"
+                                                       :theme {:measure-text fake-char-measure}})))]
+    (is (= 2 (:selection/end sel-op))
+        "clamped to the control's own text length, not left at the raw out-of-range value")))
+
+(deftest input-with-no-selection-attrs-produces-no-caret-or-selection-ops
+  (let [ops (input-ops {:value "hi"})]
+    (is (empty? (filter :caret? ops)))
+    (is (empty? (filter :selection? ops)))))
+
 ;; ---- <details>/<summary> default disclosure hiding ----
 
 (deftest closed-details-renders-only-the-first-summary
