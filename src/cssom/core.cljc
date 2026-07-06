@@ -986,6 +986,58 @@
                 {}
                 tokens)))))
 
+(defn- expand-box-shadow-shorthand
+  "Parses a `box-shadow` shorthand value (real CSS's own grammar,
+   `<offset-x> <offset-y> <blur-radius>? <color>?` -- offsets are
+   REQUIRED, blur-radius and color are each optional, color may also
+   appear before the offsets) into a map of whichever of `:box-shadow-x`/
+   `:box-shadow-y`/`:box-shadow-blur`/`:box-shadow-color` it actually
+   specifies -- previously read NOWHERE at all, `box-shadow` stored
+   verbatim as a single unrecognized `:box-shadow` key that `layout.cljc`
+   never read, so a real, common author declaration like
+   `box-shadow: 4px 4px 8px #000000` silently painted nothing at all,
+   confirmed via direct REPL reproduction. Deliberately scoped to the
+   same token forms `expand-border-shorthand`/`expand-text-shadow-
+   shorthand` already commit to (a bare integer/`px` length per offset/
+   blur, color as a single whitespace-delimited token) -- multiple
+   comma-separated shadows, the `inset` keyword, and spread-radius (real
+   CSS's own 4th length component) are NOT supported, a single
+   non-inset drop shadow only, the same 'reasonable baseline, not full
+   spec coverage' posture as `text-shadow` above.
+
+   Unlike `text-shadow`, `box-shadow` is NOT a real inherited CSS
+   property, so `none`/blank simply resolves to an EMPTY map (no
+   ancestor value to cancel -- each element's own box-shadow, or lack
+   thereof, is entirely independent of its parent's), unlike text-
+   shadow's own real, PRESENT `{:text-shadow-color \"none\"}` sentinel."
+  [v]
+  (let [v (str/trim (str v))]
+    (if (or (str/blank? v) (= "none" (str/lower-case v)))
+      {}
+      (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
+        (reduce (fn [result tok]
+                  (cond
+                    (and (not (contains? result :box-shadow-x))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-x (parse-style-value tok))
+
+                    (and (contains? result :box-shadow-x)
+                         (not (contains? result :box-shadow-y))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-y (parse-style-value tok))
+
+                    (and (contains? result :box-shadow-y)
+                         (not (contains? result :box-shadow-blur))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-blur (parse-style-value tok))
+
+                    (not (contains? result :box-shadow-color))
+                    (assoc result :box-shadow-color tok)
+
+                    :else result))
+                {}
+                tokens)))))
+
 (defn parse-declarations-with-importance
   "Parses a raw `property: value; ...` declaration-block string (e.g. a
    `<style>` rule body, or a JS-mutated `element.style.cssText`) into a
@@ -1012,6 +1064,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-text-shadow-shorthand value))
+
+                         (= "box-shadow" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-box-shadow-shorthand value))
 
                          :else
                          (let [parsed (parse-property-value k value)]

@@ -664,6 +664,10 @@
    :margin (parse-int (style node :margin) 0)
    :border-width (parse-int (style node :border-width) 0)
    :border-color (or (style node :border-color) "#000000")
+   :box-shadow-x (style node :box-shadow-x)
+   :box-shadow-y (style node :box-shadow-y)
+   :box-shadow-blur (style node :box-shadow-blur)
+   :box-shadow-color (style node :box-shadow-color)
    :background (or (style node :background) (style node :background-color))
    :color (style node :color)
    :font-size (style node :font-size)
@@ -850,6 +854,33 @@
        (assoc base :edge :right :x (- (+ x w) bw) :y y :w bw :h h)
        (assoc base :edge :bottom :x x :y (- (+ y h) bw) :w w :h bw)
        (assoc base :edge :left :x x :y y :w bw :h h)])))
+
+(defn- box-shadow-ops
+  "Real CSS `box-shadow` (basic offset + color only -- blur-radius is
+   parsed by `cssom.core/expand-box-shadow-shorthand` but not rendered
+   here, and spread-radius/`inset` are not supported at all, honest
+   documented scope-cuts matching this file's own text-shadow precedent:
+   no blur/glow rendering primitive exists in this engine or its real
+   hosts). Emits a single extra `:rect` op, the same box dimensions as
+   the element's own border box, offset by `:box-shadow-x`/`:box-shadow-
+   y`, reusing the exact `:rect` draw-op every real host already paints
+   as a plain quad -- no new dom-gpu primitive needed, the same reuse
+   `border-ops` above already established. Callers place this BEFORE the
+   element's own background/border rects (real CSS paints a non-inset
+   box-shadow BEHIND the element's own box). The literal string \"none\"
+   is defensively treated the same as absence -- `expand-box-shadow-
+   shorthand` never itself produces that value (`none`/blank resolves to
+   an empty map, since box-shadow isn't inherited and has no ancestor
+   value to cancel), but a direct `:style/box-shadow-color \"none\"` write
+   bypassing that shorthand parser is still a real, reachable shape (the
+   same defensive check `text-shadow`'s own shadow-op emission already
+   makes for its own `:text-shadow-color`)."
+  [st x y w h opacity]
+  (when (and (:box-shadow-color st) (not= "none" (:box-shadow-color st)))
+    (let [dx (or (:box-shadow-x st) 0)
+          dy (or (:box-shadow-y st) 0)]
+      [{:draw/op :rect :box-shadow? true :color (:box-shadow-color st) :opacity opacity
+        :x (+ x dx) :y (+ y dy) :w w :h h}])))
 
 (defn- absolute? [theme child]
   (and (map? child) (= "absolute" (:position (node-style child theme)))))
@@ -2867,6 +2898,7 @@
                                   (not= :select tag)
                                   (not= "checkbox" input-type)
                                   (some? placeholder))
+        box-shadow-draws (or (box-shadow-ops st x y w h opacity) [])
         border-draws (or (border-ops st x y w h opacity) [])
         bg (default-bg tag st theme)
         rect (when bg [{:draw/op :rect :x x :y y :w w :h h :color bg :tag tag :opacity opacity}])
@@ -2901,13 +2933,13 @@
                          :opacity opacity :value value :checked checked}
                         (style-passthrough st))]
     {:box {:x x :y y :w w :h h}
-     ;; rect (background) BEFORE border-draws, not after -- see
-     ;; layout-block's own identical ordering fix for why: the background
-     ;; rect spans the FULL box, including the thin edge strips
-     ;; border-draws paints, so if border-draws were drawn (and thus
-     ;; painted UNDER) first, the background would completely cover it,
-     ;; hiding the border entirely.
-     :draw (cond-> (vec (concat rect border-draws [semantic]))
+     ;; box-shadow-draws BEFORE rect (background), which is itself BEFORE
+     ;; border-draws -- see layout-block's own identical ordering fix for
+     ;; why background must precede border-draws (else the background
+     ;; would completely cover the thin border edge strips); box-shadow
+     ;; is real CSS's own "paints BEHIND the element's own box" layer, so
+     ;; it goes first of all three.
+     :draw (cond-> (vec (concat box-shadow-draws rect border-draws [semantic]))
              text-op (conj text-op)
              sel-ops (into sel-ops))}))
 
@@ -2927,6 +2959,7 @@
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
         absolute-draws (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
+        box-shadow-draws (or (box-shadow-ops st x y node-w node-h opacity) [])
         border-draws (or (border-ops st x y node-w node-h opacity) [])
         bg (default-bg (:tag node) st theme)
         rect (when bg [{:draw/op :rect :x x :y y :w node-w :h node-h :color bg :tag (:tag node) :opacity opacity}])
@@ -2951,7 +2984,9 @@
      ;; Confirmed via a real draw-ops dump through the full pipeline: an
      ;; ordinary <div> with both an explicit background AND border-width
      ;; genuinely never showed any border pixels at all before this fix.
-     :draw (vec (concat rect border-draws semantic clip-push draw clip-pop absolute-draws))}))
+     ;; box-shadow-draws goes first of all three -- real CSS paints a
+     ;; non-inset box-shadow BEHIND the element's own box.
+     :draw (vec (concat box-shadow-draws rect border-draws semantic clip-push draw clip-pop absolute-draws))}))
 
 (defn layout-node
   ([node] (layout-node default-theme 0 0 320 1.0 {:color (:fg default-theme) :font-size (:font-size default-theme)
@@ -3052,8 +3087,11 @@
                 ;; background rect BEFORE border-ops -- see layout-block's
                 ;; own identical fix's comment for why (border-ops
                 ;; painted first used to be completely hidden under the
-                ;; full-box background rect painted second).
+                ;; full-box background rect painted second). box-shadow-ops
+                ;; goes first of all: real CSS paints a non-inset box-shadow
+                ;; BEHIND the element's own box.
                 :draw (vec (concat
+                            (or (box-shadow-ops st x y box-w box-h opacity) [])
                             (when-let [bg (default-bg tag st theme)]
                               [{:draw/op :rect :x x :y y :w box-w :h box-h :color bg :tag tag :opacity opacity}])
                             (or (border-ops st x y box-w box-h opacity) [])
@@ -3068,8 +3106,11 @@
                    box-h (clamp-height st box-h)]
                {:box {:x x :y y :w box-w :h box-h}
                 ;; background rect BEFORE border-ops -- see layout-block's
-                ;; own identical fix's comment for why.
+                ;; own identical fix's comment for why. box-shadow-ops goes
+                ;; first of all: real CSS paints a non-inset box-shadow
+                ;; BEHIND the element's own box.
                 :draw (vec (concat
+                            (or (box-shadow-ops st x y box-w box-h opacity) [])
                             (when-let [bg (default-bg tag st theme)]
                               [{:draw/op :rect :x x :y y :w box-w :h box-h :color bg :tag tag :opacity opacity}])
                             (or (border-ops st x y box-w box-h opacity) [])

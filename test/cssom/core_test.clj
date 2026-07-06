@@ -99,6 +99,45 @@
     (is (= true (get-in (first rules) [:rule/declaration-meta :text-shadow-blur :important?])))
     (is (= true (get-in (first rules) [:rule/declaration-meta :text-shadow-color :important?])))))
 
+;; ---- `box-shadow` shorthand expansion ----
+
+(deftest box-shadow-shorthand-expands-into-its-four-longhands
+  ;; The confirmed repro from the bug report: before this, box-shadow was
+  ;; stored verbatim as a single :box-shadow key, which cssom.layout never
+  ;; recognizes -- a real, common author pattern like
+  ;; `box-shadow: 4px 4px 8px #000000` silently painted no shadow at all.
+  (let [rules (css/parse-rules "#f { box-shadow: 4px 5px 8px #000000 }")]
+    (is (= {:box-shadow-x 4 :box-shadow-y 5 :box-shadow-blur 8 :box-shadow-color "#000000"}
+           (:rule/declarations (first rules))))
+    (is (not (contains? (:rule/declarations (first rules)) :box-shadow))
+        "no bare :box-shadow key should remain -- it's fully expanded")))
+
+(deftest box-shadow-shorthand-is-order-independent-per-real-css-grammar
+  (let [rules (css/parse-rules "#f { box-shadow: red 2px 3px }")]
+    (is (= {:box-shadow-color "red" :box-shadow-x 2 :box-shadow-y 3}
+           (:rule/declarations (first rules))))))
+
+(deftest box-shadow-shorthand-omits-whichever-longhands-it-does-not-specify
+  (let [rules (css/parse-rules "#f { box-shadow: 2px 3px red }")]
+    (is (= {:box-shadow-x 2 :box-shadow-y 3 :box-shadow-color "red"}
+           (:rule/declarations (first rules)))
+        "a real, legal box-shadow shorthand may omit the blur radius entirely")))
+
+(deftest box-shadow-none-expands-to-an-empty-declaration-unlike-text-shadow
+  ;; Unlike text-shadow, box-shadow is NOT a real inherited CSS property --
+  ;; there is no ancestor value to cancel, so `box-shadow: none` resolving
+  ;; to an empty declaration (rather than text-shadow's own real, PRESENT
+  ;; sentinel) is correct here, not an inconsistency.
+  (let [rules (css/parse-rules "#f { box-shadow: none }")]
+    (is (= {} (:rule/declarations (first rules))))))
+
+(deftest box-shadow-shorthand-importance-applies-to-every-expanded-longhand
+  (let [rules (css/parse-rules "#f { box-shadow: 2px 3px 4px red !important }")]
+    (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-x :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-y :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-blur :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-color :important?])))))
+
 (deftest parses-attribute-selector-operators
   (let [rules (css/parse-rules "[class~=\"primary\"] { color: red }
                                 [lang|=\"en\"] { font-size: 12px }

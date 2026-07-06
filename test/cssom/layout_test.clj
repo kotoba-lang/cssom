@@ -738,6 +738,134 @@
     (is (< (.indexOf ops bg-rect) (.indexOf ops top-border))
         "background must paint BEFORE border, not after, same convention as block")))
 
+;; ---- box-shadow: basic offset + color, no dom-gpu changes needed ----
+
+(deftest box-shadow-paints-before-background-and-border-not-after
+  ;; Real CSS: a non-inset box-shadow paints BEHIND the element's own box
+  ;; -- confirmed via direct REPL reproduction before touching source that
+  ;; box-shadow was previously read nowhere at all, so this ordering never
+  ;; had a chance to matter (no shadow rect was ever emitted).
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:box-shadow-x 4 :box-shadow-y 4 :box-shadow-color "#000000"
+                                     :border-width 3 :border-color "#00ff00" :background "#ff0000"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %)) (not (:box-shadow? %))) ops))
+        top-border (first (filter #(and (= :rect (:draw/op %)) (:border? %) (= :top (:edge %))) ops))]
+    (is (some? shadow-rect))
+    (is (some? bg-rect))
+    (is (some? top-border))
+    (is (< (.indexOf ops shadow-rect) (.indexOf ops bg-rect))
+        "box-shadow must paint BEFORE the background, not after")
+    (is (< (.indexOf ops bg-rect) (.indexOf ops top-border))
+        "background must still paint before border, same pre-existing convention")))
+
+(deftest box-shadow-is-offset-and-shares-the-elements-own-box-size
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:box-shadow-x 6 :box-shadow-y 9 :box-shadow-color "#123456"
+                                     :width 80 :height 40})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))]
+    (is (= 6 (:x shadow-rect)))
+    (is (= 9 (:y shadow-rect)))
+    (is (= 80 (:w shadow-rect)))
+    (is (= 40 (:h shadow-rect)))
+    (is (= "#123456" (:color shadow-rect)))))
+
+(deftest no-box-shadow-declared-produces-no-shadow-rect-at-all
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:background "#ff0000"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})]
+    (is (not-any? :box-shadow? ops))))
+
+(deftest box-shadow-color-none-produces-no-shadow-rect-either
+  ;; A defensive guard, not just an absence check: a direct
+  ;; :style/box-shadow-color "none" write (bypassing expand-box-shadow-
+  ;; shorthand, which never itself produces this value for box-shadow --
+  ;; unlike text-shadow, there is no ancestor value to cancel) must still
+  ;; be treated the same as no shadow at all, the same defensive check
+  ;; text-shadow's own shadow-op emission already makes.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:box-shadow-x 4 :box-shadow-y 4 :box-shadow-color "none"
+                                     :background "#ff0000"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})]
+    (is (not-any? :box-shadow? ops))))
+
+(deftest box-shadow-is-not-a-real-inherited-property
+  ;; Unlike text-shadow, box-shadow does NOT inherit in real CSS -- a
+  ;; child with no box-shadow of its own must never see its parent's.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:box-shadow-x 4 :box-shadow-y 4 :box-shadow-color "#000000"
+                                        :width 200 :height 100})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/set-style doc child {:background "#0000ff" :width 40 :height 20})
+        doc (dom/append-child doc parent child)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        shadow-rects (filter :box-shadow? ops)]
+    (is (= 1 (count shadow-rects))
+        "exactly the parent's own single box-shadow rect -- the child must not have inherited a second one")))
+
+(deftest flex-container-box-shadow-paints-before-background
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :box-shadow-x 4 :box-shadow-y 4 :box-shadow-color "#000000"
+                                     :background "#ff0000"})
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div span)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %)) (not (:box-shadow? %))) ops))]
+    (is (some? shadow-rect))
+    (is (< (.indexOf ops shadow-rect) (.indexOf ops bg-rect))
+        "box-shadow must paint before the flex container's own background, same convention as block")))
+
+(deftest grid-container-box-shadow-paints-before-background
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "grid" :box-shadow-x 4 :box-shadow-y 4 :box-shadow-color "#000000"
+                                     :background "#ff0000"})
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div span)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %)) (not (:box-shadow? %))) ops))]
+    (is (some? shadow-rect))
+    (is (< (.indexOf ops shadow-rect) (.indexOf ops bg-rect))
+        "box-shadow must paint before the grid container's own background, same convention as block/flex")))
+
+(deftest form-control-box-shadow-paints-before-background
+  (let [[input doc] (dom/create-element dom/empty-document :input)
+        doc (dom/set-root doc input)
+        doc (dom/set-style doc input {:box-shadow-x 4 :box-shadow-y 4 :box-shadow-color "#000000"
+                                       :background "#445566"})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))
+        bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %)) (not (:box-shadow? %))) ops))]
+    (is (some? shadow-rect))
+    (is (< (.indexOf ops shadow-rect) (.indexOf ops bg-rect))
+        "box-shadow must paint before a form control's own background, same convention as block/flex/grid")))
+
 (def ^:private inherited-text
   {:color (:fg layout/default-theme) :font-size (:font-size layout/default-theme)})
 
