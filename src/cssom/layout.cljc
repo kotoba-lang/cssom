@@ -287,6 +287,31 @@
                   :else
                   (recur words nil (conj lines cur)))))))))))
 
+(defn- apply-text-transform
+  "Applies `text-transform`'s `uppercase`/`lowercase`/`capitalize` to
+   `text`, returning it unmodified for `nil`/`\"none\"`/any other
+   unrecognized value. `capitalize` upper-cases the first character of
+   each whitespace-delimited word (`\\b\\w` -- a single word character at
+   a word boundary), matching real CSS's per-word behavior rather than
+   just the string's own first character. Unlike font-weight/font-style/
+   text-decoration/text-align (all threaded onto the draw-op as separate
+   metadata for a host to interpret at paint time), text-transform
+   actually REWRITES the text content itself before word-wrapping --
+   real CSS text-transform changes what characters are rendered, not
+   just how, so wrapping must see the transformed text (an upper-cased
+   word is often wider than its original) rather than wrapping the
+   original and transforming after, which could wrap at the wrong point.
+   Deliberately scoped to these three keywords -- `full-width`/
+   `full-size-kana` (CJK-specific, real but rare CSS values) are not
+   implemented."
+  [text-transform text]
+  (let [text (str text)]
+    (case text-transform
+      "uppercase" (str/upper-case text)
+      "lowercase" (str/lower-case text)
+      "capitalize" (str/replace text #"\b\w" str/upper-case)
+      text)))
+
 (defn- layout-text
   "Word-wraps and lays out `text` as one or more :text draw-ops -- exactly
    the algorithm layout-node's real-DOM-text-node branch uses, factored out
@@ -355,6 +380,11 @@
    of its own), a safe degrade rather than a wrong guess, matching this
    codebase's existing convention for other unimplemented keyword values.
 
+   `text-transform` (see apply-text-transform above) rewrites `text`
+   itself, BEFORE word-wrapping, so `uppercase`/`lowercase`/`capitalize`
+   wrap according to the actual rendered (transformed) characters' width,
+   not the original untransformed string's.
+
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
    `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
    docstring for the full rationale (this file is a pure, host-independent
@@ -366,12 +396,13 @@
    resolves to the EXACT SAME char-w-approximation code path
    (text-lines/char-w below) this file has always used, so today's
    word-wrap behavior is completely unaffected unless a host opts in."
-  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text]
+  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform text]
   (let [line-height (:line-height theme)
         padding (:padding theme)
         measure-text (:measure-text theme)
         char-w (long (* 0.6 font-size))
         content-w (max 0 (- avail-width (* 2 padding)))
+        text (apply-text-transform text-transform text)
         lines (if measure-text
                 (text-lines-measured #(measure-text % font-size) content-w text)
                 (text-lines char-w content-w text))
@@ -420,6 +451,7 @@
    :font-style (style node :font-style)
    :text-decoration (style node :text-decoration)
    :text-align (style node :text-align)
+   :text-transform (style node :text-transform)
    :opacity (parse-dbl (style node :opacity) 1.0)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
@@ -2507,13 +2539,14 @@
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
            font-style (or (:font-style gstyle) (:font-style inherited))
            text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))
-           text-align (or (:text-align gstyle) (:text-align inherited))]
-       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align (:generated/text node)))
+           text-align (or (:text-align gstyle) (:text-align inherited))
+           text-transform (or (:text-transform gstyle) (:text-transform inherited))]
+       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited)
                   (:font-weight inherited) (:font-style inherited) (:text-decoration inherited)
-                  (:text-align inherited) node)
+                  (:text-align inherited) (:text-transform inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -2537,9 +2570,11 @@
                font-style (or (:font-style st) (:font-style inherited))
                text-decoration (or (:text-decoration st) (:text-decoration inherited))
                text-align (or (:text-align st) (:text-align inherited))
+               text-transform (or (:text-transform st) (:text-transform inherited))
                inherited (assoc inherited :color color :font-size font-size
                                 :font-weight font-weight :font-style font-style
-                                :text-decoration text-decoration :text-align text-align)
+                                :text-decoration text-decoration :text-align text-align
+                                :text-transform text-transform)
                tag (:tag node)
                children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond

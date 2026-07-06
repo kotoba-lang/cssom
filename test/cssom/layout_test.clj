@@ -217,6 +217,51 @@
     (is (not= plain-x (:x text-op))
         "the inherited center alignment must move the child's text away from its default left-aligned x")))
 
+;; ---- text-transform rewrites the real rendered text, not just metadata ----
+
+(defn- text-op-text [text-transform text]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (if text-transform (dom/set-style doc div {:text-transform text-transform}) doc)
+        [t doc] (dom/create-text-node doc text)
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})]
+    (:text (first (filter #(= :text (:draw/op %)) ops)))))
+
+(deftest text-transform-rewrites-the-real-draw-op-text
+  ;; Unlike font-weight/font-style/text-decoration/text-align (all
+  ;; threaded onto the draw-op as separate paint metadata), text-
+  ;; transform actually rewrites the rendered text content itself.
+  (is (= "HELLO WORLD" (text-op-text "uppercase" "hello world")))
+  (is (= "hello world" (text-op-text "lowercase" "HELLO WORLD")))
+  (is (= "Hello World" (text-op-text "capitalize" "hello world"))))
+
+(deftest text-transform-none-or-absent-leaves-text-unchanged
+  ;; Exact backward compatibility: no text-transform at all, and an
+  ;; explicit "none", must both leave the original text untouched.
+  (is (= "Hello World" (text-op-text nil "Hello World")))
+  (is (= "Hello World" (text-op-text "none" "Hello World"))))
+
+(deftest text-transform-is-a-real-inheritable-property
+  ;; A child with no explicit text-transform inherits its parent's --
+  ;; text-transform genuinely is an inherited CSS property, the same
+  ;; shape color/text-align already have.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:text-transform "uppercase"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "child text")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= "CHILD TEXT" (:text text-op))
+        "the inherited uppercase must transform the child's own text too")))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints
