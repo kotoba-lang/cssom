@@ -549,6 +549,8 @@
    :height (style node :height)
    :min-width (style node :min-width)
    :max-width (style node :max-width)
+   :min-height (style node :min-height)
+   :max-height (style node :max-height)
    :box-sizing (or (style node :box-sizing) "content-box")
    :padding (parse-int (style node :padding) (:padding theme))
    :margin (parse-int (style node :margin) 0)
@@ -653,6 +655,23 @@
    here."
   [st]
   (explicit-length (:height st)))
+
+(defn- clamp-height
+  "Real CSS min-height/max-height apply to a box's FINAL height regardless
+   of where that height came from -- an explicit :height (resolve-height)
+   or content-driven auto-sizing (every caller's own fallback formula) --
+   unlike resolve-width's min/max clamp, which resolve-width applies
+   internally since width always resolves to SOME number via its
+   avail-width fallback. Each of the four call sites that compute a
+   node's own final height (layout-block/layout-form-control directly,
+   layout-flex/layout-grid via layout-node's own box-h destructuring)
+   wraps its own already-or'd height value with this, so min/max apply
+   uniformly whether that value came from an explicit :height or a
+   content-driven fallback."
+  [st height]
+  (let [height (if-let [mn (explicit-length (:min-height st))] (max height mn) height)
+        height (if-let [mx (explicit-length (:max-height st))] (min height mx) height)]
+    height))
 
 (defn- content-inset
   [st]
@@ -2671,7 +2690,7 @@
   (let [tag (:tag node)
         w (resolve-width st avail-width)
         inset (content-inset st)
-        h (or (resolve-height st) (+ (:line-height theme) (* 2 inset)))
+        h (clamp-height st (or (resolve-height st) (+ (:line-height theme) (* 2 inset))))
         value (attr node :value)
         checked (truthy-attr? (attr node :checked))
         input-type (str/lower-case (str (or (attr node :type) "text")))
@@ -2736,7 +2755,7 @@
         {:keys [in-flow out-of-flow]} (partition-flow theme (:children node))
         {:keys [draw h]} (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y) content-w opacity inherited in-flow)
         explicit-h (resolve-height st)
-        node-h (or explicit-h (+ h (* 2 inset)))
+        node-h (clamp-height st (or explicit-h (+ h (* 2 inset))))
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
         absolute-draws (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
@@ -2836,7 +2855,8 @@
              (layout-form-control theme x y avail-width opacity st node)
 
              (= "flex" (:display st))
-             (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node children)]
+             (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node children)
+                   box-h (clamp-height st box-h)]
                {:box {:x x :y y :w box-w :h box-h}
                 ;; background rect BEFORE border-ops -- see layout-block's
                 ;; own identical fix's comment for why (border-ops
@@ -2853,7 +2873,8 @@
                             draws))})
 
              (= "grid" (:display st))
-             (let [{:keys [box-w box-h draws]} (layout-grid theme x y avail-width opacity inherited st node children)]
+             (let [{:keys [box-w box-h draws]} (layout-grid theme x y avail-width opacity inherited st node children)
+                   box-h (clamp-height st box-h)]
                {:box {:x x :y y :w box-w :h box-h}
                 ;; background rect BEFORE border-ops -- see layout-block's
                 ;; own identical fix's comment for why.

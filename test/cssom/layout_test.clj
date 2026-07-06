@@ -2189,6 +2189,67 @@
     ;; "20%" -> 20, clamping the box down from its declared 500px width.
     (is (= 20 (:w div-op)))))
 
+;; ---- min-height/max-height (previously entirely unimplemented -- unlike
+;;      min-width/max-width, which resolve-width already clamped, height
+;;      had zero min/max handling anywhere in this file) ----
+
+(defn- min-max-height-box
+  [rules-str]
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        [text doc] (dom/create-text-node doc "x")
+        doc (dom/append-child doc div text)
+        rules (css/parse-rules rules-str)
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)))
+
+(deftest min-height-applies-to-a-content-driven-auto-height-box
+  ;; Real CSS: min-height applies regardless of whether the height came
+  ;; from an explicit declaration or content-driven auto-sizing -- a very
+  ;; common pattern (reserving space for an otherwise-empty/loading card).
+  (is (= 200 (:h (min-max-height-box ".box { min-height: 200 }")))))
+
+(deftest max-height-clamps-an-explicit-height
+  (is (= 10 (:h (min-max-height-box ".box { height: 100; max-height: 10 }")))))
+
+(deftest min-height-below-an-already-larger-explicit-height-is-a-no-op
+  (is (= 100 (:h (min-max-height-box ".box { height: 100; min-height: 10 }")))))
+
+(deftest min-height-and-max-height-together-both-real-constraints
+  (is (= 50 (:h (min-max-height-box ".box { min-height: 20; max-height: 50; height: 200 }")))))
+
+(deftest no-min-max-height-declared-is-an-unaffected-baseline
+  (is (= 36 (:h (min-max-height-box "")))))
+
+(deftest malformed-min-height-value-degrades-to-a-no-op-not-a-crash
+  (is (= 36 (:h (min-max-height-box ".box { min-height: bogus }")))))
+
+(deftest min-height-applies-to-a-flex-box-too
+  (is (= 150 (:h (min-max-height-box ".box { display: flex; min-height: 150 }")))))
+
+(deftest min-height-applies-to-a-grid-box-too
+  (is (= 150 (:h (min-max-height-box ".box { display: grid; min-height: 150 }")))))
+
+(deftest min-height-applies-to-a-form-control-too
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [input doc] (dom/create-element doc :input)
+        doc (dom/append-child doc root input)
+        doc (dom/set-attribute doc input :class "field")
+        rules (css/parse-rules ".field { min-height: 80 }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        input-op (some #(and (= :node (:draw/op %)) (= :input (:tag %)) %) ops)]
+    (is (= 80 (:h input-op)))))
+
 (deftest explicit-percentage-left-top-on-absolute-child-does-not-crash
   ;; layout-absolute-children added a position:absolute child's raw :left/
   ;; :top straight into content-x/content-y with no coercion at all --
