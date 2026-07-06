@@ -2769,7 +2769,24 @@
    deliberately NOT implemented -- the highlight uses a fixed UA-default
    translucent blue, the same class of 'reasonable baseline, not full
    spec coverage' decision as this fn's own default-bg/default-border
-   above."
+   above.
+
+   The `placeholder` attribute -- present on virtually every real
+   `<input>`/`<textarea>` in the wild -- was previously read NOWHERE at
+   all: `control-text` came purely from `value`, so an empty-valued
+   control (the overwhelmingly common real case: an unfocused input a
+   user hasn't typed into yet) painted as a totally silent, empty box no
+   matter what a real page declared, confirmed via direct REPL
+   reproduction. Fixed by falling back to `placeholder` whenever `value`
+   is absent/empty, for the same two control shapes real HTML actually
+   supports `placeholder` on (`<input>` types other than `checkbox`, and
+   `<textarea>`, i.e. this fn's own default `case` branch) -- `<select>`
+   and checkboxes have no `placeholder` concept in real CSS/HTML either,
+   so they're deliberately excluded. Shown in a fixed UA-default dim
+   gray (`#767676`, distinct from the real, cascade-computed `color` a
+   genuine value would use) -- the same class of 'reasonable baseline,
+   not a real ::placeholder pseudo-element selector' decision as this
+   fn's own selection-highlight color above."
   [theme x y avail-width opacity st node]
   (let [tag (:tag node)
         w (resolve-width st avail-width)
@@ -2780,18 +2797,25 @@
         value (attr node :value)
         checked (truthy-attr? (attr node :checked))
         input-type (str/lower-case (str (or (attr node :type) "text")))
+        has-value? (boolean (seq (str value)))
+        placeholder (attr node :placeholder)
         control-text (case tag
                        :select (option-label node value)
                        :input (if (= "checkbox" input-type)
                                 (if checked "[x]" "[ ]")
-                                (str value))
-                       (str value))
+                                (if has-value? (str value) (str placeholder)))
+                       (if has-value? (str value) (str placeholder)))
+        showing-placeholder? (and (not has-value?)
+                                  (not= :select tag)
+                                  (not= "checkbox" input-type)
+                                  (some? placeholder))
         border-draws (or (border-ops st x y w h opacity) [])
         bg (default-bg tag st theme)
         rect (when bg [{:draw/op :rect :x x :y y :w w :h h :color bg :tag tag :opacity opacity}])
         text-op (when (seq (str control-text))
-                  {:draw/op :text :control? true :node/id (:node/id node)
-                   :x (+ x inset) :y (+ y inset) :text control-text :opacity opacity})
+                  (cond-> {:draw/op :text :control? true :node/id (:node/id node)
+                           :x (+ x inset) :y (+ y inset) :text control-text :opacity opacity}
+                    showing-placeholder? (assoc :color "#767676")))
         selection-start (attr node :selection-start)
         selection-end (attr node :selection-end)
         sel-ops (when (and (= tag :input) selection-start selection-end)

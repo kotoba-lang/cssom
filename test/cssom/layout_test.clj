@@ -3096,6 +3096,48 @@
       (is (= 4 (count border-rects)) (str tag " must get border rects too, not just <input>"))
       (is (= "#ffffff" (:color bg-rect)) (str tag " must get a background rect too")))))
 
+;; ---- <input>/<textarea> placeholder rendering ----
+
+(defn- control-text-op-for
+  [attrs]
+  (let [[el doc] (dom/create-element dom/empty-document (:tag attrs :input))
+        doc (dom/set-root doc el)
+        doc (reduce-kv (fn [doc k v] (dom/set-attribute doc el k v))
+                       doc
+                       (dissoc attrs :tag))
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})]
+    (first (filter #(= :text (:draw/op %)) ops))))
+
+(deftest input-with-empty-value-shows-its-placeholder-attribute
+  ;; The confirmed repro from the bug report: placeholder was read
+  ;; NOWHERE at all -- an empty-valued <input>/<textarea> (the
+  ;; overwhelmingly common real case, an unfocused control a user hasn't
+  ;; typed into yet) painted as a totally silent, empty box no matter
+  ;; what a real page declared.
+  (is (= "Search..." (:text (control-text-op-for {:placeholder "Search..."})))))
+
+(deftest input-with-a-real-value-shows-the-value-not-the-placeholder
+  (is (= "hello" (:text (control-text-op-for {:value "hello" :placeholder "Search..."})))))
+
+(deftest placeholder-text-uses-a-dim-ua-default-color-distinct-from-a-real-values-color
+  (is (= "#767676" (:color (control-text-op-for {:placeholder "Search..."}))))
+  (is (not (contains? (control-text-op-for {:value "hello"}) :color))
+      "a real value must NOT get the placeholder's dim color -- byte-for-byte the same as before this feature existed"))
+
+(deftest checkbox-placeholder-attribute-is-ignored-shows-its-checked-state-glyph-instead
+  (is (= "[ ]" (:text (control-text-op-for {:type "checkbox" :placeholder "ignored"}))))
+  (is (= "[x]" (:text (control-text-op-for {:type "checkbox" :checked "true" :placeholder "ignored"})))))
+
+(deftest textarea-with-empty-value-shows-its-placeholder-attribute
+  (is (= "Type here" (:text (control-text-op-for {:tag :textarea :placeholder "Type here"})))))
+
+(deftest input-with-no-value-and-no-placeholder-produces-no-text-op-at-all
+  ;; Exact backward compatibility: unchanged from before this feature
+  ;; existed.
+  (is (nil? (control-text-op-for {}))))
+
 ;; ---- <input> caret/selection painting ----
 
 (defn- fake-char-measure
