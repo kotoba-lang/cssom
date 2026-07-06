@@ -2259,6 +2259,59 @@
            (or (and min (< n min))
                (and max (> n max)))))))
 
+(def ^:private step-mismatch-tolerance
+  "Real HTML5's own step-validity algorithm uses precise decimal
+   arithmetic to avoid floating-point rounding artifacts (e.g. so
+   `step=\"0.1\"` cleanly accepts `0.1`/`0.2`/`0.3`, which naive `double`
+   division does not: `0.3 / 0.1` is `2.9999999999999996`, not `3.0`).
+   This file's own `parse-number` already only accepts plain decimal
+   strings (no scientific notation, an existing honest scope-cut), so a
+   small, fixed epsilon tolerance -- rather than a full precise-decimal
+   reimplementation -- is a pragmatic, documented simplification
+   consistent with this file's other 'reasonable baseline, not full spec
+   coverage' checks."
+  1e-9)
+
+(defn- step-invalid?
+  "Real HTML5 step-mismatch: `type=\"number\"`/`\"range\"` (the same two
+   types `range-invalid?` above already scopes to) with a non-blank,
+   numerically-parseable `value` that isn't `step-base + n*step` for some
+   integer `n` -- previously read NOWHERE at all (an honest, documented
+   scope-cut in kotoba-lang/browser's own JS-facing
+   `__kotobaValidityState`: `stepMismatch: false` hardcoded).
+
+   Real HTML5's own default `step` for both types is `1` (NOT 'no
+   constraint' -- a genuinely common surprise: `<input type=\"number\"
+   value=\"3.5\">` with no `step` attribute at all is real HTML5
+   INVALID), and a real, legal `step=\"any\"` disables the check
+   entirely. A `step` attribute present but not itself a valid positive
+   number (per `parse-number`) falls back to that same default of `1`
+   -- deliberately DIFFERENT from `min`/`max`'s own degrade-don't-guess
+   convention (an unparseable bound there has nothing sensible to fall
+   back to and so is simply dropped), because real HTML5 step genuinely
+   HAS a defined default value to fall back to, unlike min/max which
+   don't. `step-base` is `min` when present and parseable, else `0`,
+   matching real HTML5's own step-base algorithm for these two types
+   (neither has a `list`/default-option step base concept to consider)."
+  [type value attrs]
+  (and (contains? #{"number" "range"} type)
+       (not (str/blank? value))
+       (when-let [n (parse-number value)]
+         (let [raw-step (:step attrs)]
+           (when-not (and raw-step (= "any" (str/lower-case (str raw-step))))
+             (let [step (let [parsed (parse-number raw-step)]
+                          (if (and parsed (pos? parsed)) parsed 1.0))
+                   base (or (parse-number (:min attrs)) 0.0)
+                   steps (/ (- n base) step)
+                   ;; portable across CLJ/CLJS (no Math/round -- `mod`'s
+                   ;; own floored-division semantics already put the
+                   ;; fractional remainder in [0, 1) regardless of sign,
+                   ;; so "close to 0 OR close to 1" means "close to some
+                   ;; integer" either way).
+                   frac (mod steps 1)]
+               (and (> frac step-mismatch-tolerance)
+                    (< frac (- 1 step-mismatch-tolerance)))))))))
+
 (defn- pattern-invalid?
   "Real HTML5 pattern-mismatch: a non-blank value on a text/search/url/
    tel/email/password `<input>` (real HTML5's own restriction on which
@@ -2343,7 +2396,9 @@
              (and (= :input (:tag node))
                   (pattern-invalid? type value attrs))
              (and (= :input (:tag node))
-                  (type-mismatch? type value))))))
+                  (type-mismatch? type value))
+             (and (= :input (:tag node))
+                  (step-invalid? type value attrs))))))
 
 (defn- constraint-valid?
   [document node]

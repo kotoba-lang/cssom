@@ -463,6 +463,89 @@
     (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
         "type=\"text\" must never be subject to email/url format checking")))
 
+;; ---- :invalid/:valid honoring a real `step` attribute (real HTML5
+;; stepMismatch) -- the last member of the constraint-validation family
+;; started with range/pattern/type checking above. ----
+
+(deftest step-mismatch-matches-invalid-not-valid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "number")
+        doc (dom/set-attribute doc el :step "2")
+        doc (dom/set-attribute doc el :value "3")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes el :attrs :style/color]))
+        "a value not reachable via step from 0 must match :invalid")))
+
+(deftest step-match-matches-valid-not-invalid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "number")
+        doc (dom/set-attribute doc el :step "2")
+        doc (dom/set-attribute doc el :value "4")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "a value reachable via step from 0 must match :valid")))
+
+(deftest default-step-rejects-a-fractional-value
+  ;; A genuinely common surprise, matching real browsers: with no step
+  ;; attribute at all, the default step is 1, so a fractional value is
+  ;; real HTML5 INVALID.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "number")
+        doc (dom/set-attribute doc el :value "3.5")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes el :attrs :style/color]))
+        "a fractional value with no step attribute at all must match :invalid (default step is 1)")))
+
+(deftest step-any-disables-the-check
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "number")
+        doc (dom/set-attribute doc el :step "any")
+        doc (dom/set-attribute doc el :value "3.5")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "step=\"any\" must disable the step check entirely, matching :valid")))
+
+(deftest blank-numeric-value-does-not-force-step-mismatch
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "number")
+        doc (dom/set-attribute doc el :step "2")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "step-mismatch is not required's concern -- a blank, non-required numeric value must still match :valid")))
+
+(deftest step-mismatch-only-applies-to-number-and-range
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "text")
+        doc (dom/set-attribute doc el :step "2")
+        doc (dom/set-attribute doc el :value "3")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "type=\"text\" must never be subject to step checking")))
+
 ;; ---- sibling combinators (+ / ~) ----
 
 (deftest parses-adjacent-and-general-sibling-combinators
