@@ -318,6 +318,25 @@
    change to an already-established host callback contract, left for a
    future cycle rather than done as a side effect of this one.
 
+   `text-decoration` is the same shape again -- a direct follow-up gap
+   found in the same text-styling-property survey that turned up the
+   font-weight/font-style bug above: `underline`/`line-through`/`overline`
+   already resolve fine in the cascade (this file's style resolution is
+   generic, not an allowlist of known property names) but were never read
+   here at all, so `text-decoration: underline` also had ZERO visual
+   effect. Unlike real CSS (where `text-decoration-line` is NOT an
+   inherited property but its drawn line still visually propagates across
+   descendant inline boxes regardless of their own value, a distinct
+   'propagation' mechanism from inheritance), this engine deliberately
+   models it as an ordinary inherited-with-override property -- the exact
+   same shape color/font-size/font-weight/font-style already use here. A
+   descendant explicitly setting `text-decoration: none` correctly stops
+   ITS OWN line (and everything further nested under it), which is a
+   simplification of the real spec's more subtle non-overridable
+   propagation, but is consistent with how every other text property this
+   engine tracks already behaves, and is flagged here rather than silently
+   diverging from CSS without a note.
+
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
    `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
    docstring for the full rationale (this file is a pure, host-independent
@@ -329,7 +348,7 @@
    resolves to the EXACT SAME char-w-approximation code path
    (text-lines/char-w below) this file has always used, so today's
    word-wrap behavior is completely unaffected unless a host opts in."
-  [theme x y avail-width opacity color font-size font-weight font-style text]
+  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text]
   (let [line-height (:line-height theme)
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -349,7 +368,8 @@
                    (cond-> {:draw/op :text :x (+ x padding) :y (+ y padding (* i line-height))
                             :text line :color color :font-size font-size :opacity opacity}
                      font-weight (assoc :font-weight font-weight)
-                     font-style (assoc :font-style font-style)))
+                     font-style (assoc :font-style font-style)
+                     text-decoration (assoc :text-decoration text-decoration)))
                  lines))}))
 
 ;; ---- per-node computed style bag ----
@@ -374,6 +394,7 @@
    :font-size (style node :font-size)
    :font-weight (style node :font-weight)
    :font-style (style node :font-style)
+   :text-decoration (style node :text-decoration)
    :opacity (parse-dbl (style node :opacity) 1.0)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
@@ -2459,12 +2480,13 @@
            color (or (:color gstyle) (:color inherited))
            font-size (parse-int (:font-size gstyle) (:font-size inherited))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
-           font-style (or (:font-style gstyle) (:font-style inherited))]
-       (layout-text theme x y avail-width opacity color font-size font-weight font-style (:generated/text node)))
+           font-style (or (:font-style gstyle) (:font-style inherited))
+           text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))]
+       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited)
-                  (:font-weight inherited) (:font-style inherited) node)
+                  (:font-weight inherited) (:font-style inherited) (:text-decoration inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -2486,8 +2508,10 @@
                font-size (parse-int (:font-size st) (:font-size inherited))
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
+               text-decoration (or (:text-decoration st) (:text-decoration inherited))
                inherited (assoc inherited :color color :font-size font-size
-                                :font-weight font-weight :font-style font-style)
+                                :font-weight font-weight :font-style font-style
+                                :text-decoration text-decoration)
                tag (:tag node)
                children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond

@@ -73,6 +73,71 @@
     (is (= "normal" (:font-weight text-op))
         "the child's own explicit font-weight: normal must win over the inherited bold")))
 
+;; ---- text-decoration pass-through onto :text draw-ops ----
+
+(deftest text-draw-op-carries-real-text-decoration
+  ;; Direct follow-up to the font-weight/font-style bug: text-decoration:
+  ;; underline/line-through/overline already resolved fine in the cascade
+  ;; (this file's style resolution has no allowlist of known property
+  ;; names) but layout's own :text draw-op never carried any of them at
+  ;; all -- text-decoration had ZERO visual effect no matter what a real
+  ;; author wrote, confirmed via a real draw-ops dump through the full
+  ;; pipeline.
+  (doseq [value ["underline" "line-through" "overline"]]
+    (let [[div doc] (dom/create-element dom/empty-document :div)
+          doc (dom/set-root doc div)
+          doc (dom/set-style doc div {:text-decoration value})
+          [t doc] (dom/create-text-node doc "hi")
+          doc (dom/append-child doc div t)
+          [_ doc] (dom/consume-ops doc)
+          tree (dom/tree doc)
+          ops (layout/draw-ops tree {:width 100})
+          text-op (first (filter #(= :text (:draw/op %)) ops))]
+      (is (= value (:text-decoration text-op))))))
+
+(deftest text-draw-op-has-no-text-decoration-key-when-never-set
+  ;; Exact backward compatibility: an unstyled element's :text draw-op
+  ;; must look byte-for-byte the same as before this feature existed --
+  ;; no :text-decoration key at all.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (not (contains? text-op :text-decoration)))))
+
+(deftest text-decoration-is-inherited-and-none-stops-it
+  ;; This engine deliberately models text-decoration as an ordinary
+  ;; inherited-with-override property (the same shape color/font-weight/
+  ;; font-style already have) rather than real CSS's own more subtle
+  ;; non-overridable propagation -- a child with no explicit value
+  ;; inherits the parent's decoration, and a child explicitly setting
+  ;; text-decoration: none correctly stops its own line.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:text-decoration "line-through"})
+        [inheriting-child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent inheriting-child)
+        [t1 doc] (dom/create-text-node doc "inherits")
+        doc (dom/append-child doc inheriting-child t1)
+        [overriding-child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent overriding-child)
+        doc (dom/set-style doc overriding-child {:text-decoration "none"})
+        [t2 doc] (dom/create-text-node doc "overrides")
+        doc (dom/append-child doc overriding-child t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        inherits-op (first (filter #(= "inherits" (:text %)) ops))
+        overrides-op (first (filter #(= "overrides" (:text %)) ops))]
+    (is (= "line-through" (:text-decoration inherits-op))
+        "a child with no explicit text-decoration inherits the parent's")
+    (is (= "none" (:text-decoration overrides-op))
+        "a child's own explicit text-decoration: none must win over the inherited line-through")))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints
