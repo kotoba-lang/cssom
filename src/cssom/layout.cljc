@@ -538,6 +538,8 @@
    :position (or (style node :position) "static")
    :left (style node :left)
    :top (style node :top)
+   :right (style node :right)
+   :bottom (style node :bottom)
    :z-index (parse-int (style node :z-index) 0)
    :width (style node :width)
    :height (style node :height)
@@ -2560,15 +2562,41 @@
       {:draw draws :h (max 0 (- height (:gap theme)))})))
 
 (defn- layout-absolute-children
-  [theme content-x content-y content-w opacity inherited children]
+  "Real CSS `position: absolute` anchors a box's edges to its containing
+   block's `left`/`top`/`right`/`bottom` -- this used to read ONLY `left`/
+   `top`, so `right`/`bottom` (extremely common for corner-pinned badges,
+   close buttons, and overlays) were silently ignored and the child always
+   landed at `left:0;top:0`. Fixed by measuring the child at the origin
+   first (the same 'measure, then `translate-ops`' technique
+   `layout-flex`/`layout-grid` already use for cross-axis/track placement,
+   safe here for the identical reason: `layout-node` only ever ADDS its
+   `x`/`y` params as an offset, so laying out at `0,0` then translating by
+   `dx`/`dy` is equivalent to laying out directly at `dx,dy`) so its real,
+   resolved box `:w`/`:h` is known before solving for a `right`/`bottom`
+   anchor, which needs the box size to compute (`dx = content-w - w -
+   right`). When `left`/`top` is present it always wins over `right`/
+   `bottom` (matching this engine's existing width/height resolution,
+   which is already decided before this placement step runs and has no
+   'stretch to fill left+right' auto-width solving -- a real but deeper
+   CSS behavior deliberately out of scope here, the same kind of honest,
+   documented cut this file already makes elsewhere, e.g. `hsl()`'s
+   hue-unit scoping)."
+  [theme content-x content-y content-w content-h opacity inherited children]
   (let [placed (mapv (fn [child]
                         (let [cst (node-style child theme)
-                              left (or (explicit-length (:left cst)) 0)
-                              top (or (explicit-length (:top cst)) 0)
-                              cx (+ content-x left)
-                              cy (+ content-y top)
-                              m (layout-node theme cx cy content-w opacity inherited child)]
-                          {:z (:z-index cst) :draw (:draw m)}))
+                              m (layout-node theme 0 0 content-w opacity inherited child)
+                              {:keys [w h]} (:box m)
+                              left (explicit-length (:left cst))
+                              right (explicit-length (:right cst))
+                              top (explicit-length (:top cst))
+                              bottom (explicit-length (:bottom cst))
+                              dx (+ content-x (cond left left
+                                                     right (- content-w w right)
+                                                     :else 0))
+                              dy (+ content-y (cond top top
+                                                     bottom (- content-h h bottom)
+                                                     :else 0))]
+                          {:z (:z-index cst) :draw (translate-ops dx dy (:draw m))}))
                       children)
         sorted (sort-by :z placed)]
     (vec (mapcat :draw sorted))))
@@ -2705,7 +2733,8 @@
         explicit-h (resolve-height st)
         node-h (or explicit-h (+ h (* 2 inset)))
         node-w w
-        absolute-draws (layout-absolute-children theme content-x content-y content-w opacity inherited out-of-flow)
+        content-h (max 0 (- node-h (* 2 inset)))
+        absolute-draws (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
         border-draws (or (border-ops st x y node-w node-h opacity) [])
         bg (default-bg (:tag node) st theme)
         rect (when bg [{:draw/op :rect :x x :y y :w node-w :h node-h :color bg :tag (:tag node) :opacity opacity}])

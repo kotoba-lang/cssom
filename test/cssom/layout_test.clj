@@ -2210,6 +2210,67 @@
     (is (= (+ 4 10) (:x div-op)))
     (is (= (+ 4 5) (:y div-op)))))
 
+;; ---- position:absolute right/bottom (layout-absolute-children previously
+;;      read ONLY left/top; right/bottom -- extremely common for
+;;      corner-pinned badges, close buttons, overlays -- were silently
+;;      ignored and the child always landed at left:0;top:0) ----
+
+(defn- absolute-child-op
+  "Shared harness: a :main root with an explicit width/height/zero-padding
+   container (clean, hand-computable numbers) and a single position:absolute
+   :div child styled by `box-style`; returns the child's real :node draw-op."
+  [box-style]
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :class "container")
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules
+               (str ".container { width: 200; height: 200; padding: 0 } "
+                    ".box { position: absolute; " box-style " }"))
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)))
+
+(deftest absolute-child-right-anchors-to-container-right-edge
+  ;; 200 (container content-w) - 40 (child width) - 10 (right) = 150.
+  (let [div-op (absolute-child-op "right: 10; width: 40; height: 20")]
+    (is (= 150 (:x div-op)))
+    (is (= 0 (:y div-op)))))
+
+(deftest absolute-child-bottom-anchors-to-container-bottom-edge
+  ;; 200 (container content-h) - 20 (child height) - 5 (bottom) = 175.
+  (let [div-op (absolute-child-op "bottom: 5; width: 40; height: 20")]
+    (is (= 0 (:x div-op)))
+    (is (= 175 (:y div-op)))))
+
+(deftest absolute-child-right-and-bottom-together
+  (let [div-op (absolute-child-op "right: 10; bottom: 5; width: 40; height: 20")]
+    (is (= 150 (:x div-op)))
+    (is (= 175 (:y div-op)))))
+
+(deftest absolute-child-left-wins-over-right-when-both-present
+  ;; This engine's width resolution is already decided before this
+  ;; placement step runs (no "stretch to fill left+right" auto-width
+  ;; solving -- a deliberate, documented scope cut), so left simply wins
+  ;; and right is ignored, matching layout-absolute-children's docstring.
+  (let [div-op (absolute-child-op "left: 15; right: 10; width: 40; height: 20")]
+    (is (= 15 (:x div-op)))))
+
+(deftest absolute-child-top-wins-over-bottom-when-both-present
+  (let [div-op (absolute-child-op "top: 8; bottom: 5; width: 40; height: 20")]
+    (is (= 8 (:y div-op)))))
+
+(deftest absolute-child-malformed-right-degrades-to-default-no-crash
+  ;; Mirrors this file's existing degrade-don't-guess convention: a
+  ;; non-numeric right/bottom (here "auto") is simply not enforced,
+  ;; falling through to the pre-existing left:0;top:0-equivalent default.
+  (let [div-op (absolute-child-op "right: auto; width: 40; height: 20")]
+    (is (= 0 (:x div-op)))))
+
 ;; ---- implicit <ul>/<ol> default `<li>` markers (with-implicit-list-markers)
 ;;      ----
 ;;
