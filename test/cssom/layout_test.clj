@@ -18,6 +18,61 @@
     (is (some #(and (= :rect (:draw/op %)) (= :button (:tag %))) ops))
     (is (some #(and (= :text (:draw/op %)) (= "Counter" (:text %))) ops))))
 
+;; ---- font-weight/font-style pass-through onto :text draw-ops ----
+
+(deftest text-draw-op-carries-real-font-weight-and-font-style
+  ;; The confirmed repro from the bug report: font-weight: bold/font-
+  ;; style: italic already resolved correctly in the real cascade
+  ;; (:style/font-weight/:style/font-style existed on the node), but
+  ;; layout's own :text draw-op never carried either at all -- bold/
+  ;; italic CSS had ZERO visual effect no matter what a real author
+  ;; wrote, confirmed via a real draw-ops dump through the full pipeline.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:font-weight "bold" :font-style "italic"})
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= "bold" (:font-weight text-op)))
+    (is (= "italic" (:font-style text-op)))))
+
+(deftest text-draw-op-has-no-font-weight-or-style-keys-when-never-set
+  ;; Exact backward compatibility: an unstyled element's :text draw-op
+  ;; must look byte-for-byte the same as before this feature existed --
+  ;; no :font-weight/:font-style key at all, not even a "normal" one.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (not (contains? text-op :font-weight)))
+    (is (not (contains? text-op :font-style)))))
+
+(deftest font-weight-and-style-are-real-inheritable-properties
+  ;; A child overriding font-weight back to "normal" must win over its
+  ;; parent's own bold -- real CSS inheritance, the same shape color/
+  ;; font-size already have.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:font-weight "bold"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        doc (dom/set-style doc child {:font-weight "normal"})
+        [t doc] (dom/create-text-node doc "child")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= "normal" (:font-weight text-op))
+        "the child's own explicit font-weight: normal must win over the inherited bold")))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints

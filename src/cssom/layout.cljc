@@ -292,10 +292,31 @@
    the algorithm layout-node's real-DOM-text-node branch uses, factored out
    so generated ::before/::after content (see with-generated-content) can
    flow through the identical text-measurement/wrapping/paint path instead
-   of a second, forked implementation. `color`/`font-size` are taken as
-   explicit args (rather than read off `inherited` internally) so a
-   pseudo-element's own resolved style can override either one while still
-   falling back to whatever a real text child in the same spot would use.
+   of a second, forked implementation. `color`/`font-size`/`font-weight`/
+   `font-style` are taken as explicit args (rather than read off `inherited`
+   internally) so a pseudo-element's own resolved style can override any of
+   them while still falling back to whatever a real text child in the same
+   spot would use.
+
+   `font-weight`/`font-style` are passed through to each resulting :text
+   draw-op unchanged (real hosts, e.g. kotoba-lang/dom-gpu's webgl.cljs/
+   webgpu.cljs, interpolate them into the real Canvas 2D `font` string) --
+   before this, this engine resolved `font-weight: bold`/`font-style:
+   italic` correctly in the cascade (real, cascade-computed `:style/
+   font-weight`/`:style/font-style` attrs already existed) but silently
+   dropped both once layout built the actual :text draw-op, so bold/italic
+   CSS had ZERO visual effect no matter what a real author wrote. Known,
+   documented, deliberately deferred limitation: the OPTIONAL `:measure-
+   text` word-wrap path below (see its own paragraph) is NOT told about
+   font-weight/font-style, so a real host's word-wrap measurement for
+   bold/italic text uses NORMAL-weight/upright metrics -- a real, if minor
+   and rarely visible, inconsistency (bold text is typically ~5-10% wider
+   than normal at the same point size) between where a line wraps and how
+   wide that line's real glyphs actually render. Fixing that too would
+   mean threading font-weight/font-style into `measure-text`'s own
+   `(fn [text font-size] ...)` signature -- a real, separate, larger
+   change to an already-established host callback contract, left for a
+   future cycle rather than done as a side effect of this one.
 
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
    `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
@@ -308,7 +329,7 @@
    resolves to the EXACT SAME char-w-approximation code path
    (text-lines/char-w below) this file has always used, so today's
    word-wrap behavior is completely unaffected unless a host opts in."
-  [theme x y avail-width opacity color font-size text]
+  [theme x y avail-width opacity color font-size font-weight font-style text]
   (let [line-height (:line-height theme)
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -325,8 +346,10 @@
     {:box {:x x :y y :w w :h h}
      :draw (vec (map-indexed
                  (fn [i line]
-                   {:draw/op :text :x (+ x padding) :y (+ y padding (* i line-height))
-                    :text line :color color :font-size font-size :opacity opacity})
+                   (cond-> {:draw/op :text :x (+ x padding) :y (+ y padding (* i line-height))
+                            :text line :color color :font-size font-size :opacity opacity}
+                     font-weight (assoc :font-weight font-weight)
+                     font-style (assoc :font-style font-style)))
                  lines))}))
 
 ;; ---- per-node computed style bag ----
@@ -349,6 +372,8 @@
    :background (or (style node :background) (style node :background-color))
    :color (style node :color)
    :font-size (style node :font-size)
+   :font-weight (style node :font-weight)
+   :font-style (style node :font-style)
    :opacity (parse-dbl (style node :opacity) 1.0)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
@@ -2432,11 +2457,14 @@
      (generated-node? node)
      (let [gstyle (:generated/style node)
            color (or (:color gstyle) (:color inherited))
-           font-size (parse-int (:font-size gstyle) (:font-size inherited))]
-       (layout-text theme x y avail-width opacity color font-size (:generated/text node)))
+           font-size (parse-int (:font-size gstyle) (:font-size inherited))
+           font-weight (or (:font-weight gstyle) (:font-weight inherited))
+           font-style (or (:font-style gstyle) (:font-style inherited))]
+       (layout-text theme x y avail-width opacity color font-size font-weight font-style (:generated/text node)))
 
      (text-node? node)
-     (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) node)
+     (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited)
+                  (:font-weight inherited) (:font-style inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -2456,7 +2484,10 @@
          (let [opacity (* opacity (:opacity st))
                color (or (:color st) (:color inherited))
                font-size (parse-int (:font-size st) (:font-size inherited))
-               inherited (assoc inherited :color color :font-size font-size)
+               font-weight (or (:font-weight st) (:font-weight inherited))
+               font-style (or (:font-style st) (:font-style inherited))
+               inherited (assoc inherited :color color :font-size font-size
+                                :font-weight font-weight :font-style font-style)
                tag (:tag node)
                children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond
