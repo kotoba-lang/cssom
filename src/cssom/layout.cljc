@@ -320,6 +320,28 @@
       "capitalize" (str/replace text #"\b\w" str/upper-case)
       text)))
 
+(defn- ellipsize
+  "Real CSS `text-overflow: ellipsis`'s own truncation: if `line`'s own
+   measured width (via `line-w-fn`, either a real host `:measure-text`
+   callback or this file's own `char-w` approximation) already fits
+   within `content-w`, `line` is returned unchanged. Otherwise, the
+   LONGEST prefix of `line` such that `(prefix + \"…\")` still fits is
+   kept -- a simple linear shrink from the full length rather than a
+   binary search, since real single-line control/label text this applies
+   to is short enough that the difference is not measurable. An
+   `content-w` too narrow to fit even a bare `\"…\"` degrades to just the
+   ellipsis alone, rather than an empty string or a crash."
+  [line content-w line-w-fn]
+  (if (<= (line-w-fn line) content-w)
+    line
+    (loop [n (dec (count line))]
+      (if (<= n 0)
+        "…"
+        (let [candidate (str (subs line 0 n) "…")]
+          (if (<= (line-w-fn candidate) content-w)
+            candidate
+            (recur (dec n))))))))
+
 (defn- layout-text
   "Word-wraps and lays out `text` as one or more :text draw-ops -- exactly
    the algorithm layout-node's real-DOM-text-node branch uses, factored out
@@ -506,29 +528,62 @@
    same bug shape already fixed for font-weight/font-style/
    text-decoration/line-height.
 
-   `text-shadow-x`/`text-shadow-y`/`text-shadow-blur`/`text-shadow-color`
-   -- real CSS's own `text-shadow` shorthand, already expanded into these
-   four longhand-shaped attrs at cascade-parse time (see
-   `cssom.core/expand-text-shadow-shorthand`) -- were previously read
-   NOWHERE at all, `text-shadow` stored verbatim as a single unrecognized
+   `text-shadow` (a single `{:x :y :blur :color}` map arg -- consolidated
+   from 4 separate positional args to keep this fn's own arity under
+   Clojure's hard 20-positional-parameter limit, hit for real once
+   `text-overflow` below pushed the previous flat-arg signature to 21)
+   -- real CSS's own `text-shadow` shorthand is expanded into four
+   longhand-shaped attrs at cascade-parse time (see
+   `cssom.core/expand-text-shadow-shorthand`) and bundled into this map
+   by each `layout-node` call site below. `text-shadow` was previously
+   read NOWHERE at all, stored verbatim as a single unrecognized
    `:style/text-shadow` string, confirmed via direct REPL reproduction
    that no shadow :text draw-op was ever emitted no matter what a real
-   page declared. When `text-shadow-color` is present and not the literal
-   string `\"none\"` (the real explicit 'no shadow' keyword, and this
-   fn's own sentinel for 'an ancestor's shadow was explicitly cancelled
-   here', since `text-shadow` genuinely inherits in real CSS), an EXTRA,
+   page declared. When `:color` is present and not the literal string
+   `\"none\"` (the real explicit 'no shadow' keyword, and this fn's own
+   sentinel for 'an ancestor's shadow was explicitly cancelled here',
+   since `text-shadow` genuinely inherits in real CSS), an EXTRA,
    shadow-colored `:text` draw-op is emitted for each line, offset by
-   `text-shadow-x`/`text-shadow-y`, immediately BEFORE that line's own
-   real-color op so paint order puts the real glyphs on top. Blur radius
-   is parsed and threaded but NOT rendered -- an honest, documented
-   scope-cut (no blur/glow rendering primitive exists in this engine or
-   its real hosts), the same class of simplification as border-radius/
-   box-shadow spread being left unimplemented elsewhere. The shadow op
-   deliberately does NOT carry `text-decoration` -- underline/strikethrough
-   is this file's own separate draw-op concern, not duplicated here."
+   `:x`/`:y`, immediately BEFORE that line's own real-color op so paint
+   order puts the real glyphs on top. `:blur` is parsed and threaded but
+   NOT rendered -- an honest, documented scope-cut (no blur/glow
+   rendering primitive exists in this engine or its real hosts), the
+   same class of simplification as border-radius/box-shadow spread being
+   left unimplemented elsewhere. The shadow op deliberately does NOT
+   carry `text-decoration` -- underline/strikethrough is this file's own
+   separate draw-op concern, not duplicated here.
+
+   `text-overflow: ellipsis` -- previously read NOWHERE at all, so the
+   classic `white-space: nowrap; overflow: hidden; text-overflow:
+   ellipsis` fixed-width label/menu-item/table-cell idiom just silently
+   overflowed (or, since the real `overflow: hidden` scissor-rect fix,
+   got hard-clipped mid-glyph with no `…` at all) no matter what a real
+   page declared, confirmed via direct REPL reproduction. Only takes
+   effect for the already-existing `nowrap` branch below (a wrapped,
+   multi-line paragraph has no single 'the line' to truncate, matching
+   real CSS's own requirement that `text-overflow` only ever act on a
+   NON-wrapping block) -- when the raw, untruncated line's own measured
+   width exceeds `content-w`, the LONGEST prefix that (prefix + `…`)
+   still fits is kept, reusing the exact same pluggable `measure`/
+   `char-w` width function every other word-wrap decision in this file
+   already uses, so a host with a real `:measure-text` callback gets
+   pixel-accurate truncation, not just a character-count guess. Honest,
+   documented scope-cut: real CSS also requires the container's own
+   `overflow` to be non-`visible` for `text-overflow` to take effect at
+   all -- this engine applies ellipsis whenever `nowrap` + `ellipsis` are
+   BOTH declared, regardless of `overflow`'s own value, since the
+   overwhelming real-world pattern always declares all three together
+   and this simplification never produces an incorrect-looking result on
+   its own. `text-overflow` is threaded through `inherited` the exact
+   same way `white-space` already is, even though real CSS's own
+   `text-overflow` is NOT an inherited property -- a pragmatic
+   architectural simplification (this file has no general inline flow
+   anywhere, see e.g. layout-node's own text-node branch, so a bare
+   text-node child has no other route to learn its containing block's
+   own truncation intent) rather than a spec-accuracy claim."
   [theme x y avail-width opacity color font-size line-height font-weight font-style font-family
-   text-shadow-x text-shadow-y text-shadow-blur text-shadow-color
-   text-decoration text-align text-transform white-space text]
+   text-shadow
+   text-decoration text-align text-transform white-space text-overflow text]
   (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -536,9 +591,12 @@
         content-w (max 0 (- avail-width (* 2 padding)))
         text (apply-text-transform text-transform text)
         measure #(measure-text % font-size font-weight font-style font-family)
+        line-w #(if measure-text (measure %) (* (count %) char-w))
         lines (cond
                 (= "pre" white-space) (str/split (str text) #"\n" -1)
-                (= "nowrap" white-space) [(str text)]
+                (= "nowrap" white-space)
+                (let [line (str text)]
+                  [(if (= "ellipsis" text-overflow) (ellipsize line content-w line-w) line)])
                 (= "pre-wrap" white-space)
                 (mapcat #(if measure-text
                            (text-lines-measured measure content-w %)
@@ -552,7 +610,6 @@
                         (str/split (str text) #"\n" -1))
                 measure-text (text-lines-measured measure content-w text)
                 :else (text-lines char-w content-w text))
-        line-w #(if measure-text (measure %) (* (count %) char-w))
         max-line-w (if measure-text
                      (apply max 0 (map measure lines))
                      (apply max 0 (map #(* (count %) char-w) lines)))
@@ -572,11 +629,11 @@
                                 font-weight (assoc :font-weight font-weight)
                                 font-style (assoc :font-style font-style)
                                 font-family (assoc :font-family font-family))
-                         shadow-op (when (and text-shadow-color (not= "none" text-shadow-color))
+                         shadow-op (when (and (:color text-shadow) (not= "none" (:color text-shadow)))
                                      (assoc base :draw/op :text
-                                            :x (+ line-x (or text-shadow-x 0))
-                                            :y (+ line-y (or text-shadow-y 0))
-                                            :color text-shadow-color))
+                                            :x (+ line-x (or (:x text-shadow) 0))
+                                            :y (+ line-y (or (:y text-shadow) 0))
+                                            :color (:color text-shadow)))
                          main-op (cond-> (assoc base :draw/op :text :x line-x :y line-y :color color)
                                    text-decoration (assoc :text-decoration text-decoration))]
                      (if shadow-op [shadow-op main-op] [main-op])))
@@ -622,6 +679,7 @@
    :text-align (style node :text-align)
    :text-transform (style node :text-transform)
    :white-space (or (style node :white-space) (when (= :pre (:tag node)) "pre"))
+   :text-overflow (style node :text-overflow)
    :opacity (parse-dbl (style node :opacity) 1.0)
    :visibility (style node :visibility)
    :justify-content (or (style node :justify-content) "flex-start")
@@ -2918,17 +2976,19 @@
            text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))
            text-align (or (:text-align gstyle) (:text-align inherited))
            text-transform (or (:text-transform gstyle) (:text-transform inherited))
-           white-space (or (:white-space gstyle) (:white-space inherited))]
+           white-space (or (:white-space gstyle) (:white-space inherited))
+           text-overflow (or (:text-overflow gstyle) (:text-overflow inherited))]
        (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family
-                    text-shadow-x text-shadow-y text-shadow-blur text-shadow-color
-                    text-decoration text-align text-transform white-space (:generated/text node)))
+                    {:x text-shadow-x :y text-shadow-y :blur text-shadow-blur :color text-shadow-color}
+                    text-decoration text-align text-transform white-space text-overflow (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) (:line-height inherited)
                   (:font-weight inherited) (:font-style inherited) (:font-family inherited)
-                  (:text-shadow-x inherited) (:text-shadow-y inherited) (:text-shadow-blur inherited) (:text-shadow-color inherited)
+                  {:x (:text-shadow-x inherited) :y (:text-shadow-y inherited)
+                   :blur (:text-shadow-blur inherited) :color (:text-shadow-color inherited)}
                   (:text-decoration inherited)
-                  (:text-align inherited) (:text-transform inherited) (:white-space inherited) node)
+                  (:text-align inherited) (:text-transform inherited) (:white-space inherited) (:text-overflow inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -2971,12 +3031,14 @@
                text-align (or (:text-align st) (:text-align inherited))
                text-transform (or (:text-transform st) (:text-transform inherited))
                white-space (or (:white-space st) (:white-space inherited))
+               text-overflow (or (:text-overflow st) (:text-overflow inherited))
                inherited (assoc inherited :color color :font-size font-size :line-height line-height
                                 :font-weight font-weight :font-style font-style :font-family font-family
                                 :text-shadow-x text-shadow-x :text-shadow-y text-shadow-y
                                 :text-shadow-blur text-shadow-blur :text-shadow-color text-shadow-color
                                 :text-decoration text-decoration :text-align text-align
-                                :text-transform text-transform :white-space white-space)
+                                :text-transform text-transform :white-space white-space
+                                :text-overflow text-overflow)
                tag (:tag node)
                children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond

@@ -549,6 +549,67 @@
         ops (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 800}))]
     (is (= ["x" "y"] (map :text ops)))))
 
+;; ---- text-overflow: ellipsis -- only ever acts on an already-nowrap line ----
+
+(deftest text-overflow-ellipsis-truncates-an-overflowing-nowrap-line
+  (let [ops (text-ops-of :div {:white-space "nowrap" :text-overflow "ellipsis"}
+                          "this is a long line of text that would normally wrap" 100)]
+    (is (= 1 (count ops)) "ellipsis, like plain nowrap, must still keep everything on one line")
+    (is (str/ends-with? (:text (first ops)) "…")
+        "an overflowing nowrap line with ellipsis declared must end with the real ellipsis glyph")
+    (is (< (count (:text (first ops)))
+           (count "this is a long line of text that would normally wrap"))
+        "the truncated text must be strictly shorter than the original overflowing text")))
+
+(deftest text-overflow-ellipsis-leaves-a-line-that-already-fits-unchanged
+  (let [ops (text-ops-of :div {:white-space "nowrap" :text-overflow "ellipsis"} "short" 800)]
+    (is (= ["short"] (map :text ops))
+        "a nowrap line that already fits within its box must be left byte-for-byte untouched, not truncated")))
+
+(deftest text-overflow-has-no-effect-without-nowrap
+  ;; Real CSS's own requirement: text-overflow only ever takes effect on a
+  ;; non-wrapping block -- a wrapped, multi-line paragraph has no single
+  ;; "the line" to truncate, so ellipsis must be silently ignored here.
+  (let [ops (text-ops-of :div {:text-overflow "ellipsis"}
+                          "this is a long line of text that would normally wrap" 100)]
+    (is (> (count ops) 1) "the text must still wrap onto multiple lines exactly as if text-overflow were absent")
+    (is (not-any? #(str/ends-with? % "…") (map :text ops))
+        "none of the wrapped lines may be ellipsized -- text-overflow must be a pure no-op here")))
+
+(deftest text-overflow-absent-or-clip-does-not-truncate-a-nowrap-line
+  ;; Baseline, unaffected by this feature: nowrap with no text-overflow (or
+  ;; any value other than the literal "ellipsis") keeps overflowing exactly
+  ;; as it always has -- the pre-existing behavior this fix must not disturb.
+  (let [no-value (text-ops-of :div {:white-space "nowrap"}
+                               "this is a long line of text that would normally wrap" 100)
+        clip-value (text-ops-of :div {:white-space "nowrap" :text-overflow "clip"}
+                                 "this is a long line of text that would normally wrap" 100)]
+    (is (= "this is a long line of text that would normally wrap" (:text (first no-value))))
+    (is (= "this is a long line of text that would normally wrap" (:text (first clip-value)))
+        "clip is not the literal string \"ellipsis\", so it must fall through to the same untruncated overflow")))
+
+(deftest text-overflow-degrades-to-a-bare-ellipsis-when-even-that-alone-does-not-fit
+  ;; Honest degrade path: a box too narrow to fit even a single "…" must
+  ;; still produce the ellipsis alone, never an empty string or a crash.
+  (let [ops (text-ops-of :div {:white-space "nowrap" :text-overflow "ellipsis"}
+                          "this is a long line of text that would normally wrap" 1)]
+    (is (= ["…"] (map :text ops)))))
+
+(deftest text-overflow-is-a-real-inheritable-property
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:white-space "nowrap" :text-overflow "ellipsis"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "this is a long line of text that would normally wrap")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 100}))]
+    (is (= 1 (count ops)))
+    (is (str/ends-with? (:text (first ops)) "…")
+        "the child inherits both nowrap and text-overflow from its parent and must truncate too")))
+
 ;; ---- white-space: pre-wrap -- pre's newline-splitting + normal's re-wrap ----
 
 (deftest pre-wrap-re-wraps-a-too-long-segment-but-leaves-a-short-one-alone
