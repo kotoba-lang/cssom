@@ -386,13 +386,12 @@
    not the original untransformed string's.
 
    `white-space` -- the last item on this file's text-styling-property
-   survey -- is a REAL, spec-accurate inherited property, originally
-   scoped to `pre`/`nowrap` (`pre-wrap`/`pre-line` deferred, see
-   Follow-up in ADR-2607061100); `pre-wrap` was added as a direct,
-   tightly-scoped follow-up the very next cycle (`pre-line` remains
-   deferred -- it needs the SAME newline-preservation as `pre`/`pre-wrap`
-   but INTER-newline whitespace COLLAPSING like `normal`, a third,
-   distinct combination not yet implemented). `nowrap` skips word-wrapping
+   survey -- is a REAL, spec-accurate inherited property. All five real
+   CSS values are now supported: `normal` (the pre-existing default),
+   `nowrap`, `pre`, `pre-wrap`, and `pre-line`, the last three added
+   across three separate, tightly-scoped cycles (originally `pre`/
+   `nowrap` only, `pre-wrap` the very next cycle, `pre-line` the cycle
+   after that). `nowrap` skips word-wrapping
    entirely: the WHOLE text becomes a single line, left to overflow its
    box exactly like this file's existing 'let an oversized single word
    overflow rather than hyphenate' convention. `pre` splits `text` on
@@ -446,6 +445,18 @@
    from the CSS spec's own more exacting semantics, accepted rather than
    rewriting the established word-wrap algorithm itself for this cycle.
 
+   `pre-line` is the third, final combination: preserves hard `\\n`
+   breaks like `pre`/`pre-wrap`, but ALWAYS collapses each segment's own
+   internal whitespace runs to a single space first (`normal`'s own
+   behavior), THEN re-wraps if the collapsed segment doesn't fit --
+   unlike `pre-wrap`, `pre-line` never preserves multiple internal
+   spaces verbatim even when a segment already fits on one line, since
+   collapsing happens unconditionally before the fits-on-one-line check
+   ever runs. This is the one white-space value that is fully spec-
+   accurate with no accepted simplification at all -- `pre-line`'s own
+   real CSS semantics never promise verbatim internal spacing to begin
+   with, so there is no divergence to document here.
+
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
    `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
    docstring for the full rationale (this file is a pure, host-independent
@@ -471,6 +482,12 @@
                 (mapcat #(if measure-text
                            (text-lines-measured (fn [s] (measure-text s font-size)) content-w %)
                            (text-lines char-w content-w %))
+                        (str/split (str text) #"\n" -1))
+                (= "pre-line" white-space)
+                (mapcat #(let [collapsed (str/replace % #"\s+" " ")]
+                           (if measure-text
+                             (text-lines-measured (fn [s] (measure-text s font-size)) content-w collapsed)
+                             (text-lines char-w content-w collapsed)))
                         (str/split (str text) #"\n" -1))
                 measure-text (text-lines-measured #(measure-text % font-size) content-w text)
                 :else (text-lines char-w content-w text))

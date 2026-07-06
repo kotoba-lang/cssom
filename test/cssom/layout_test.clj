@@ -367,6 +367,52 @@
   (let [ops (text-ops-of :div {:white-space "pre-wrap"} "a\n\nb" 800)]
     (is (= ["a" "" "b"] (map :text ops)))))
 
+;; ---- white-space: pre-line -- pre-wrap's newline-split + normal's collapse ----
+
+(deftest pre-line-collapses-internal-whitespace-but-preserves-hard-breaks
+  ;; WITHOUT this fix, an unrecognized "pre-line" value falls back to
+  ;; text-lines on the WHOLE string (including the raw \n) -- since
+  ;; "a  b\nc   d" is short enough to fit on one line by the char-width
+  ;; heuristic, that fallback's own fits-verbatim fast path would return
+  ;; it as a SINGLE line with the literal \n still baked in, not two
+  ;; separately-split, collapsed lines.
+  (let [pre-line-ops (text-ops-of :div {:white-space "pre-line"} "a  b\nc   d" 800)
+        pre-wrap-ops (text-ops-of :div {:white-space "pre-wrap"} "a  b\nc   d" 800)]
+    (is (= ["a b" "c d"] (map :text pre-line-ops))
+        "pre-line collapses each segment's internal whitespace to single spaces")
+    (is (not= (map :text pre-line-ops) (map :text pre-wrap-ops))
+        "pre-line and pre-wrap must genuinely differ on the identical input -- pre-wrap preserves the same multiple spaces verbatim")))
+
+(deftest pre-line-still-wraps-a-too-long-segment-but-leaves-a-short-one-alone
+  (let [ops (text-ops-of :div {:white-space "pre-line"}
+                          "short\nthis is a genuinely long line that needs wrapping" 150)]
+    (is (= "short" (first (map :text ops)))
+        "a segment that already fits gets no re-wrapping at all -- WITHOUT this fix, the embedded newline is treated as just another whitespace run to collapse away, jumbling \"short\" together with the second segment's own words")
+    (is (> (count ops) 2)
+        "the long segment must be broken into more than one sub-line in this narrow box")
+    (is (apply < (map :y ops)) "every resulting line must be positioned strictly below the previous one")))
+
+(deftest pre-line-preserves-a-blank-line-between-two-segments
+  (let [ops (text-ops-of :div {:white-space "pre-line"} "a\n\nb" 800)]
+    (is (= ["a" "" "b"] (map :text ops)))))
+
+(deftest pre-line-is-a-real-inheritable-property
+  ;; A child inherits its parent's white-space: pre-line and both
+  ;; splits on its OWN embedded newline and collapses its OWN internal
+  ;; whitespace -- the same inherited-with-override shape every other
+  ;; text-styling property in this file has.
+  (let [[parent doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc parent)
+        doc (dom/set-style doc parent {:white-space "pre-line"})
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        [t doc] (dom/create-text-node doc "x  y\nz")
+        doc (dom/append-child doc child t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 800}))]
+    (is (= ["x y" "z"] (map :text ops)))))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints
