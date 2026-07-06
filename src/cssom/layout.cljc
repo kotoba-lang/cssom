@@ -119,9 +119,14 @@
    skipped rather than combined/overridden). An `<ol>`'s own `start=` HTML
    attribute is honored (real, common HTML for resuming a numbered list at
    an arbitrary number, including negative/zero per real HTML5 semantics)
-   -- see implicit-marker-content. Explicitly out of scope: the full
+   -- see implicit-marker-content. An `<li>`'s own `value=` HTML attribute
+   is also honored (real, common HTML for setting that one item's own
+   displayed number directly, e.g. after a manual reorder -- every
+   following sibling without its OWN `value=` then continues counting
+   from THAT number, not from the original position, matching real
+   HTML5 semantics exactly). Explicitly out of scope: the full
    `list-style-type` property (circle/square/roman/alpha/...),
-   `list-style-position`, `<ol reversed>` and `<li value=>`, and `<menu>`.
+   `list-style-position`, `<ol reversed>`, and `<menu>`.
 
    `<details>`/`<summary>` default disclosure hiding (see
    with-details-visibility, right below with-implicit-list-markers): a
@@ -1992,27 +1997,24 @@
       (= "none" (style node :list-style-type))))
 
 (defn- implicit-marker-content
-  "The implicit marker text for the `position`-th (1-based) direct `:li`
-   child of a `parent-tag` (:ul/:ol) container -- `\"• \"` (one bullet
-   character, one space) for :ul, `\"<start + position - 1>. \"` for :ol,
-   matching real browsers' own UA-stylesheet defaults (see the section
-   comment above for the remaining, deliberately bounded scope: no other
-   list-style-type values, no :ol `reversed`, no :li `value=`). `start`
-   (an :ol's own `start=` HTML attribute, real, common CSS/HTML for
-   resuming a numbered list at an arbitrary number -- e.g. splitting one
-   logical numbered list across two `<ol>` elements around an aside) is
-   1-based like `position` itself, so `position` 1 with `start` 5 numbers
-   \"5. \", matching real HTML5 `start=` semantics exactly (a negative or
-   zero `start` is real, legal HTML too -- `<ol start=\"-2\">` legitimately
-   starts at -2 -- so this is a plain arithmetic offset, never clamped to
-   1). Any other `parent-tag` returns nil (with-implicit-list-markers
-   never actually calls this for one, but kept total rather than partial
-   defensively), matching the 'no marker' contract generated-content-node
-   already establishes for absent `:content`."
-  [parent-tag position start]
+  "The implicit marker text for a direct `:li` child of a `parent-tag`
+   (:ul/:ol) container, already resolved to its final displayed `number`
+   (1-based, `start`/`value=`-adjusted -- see with-implicit-list-markers,
+   the only caller) -- `\"• \"` (one bullet character, one space) for
+   :ul, `\"<number>. \"` for :ol, matching real browsers' own UA-
+   stylesheet defaults (see the section comment above for the remaining,
+   deliberately bounded scope: no other list-style-type values, no :ol
+   `reversed`). `number` is a plain arithmetic value, never clamped to 1
+   -- a negative or zero `start`/`value=` is real, legal HTML too (e.g.
+   `<ol start=\"-2\">` legitimately starts at -2). Any other `parent-tag`
+   returns nil (with-implicit-list-markers never actually calls this for
+   one, but kept total rather than partial defensively), matching the
+   'no marker' contract generated-content-node already establishes for
+   absent `:content`."
+  [parent-tag number]
   (case parent-tag
     :ul "• "
-    :ol (str (+ start (dec position)) ". ")
+    :ol (str number ". ")
     nil))
 
 (defn- with-implicit-list-markers
@@ -2083,11 +2085,32 @@
    without incrementing the count. `node`'s own `start=` HTML attribute
    (parsed once, up front, via `parse-int` with a fallback of 1 -- i.e.
    absent/malformed `start=` behaves exactly as before this offset
-   existed) shifts every position by a constant amount before it ever
-   reaches `implicit-marker-content`, so the position-counting logic
-   above (suppressed <li>s still counted, non-<li> children ignored) is
-   completely unaffected by it -- `start` only changes what number a
-   given position DISPLAYS as, never which position an <li> occupies.
+   existed) shifts every position by a constant amount, so the
+   position-counting logic above (suppressed <li>s still counted,
+   non-<li> children ignored) is completely unaffected by it -- `start`
+   only changes what number a given position DISPLAYS as, never which
+   position an <li> occupies.
+
+   Each <li>'s OWN `value=` HTML attribute (parsed per-<li>, independent
+   of `start=`) overrides that one item's displayed number directly --
+   real HTML5 semantics: a following sibling with no `value=` of its own
+   then continues counting from `value + 1`, not from the position it
+   would otherwise have occupied, so `value=` shifts every LATER item's
+   number too, not just the one it's set on. This is implemented by
+   threading the running DISPLAYED number itself as the reduce's own
+   accumulator (rather than a separate position counter with `start`
+   applied afterward, the shape before this feature) -- each counted <li>
+   either takes its own explicit `value=` verbatim or increments the
+   previous running number by 1, so a later plain <li> automatically
+   continues from wherever the last explicit `value=` (or `start`) left
+   off, with no separate bookkeeping needed. A malformed/non-numeric
+   `value=` is ignored (falls through to plain +1 continuation), the
+   same degrade-don't-guess convention `start=` already established. A
+   suppressed <li>'s own `value=` still shifts subsequent numbering
+   (consistent with suppression never affecting POSITION counting above
+   -- CSS `list-style: none` only hides the marker box, it doesn't
+   remove the element from HTML5's own counting semantics either).
+
    This is intentionally NOT the same number space as cssom.core's own
    counter-reset/counter-increment machinery -- see the section comment
    above for why -- so it can never collide with (or be perturbed by) a
@@ -2108,14 +2131,14 @@
         (first
          (reduce (fn [[out n] child]
                    (if (and (map? child) (= :li (:tag child)))
-                     (let [n (inc n)]
+                     (let [n (or (parse-int (get-in child [:attrs :value]) nil) (inc n))]
                        (if (or (list-style-none? child) (pseudo-content child :before))
                          [(conj out child) n]
                          [(conj out (assoc-in child [:attrs :pseudo/before]
-                                               {:content (implicit-marker-content parent-tag n start)}))
+                                               {:content (implicit-marker-content parent-tag n)}))
                           n]))
                      [(conj out child) n]))
-                 [[] 0]
+                 [[] (dec start)]
                  children)))
       children)))
 

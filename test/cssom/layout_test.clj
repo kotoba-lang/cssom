@@ -2355,6 +2355,157 @@
          <ol>'s own, unrelated numbering -- the inner list has no start=
          of its own, so it correctly still begins at the plain default 1")))
 
+(deftest li-value-attribute-overrides-that-items-number-and-shifts-later-siblings
+  ;; Real, common HTML: an <li value=N> overrides that one item's own
+  ;; displayed number directly, and every LATER sibling with no value=
+  ;; of its own continues counting from value+1, not from the position
+  ;; it would otherwise have occupied -- real HTML5 semantics, distinct
+  ;; from start= (which only offsets the very first item).
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "First")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        doc (dom/set-attribute doc li2 :value "5")
+        [t2 doc] (dom/create-text-node doc "Second")
+        doc (dom/append-child doc li2 t2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li3)
+        [t3 doc] (dom/create-text-node doc "Third")
+        doc (dom/append-child doc li3 t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. First" "5. Second" "6. Third"] (mapv :text text-ops))
+        "the second item's value=5 overrides its own number, and the third
+         item correctly continues from 6, not from its original position 3")))
+
+(deftest li-value-and-ol-start-are-independent-mechanisms
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        doc (dom/set-attribute doc ol :start "10")
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "A")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        doc (dom/set-attribute doc li2 :value "1")
+        [t2 doc] (dom/create-text-node doc "B")
+        doc (dom/append-child doc li2 t2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li3)
+        [t3 doc] (dom/create-text-node doc "C")
+        doc (dom/append-child doc li3 t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["10. A" "1. B" "2. C"] (mapv :text text-ops))
+        "start=10 sets the first item's number, but the second item's own
+         value=1 completely overrides it regardless, and the third item
+         continues from THAT (2), not from start's own number space")))
+
+(deftest li-negative-value-is-real-legal-html5-not-clamped
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "A")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        doc (dom/set-attribute doc li2 :value "-2")
+        [t2 doc] (dom/create-text-node doc "B")
+        doc (dom/append-child doc li2 t2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li3)
+        [t3 doc] (dom/create-text-node doc "C")
+        doc (dom/append-child doc li3 t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. A" "-2. B" "-1. C"] (mapv :text text-ops)))))
+
+(deftest li-malformed-value-falls-back-to-plain-continuation-not-a-crash
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "A")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        doc (dom/set-attribute doc li2 :value "not-a-number")
+        [t2 doc] (dom/create-text-node doc "B")
+        doc (dom/append-child doc li2 t2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li3)
+        [t3 doc] (dom/create-text-node doc "C")
+        doc (dom/append-child doc li3 t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. A" "2. B" "3. C"] (mapv :text text-ops))
+        "a malformed value= behaves exactly as if it were absent -- a
+         graceful fallback to plain +1 continuation, not a crash")))
+
+(deftest li-value-on-ul-has-no-numbering-effect
+  ;; <ul> markers are always a bare bullet -- value= is an :ol-only HTML5
+  ;; attribute (the HTML spec doesn't even define it for <ul>), so it
+  ;; must have zero effect here, matching implicit-marker-content's own
+  ;; :ul branch never consulting `number` at all.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [t1 doc] (dom/create-text-node doc "First")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        doc (dom/set-attribute doc li2 :value "5")
+        [t2 doc] (dom/create-text-node doc "Second")
+        doc (dom/append-child doc li2 t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["• First" "• Second"] (mapv :text text-ops)))))
+
+(deftest li-value-on-a-suppressed-li-still-shifts-later-siblings
+  ;; CSS list-style:none only hides that ONE marker BOX -- it must not
+  ;; remove the <li> from HTML5's own value=/position counting, matching
+  ;; how a suppressed <li>'s plain POSITION already keeps counting today.
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li1)
+        [t1 doc] (dom/create-text-node doc "A")
+        doc (dom/append-child doc li1 t1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li2)
+        doc (dom/set-attribute doc li2 :value "5")
+        doc (dom/set-style doc li2 {:list-style "none"})
+        [t2 doc] (dom/create-text-node doc "B")
+        doc (dom/append-child doc li2 t2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ol li3)
+        [t3 doc] (dom/create-text-node doc "C")
+        doc (dom/append-child doc li3 t3)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-ops (filterv #(= :text (:draw/op %)) ops)]
+    (is (= ["1. A" "B" "6. C"] (mapv :text text-ops))
+        "the suppressed second item shows no marker at all, but its own
+         value=5 still shifts the third item's number to 6")))
+
 ;; ---- checkbox <input checked> visual rendering ----
 
 (defn- checkbox-draw-text
