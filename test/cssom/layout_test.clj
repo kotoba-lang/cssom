@@ -262,6 +262,70 @@
     (is (= "CHILD TEXT" (:text text-op))
         "the inherited uppercase must transform the child's own text too")))
 
+;; ---- white-space: pre/nowrap -- the last item on the text-styling survey ----
+
+(defn- text-ops-of [tag style text width]
+  (let [[el doc] (dom/create-element dom/empty-document tag)
+        doc (dom/set-root doc el)
+        doc (if style (dom/set-style doc el style) doc)
+        [t doc] (dom/create-text-node doc text)
+        doc (dom/append-child doc el t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)]
+    (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width width}))))
+
+(deftest pre-splits-embedded-newlines-into-separate-draw-op-lines
+  ;; The confirmed repro: BEFORE this fix, a text node with an embedded
+  ;; \n either vanished into a single :text draw-op whose string still
+  ;; had the \n baked in (a raw newline inside one real Canvas 2D
+  ;; fillText call does NOT create a visual line break) or got the
+  ;; newline silently collapsed away by ordinary word-wrapping -- either
+  ;; way a real <pre> block's line structure was never actually visible.
+  (let [ops (text-ops-of :div {:white-space "pre"} "a\nb\nc" 800)]
+    (is (= ["a" "b" "c"] (map :text ops)))
+    (is (apply < (map :y ops)) "each split line must be positioned strictly below the previous one")))
+
+(deftest pre-tag-gets-a-ua-default-white-space-pre-with-no-author-css-at-all
+  ;; Matches every real browser's own default UA stylesheet (pre { white-
+  ;; space: pre; }) -- a bare, unstyled <pre> must show its real line
+  ;; structure without requiring an author to write explicit CSS for it.
+  (let [ops (text-ops-of :pre nil "line one\nline two" 800)]
+    (is (= ["line one" "line two"] (map :text ops)))))
+
+(deftest ordinary-element-without-white-space-pre-is-unaffected
+  ;; Documented architectural limitation: kotoba-lang/htmldom's own
+  ;; parse-time whitespace collapsing is HTML-structural (raw-text tags /
+  ;; a real <pre> ancestor), not CSS-driven, so an embedded \n in an
+  ;; ordinary element's source HTML is already gone before cssom ever
+  ;; sees the text -- explicit white-space: pre on a plain <div> cannot
+  ;; recover a newline this test constructs directly (bypassing the HTML
+  ;; parser), but a <div> with NO white-space at all must still behave
+  ;; exactly as before this feature existed: byte-for-byte unaffected.
+  (let [ops (text-ops-of :div nil "a\nb\nc" 800)]
+    (is (= ["a\nb\nc"] (map :text ops))
+        "pre-existing behavior, unchanged: the embedded newline is baked into a single draw-op's string")))
+
+(deftest nowrap-keeps-long-text-on-one-line-overflowing-a-narrow-box
+  (let [wrapped (text-ops-of :div nil "this is a long line of text that would normally wrap" 100)
+        nowrapped (text-ops-of :div {:white-space "nowrap"} "this is a long line of text that would normally wrap" 100)]
+    (is (> (count wrapped) 1) "sanity check: the same text without nowrap really does wrap in this narrow box")
+    (is (= 1 (count nowrapped)) "nowrap must keep the whole text on a single, overflowing line")))
+
+(deftest white-space-is-a-real-inheritable-property
+  ;; A <span> nested inside a <pre> inherits white-space: pre and splits
+  ;; its OWN text on embedded newlines too -- the same inherited-with-
+  ;; override shape every other text-styling property in this file has.
+  (let [[pre doc] (dom/create-element dom/empty-document :pre)
+        doc (dom/set-root doc pre)
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc pre span)
+        [t doc] (dom/create-text-node doc "x\ny")
+        doc (dom/append-child doc span t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 800}))]
+    (is (= ["x" "y"] (map :text ops)))))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints

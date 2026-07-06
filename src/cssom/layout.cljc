@@ -385,6 +385,43 @@
    wrap according to the actual rendered (transformed) characters' width,
    not the original untransformed string's.
 
+   `white-space` -- the last item on this file's text-styling-property
+   survey -- is a REAL, spec-accurate inherited property, deliberately
+   scoped to `pre`/`nowrap` this cycle (`pre-wrap`/`pre-line` deferred,
+   see Follow-up in ADR-2607061100). `nowrap` skips word-wrapping
+   entirely: the WHOLE text becomes a single line, left to overflow its
+   box exactly like this file's existing 'let an oversized single word
+   overflow rather than hyphenate' convention. `pre` splits `text` on
+   LITERAL `\\n` characters (not the normal `#\"\\s+\"` word-wrap
+   splitting) and does NOT re-wrap each resulting segment, preserving
+   whatever verbatim whitespace/structure is already inside each one --
+   this is a real, confirmed-via-REPL paint bug fix: BEFORE this, a text
+   node containing an embedded `\\n` (kotoba-lang/htmldom already
+   preserves these verbatim for real `<pre>`/raw-text-tag content, see
+   htmldom.core/preserve-whitespace-context?) either silently vanished
+   into a single :text draw-op whose string still had the `\\n` baked in
+   (a raw newline character inside one Canvas 2D `fillText` call does
+   NOT create a visual line break -- browsers render it as an invisible
+   or tofu-like glyph, never a break), or got its embedded newlines
+   silently destroyed by ordinary word-wrap collapsing (`text-lines`'s
+   `#\"\\s+\"` split treats a newline as just another whitespace run to
+   collapse away) -- either way, a real `<pre>` block's line structure
+   was never actually visible in a real rendered page. KNOWN,
+   deliberately scoped limitation: `white-space: pre` on an ORDINARY
+   element (not `<pre>`/a raw-text tag) whose source HTML already had
+   its embedded newlines collapsed to single spaces by
+   kotoba-lang/htmldom's own HTML-structural (not CSS-driven) parse-time
+   whitespace handling cannot recover those lost newlines here -- by the
+   time this file ever sees the text, they are already gone. A real
+   browser defers ALL whitespace collapsing to layout time (CSS-driven,
+   tag-independent), which this pipeline does not; fixing that
+   architectural gap would mean changing htmldom's parse-time behavior
+   itself, out of scope for this cycle. `<pre>`'s own UA-stylesheet
+   default (`white-space: pre` with no author CSS at all, matching every
+   real browser's default stylesheet) is wired in node-style below, so a
+   bare, unstyled `<pre>` renders its line structure correctly out of
+   the box without requiring an author to write explicit CSS for it.
+
    Text measurement is pluggable via an OPTIONAL `:measure-text` key on
    `theme` -- a `(fn [text font-size] width-in-px)` -- see draw-ops'
    docstring for the full rationale (this file is a pure, host-independent
@@ -396,16 +433,18 @@
    resolves to the EXACT SAME char-w-approximation code path
    (text-lines/char-w below) this file has always used, so today's
    word-wrap behavior is completely unaffected unless a host opts in."
-  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform text]
+  [theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform white-space text]
   (let [line-height (:line-height theme)
         padding (:padding theme)
         measure-text (:measure-text theme)
         char-w (long (* 0.6 font-size))
         content-w (max 0 (- avail-width (* 2 padding)))
         text (apply-text-transform text-transform text)
-        lines (if measure-text
-                (text-lines-measured #(measure-text % font-size) content-w text)
-                (text-lines char-w content-w text))
+        lines (cond
+                (= "pre" white-space) (str/split (str text) #"\n" -1)
+                (= "nowrap" white-space) [(str text)]
+                measure-text (text-lines-measured #(measure-text % font-size) content-w text)
+                :else (text-lines char-w content-w text))
         line-w #(if measure-text (measure-text % font-size) (* (count %) char-w))
         max-line-w (if measure-text
                      (apply max 0 (map #(measure-text % font-size) lines))
@@ -452,6 +491,7 @@
    :text-decoration (style node :text-decoration)
    :text-align (style node :text-align)
    :text-transform (style node :text-transform)
+   :white-space (or (style node :white-space) (when (= :pre (:tag node)) "pre"))
    :opacity (parse-dbl (style node :opacity) 1.0)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
@@ -2540,13 +2580,14 @@
            font-style (or (:font-style gstyle) (:font-style inherited))
            text-decoration (or (:text-decoration gstyle) (:text-decoration inherited))
            text-align (or (:text-align gstyle) (:text-align inherited))
-           text-transform (or (:text-transform gstyle) (:text-transform inherited))]
-       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform (:generated/text node)))
+           text-transform (or (:text-transform gstyle) (:text-transform inherited))
+           white-space (or (:white-space gstyle) (:white-space inherited))]
+       (layout-text theme x y avail-width opacity color font-size font-weight font-style text-decoration text-align text-transform white-space (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited)
                   (:font-weight inherited) (:font-style inherited) (:text-decoration inherited)
-                  (:text-align inherited) (:text-transform inherited) node)
+                  (:text-align inherited) (:text-transform inherited) (:white-space inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -2571,10 +2612,11 @@
                text-decoration (or (:text-decoration st) (:text-decoration inherited))
                text-align (or (:text-align st) (:text-align inherited))
                text-transform (or (:text-transform st) (:text-transform inherited))
+               white-space (or (:white-space st) (:white-space inherited))
                inherited (assoc inherited :color color :font-size font-size
                                 :font-weight font-weight :font-style font-style
                                 :text-decoration text-decoration :text-align text-align
-                                :text-transform text-transform)
+                                :text-transform text-transform :white-space white-space)
                tag (:tag node)
                children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond
