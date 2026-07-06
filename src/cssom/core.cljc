@@ -2282,6 +2282,42 @@
                           :cljs (try (re-pattern pattern) (catch :default _ nil)))]
            (not (re-matches re value))))))
 
+(def ^:private email-format-pattern
+  "The real WHATWG HTML5 email-format regex (verbatim -- the same one
+   real browsers use for `type=\"email\"` `typeMismatch` checking), not a
+   hand-simplified approximation. Deliberately still an honest scope-cut
+   in one specific way: the `multiple` attribute (a comma-separated list
+   of addresses, each individually checked) is NOT supported -- a single
+   address only, matching this file's own established 'single X only'
+   posture elsewhere (e.g. `text-shadow`'s own single-shadow scope-cut)."
+  #"[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*")
+
+(def ^:private url-format-pattern
+  "A deliberately simplified `type=\"url\"` format check -- real HTML5
+   requires successfully parsing via the full WHATWG URL parser (which
+   accepts almost anything with a scheme); this engine has no such parser,
+   so this instead requires the single most common practical shape, an
+   absolute URL with a real scheme (`scheme://...`) -- an honest,
+   documented scope-cut consistent with this file's other 'reasonable
+   baseline, not full spec coverage' checks."
+  #"[a-zA-Z][a-zA-Z0-9+.-]*://\S+")
+
+(defn- type-mismatch?
+  "Real HTML5 `typeMismatch`: a non-blank value on `type=\"email\"`/
+   `\"url\"` that doesn't match that type's own format -- previously read
+   NOWHERE at all. Mirrors `range-invalid?`/`pattern-invalid?`'s own
+   shape -- deliberately NOT enforced for a blank value (that's
+   `required`'s concern, not `typeMismatch`'s). Fixed together with the
+   identical gap in kotoba-lang/browser's own document_input.cljc
+   `type-mismatch?` and quickjs_wasm.cljc's JS-facing
+   `__kotobaValidationReason`."
+  [type value]
+  (and (not (str/blank? value))
+       (case type
+         "email" (not (re-matches email-format-pattern value))
+         "url" (not (re-matches url-format-pattern value))
+         false)))
+
 (defn- constraint-invalid?
   [document node]
   (let [attrs (:attrs node)
@@ -2305,7 +2341,9 @@
              (and (= :input (:tag node))
                   (range-invalid? type value attrs))
              (and (= :input (:tag node))
-                  (pattern-invalid? type value attrs))))))
+                  (pattern-invalid? type value attrs))
+             (and (= :input (:tag node))
+                  (type-mismatch? type value))))))
 
 (defn- constraint-valid?
   [document node]

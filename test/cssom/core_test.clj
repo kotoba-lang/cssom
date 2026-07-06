@@ -385,6 +385,84 @@
     (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
         "pattern is real HTML5's own input-only restriction -- it must have zero effect on a <textarea>")))
 
+;; ---- :invalid/:valid honoring real type="email"/"url" format checking
+;; (real HTML5 typeMismatch) -- the other half of the same scope-cut
+;; pattern-mismatch closed above. ----
+
+(deftest malformed-email-matches-invalid-not-valid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "email")
+        doc (dom/set-attribute doc el :value "not-an-email")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes el :attrs :style/color]))
+        "a malformed email value must match :invalid")))
+
+(deftest well-formed-email-matches-valid-not-invalid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "email")
+        doc (dom/set-attribute doc el :value "user@example.com")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "a well-formed email value must match :valid")))
+
+(deftest malformed-url-matches-invalid-not-valid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "url")
+        doc (dom/set-attribute doc el :value "not a url")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes el :attrs :style/color]))
+        "a malformed url value must match :invalid")))
+
+(deftest well-formed-url-matches-valid-not-invalid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "url")
+        doc (dom/set-attribute doc el :value "https://example.com/path")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "a well-formed url value must match :valid")))
+
+(deftest blank-email-does-not-force-invalid
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "email")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "typeMismatch is not required's concern -- a blank, non-required email value must still match :valid")))
+
+(deftest malformed-email-on-a-text-input-has-no-effect
+  ;; type-mismatch only ever applies to type="email"/"url" -- a plain
+  ;; text input with an email-shaped-but-irrelevant pattern-mismatching
+  ;; value must be unaffected.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc el :type "text")
+        doc (dom/set-attribute doc el :value "not-an-email")
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
+        "type=\"text\" must never be subject to email/url format checking")))
+
 ;; ---- sibling combinators (+ / ~) ----
 
 (deftest parses-adjacent-and-general-sibling-combinators
