@@ -124,9 +124,12 @@
    displayed number directly, e.g. after a manual reorder -- every
    following sibling without its OWN `value=` then continues counting
    from THAT number, not from the original position, matching real
-   HTML5 semantics exactly). Explicitly out of scope: the full
-   `list-style-type` property (circle/square/roman/alpha/...),
-   `list-style-position`, `<ol reversed>`, and `<menu>`.
+   HTML5 semantics exactly). An `<ol>`'s own `reversed` HTML5 boolean
+   attribute is also honored (counts DOWN instead of up; with no
+   explicit `start=`, defaults `start` to the total count of direct
+   <li> children, matching real HTML5/browser semantics). Explicitly
+   out of scope: the full `list-style-type` property (circle/square/
+   roman/alpha/...), `list-style-position`, and `<menu>`.
 
    `<details>`/`<summary>` default disclosure hiding (see
    with-details-visibility, right below with-implicit-list-markers): a
@@ -1999,14 +2002,17 @@
 (defn- implicit-marker-content
   "The implicit marker text for a direct `:li` child of a `parent-tag`
    (:ul/:ol) container, already resolved to its final displayed `number`
-   (1-based, `start`/`value=`-adjusted -- see with-implicit-list-markers,
-   the only caller) -- `\"• \"` (one bullet character, one space) for
-   :ul, `\"<number>. \"` for :ol, matching real browsers' own UA-
-   stylesheet defaults (see the section comment above for the remaining,
-   deliberately bounded scope: no other list-style-type values, no :ol
-   `reversed`). `number` is a plain arithmetic value, never clamped to 1
-   -- a negative or zero `start`/`value=` is real, legal HTML too (e.g.
-   `<ol start=\"-2\">` legitimately starts at -2). Any other `parent-tag`
+   (1-based, `start`/`value=`/`reversed`-adjusted -- see
+   with-implicit-list-markers, the only caller, for all of that
+   direction/offset logic; this fn itself is direction-agnostic, just
+   rendering whatever final `number` it's handed) -- `\"• \"` (one
+   bullet character, one space) for :ul, `\"<number>. \"` for :ol,
+   matching real browsers' own UA-stylesheet defaults (see the section
+   comment above for the remaining, deliberately bounded scope: no
+   other list-style-type values). `number` is a plain arithmetic value,
+   never clamped to 1 -- a negative or zero `start`/`value=` is real,
+   legal HTML too (e.g. `<ol start=\"-2\">` legitimately starts at -2).
+   Any other `parent-tag`
    returns nil (with-implicit-list-markers never actually calls this for
    one, but kept total rather than partial defensively), matching the
    'no marker' contract generated-content-node already establishes for
@@ -2111,6 +2117,23 @@
    -- CSS `list-style: none` only hides the marker box, it doesn't
    remove the element from HTML5's own counting semantics either).
 
+   `node`'s own `reversed` HTML5 boolean attribute (checked via
+   truthy-attr? -- the same real, common-XHTML-form-aware boolean check
+   already established for `checked`/`open`, so `reversed=\"reversed\"`
+   is recognized identically to a bare `reversed`) reverses the counting
+   DIRECTION: each counted <li> DECREMENTS the running number instead of
+   incrementing it. When `reversed` is present with NO explicit `start=`,
+   `start` itself defaults to the total COUNT of direct <li> children
+   (matching real HTML5/browser semantics exactly -- a 3-item reversed
+   list numbers 3, 2, 1) rather than the normal default of 1; an
+   explicit `start=` still simply sets what the FIRST item displays,
+   counting down from there instead of up. Every other mechanism above
+   (per-<li> `value=` override, malformed-value/malformed-start
+   graceful fallback, suppressed-<li> still shifting later numbering) is
+   completely direction-agnostic -- `value=`'s own override always wins
+   regardless of direction, and a later plain <li> simply continues by
+   whichever step (+1 or -1) is currently active.
+
    This is intentionally NOT the same number space as cssom.core's own
    counter-reset/counter-increment machinery -- see the section comment
    above for why -- so it can never collide with (or be perturbed by) a
@@ -2121,24 +2144,29 @@
    nested one level deeper, inside one of the <li>s), so it is only ever
    processed by a LATER, separate call to this same function -- once
    layout-node recurses into that inner <ol>/<ul> as ITS OWN node -- which
-   starts its own loop fresh from position 1 (and reads its OWN `start=`
-   attribute, if any -- entirely independent of whatever the outer <ol>'s
-   `start=` was), with no shared state of any kind between the two calls."
+   starts its own loop fresh from position 1 (and reads its OWN `start=`/
+   `reversed` attributes, if any -- entirely independent of whatever the
+   outer <ol>'s own were), with no shared state of any kind between the
+   two calls."
   [node children]
   (let [parent-tag (:tag node)]
     (if (and (contains? #{:ul :ol} parent-tag) (not (list-style-none? node)))
-      (let [start (parse-int (get-in node [:attrs :start]) 1)]
+      (let [reversed? (truthy-attr? (get-in node [:attrs :reversed]))
+            li-count (count (filter #(and (map? %) (= :li (:tag %))) children))
+            start (parse-int (get-in node [:attrs :start]) (if reversed? li-count 1))
+            step (if reversed? dec inc)
+            init-n (if reversed? (inc start) (dec start))]
         (first
          (reduce (fn [[out n] child]
                    (if (and (map? child) (= :li (:tag child)))
-                     (let [n (or (parse-int (get-in child [:attrs :value]) nil) (inc n))]
+                     (let [n (or (parse-int (get-in child [:attrs :value]) nil) (step n))]
                        (if (or (list-style-none? child) (pseudo-content child :before))
                          [(conj out child) n]
                          [(conj out (assoc-in child [:attrs :pseudo/before]
                                                {:content (implicit-marker-content parent-tag n)}))
                           n]))
                      [(conj out child) n]))
-                 [[] (dec start)]
+                 [[] init-n]
                  children)))
       children)))
 

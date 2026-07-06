@@ -2506,6 +2506,68 @@
         "the suppressed second item shows no marker at all, but its own
          value=5 still shifts the third item's number to 6")))
 
+(defn- reversed-ol-markers
+  "Builds a real <ol> with `ol-attrs` and one <li> per `[text li-attrs]`
+   pair in `li-specs`, then returns the real merged marker+text draw-op
+   strings, in document order -- a small helper mirroring the shape of
+   this file's own repeated ol/li-construction tests above, needed here
+   since ol-reversed has more scenario combinations to cover than the
+   earlier start=/value= tests did."
+  [ol-attrs li-specs]
+  (let [[ol doc] (dom/create-element dom/empty-document :ol)
+        doc (dom/set-root doc ol)
+        doc (reduce (fn [doc [k v]] (dom/set-attribute doc ol k v)) doc ol-attrs)
+        doc (reduce (fn [doc [text attrs]]
+                      (let [[li doc] (dom/create-element doc :li)
+                            doc (dom/append-child doc ol li)
+                            doc (reduce (fn [doc [k v]] (dom/set-attribute doc li k v)) doc attrs)
+                            [t doc] (dom/create-text-node doc text)
+                            doc (dom/append-child doc li t)]
+                        doc))
+                    doc li-specs)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (mapv :text (filterv #(= :text (:draw/op %)) ops))))
+
+(deftest ol-reversed-with-no-start-defaults-to-li-count-and-counts-down
+  ;; Real HTML5/browser semantics: reversed with no explicit start=
+  ;; defaults start to the TOTAL COUNT of direct <li> children, then
+  ;; counts down -- a 3-item reversed list numbers 3, 2, 1, not 1, 2, 3.
+  (is (= ["3. a" "2. b" "1. c"]
+         (reversed-ol-markers {:reversed true} [["a" {}] ["b" {}] ["c" {}]]))))
+
+(deftest ol-reversed-with-explicit-start-counts-down-from-it
+  (is (= ["10. a" "9. b"]
+         (reversed-ol-markers {:reversed true :start "10"} [["a" {}] ["b" {}]]))))
+
+(deftest ol-reversed-recognizes-the-real-xhtml-explicit-form
+  ;; reversed="reversed" must be recognized identically to a bare
+  ;; reversed -- the same truthy-attr? real-boolean-attribute check
+  ;; already established for checked/open, reused here rather than a
+  ;; naive (true? ...) that only recognizes htmldom's own bare-attribute
+  ;; sentinel value.
+  (is (= ["3. a" "2. b" "1. c"]
+         (reversed-ol-markers {:reversed "reversed"} [["a" {}] ["b" {}] ["c" {}]]))))
+
+(deftest ol-reversed-composes-with-a-mid-list-value-override
+  ;; value= always wins regardless of direction, and a later plain <li>
+  ;; continues counting DOWN from that override, not back to the
+  ;; original reversed sequence.
+  (is (= ["3. a" "20. b" "19. c"]
+         (reversed-ol-markers {:reversed true} [["a" {}] ["b" {:value "20"}] ["c" {}]]))))
+
+(deftest ol-without-reversed-is-unaffected-baseline
+  (is (= ["1. a" "2. b" "3. c"]
+         (reversed-ol-markers {} [["a" {}] ["b" {}] ["c" {}]]))))
+
+(deftest ol-reversed-with-malformed-start-falls-back-to-li-count-not-one
+  ;; A malformed start= on a REVERSED list must fall back to the
+  ;; reversed-aware default (li-count), not silently revert to the
+  ;; ordinary default of 1 -- a graceful, direction-aware fallback.
+  (is (= ["3. a" "2. b" "1. c"]
+         (reversed-ol-markers {:reversed true :start "nope"} [["a" {}] ["b" {}] ["c" {}]]))))
+
 ;; ---- checkbox <input checked> visual rendering ----
 
 (defn- checkbox-draw-text
