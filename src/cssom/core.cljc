@@ -1083,6 +1083,94 @@
             {}
             tokens)))
 
+(def ^:private font-shorthand-style-keywords
+  #{"italic" "oblique"})
+
+(def ^:private font-shorthand-weight-keywords
+  #{"bold" "bolder" "lighter" "100" "200" "300" "400" "500" "600" "700" "800" "900"})
+
+(def ^:private font-shorthand-skip-keywords
+  ;; `normal` (real CSS's own reset value, legal in the style/variant/
+  ;; weight/stretch slot -- deliberately a no-op here, since simply not
+  ;; assigning that longhand already produces the same "unspecified,
+  ;; inherit/default" outcome) plus font-variant/font-stretch keywords
+  ;; this engine has no longhand support for at all (no `font-variant`/
+  ;; `font-stretch` property is read anywhere in layout.cljc) -- consumed
+  ;; and dropped here rather than mis-parsed as the start of font-family.
+  #{"normal" "small-caps" "condensed" "expanded" "semi-condensed" "semi-expanded"
+    "extra-condensed" "extra-expanded" "ultra-condensed" "ultra-expanded"})
+
+(defn- expand-font-shorthand
+  "Parses a `font` shorthand value (real CSS's own grammar, an OPTIONAL
+   leading run of `<font-style>||<font-variant>||<font-weight>||
+   <font-stretch>` tokens in any order, then a REQUIRED `<font-size>
+   [/<line-height>]?`, then a REQUIRED `<font-family>` list taking up the
+   REST of the value) into a map of whichever of `:font-style`/`:font-
+   weight`/`:font-size`/`:line-height`/`:font-family` it actually
+   specifies -- previously read NOWHERE at all, `font` stored verbatim as
+   a single unrecognized `:font` key (confirmed via direct REPL
+   reproduction: `font: italic bold 14px/1.5 sans-serif` resolved to
+   `{:font \"italic bold 14px/1.5 sans-serif\"}`, none of the 5 real
+   longhands this shorthand expands to -- all already fully wired in
+   `cssom.layout` -- ever actually set).
+
+   Deliberately scoped to the single most common real-world form: the
+   leading run only recognizes `italic`/`oblique` (style) and `bold`/
+   `bolder`/`lighter`/a bare `100`-`900` multiple-of-100 (weight) --
+   `font-variant`/`font-stretch` keywords and the reset value `normal`
+   are recognized just enough to be consumed WITHOUT being mis-parsed as
+   the start of `font-family`, but set no longhand of their own (neither
+   property exists anywhere in this engine). The 6 real CSS system-font
+   keywords (`caption`/`icon`/`menu`/`message-box`/`small-caption`/
+   `status-bar`) are NOT supported, the same 'reasonable baseline, not
+   full spec coverage' posture as the other 4 shorthand expanders in this
+   file. Once the leading run ends, the VERY NEXT token is treated
+   unconditionally as `<font-size>[/<line-height>]?` (matching real CSS's
+   own strict positional grammar -- no further keyword-vs-size
+   disambiguation needed), and everything after THAT token is rejoined
+   with a single space into `:font-family` verbatim (a multi-word quoted
+   family name like `'Times New Roman'` or a comma-separated fallback
+   list like `Arial, sans-serif` both survive this whitespace-normalizing
+   rejoin losslessly, unlike `expand-border-shorthand`'s own color-token
+   limitation, since font-family is never classified token-by-token
+   here).
+
+   Both `<font-size>` and `<line-height>` (when present) are run through
+   `parse-style-value`, exactly like a plain, non-shorthand `font-size`/
+   `line-height` declaration would be -- so e.g. a bare `1.5` line-height
+   survives as the same raw multiplier STRING `cssom.layout/resolve-line-
+   height` already knows how to interpret, not a special shorthand-only
+   representation. `font-style`/`font-weight` are also run through
+   `parse-style-value` for the identical reason (a numeric weight like
+   `700` needs to become the same coerced integer a plain `font-weight:
+   700` declaration already produces elsewhere).
+
+   Real CSS treats a `font` shorthand missing its mandatory `<font-size>`
+   or `<font-family>` as an ENTIRELY invalid declaration (dropped
+   wholesale, not partially applied) -- mirrored here by returning an
+   empty map rather than guessing, this file's own established degrade-
+   don't-guess convention for every other malformed/incomplete value."
+  [v]
+  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))
+        [leading remaining] (split-with (fn [tok]
+                                           (let [lower (str/lower-case tok)]
+                                             (or (contains? font-shorthand-style-keywords lower)
+                                                 (contains? font-shorthand-weight-keywords lower)
+                                                 (contains? font-shorthand-skip-keywords lower))))
+                                         tokens)]
+    (if (or (empty? remaining) (empty? (rest remaining)))
+      {}
+      (let [size-token (first remaining)
+            family (str/join " " (rest remaining))
+            style-tok (some #(when (contains? font-shorthand-style-keywords (str/lower-case %)) %) leading)
+            weight-tok (some #(when (contains? font-shorthand-weight-keywords (str/lower-case %)) %) leading)
+            [size-part lh-part] (str/split size-token #"/" 2)]
+        (cond-> {:font-size (parse-style-value size-part)
+                 :font-family family}
+          style-tok (assoc :font-style (parse-style-value style-tok))
+          weight-tok (assoc :font-weight (parse-style-value weight-tok))
+          lh-part (assoc :line-height (parse-style-value lh-part)))))))
+
 (defn parse-declarations-with-importance
   "Parses a raw `property: value; ...` declaration-block string (e.g. a
    `<style>` rule body, or a JS-mutated `element.style.cssText`) into a
@@ -1119,6 +1207,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-outline-shorthand value))
+
+                         (= "font" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-font-shorthand value))
 
                          :else
                          (let [parsed (parse-property-value k value)]

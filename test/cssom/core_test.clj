@@ -180,6 +180,64 @@
     (is (= {:outline-width 2 :outline-color "#ff0000"}
            (:rule/declarations (first rules))))))
 
+(deftest font-shorthand-expands-into-its-five-longhands
+  ;; The confirmed repro: before this, font was never expanded at all --
+  ;; stored verbatim as a single unrecognized :font key -- so a real,
+  ;; common author pattern like `font: italic bold 14px/1.5 sans-serif`
+  ;; silently set none of the 5 real longhands this shorthand expands to.
+  (let [rules (css/parse-rules "#f { font: italic bold 14px/1.5 sans-serif }")]
+    (is (= {:font-style "italic" :font-weight "bold" :font-size 14
+            :line-height "1.5" :font-family "sans-serif"}
+           (:rule/declarations (first rules))))
+    (is (not (contains? (:rule/declarations (first rules)) :font))
+        "no bare :font key should remain -- it's fully expanded")))
+
+(deftest font-shorthand-is-order-independent-for-its-leading-style-and-weight-tokens
+  (let [rules (css/parse-rules "#f { font: bold italic 16px monospace }")]
+    (is (= {:font-weight "bold" :font-style "italic" :font-size 16 :font-family "monospace"}
+           (:rule/declarations (first rules))))))
+
+(deftest font-shorthand-omits-whichever-leading-longhands-it-does-not-specify
+  (let [rules (css/parse-rules "#f { font: 12px Arial, sans-serif }")]
+    (is (= {:font-size 12 :font-family "Arial, sans-serif"}
+           (:rule/declarations (first rules)))
+        "a real, legal font shorthand may omit style/weight/line-height entirely")))
+
+(deftest font-shorthand-recognizes-a-numeric-font-weight
+  (let [rules (css/parse-rules "#f { font: 700 16px monospace }")]
+    (is (= {:font-weight 700 :font-size 16 :font-family "monospace"}
+           (:rule/declarations (first rules)))
+        "a bare 100-900 weight number is coerced the same way a plain font-weight: 700 declaration is")))
+
+(deftest font-shorthand-skips-normal-and-variant-stretch-keywords-without-consuming-family
+  (let [rules (css/parse-rules "#f { font: normal small-caps condensed 16px monospace }")]
+    (is (= {:font-size 16 :font-family "monospace"}
+           (:rule/declarations (first rules)))
+        "normal/font-variant/font-stretch keywords are consumed and dropped, not mis-parsed as family")))
+
+(deftest font-shorthand-preserves-a-multi-word-quoted-family-and-comma-separated-fallbacks
+  (let [rules (css/parse-rules "#f { font: bold 12px/1.4 'Times New Roman', serif }")]
+    (is (= {:font-weight "bold" :font-size 12 :line-height "1.4" :font-family "'Times New Roman', serif"}
+           (:rule/declarations (first rules))))))
+
+(deftest font-shorthand-missing-a-mandatory-font-size-degrades-to-no-op
+  (let [rules (css/parse-rules "#f { font: sans-serif }")]
+    (is (= {} (:rule/declarations (first rules)))
+        "a real font shorthand missing its mandatory font-size is entirely invalid -- dropped, not partially applied")))
+
+(deftest font-shorthand-importance-applies-to-every-expanded-longhand
+  (let [rules (css/parse-rules "#f { font: italic bold 14px/1.5 sans-serif !important }")]
+    (is (= true (get-in (first rules) [:rule/declaration-meta :font-style :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :font-weight :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :font-size :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :line-height :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :font-family :important?])))))
+
+(deftest font-longhands-declared-separately-are-unaffected-by-shorthand-expansion
+  (let [rules (css/parse-rules "#f { font-size: 18px; font-family: Georgia }")]
+    (is (= {:font-size 18 :font-family "Georgia"}
+           (:rule/declarations (first rules))))))
+
 (deftest parses-attribute-selector-operators
   (let [rules (css/parse-rules "[class~=\"primary\"] { color: red }
                                 [lang|=\"en\"] { font-size: 12px }
