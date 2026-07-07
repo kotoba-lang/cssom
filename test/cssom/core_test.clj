@@ -1089,6 +1089,52 @@
         doc (css/apply-cascade doc rules)]
     (is (= 12 (get-in doc [:nodes p :attrs :style/font-size])))))
 
+(deftest var-fallback-containing-a-nested-function-call-still-resolves
+  ;; Previously `var-ref-pattern`'s fallback capture group (`[^()]*`)
+  ;; excluded ANY paren whatsoever, so a fallback containing a nested
+  ;; function call -- `rgba(...)`, `calc(...)`, or another `var(--y, ...)`
+  ;; -- meant the WHOLE var() reference failed to match at all, leaving
+  ;; the literal, unresolved text in the computed value instead of the
+  ;; resolved fallback. This is an ordinary, common custom-property
+  ;; idiom (`background: var(--btn-bg, rgba(0,0,0,.1))`), not a
+  ;; contrived case. Confirmed via a real cljw run against the actual
+  ;; resolve-value fn before touching source: both cases below returned
+  ;; the raw, unresolved var(...) text.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules
+               "p { background: var(--missing-a, rgba(0,0,0,0.5));
+                    border-color: var(--missing-b, var(--missing-c, red));
+                    width: var(--missing-d, calc(1px + 2px));
+                    margin: 1px solid var(--missing-e, 3px) dashed }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes p :attrs])]
+    (is (= "rgba(0,0,0,0.5)" (:style/background attrs))
+        "a fallback containing a nested rgba() call resolves instead of staying literal text")
+    (is (= "red" (:style/border-color attrs))
+        "a fallback that is itself another var() reference with its own plain fallback resolves recursively")
+    (is (= 3 (:style/width attrs))
+        "a fallback containing a nested calc() call resolves all the way through to a plain evaluated number, exactly like an ordinary standalone calc() declaration")
+    (is (= "1px solid 3px dashed" (:style/margin attrs))
+        "an embedded var() with a plain (paren-free) fallback, surrounded by other text on both sides, still substitutes correctly without over- or under-consuming neighboring text -- a pre-existing-behavior regression guard, not itself discriminating for this fix (a plain fallback never hit the bug)")))
+
+(deftest var-fallback-nested-two-levels-deep-is-a-documented-scope-cut
+  ;; Bounded, honest scope cut mirroring this file's calc()/hsl() cuts
+  ;; elsewhere: one level of nested parens in a fallback resolves (see
+  ;; the sibling test above), but TWO levels deep -- a function call
+  ;; nested inside another function call, both inside the fallback --
+  ;; does not match this pattern at all and is left as literal,
+  ;; unresolved text. Real recursive-descent parsing would be needed for
+  ;; arbitrary nesting depth; this documents the current, deliberate
+  ;; boundary rather than silently leaving it undiscovered.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        rules (css/parse-rules
+               "p { background: var(--missing, rgba(0,0,0, calc(1 + 1))) }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "var(--missing, rgba(0,0,0, calc(1 + 1)))"
+           (get-in doc [:nodes p :attrs :style/background])))))
+
 ;; ---- @layer cascade layers ----
 
 (deftest parses-layer-blocks-and-tags-nested-rules-with-their-name

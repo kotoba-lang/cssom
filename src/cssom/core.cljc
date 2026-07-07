@@ -3676,7 +3676,23 @@
   (str/starts-with? (name k) "--"))
 
 (def ^:private var-ref-pattern
-  #"var\(\s*(--[A-Za-z_][-A-Za-z0-9_]*)\s*(?:,\s*([^()]*))?\)")
+  ;; The fallback capture allows the fallback text to contain ONE level of
+  ;; balanced, paren-free-inside parens (`(?:[^()]|\([^()]*\))*`) -- not
+  ;; just `[^()]*` -- so a fallback with a nested function call
+  ;; (`rgba(...)`, `hsl(...)`, `calc(...)`, or another `var(--y, plain)`)
+  ;; still matches, instead of the WHOLE `var(...)` reference failing to
+  ;; match at all. Previously `var(--x, rgba(0,0,0,0.5))` -- an ordinary,
+  ;; common custom-property idiom, not a contrived case -- left the
+  ;; literal, unresolved text in the computed value: the character class
+  ;; excluded any paren whatsoever from the fallback, so as soon as the
+  ;; fallback contained ITS OWN parens, this pattern's own trailing `\)`
+  ;; had nothing left to close against and the match failed outright.
+  ;; Bounded, honest scope cut (consistent with this file's calc()/hsl()
+  ;; cuts elsewhere): a fallback nested TWO levels deep (e.g. a `calc()`
+  ;; inside an `rgba()` inside the fallback) still doesn't match -- real
+  ;; recursive-descent parsing would be needed for arbitrary nesting, and
+  ;; one level already covers the overwhelmingly common real-world cases.
+  #"var\(\s*(--[A-Za-z_][-A-Za-z0-9_]*)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)")
 
 (defn- var-lookup
   [env var-name fallback]
