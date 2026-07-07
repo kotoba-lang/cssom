@@ -988,22 +988,35 @@
 
 (defn- expand-box-shadow-shorthand
   "Parses a `box-shadow` shorthand value (real CSS's own grammar,
-   `<offset-x> <offset-y> <blur-radius>? <color>?` -- offsets are
-   REQUIRED, blur-radius and color are each optional, color may also
-   appear before the offsets) into a map of whichever of `:box-shadow-x`/
-   `:box-shadow-y`/`:box-shadow-blur`/`:box-shadow-color` it actually
-   specifies -- previously read NOWHERE at all, `box-shadow` stored
-   verbatim as a single unrecognized `:box-shadow` key that `layout.cljc`
-   never read, so a real, common author declaration like
-   `box-shadow: 4px 4px 8px #000000` silently painted nothing at all,
-   confirmed via direct REPL reproduction. Deliberately scoped to the
-   same token forms `expand-border-shorthand`/`expand-text-shadow-
-   shorthand` already commit to (a bare integer/`px` length per offset/
-   blur, color as a single whitespace-delimited token) -- multiple
-   comma-separated shadows, the `inset` keyword, and spread-radius (real
-   CSS's own 4th length component) are NOT supported, a single
-   non-inset drop shadow only, the same 'reasonable baseline, not full
-   spec coverage' posture as `text-shadow` above.
+   `<offset-x> <offset-y> <blur-radius>? <spread-radius>? <color>?` --
+   offsets are REQUIRED, blur-radius/spread-radius/color are each
+   optional, color may also appear before the offsets) into a map of
+   whichever of `:box-shadow-x`/`:box-shadow-y`/`:box-shadow-blur`/
+   `:box-shadow-spread`/`:box-shadow-color` it actually specifies --
+   previously read NOWHERE at all, `box-shadow` stored verbatim as a
+   single unrecognized `:box-shadow` key that `layout.cljc` never read,
+   so a real, common author declaration like `box-shadow: 4px 4px 8px
+   #000000` silently painted nothing at all, confirmed via direct REPL
+   reproduction. Deliberately scoped to the same token forms
+   `expand-border-shorthand`/`expand-text-shadow-shorthand` already
+   commit to (a bare integer/`px` length per offset/blur/spread, color
+   as a single whitespace-delimited token) -- multiple comma-separated
+   shadows and the `inset` keyword are NOT supported, a single non-inset
+   drop shadow only, the same 'reasonable baseline, not full spec
+   coverage' posture as `text-shadow` above.
+
+   Spread-radius (the 4th length component) WAS a real, severe bug here,
+   not merely an absent feature: before this fix, a 4th length-shaped
+   token (e.g. the `0` in the extremely common real-world
+   `box-shadow: 0 1px 2px 0 rgba(0,0,0,0.1)` shape -- Tailwind's/
+   Material's/Bootstrap's own default shadows all use exactly this
+   5-token form) fell through into the `:box-shadow-color` branch,
+   confirmed via direct REPL reproduction, and the REAL trailing color
+   token was then silently DROPPED entirely (the `:else` branch, since
+   `:box-shadow-color` was already \"taken\" by the spread token) --
+   worse than a scope-cut, an author's real shadow color was corrupted
+   and lost. Fixed by recognizing a 4th length-shaped token as
+   `:box-shadow-spread` before falling through to color.
 
    Unlike `text-shadow`, `box-shadow` is NOT a real inherited CSS
    property, so `none`/blank simply resolves to an EMPTY map (no
@@ -1030,6 +1043,11 @@
                          (not (contains? result :box-shadow-blur))
                          (border-shorthand-width-token? tok))
                     (assoc result :box-shadow-blur (parse-style-value tok))
+
+                    (and (contains? result :box-shadow-blur)
+                         (not (contains? result :box-shadow-spread))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-spread (parse-style-value tok))
 
                     (not (contains? result :box-shadow-color))
                     (assoc result :box-shadow-color tok)

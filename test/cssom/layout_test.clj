@@ -778,6 +778,25 @@
     (is (= 40 (:h shadow-rect)))
     (is (= "#123456" (:color shadow-rect)))))
 
+(deftest box-shadow-spread-radius-expands-the-shadow-rect-outward
+  ;; A positive spread-radius grows the shadow past the element's own box
+  ;; edges on all four sides, before the x/y offset is applied -- the exact
+  ;; real-world 5-token box-shadow: 0 1px 2px 0 rgba(...) shape (previously
+  ;; corrupting/dropping the color entirely) now also renders the spread.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:box-shadow-x 0 :box-shadow-y 2 :box-shadow-spread 3
+                                     :box-shadow-color "#123456"
+                                     :width 80 :height 40})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))]
+    (is (= -3 (:x shadow-rect)))
+    (is (= -1 (:y shadow-rect)))
+    (is (= 86 (:w shadow-rect)))
+    (is (= 46 (:h shadow-rect)))))
+
 (deftest no-box-shadow-declared-produces-no-shadow-rect-at-all
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)

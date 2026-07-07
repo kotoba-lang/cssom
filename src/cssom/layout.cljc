@@ -672,6 +672,7 @@
    :box-shadow-x (style node :box-shadow-x)
    :box-shadow-y (style node :box-shadow-y)
    :box-shadow-blur (style node :box-shadow-blur)
+   :box-shadow-spread (style node :box-shadow-spread)
    :box-shadow-color (style node :box-shadow-color)
    :outline-width (parse-int (style node :outline-width) 0)
    :outline-color (or (style node :outline-color) "#000000")
@@ -864,31 +865,35 @@
        (assoc base :edge :left :x x :y y :w bw :h h)])))
 
 (defn- box-shadow-ops
-  "Real CSS `box-shadow` (basic offset + color only -- blur-radius is
+  "Real CSS `box-shadow` (offset + spread + color -- blur-radius is
    parsed by `cssom.core/expand-box-shadow-shorthand` but not rendered
-   here, and spread-radius/`inset` are not supported at all, honest
-   documented scope-cuts matching this file's own text-shadow precedent:
-   no blur/glow rendering primitive exists in this engine or its real
-   hosts). Emits a single extra `:rect` op, the same box dimensions as
-   the element's own border box, offset by `:box-shadow-x`/`:box-shadow-
-   y`, reusing the exact `:rect` draw-op every real host already paints
-   as a plain quad -- no new dom-gpu primitive needed, the same reuse
-   `border-ops` above already established. Callers place this BEFORE the
-   element's own background/border rects (real CSS paints a non-inset
-   box-shadow BEHIND the element's own box). The literal string \"none\"
-   is defensively treated the same as absence -- `expand-box-shadow-
-   shorthand` never itself produces that value (`none`/blank resolves to
-   an empty map, since box-shadow isn't inherited and has no ancestor
-   value to cancel), but a direct `:style/box-shadow-color \"none\"` write
+   here, and `inset` is not supported at all, an honest documented
+   scope-cut: no blur/glow rendering primitive exists in this engine or
+   its real hosts). Emits a single extra `:rect` op, the element's own
+   border box expanded outward on all four sides by `:box-shadow-spread`
+   (mirroring `outline-ops`'s own real, legal-negative-value `gap`
+   expansion below -- a positive spread grows the shadow past the box's
+   own edges, a negative spread shrinks it, before the `:box-shadow-x`/
+   `:box-shadow-y` offset is applied), reusing the exact `:rect` draw-op
+   every real host already paints as a plain quad -- no new dom-gpu
+   primitive needed, the same reuse `border-ops` above already
+   established. Callers place this BEFORE the element's own background/
+   border rects (real CSS paints a non-inset box-shadow BEHIND the
+   element's own box). The literal string \"none\" is defensively
+   treated the same as absence -- `expand-box-shadow-shorthand` never
+   itself produces that value (`none`/blank resolves to an empty map,
+   since box-shadow isn't inherited and has no ancestor value to
+   cancel), but a direct `:style/box-shadow-color \"none\"` write
    bypassing that shorthand parser is still a real, reachable shape (the
    same defensive check `text-shadow`'s own shadow-op emission already
    makes for its own `:text-shadow-color`)."
   [st x y w h opacity]
   (when (and (:box-shadow-color st) (not= "none" (:box-shadow-color st)))
     (let [dx (or (:box-shadow-x st) 0)
-          dy (or (:box-shadow-y st) 0)]
+          dy (or (:box-shadow-y st) 0)
+          spread (or (:box-shadow-spread st) 0)]
       [{:draw/op :rect :box-shadow? true :color (:box-shadow-color st) :opacity opacity
-        :x (+ x dx) :y (+ y dy) :w w :h h}])))
+        :x (+ x dx (- spread)) :y (+ y dy (- spread)) :w (+ w (* 2 spread)) :h (+ h (* 2 spread))}])))
 
 (defn- outline-ops
   "Real CSS `outline` -- a non-layout-affecting ring painted OUTSIDE the

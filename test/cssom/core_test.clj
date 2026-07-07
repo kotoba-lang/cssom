@@ -138,6 +138,24 @@
     (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-blur :important?])))
     (is (= true (get-in (first rules) [:rule/declaration-meta :box-shadow-color :important?])))))
 
+(deftest box-shadow-shorthand-fifth-token-is-spread-radius-not-color
+  ;; The real bug this fixes: before this, a 4th length-shaped token (the
+  ;; extremely common real-world 5-token box-shadow: 0 1px 2px 0 rgba(...)
+  ;; shape -- Tailwind's/Material's/Bootstrap's own default shadows all use
+  ;; exactly this) fell through into :box-shadow-color, and the REAL
+  ;; trailing color token was then silently DROPPED entirely.
+  (let [rules (css/parse-rules "#f { box-shadow: 0 1px 2px 0 rgba(0,0,0,0.1) }")]
+    (is (= {:box-shadow-x 0 :box-shadow-y 1 :box-shadow-blur 2 :box-shadow-spread 0
+            :box-shadow-color "rgba(0,0,0,0.1)"}
+           (:rule/declarations (first rules)))
+        "the 4th length token must become spread-radius, and the real color must survive")))
+
+(deftest box-shadow-shorthand-with-a-nonzero-spread-radius
+  (let [rules (css/parse-rules "#f { box-shadow: 2px 2px 4px 3px #ff0000 }")]
+    (is (= {:box-shadow-x 2 :box-shadow-y 2 :box-shadow-blur 4 :box-shadow-spread 3
+            :box-shadow-color "#ff0000"}
+           (:rule/declarations (first rules))))))
+
 ;; ---- `outline` shorthand expansion ----
 
 (deftest outline-shorthand-expands-into-its-three-longhands
