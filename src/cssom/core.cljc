@@ -2822,7 +2822,12 @@
    language-range list against `node`'s computed language (`computed-lang`,
    walking `node`'s own ancestor chain via `document` -- the same
    document-dependent restriction `:root`/structural pseudo-classes already
-   have, see the namespace docstring's `:lang()` paragraph)."
+   have, see the namespace docstring's `:lang()` paragraph). `:focus-within`
+   matches `node` itself OR any descendant currently holding `document`'s
+   `:focus`, reusing `descendant-or-self?` (already established by `:has()`
+   below for its own downward tree walk) rather than an upward ancestor
+   walk -- the one case in this function that asks 'is X somewhere in MY
+   subtree' instead of 'is X an ancestor of me'."
   [document node selector-pseudo arg]
   (case selector-pseudo
     :disabled (disabled-control? document node)
@@ -2849,6 +2854,8 @@
                   (constraint-invalid? document node))
     :valid (constraint-valid? document node)
     :focus (and document (= (:node/id node) (:focus document)))
+    :focus-within (and document (:focus document)
+                        (descendant-or-self? document (:node/id node) (:focus document)))
     :first-child (= 1 (sibling-position (structural-siblings document node false) (:node/id node)))
     :last-child (let [siblings (structural-siblings document node false)]
                   (and (seq siblings)

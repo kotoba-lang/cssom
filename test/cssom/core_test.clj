@@ -2054,6 +2054,57 @@
     (is (nil? (get-in doc [:nodes full-div :attrs :style/color]))
         "a <div>hi</div> with a real text child does NOT match :empty")))
 
+(deftest focus-within-matches-an-ancestor-of-the-focused-element
+  ;; The confirmed repro: before this, `div:focus-within` never matched at
+  ;; all, even with a real focused descendant, confirmed via direct REPL
+  ;; reproduction before touching source (root-style stayed nil while the
+  ;; focused child's own `:focus` still correctly matched blue).
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :input)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "div:focus-within { color: red } input:focus { color: blue }")
+        doc (assoc doc :focus child)
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes root :attrs :style/color]))
+        ":focus-within matches an ancestor of the real focused element")
+    (is (= "blue" (get-in doc [:nodes child :attrs :style/color]))
+        ":focus still matches the focused element itself, unaffected")))
+
+(deftest focus-within-matches-the-focused-element-itself-too
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :input)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "input:focus-within { color: red }")
+        doc (assoc doc :focus child)
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes child :attrs :style/color]))
+        "real CSS :focus-within matches the focused element ITSELF too, not just its ancestors")))
+
+(deftest focus-within-does-not-match-a-sibling-of-the-focused-element
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :input)
+        doc (dom/append-child doc root child)
+        [sibling doc] (dom/create-element doc :span)
+        doc (dom/append-child doc root sibling)
+        rules (css/parse-rules "span:focus-within { color: red }")
+        doc (assoc doc :focus child)
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes sibling :attrs :style/color]))
+        "a sibling of the focused element, not an ancestor, must not match :focus-within")))
+
+(deftest focus-within-matches-nothing-when-nothing-is-focused
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :input)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "*:focus-within { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes root :attrs :style/color])))
+    (is (nil? (get-in doc [:nodes child :attrs :style/color])))))
+
 (deftest root-pseudo-class-does-not-match-when-document-is-absent
   ;; The document-less 2-arity `matches?`/`matches-simple?` form never has
   ;; access to a `:root` key to compare against -- same documented
