@@ -977,6 +977,102 @@
     (is (= 4 (count outline-rects))
         "exactly the parent's own 4 outline edges -- the child must not have inherited a second set")))
 
+;; ---- currentColor keyword resolution ----
+;;
+;; Unlike the rest of this file (which sets style attrs directly via
+;; kotoba.wasm.dom, bypassing cssom.core's cascade -- see grid-tree's
+;; docstring above), these run the real end-to-end pipeline: CSS text ->
+;; cssom.core/parse-rules + apply-cascade -> kotoba.wasm.dom tree ->
+;; cssom.layout/draw-ops. currentColor is resolved in cssom.core's
+;; style-element (the single place that writes the canonical :style/*
+;; attrs both this file's rendering AND a live page's getComputedStyle()
+;; read), not in cssom.layout -- so exercising it here through the real
+;; cascade is the only way to prove the fix lives where it needs to,
+;; rather than just that cssom.layout can read an already-resolved attr.
+
+(deftest border-color-currentcolor-resolves-to-the-elements-own-color
+  ;; Real CSS: currentColor used in any color-valued property other than
+  ;; `color` itself resolves to that same element's own computed `color`
+  ;; -- previously entirely unsupported, the literal string "currentColor"
+  ;; reached dom-gpu's ->rgba unresolved, which doesn't recognize it as
+  ;; hex/rgb/hsl/named, silently painting fully transparent instead of the
+  ;; real color, confirmed via direct REPL reproduction.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules "div { color: #ff0000; border: 2px solid currentColor;
+                                       width: 80px; height: 40px }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        border-rect (first (filter :border? ops))]
+    (is (= "#ff0000" (:color border-rect)))))
+
+(deftest box-shadow-color-currentcolor-resolves-to-the-elements-own-color
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules "div { color: #00ff00; box-shadow: 2px 2px currentColor;
+                                       width: 80px; height: 40px }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter :box-shadow? ops))]
+    (is (= "#00ff00" (:color shadow-rect)))))
+
+(deftest outline-color-currentcolor-is-case-insensitive
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules "div { color: #0000ff; outline: 2px solid CURRENTCOLOR;
+                                       width: 80px; height: 40px }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        outline-rect (first (filter :outline? ops))]
+    (is (= "#0000ff" (:color outline-rect)))))
+
+(deftest text-shadow-color-currentcolor-resolves-to-the-elements-own-color
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules "div { color: #123456; text-shadow: 1px 1px currentColor }")
+        doc (css/apply-cascade doc rules)
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        [shadow-op _main-op] (filter #(= :text (:draw/op %)) ops)]
+    (is (= "#123456" (:color shadow-op)))))
+
+(deftest explicit-color-value-is-not-touched-by-currentcolor-resolution
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules "div { color: #00ff00; border: 2px solid #0000ff;
+                                       width: 80px; height: 40px }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        border-rect (first (filter :border? ops))]
+    (is (= "#0000ff" (:color border-rect))
+        "an explicit color value must be left completely untouched")))
+
+(deftest border-color-currentcolor-with-no-own-color-declared-is-left-unresolved
+  ;; Honest scope-cut (documented on cssom.core/resolve-current-color):
+  ;; this namespace has no general property-inheritance machinery, so an
+  ;; element that only INHERITS its color (rather than declaring its own)
+  ;; can't have its currentColor resolved here -- it's left as the literal
+  ;; string, exactly as before this fix, rather than silently resolved to
+  ;; nil.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules "div { border: 2px solid currentColor; width: 80px; height: 40px }")
+        doc (css/apply-cascade doc rules)
+        node (get-in doc [:nodes div])]
+    (is (= "currentColor" (get-in node [:attrs :style/border-color]))
+        "left as the unresolved literal, not silently defaulted to nil")))
+
 (deftest flex-container-outline-paints-after-border
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)

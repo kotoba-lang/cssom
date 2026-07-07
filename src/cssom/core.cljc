@@ -3785,6 +3785,40 @@
                 (seq after) (assoc :pseudo/after after))]
     [style node-counters]))
 
+(def ^:private current-color-keys
+  "The color-valued properties (other than `color` itself) this namespace
+   threads onto `:style/*` attrs that real CSS lets take the `currentColor`
+   keyword."
+  #{:border-color :box-shadow-color :outline-color :text-shadow-color})
+
+(defn- resolve-current-color
+  "Real CSS: the `currentColor` keyword, used in any color-valued property
+   other than `color` itself, resolves to that same element's own computed
+   `color` value. Resolved here (not in cssom.layout) because this is the
+   single place that writes the canonical `:style/<prop>` attrs both
+   cssom.layout's rendering AND a live page's `getComputedStyle()` read --
+   fixing it here fixes both, whereas fixing it only in cssom.layout would
+   leave getComputedStyle() seeing the literal, unresolved string.
+
+   Only resolves against a `color` this same element explicitly declares
+   in `final-style` -- `color` resolving its OWN currentColor against an
+   ancestor's INHERITED color is a rarer, more complex circular-inheritance
+   case this namespace has no inheritance machinery for at all (ordinary
+   property inheritance only happens later, in cssom.layout's rendering
+   pass -- see apply-cascade's docstring). An honest scope-cut: if this
+   element has no own `:color`, the keyword is left as-is rather than
+   silently resolved to nil."
+  [final-style]
+  (let [color (:color final-style)]
+    (if-not color
+      final-style
+      (reduce (fn [m k]
+                (if (and (contains? m k) (= "currentcolor" (str/lower-case (str (get m k)))))
+                  (assoc m k color)
+                  m))
+              final-style
+              current-color-keys))))
+
 (defn- style-element
   "Resolves and writes computed style attrs for a single element, given the
    custom-property environment inherited from its ancestors and the running
@@ -3811,7 +3845,7 @@
         node-env (merge inherited-env resolved-custom)
         resolved-normal (resolve-style-map node-env normal)
         resolved-pseudo (into {} (map (fn [[k v]] [k (resolve-style-map node-env v)])) pseudo)
-        final-style (merge resolved-custom resolved-normal resolved-pseudo)
+        final-style (resolve-current-color (merge resolved-custom resolved-normal resolved-pseudo))
         document (reduce-kv
                   (fn [d k v]
                     (if (contains? pseudo-keys k)
