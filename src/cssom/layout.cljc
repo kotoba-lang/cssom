@@ -760,12 +760,20 @@
   [v]
   (when (some? v) (parse-int v nil)))
 
+(defn- clamp-width
+  "The :width counterpart to clamp-height's own shared min/max clamp --
+   split out so flex-item-main-width's shrink-to-fit natural width (which
+   never runs through resolve-width's own avail-width fallback base) still
+   gets the same min-width/max-width treatment an explicit or avail-
+   defaulted width already does."
+  [st width]
+  (let [width (if-let [mn (explicit-length (:min-width st))] (max width mn) width)
+        width (if-let [mx (explicit-length (:max-width st))] (min width mx) width)]
+    width))
+
 (defn- resolve-width
   [st avail]
-  (let [base (parse-int (:width st) avail)
-        base (if-let [mn (explicit-length (:min-width st))] (max base mn) base)
-        base (if-let [mx (explicit-length (:max-width st))] (min base mx) base)]
-    base))
+  (clamp-width st (parse-int (:width st) avail)))
 
 (defn- resolve-height
   "The :height counterpart to resolve-width's own defensive numeric
@@ -2534,9 +2542,79 @@
 
 (declare layout-node)
 
+(def ^:private flex-item-shrink-to-fit-measure-width
+  "An effectively-unconstrained width used to discover a flex row-item's
+   own natural (max-content) width when it has no explicit :width --
+   large enough that no realistic word-wrap constraint would ever kick in
+   first."
+  1000000)
+
+(defn- flex-item-natural-text-width
+  "flex-item-main-width's own scope-cut: the one common flex-item shape
+   this handles is a leaf element wrapping EXACTLY one text child (an
+   ordinary <button>/<span>/<a> label -- the overwhelming majority of
+   real-world flex items). Lays out just that text child directly, not
+   the wrapping element -- layout-block has no shrink-to-fit concept of
+   its own at all, its own node-w always defaults to whatever avail-width
+   it's given regardless of children's content (confirmed via direct REPL
+   reproduction: laying out the WRAPPING element itself against an
+   unconstrained width just returns that same unconstrained width back,
+   since layout-block's own width resolution never looks at children).
+   Merges the wrapping element's own resolved font/color/text-transform
+   properties into `inherited` first (mirroring layout-node's own
+   :element-branch merge, minus the paint-only properties that don't
+   affect measured width), so an item with its own font-size/font-weight
+   override still measures against the right metrics."
+  [theme opacity inherited st text]
+  (let [font-size (parse-int (:font-size st) (:font-size inherited))
+        text-inherited (assoc inherited
+                              :color (or (:color st) (:color inherited))
+                              :font-size font-size
+                              :line-height (resolve-line-height (:line-height st) font-size (:line-height inherited))
+                              :font-weight (or (:font-weight st) (:font-weight inherited))
+                              :font-style (or (:font-style st) (:font-style inherited))
+                              :font-family (or (:font-family st) (:font-family inherited))
+                              :text-transform (or (:text-transform st) (:text-transform inherited)))
+        text-box (:box (layout-node theme 0 0 flex-item-shrink-to-fit-measure-width opacity text-inherited text))]
+    (+ (:w text-box) (* 2 (content-inset st)))))
+
+(defn- flex-item-main-width
+  "Real CSS flex-basis:auto (the default) falls back to an item's own
+   explicit width if set, else shrink-wraps to its own preferred
+   (max-content) width -- NOT resolve-width's own block-default fallback
+   to the full available width, which is only correct for an ordinary
+   block child (previously applied uniformly to flex children too,
+   confirmed via direct REPL reproduction: two unstyled <button> flex
+   children each rendered at the FULL flex container width instead of
+   shrink-wrapping to their own short labels, ballooning the container
+   itself to fit them). Only handles the single-text-child leaf shape
+   (see flex-item-natural-text-width) -- a flex item with more complex
+   nested content (multiple children, or a single child that is itself
+   an element) falls back to the pre-existing fill-available-width
+   behavior, an honest, disclosed scope-cut rather than a half-correct
+   guess. Clamps the natural width to both min/max-width AND whatever
+   main-axis space is actually available, so an overly-wide label still
+   shrinks to fit rather than overflowing un-shrunk. Deliberately does
+   not implement flex-grow/flex-shrink/an explicit flex-basis -- with the
+   real default flex-grow:0, an item simply stays at this natural size
+   regardless (leftover main-axis space is real CSS's own default
+   behavior too, governed by justify-content), an honest, separate
+   scope-cut."
+  [theme content-w opacity inherited child st]
+  (let [cs (:children child)
+        natural (if (and (= 1 (count cs)) (string? (first cs)))
+                  (flex-item-natural-text-width theme opacity inherited st (first cs))
+                  content-w)]
+    (min content-w (clamp-width st natural))))
+
 (defn- measure-child
-  [theme content-w opacity inherited child]
-  (let [child-avail (if (map? child) (resolve-width (node-style child theme) content-w) content-w)]
+  [theme content-w opacity inherited child shrink-to-fit?]
+  (let [child-avail (if (map? child)
+                       (let [st (node-style child theme)]
+                         (if (and shrink-to-fit? (not (:width st)))
+                           (flex-item-main-width theme content-w opacity inherited child st)
+                           (resolve-width st content-w)))
+                       content-w)]
     (layout-node theme 0 0 child-avail opacity inherited child)))
 
 (defn- layout-flex-wrap-row
@@ -2573,7 +2651,7 @@
         cy (+ y (:margin st) inset)
         cw (max 0 (- w (* 2 inset)))
         gap (:gap st)
-        measured (mapv #(measure-child theme cw opacity inherited %) in-flow)]
+        measured (mapv #(measure-child theme cw opacity inherited % (not column?)) in-flow)]
     (if wrap?
       (let [{:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw opacity inherited st measured)
             node-h (or (resolve-height st) (+ cross-total (* 2 inset)))]
@@ -2744,7 +2822,7 @@
         total-rows (if (seq placements) (apply max 0 (map :row-end placements)) 0)
         measured (mapv (fn [child pl]
                           (let [item-w (span-width col-widths gap (:col-start pl) (:col-end pl))]
-                            (measure-child theme item-w opacity inherited child)))
+                            (measure-child theme item-w opacity inherited child false)))
                         in-flow placements)
         row-heights (vec (map (fn [row-idx]
                                  (let [track (nth row-tracks row-idx nil)]

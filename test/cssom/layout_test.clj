@@ -1089,6 +1089,115 @@
     (is (< (.indexOf ops border-rect) (.indexOf ops outline-rect))
         "outline must paint after the flex container's own border, same convention as block")))
 
+;; ---- flex item shrink-to-fit main-axis sizing (flex-basis:auto default) ----
+
+(deftest unstyled-flex-row-children-shrink-wrap-to-their-own-text-instead-of-filling-the-container
+  ;; Real CSS: flex-basis:auto (the default) falls back to an item's own
+  ;; content-based (shrink-to-fit) size, not resolve-width's own block-
+  ;; default fallback to the FULL available width -- previously applied
+  ;; uniformly to flex children too, confirmed via direct REPL
+  ;; reproduction before touching source: two unstyled <button> flex
+  ;; children each rendered at the full container width (472px each in a
+  ;; 480px container) instead of shrink-wrapping to their own short
+  ;; labels, ballooning the container itself to fit them.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :gap 8})
+        [b1 doc] (dom/create-element doc :button)
+        doc (dom/append-child doc div b1)
+        [t1 doc] (dom/create-text-node doc "OK")
+        doc (dom/append-child doc b1 t1)
+        [b2 doc] (dom/create-element doc :button)
+        doc (dom/append-child doc div b2)
+        [t2 doc] (dom/create-text-node doc "Cancel")
+        doc (dom/append-child doc b2 t2)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        buttons (filterv #(and (= :rect (:draw/op %)) (= :button (:tag %))) ops)
+        container-rect (first (filterv #(and (= :rect (:draw/op %)) (= :div (:tag %))) ops))]
+    (is (= 2 (count buttons)))
+    (is (< (:w (first buttons)) 100)
+        (str "\"OK\" must shrink-wrap to a compact width, not fill the 480px container -- got "
+             (:w (first buttons))))
+    (is (< (:w (second buttons)) (:w container-rect))
+        "each button must be narrower than the flex container itself")
+    (is (not= (:w (first buttons)) (:w (second buttons)))
+        "\"OK\" and \"Cancel\" have different label lengths, so they must NOT resolve to the identical width")))
+
+(deftest explicit-width-on-a-flex-child-is-not-touched-by-shrink-to-fit
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex"})
+        [b1 doc] (dom/create-element doc :button)
+        doc (dom/append-child doc div b1)
+        doc (dom/set-style doc b1 {:width 200})
+        [t1 doc] (dom/create-text-node doc "OK")
+        doc (dom/append-child doc b1 t1)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        button-rect (first (filter #(= :button (:tag %)) ops))]
+    (is (= 200 (:w button-rect))
+        "an explicit :width must win outright, exactly like real CSS flex-basis:auto falling back to an explicit width first")))
+
+(deftest flex-item-shrink-to-fit-still-clamps-to-available-space
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex"})
+        [b1 doc] (dom/create-element doc :button)
+        doc (dom/append-child doc div b1)
+        [t1 doc] (dom/create-text-node doc "This is a very very very very very long button label indeed")
+        doc (dom/append-child doc b1 t1)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        button-rect (first (filter #(= :button (:tag %)) ops))]
+    (is (<= (:w button-rect) 200)
+        "a long label must still clamp to the actually-available main-axis space, not overflow un-shrunk")))
+
+(deftest flex-item-with-nested-element-content-falls-back-to-filling-available-width
+  ;; Honest scope-cut (documented on flex-item-main-width): only a leaf
+  ;; element wrapping EXACTLY one text child gets real shrink-to-fit
+  ;; sizing -- a flex item with more complex nested content (here, an
+  ;; <i> icon plus a text sibling) falls back to the pre-existing fill-
+  ;; available-width behavior rather than a half-correct guess.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex"})
+        [wrap doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div wrap)
+        [icon doc] (dom/create-element doc :i)
+        doc (dom/append-child doc wrap icon)
+        [t1 doc] (dom/create-text-node doc "Label")
+        doc (dom/append-child doc wrap t1)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        span-rect (first (filter #(= :span (:tag %)) ops))]
+    (is (> (:w span-rect) 400)
+        "nested (non-leaf-text) flex-item content is an honest, disclosed scope-cut -- still fills the available width")))
+
+(deftest column-direction-flex-items-are-unaffected-by-row-direction-shrink-to-fit
+  ;; column direction's main axis is height, which this file's :height
+  ;; resolution already defaults to content-driven sizing -- the row-
+  ;; direction-only shrink-to-fit fix above must not change column
+  ;; behavior at all (an unstyled child's cross-axis WIDTH still fills
+  ;; available space, same as before this fix).
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :flex-direction "column"})
+        [b1 doc] (dom/create-element doc :button)
+        doc (dom/append-child doc div b1)
+        [t1 doc] (dom/create-text-node doc "OK")
+        doc (dom/append-child doc b1 t1)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        button-rect (first (filter #(= :button (:tag %)) ops))]
+    (is (> (:w button-rect) 400)
+        "column-direction cross-axis (width) must still fill available space, unaffected by the row-direction fix")))
+
 (deftest grid-container-outline-paints-after-border
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
