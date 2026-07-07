@@ -604,6 +604,54 @@
     (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
         "type=\"text\" must never be subject to step checking")))
 
+;; ---- :in-range / :out-of-range pseudo-classes ----
+
+(defn- range-check-doc
+  [attrs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc :input)
+        doc (reduce (fn [d [k v]] (dom/set-attribute d el k v)) doc attrs)
+        doc (dom/append-child doc root el)
+        rules (css/parse-rules "input:out-of-range { color: red } input:in-range { color: green }")]
+    (get-in (css/apply-cascade doc rules) [:nodes el :attrs :style/color])))
+
+(deftest out-of-range-value-matches-out-of-range-not-in-range
+  (is (= "red" (range-check-doc {:type "number" :min "1" :max "10" :value "15"}))
+      "a numeric value above max must match :out-of-range"))
+
+(deftest in-range-value-matches-in-range-not-out-of-range
+  (is (= "green" (range-check-doc {:type "number" :min "1" :max "10" :value "5"}))
+      "a numeric value within min/max must match :in-range"))
+
+(deftest below-min-value-matches-out-of-range
+  (is (= "red" (range-check-doc {:type "number" :min "1" :max "10" :value "0"}))
+      "a numeric value below min must match :out-of-range"))
+
+(deftest range-type-out-of-range-also-matches
+  (is (= "red" (range-check-doc {:type "range" :min "0" :max "100" :value "150"}))
+      "type=\"range\" is subject to the same range-limitation matching as type=\"number\""))
+
+(deftest no-min-or-max-matches-neither-in-range-nor-out-of-range
+  (is (nil? (range-check-doc {:type "number" :value "5"}))
+      "a control with no range limitations at all must match NEITHER pseudo-class, not :in-range by default"))
+
+(deftest non-numeric-type-never-matches-in-range-or-out-of-range
+  (is (nil? (range-check-doc {:type "text" :min "1" :max "10" :value "abc"}))
+      "min/max on a non-number/range type input confer no range limitations"))
+
+(deftest malformed-min-is-not-enforced-by-in-range-out-of-range-matching
+  (is (= "green" (range-check-doc {:type "number" :min "abc" :max "10" :value "5"}))
+      "a malformed min is not enforced, matching range-invalid?'s own degrade-don't-guess convention -- max alone still applies"))
+
+(deftest blank-value-with-range-limitations-matches-in-range
+  (is (= "green" (range-check-doc {:type "number" :min "1" :max "10" :value ""}))
+      "a blank value is not suffering overflow/underflow, so it matches :in-range like real HTML5"))
+
+(deftest disabled-out-of-range-control-matches-neither-pseudo-class
+  (is (nil? (range-check-doc {:type "number" :min "1" :max "10" :value "15" :disabled "disabled"}))
+      "constraint validation (and so :in-range/:out-of-range) does not apply to a disabled control"))
+
 ;; ---- sibling combinators (+ / ~) ----
 
 (deftest parses-adjacent-and-general-sibling-combinators

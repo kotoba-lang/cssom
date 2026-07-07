@@ -2500,6 +2500,43 @@
        (not (constraint-validation-barred-control? node))
        (not (constraint-invalid? document node))))
 
+(defn- range-limited-control?
+  "Real HTML5 \"has range limitations\": for the number/range input types
+   `range-invalid?` already scopes this engine's range validation to, true
+   whenever a valid (per `parse-number`, matching `range-invalid?`'s own
+   degrade-don't-guess convention for malformed bounds) `min` or `max`
+   attribute is present. `:in-range`/`:out-of-range` only ever apply to a
+   control that has range limitations at all -- a plain, unbounded
+   `type=\"number\"` with neither `min` nor `max` matches NEITHER
+   pseudo-class, not `:in-range` by default."
+  [type attrs]
+  (and (contains? #{"number" "range"} type)
+       (boolean (or (parse-number (:min attrs)) (parse-number (:max attrs))))))
+
+(defn- in-range?
+  [document node]
+  (let [attrs (:attrs node)
+        type (str/lower-case (str (or (:type attrs) "text")))
+        value (control-value document node)]
+    (and (= :input (:tag node))
+         (form-control? node)
+         (not (disabled-control? document node))
+         (not (constraint-validation-barred-control? node))
+         (range-limited-control? type attrs)
+         (not (range-invalid? type value attrs)))))
+
+(defn- out-of-range?
+  [document node]
+  (let [attrs (:attrs node)
+        type (str/lower-case (str (or (:type attrs) "text")))
+        value (control-value document node)]
+    (and (= :input (:tag node))
+         (form-control? node)
+         (not (disabled-control? document node))
+         (not (constraint-validation-barred-control? node))
+         (range-limited-control? type attrs)
+         (range-invalid? type value attrs))))
+
 ;; ---- structural pseudo-classes (:first-child/:last-child/:only-child/
 ;;      :nth-child() and their :first-of-type/:last-of-type/:nth-of-type()
 ;;      same-tag counterparts, plus :nth-child()'s/:nth-of-type()'s own
@@ -2827,7 +2864,11 @@
    `:focus`, reusing `descendant-or-self?` (already established by `:has()`
    below for its own downward tree walk) rather than an upward ancestor
    walk -- the one case in this function that asks 'is X somewhere in MY
-   subtree' instead of 'is X an ancestor of me'."
+   subtree' instead of 'is X an ancestor of me'. `:in-range`/`:out-of-range`
+   delegate to `in-range?`/`out-of-range?`, which reuse `range-invalid?`
+   (already computing exactly real HTML5 range-overflow/underflow for
+   `constraint-invalid?`) -- a control with no `min`/`max` at all has no
+   'range limitations' per spec and matches NEITHER pseudo-class."
   [document node selector-pseudo arg]
   (case selector-pseudo
     :disabled (disabled-control? document node)
@@ -2853,6 +2894,8 @@
                   (not (constraint-validation-barred-control? node))
                   (constraint-invalid? document node))
     :valid (constraint-valid? document node)
+    :in-range (in-range? document node)
+    :out-of-range (out-of-range? document node)
     :focus (and document (= (:node/id node) (:focus document)))
     :focus-within (and document (:focus document)
                         (descendant-or-self? document (:node/id node) (:focus document)))
