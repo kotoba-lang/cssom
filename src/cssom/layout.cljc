@@ -2677,7 +2677,7 @@
     (layout-node theme 0 0 child-avail opacity inherited child)))
 
 (defn- layout-flex-wrap-row
-  [theme cx cy cw opacity inherited st measured]
+  [theme cx cy cw opacity inherited st in-flow measured]
   (let [gap (:gap st)
         main-sizes (mapv #(:w (:box %)) measured)
         rows-idx (pack-rows main-sizes gap cw)
@@ -2686,17 +2686,52 @@
                              (if (= i (count rows-idx))
                                offsets
                                (recur (inc i) (+ pos (nth row-cross-sizes i) gap) (conj offsets pos))))
+        ;; align-items (including stretch) pass, per ROW -- see layout-
+        ;; flex's own identical non-wrap pass and cross-offset/stretch-
+        ;; eligible-child?/force-cross-size for the full rationale. This
+        ;; function previously ignored align-items ENTIRELY (not even the
+        ;; pre-existing center/flex-end offsets, let alone stretch) --
+        ;; every wrapped child was unconditionally top-aligned to its own
+        ;; row's top edge, confirmed via a direct REPL reproduction before
+        ;; touching source: two flex-wrap:wrap children (heights 20/80,
+        ;; align-items:center) both stayed at y=4, while the identical
+        ;; style with flex-wrap OMITTED (the already-correct non-wrap
+        ;; path) put the shorter child at y=34, properly centered. Wrap
+        ;; mode is ALWAYS row-direction (flex-wrap only meaningfully
+        ;; applies to flex-direction:row in real CSS too -- wrap? in
+        ;; layout-flex above is only ever true when NOT column), so the
+        ;; cross axis is always height and `column?` is always false in
+        ;; both helper calls below. Each wrapped ROW stretches its own
+        ;; auto-sized children to THAT row's own cross size
+        ;; (row-cross-sizes, already settled above from the ORIGINAL
+        ;; unstretched measurements), not the whole container's --
+        ;; matching real CSS's own per-line stretch model.
+        measured (reduce
+                  (fn [acc [idxs row-cross-size]]
+                    (reduce (fn [acc2 idx]
+                              (let [child (nth in-flow idx)]
+                                (if (stretch-eligible-child? false st child)
+                                  (assoc acc2 idx
+                                         (measure-child theme cw opacity inherited
+                                                        (force-cross-size false row-cross-size child)
+                                                        true))
+                                  acc2)))
+                            acc idxs))
+                  measured
+                  (map vector rows-idx row-cross-sizes))
         draws (mapcat
-               (fn [idxs row-y]
+               (fn [idxs row-y row-cross-size]
                  (let [sizes (mapv #(nth main-sizes %) idxs)
                        offs (place-main-axis "flex-start" sizes gap cw)]
                    (mapcat (fn [child-idx off]
                              (let [m (nth measured child-idx)
+                                   child-cross (:h (:box m))
+                                   c-off (cross-offset (:align-items st) child-cross row-cross-size)
                                    dx (+ cx off)
-                                   dy (+ cy row-y)]
+                                   dy (+ cy row-y c-off)]
                                (translate-ops dx dy (:draw m))))
                            idxs offs)))
-               rows-idx row-cross-offsets)
+               rows-idx row-cross-offsets row-cross-sizes)
         total-cross (+ (reduce + 0 row-cross-sizes) (* gap (max 0 (dec (count rows-idx)))))]
     {:draws (vec draws) :main-total cw :cross-total total-cross}))
 
@@ -2712,7 +2747,7 @@
         gap (:gap st)
         measured (mapv #(measure-child theme cw opacity inherited % (not column?)) in-flow)]
     (if wrap?
-      (let [{:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw opacity inherited st measured)
+      (let [{:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw opacity inherited st in-flow measured)
             node-h (or (resolve-height st) (+ cross-total (* 2 inset)))]
         {:box-w w :box-h node-h :draws draws})
       (let [main-sizes (mapv (fn [m] (if column? (:h (:box m)) (:w (:box m)))) measured)

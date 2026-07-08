@@ -1309,6 +1309,66 @@
     (is (= 20 (nth a 3))
         "real CSS still clamps a stretched item to its own max-height -- A must NOT overshoot to 40 just because that's what stretch would otherwise produce")))
 
+;; ---- flex-wrap:wrap + align-items ----
+;;
+;; layout-flex-wrap-row previously ignored align-items ENTIRELY -- not even
+;; the pre-existing center/flex-end cross-axis offsets the non-wrap branch
+;; already had before this fix, let alone stretch -- every wrapped child
+;; was unconditionally top-aligned to its own row's own top edge. Confirmed
+;; via a direct REPL reproduction before touching source: two flex-
+;; wrap:wrap children (heights 20/80, align-items:center) both stayed at
+;; y=4, while the identical style with flex-wrap OMITTED (the already-
+;; correct non-wrap path) correctly put the shorter child at y=34,
+;; properly centered within the taller sibling's own 80px height.
+
+(defn- flex-wrap-span-boxes
+  "flex-span-boxes's own wrap-mode counterpart: builds a flex-wrap:wrap row
+   with N <span> children (each own [width height-or-nil] pair) under an
+   explicit gap:0 (deterministic row-packing math, unaffected by this
+   file's own default nonzero theme gap) and returns each child's own
+   [x y w h] draw box, in source order."
+  [align container-width items]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div (merge {:display "flex" :flex-wrap "wrap" :width container-width :gap 0}
+                                           (when align {:align-items align})))
+        doc (reduce (fn [doc [w h]]
+                      (let [[item doc] (dom/create-element doc :span)
+                            doc (dom/append-child doc div item)]
+                        (dom/set-style doc item (cond-> {:width w} h (assoc :height h)))))
+                    doc items)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width container-width})
+        spans (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)]
+    (mapv (fn [s] [(:x s) (:y s) (:w s) (:h s)]) spans)))
+
+(deftest flex-wrap-align-items-center-vertically-centers-a-shorter-child-within-its-own-row
+  (let [[a b] (flex-wrap-span-boxes "center" 300 [[50 20] [50 80]])]
+    (is (= [4 34 50 20] a) "A (height 20) centered within B's 80px row-cross-size: (80-20)/2 = 30, plus the container's own 4px content-area top inset")
+    (is (= [54 4 50 80] b) "B (the row's own tallest child) stays flush at the row's own top")))
+
+(deftest flex-wrap-align-items-default-stretches-an-auto-height-child-within-its-own-row
+  (let [[a b] (flex-wrap-span-boxes nil 300 [[50 nil] [50 40]])]
+    (is (= 40 (nth a 3)) "A has no explicit height, so it must stretch to match B's 40px row-cross-size, matching real CSS's own unauthored align-items default")
+    (is (= 4 (nth a 1)) "a fully-stretched child sits flush at the row's own top, zero offset")))
+
+(deftest flex-wrap-align-items-stretch-is-scoped-to-each-rows-own-cross-size-not-the-whole-container
+  ;; cw at container-width 300 with this file's own 4px default padding on
+  ;; each side is 292 -- two 140px-wide items fit one row (280 <= 292), a
+  ;; third 140px item wraps to its own second row. Row 1's own tallest
+  ;; child (60) must NOT influence row 2's independent, smaller stretch
+  ;; target -- each wrapped line stretches to ITS OWN cross size, matching
+  ;; real CSS's own per-line stretch model.
+  (let [[a b c] (flex-wrap-span-boxes nil 300 [[140 nil] [140 60] [140 30]])]
+    (is (= [4 4 140 60] a) "A (no explicit height) stretches to row 1's own 60px cross size")
+    (is (= [144 4 140 60] b) "B's own explicit height is untouched")
+    (is (= [4 64 140 30] c) "C, alone in row 2, keeps its own explicit 30px height -- unaffected by row 1's larger 60px cross size")))
+
+(deftest flex-wrap-align-items-flex-start-is-unaffected-by-this-fix
+  (let [[a b] (flex-wrap-span-boxes "flex-start" 300 [[50 20] [50 80]])]
+    (is (= [4 4 50 20] a) "flex-start must stay byte-identical to this function's own pre-fix (align-items-ignoring) top-aligned behavior")))
+
 (deftest grid-container-outline-paints-after-border
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
