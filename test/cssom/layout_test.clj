@@ -1125,6 +1125,53 @@
     (is (not= (:w (first buttons)) (:w (second buttons)))
         "\"OK\" and \"Cancel\" have different label lengths, so they must NOT resolve to the identical width")))
 
+(defn- space-between-item-x-offsets
+  "Builds a flex row with the given per-item width/gap, all under an
+   explicit 300px container width so main-axis free-space math is
+   deterministic, and returns each in-flow child's own :x offset (a plain
+   :draw/op :node for a background-less <span>, not a :rect -- unlike a
+   styled <button>, a bare span paints no rect of its own)."
+  [item-width gap]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :justify-content "space-between"
+                                     :gap gap :width 300})
+        make-item (fn [doc]
+                    (let [[item doc] (dom/create-element doc :span)
+                          doc (dom/append-child doc div item)
+                          doc (dom/set-style doc item {:width item-width})]
+                      [item doc]))
+        [_ doc] (make-item doc)
+        [_ doc] (make-item doc)
+        [_ doc] (make-item doc)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})]
+    (mapv :x (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))))
+
+(deftest space-between-reserves-gap-as-a-minimum-inter-item-spacing
+  ;; Real CSS: `gap` is a MINIMUM inter-item spacing that `justify-content:
+  ;; space-between` must still honor, not just a fallback for when free
+  ;; space runs out. Previously the space-between branch of place-main-axis
+  ;; had no gap term in its free-space computation at all (unlike the
+  ;; sibling center/flex-end branch), so a nonzero gap was silently
+  ;; ignored whenever the container wasn't dramatically larger than the
+  ;; summed item sizes -- confirmed via a direct REPL reproduction before
+  ;; touching source: with three 90px-wide items, gap:20px, and a 300px
+  ;; container, this produced the exact same offsets as gap:0.
+  (is (= [4 114 224] (space-between-item-x-offsets 90 20))
+      "each item must be spaced by exactly the 20px gap (90+20=110px apart, plus the container's own 4px padding)"))
+
+(deftest space-between-still-distributes-extra-free-space-beyond-the-gap-floor
+  ;; Once free space genuinely exceeds what the gap alone needs, real CSS
+  ;; space-between still distributes the REMAINING extra space between
+  ;; items, on top of the gap floor -- not instead of it.
+  (is (= [4 129 254] (space-between-item-x-offsets 50 20))
+      "150px of items + 40px gap floor leaves 110px extra free space, split 55/55 between the two gaps on top of the 20px floor each (plus the container's own 4px padding)"))
+
+(deftest space-between-with-zero-gap-is-unaffected-by-this-fix
+  (is (= [4 109 214] (space-between-item-x-offsets 90 0))))
+
 (deftest explicit-width-on-a-flex-child-is-not-touched-by-shrink-to-fit
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)

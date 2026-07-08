@@ -954,9 +954,21 @@
       (zero? n) []
 
       (= justify "space-between")
-      (let [total (reduce + 0 sizes)
+      ;; Real CSS reserves `gap` as a MINIMUM inter-item spacing even under
+      ;; space-between -- it is not just a fallback for when free space runs
+      ;; out, it is added to whatever free space distribution would already
+      ;; produce. Previously `total`/`free` here had no gap term at all
+      ;; (unlike the center/flex-end branch below, which already correctly
+      ;; adds `gap * (n - 1)`), so a nonzero `gap` was silently ignored
+      ;; whenever the container wasn't dramatically larger than the summed
+      ;; item sizes -- confirmed via a direct REPL reproduction: with
+      ;; sizes [90 90 90] gap 20 container 300, this produced the exact
+      ;; same offsets as gap 0. `step` (the per-item main-axis advance)
+      ;; must carry the base `gap` PLUS whatever additional space
+      ;; space-between distributes beyond that floor.
+      (let [total (+ (reduce + 0 sizes) (* gap (max 0 (dec n))))
             free (max 0 (- container-size total))
-            step (if (> n 1) (/ free (dec n)) 0)]
+            step (+ gap (if (> n 1) (/ free (dec n)) 0))]
         (loop [i 0 pos 0 offsets []]
           (if (= i n)
             offsets
