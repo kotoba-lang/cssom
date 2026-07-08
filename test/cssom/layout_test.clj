@@ -4413,7 +4413,8 @@
         ops (layout/draw-ops tree {:width 480})
         div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)
         text-op (some #(and (= :text (:draw/op %)) %) ops)]
-    {:w (:w div-op) :h (:h div-op) :text-opacity (:opacity text-op)}))
+    {:w (:w div-op) :h (:h div-op) :text-opacity (:opacity text-op)
+     :visibility (:visibility div-op)}))
 
 (deftest visibility-hidden-reserves-layout-space-but-paints-nothing
   ;; Unlike display:none (a zero-box, nothing-walked branch), visibility:
@@ -4443,6 +4444,27 @@
 (deftest malformed-visibility-value-degrades-to-visible-not-enforced
   (is (= 1.0 (:text-opacity (visibility-box-and-text-opacity
                              ".box { visibility: bogus; width: 100; height: 50 }")))))
+
+;; ---- :visibility on the :node draw-op itself (previously absent from
+;; style-passthrough entirely -- the property already correctly zeroed
+;; paint opacity above, but the raw value never reached the draw-op a
+;; hit-tester (browser.session/node-at, dom-gpu's retained/hit-test)
+;; actually scans, so neither could tell a visibility:hidden box apart
+;; from an ordinary opaque one for pointer-event purposes -- a real
+;; click-through, the same class of bug already fixed for pointer-
+;; events:none. Confirmed via direct REPL reproduction before touching
+;; source. ----
+
+(deftest node-draw-op-carries-its-own-visibility-value
+  (is (= "hidden" (:visibility (visibility-box-and-text-opacity
+                                ".box { visibility: hidden; width: 100; height: 50 }"))))
+  (is (= "collapse" (:visibility (visibility-box-and-text-opacity
+                                  ".box { visibility: collapse; width: 100; height: 50 }"))))
+  (is (= "visible" (:visibility (visibility-box-and-text-opacity
+                                 ".box { visibility: visible; width: 100; height: 50 }"))))
+  (is (nil? (:visibility (visibility-box-and-text-opacity
+                          ".box { width: 100; height: 50 }")))
+      "no visibility declared at all leaves the field absent, matching every other style-passthrough field's own convention"))
 
 (deftest visibility-hidden-child-with-no-own-visibility-inherits-hidden-by-default
   (let [[root doc] (dom/create-element dom/empty-document :main)

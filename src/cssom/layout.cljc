@@ -773,6 +773,19 @@
    :position (:position st)
    :z-index (:z-index st)
    :pointer-events (:pointer-events st)
+   ;; Previously absent -- a visibility:hidden/collapse element already
+   ;; paints nothing (see the multiplicative opacity accumulator this
+   ;; property drives in layout-block), but the emitted :node draw-op
+   ;; itself carried no trace of that at all, so a hit-tester scanning
+   ;; these ops (browser.session/node-at, dom-gpu's retained/hit-test)
+   ;; had no way to tell a visibility:hidden box apart from an ordinary
+   ;; opaque one -- it still swallowed clicks itself or blocked whatever
+   ;; painted underneath it, the same click-through bug class already
+   ;; fixed for pointer-events:none, just for visibility instead. Real
+   ;; CSS treats visibility:hidden/collapse as fully transparent to
+   ;; pointer events (CSS-UI-4 / CSS2.1 SS11.1.1), exactly like
+   ;; pointer-events:none.
+   :visibility (:visibility st)
    :overflow (:overflow st)
    :scroll-top (:scroll-top st)
    :scroll-left (:scroll-left st)
