@@ -996,6 +996,53 @@
     "flex-end" (- container-cross child-cross)
     0))
 
+(defn- stretch-eligible-child?
+  "True when `child` is a real element (not a bare text-string flex item --
+   see measure-child's own identical map? check) with no explicit cross-
+   dimension of its own (`:height` for a row container, `:width` for a
+   column container) under a container whose `:align-items` resolves to
+   `\"stretch\"` (node-style's own real-CSS default when unauthored -- see
+   node-style). Real CSS's align-items default -- stretch -- was never
+   actually implemented as a SIZE change here; cross-offset above only ever
+   REPOSITIONS a child within the cross axis, so `\"stretch\"` (not handled
+   by cross-offset's own case) silently fell through to the same zero-
+   offset, zero-resize behavior as `\"flex-start\"`, confirmed via a direct
+   REPL reproduction before touching source: two 300px-wide flex-row items,
+   one with an explicit height of 40 and one with none, and NO align-items
+   declared (real CSS's own default is stretch) -- the auto-height item
+   stayed at its own tiny 8px content height instead of stretching to match
+   its 40px sibling, exactly like Chrome/Firefox never would."
+  [column? st child]
+  (and (map? child)
+       (= "stretch" (:align-items st))
+       (nil? (style child (if column? :width :height)))))
+
+(defn- force-cross-size
+  "Returns `child` with a synthetic explicit cross-dimension (`:height` for
+   a row container, `:width` for a column container) of `px` injected into
+   its own style attrs, for stretch-eligible-child? to re-measure through
+   the EXACT same explicit-height/explicit-width code path an authored
+   `style=\"...\"` value already takes (layout-block's/layout-form-control's
+   own `explicit-h`/resolve-width, confirmed via direct REPL check: an
+   explicit :height on a plain block or form-control child becomes its
+   final box height with no further adjustment) -- not a piecemeal after-
+   the-fact rect patch, so background/border/outline/clip/absolutely-
+   positioned-descendant geometry all come out correct for the new size.
+   Known, disclosed imprecision: a child that is ITSELF display:flex/grid
+   treats its own explicit cross-dimension as CONTENT size with its own
+   inset (padding/border) added on top afterward (a pre-existing asymmetry
+   in layout-flex/layout-grid's own explicit-height handling, confirmed via
+   a direct REPL check: a nested flex child with explicit height 40 and
+   padding 10 resolves to box height 60, not 40) -- unlike a plain block or
+   form-control child, where explicit height IS the final box height
+   outright. This means a nested flex/grid child stretched by this fix can
+   overshoot cross-content by its own 2x inset; still strictly better than
+   the previous zero-resize behavior, and a narrower, honestly-disclosed
+   scope-cut rather than solving that separate, pre-existing asymmetry
+   here too."
+  [column? px child]
+  (assoc-in child [:attrs (keyword "style" (if column? "width" "height"))] px))
+
 (defn- pack-rows
   "Greedily packs measured children (indices) into rows that fit within
    container-main; row-wrapping is only implemented for flex-direction:row."
@@ -2674,6 +2721,25 @@
             cross-content (or (explicit-length (if column? (:width st) (:height st))) auto-cross)
             auto-main (+ (reduce + 0 main-sizes) (* gap (max 0 (dec (count main-sizes)))))
             main-content (or (explicit-length (if column? (:height st) (:width st))) auto-main)
+            ;; align-items:stretch pass -- see stretch-eligible-child?/
+            ;; force-cross-size. Deliberately AFTER cross-content is
+            ;; determined from the ORIGINAL (unstretched) measurements,
+            ;; matching real flexbox's own algorithm order (the flex line's
+            ;; cross size is settled first, from the tallest natural item or
+            ;; the container's own explicit size; only THEN do stretch-
+            ;; eligible items get resized to fill it -- a stretched item
+            ;; never feeds back into cross-content's own computation). Main-
+            ;; axis sizes (main-sizes/offsets, already computed above) are
+            ;; unaffected by this: injecting a cross-dimension never touches
+            ;; resolve-width/flex-item-main-width, confirmed via direct REPL
+            ;; check.
+            measured (mapv (fn [child m]
+                              (if (stretch-eligible-child? column? st child)
+                                (measure-child theme cw opacity inherited
+                                               (force-cross-size column? cross-content child)
+                                               (not column?))
+                                m))
+                            in-flow measured)
             offsets (place-main-axis (:justify-content st) main-sizes gap main-content)
             draws (mapcat
                    (fn [m off]

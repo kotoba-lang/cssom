@@ -1245,6 +1245,70 @@
     (is (> (:w button-rect) 400)
         "column-direction cross-axis (width) must still fill available space, unaffected by the row-direction fix")))
 
+;; ---- align-items:stretch ----
+;;
+;; Real CSS's own align-items DEFAULT (real browsers stretch cross-axis-
+;; auto-sized children to match the tallest/widest sibling whenever
+;; align-items is unset) was never actually implemented as a size change
+;; here -- cross-offset only ever repositioned a child within the cross
+;; axis, so "stretch" (not handled by its own case) silently behaved
+;; exactly like "flex-start": zero resize, zero offset. Confirmed via a
+;; direct REPL reproduction before touching source: two 300px-wide flex-
+;; row items, one 50px wide with no explicit height and one 50px wide with
+;; an explicit height of 40, and NO align-items declared (so it defaults
+;; to stretch) -- the auto-height item stayed at its own tiny natural
+;; height instead of stretching to match its 40px sibling.
+
+(defn- flex-span-boxes
+  "Builds a flex row/column with two <span> children (no text content, so
+   each one's own natural size comes purely from resolve-width/resolve-
+   height's own defaults, not text metrics) and returns each child's own
+   [x y w h] draw box, in source order."
+  [container-style a-style b-style]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div (merge {:display "flex"} container-style))
+        [a doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div a)
+        doc (dom/set-style doc a a-style)
+        [b doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div b)
+        doc (dom/set-style doc b b-style)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        spans (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)]
+    (mapv (fn [s] [(:x s) (:y s) (:w s) (:h s)]) spans)))
+
+(deftest flex-row-align-items-default-stretches-an-auto-height-child-to-match-its-sibling
+  (let [[a b] (flex-span-boxes {:width 300} {:width 50} {:width 50 :height 40})]
+    (is (= 40 (nth a 3)) "A has no explicit height, so it must stretch to match B's 40px height, matching real CSS's own unauthored align-items default")
+    (is (= 40 (nth b 3)) "B's own explicit height is untouched")
+    (is (= 4 (nth a 1)) "A's stretched box starts flush at the content-area top, not centered/offset")))
+
+(deftest flex-row-align-items-stretch-is-a-no-op-for-a-child-with-its-own-explicit-height
+  (let [[a b] (flex-span-boxes {:width 300} {:width 50 :height 10} {:width 50 :height 40})]
+    (is (= 10 (nth a 3)) "an explicit cross-size always wins over stretch, exactly like real CSS -- A must NOT be forced up to match B")))
+
+(deftest flex-row-align-items-center-is-unaffected-by-the-stretch-fix
+  (let [[a b] (flex-span-boxes {:align-items "center" :width 300} {:width 50} {:width 50 :height 40})]
+    (is (= 8 (nth a 3)) "A keeps its own natural (unstretched) height under an explicit non-stretch align-items")
+    (is (= 20 (nth a 1)) "A is vertically centered within B's 40px cross size: (40-8)/2 = 16, plus the container's own 4px content-area top inset")))
+
+(deftest flex-row-align-items-flex-start-is-unaffected-by-the-stretch-fix
+  (let [[a b] (flex-span-boxes {:align-items "flex-start" :width 300} {:width 50} {:width 50 :height 40})]
+    (is (= 8 (nth a 3)) "flex-start must not stretch A -- this must stay the exact same as before this fix")))
+
+(deftest flex-row-align-items-stretch-with-an-explicit-container-height-stretches-to-that-height
+  (let [[a b] (flex-span-boxes {:width 300 :height 60} {:width 50} {:width 50})]
+    (is (= 60 (nth a 3)))
+    (is (= 60 (nth b 3)) "both auto-height children stretch to the CONTAINER's own explicit height, not just to each other")))
+
+(deftest flex-row-align-items-stretch-still-respects-a-childs-own-max-height
+  (let [[a b] (flex-span-boxes {:width 300} {:width 50 :max-height 20} {:width 50 :height 40})]
+    (is (= 20 (nth a 3))
+        "real CSS still clamps a stretched item to its own max-height -- A must NOT overshoot to 40 just because that's what stretch would otherwise produce")))
+
 (deftest grid-container-outline-paints-after-border
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
