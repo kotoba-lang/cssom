@@ -3360,8 +3360,22 @@
         ;; already unaffected -- :textarea already falls through to the
         ;; same default text-rendering branch :input's own non-checkbox
         ;; case uses -- only this gate was too narrow.
+        ;; selectable-text is the real VALUE, deliberately NOT control-text
+        ;; (which falls back to placeholder when value is empty). A real
+        ;; input's selection/caret is always relative to its own actual
+        ;; value -- placeholder text is never selectable/editable in any
+        ;; real browser. Previously sel-ops measured against control-text,
+        ;; so an empty, placeholder-showing input with stale non-zero
+        ;; selection-start/selection-end attrs (a real, reachable state:
+        ;; the JS-facing `value` setter never resets selection, so a
+        ;; common `input.select(); input.value = '';` "clear" idiom
+        ;; leaves stale offsets behind) painted a caret/selection rect
+        ;; positioned against the PLACEHOLDER's own characters instead of
+        ;; correctly clamping to the empty value's own [0,0] range.
+        ;; Confirmed via direct REPL reproduction before touching source.
+        selectable-text (str value)
         sel-ops (when (and (contains? #{:input :textarea} tag) selection-start selection-end)
-                  (let [len (count control-text)
+                  (let [len (count selectable-text)
                         clamp #(max 0 (min len %))
                         s (some-> (parse-int selection-start nil) clamp)
                         e (some-> (parse-int selection-end nil) clamp)
@@ -3372,13 +3386,13 @@
                     (when (and s e)
                       (if (= s e)
                         [{:draw/op :rect :caret? true :caret s :node/id (:node/id node)
-                          :x (+ x inset (measure (subs control-text 0 s))) :y (+ y inset)
+                          :x (+ x inset (measure (subs selectable-text 0 s))) :y (+ y inset)
                           :w 1 :h font-size :color (:fg theme) :opacity opacity}]
                         (let [lo (min s e) hi (max s e)]
                           [{:draw/op :rect :selection? true :node/id (:node/id node)
                             :selection/start lo :selection/end hi
-                            :x (+ x inset (measure (subs control-text 0 lo))) :y (+ y inset)
-                            :w (max 1 (measure (subs control-text lo hi))) :h font-size
+                            :x (+ x inset (measure (subs selectable-text 0 lo))) :y (+ y inset)
+                            :w (max 1 (measure (subs selectable-text lo hi))) :h font-size
                             :color "rgba(70,130,220,0.4)" :opacity opacity}])))))
         semantic (merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w w :h h
                          :class (attr node :class) :listeners (listeners node)

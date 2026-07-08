@@ -4311,13 +4311,14 @@
   (* (count text) 7))
 
 (defn- input-ops
-  [{:keys [value start end theme tag] :or {tag :input}}]
+  [{:keys [value start end theme tag placeholder] :or {tag :input}}]
   (let [[input doc] (dom/create-element dom/empty-document tag)
         doc (dom/set-root doc input)
         doc (dom/set-attribute doc input :value value)
         doc (cond-> doc
               start (dom/set-attribute input :selection-start start)
-              end (dom/set-attribute input :selection-end end))
+              end (dom/set-attribute input :selection-end end)
+              placeholder (dom/set-attribute input :placeholder placeholder))
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)]
     (layout/draw-ops tree (cond-> {:width 200} theme (assoc :theme theme)))))
@@ -4342,6 +4343,38 @@
     (is (not (contains? sel-op :text)))
     (is (str/starts-with? (:color sel-op) "rgba")
         "a translucent highlight so the text underneath stays legible")))
+
+;; ---- selection/caret geometry must be measured against the real value,
+;; never the placeholder ----
+;;
+;; Real bug this guards: sel-ops previously measured len/clamp/subs
+;; against control-text, which falls back to placeholder whenever value
+;; is empty. A real, reachable state -- the JS-facing value SETTER never
+;; resets selection-start/selection-end, so a common
+;; `input.select(); input.value = '';` "clear" idiom leaves stale
+;; non-zero selection offsets on a now-empty, placeholder-showing input
+;; -- painted a selection highlight positioned against the PLACEHOLDER's
+;; own characters instead of correctly clamping to the empty value's own
+;; [0,0] range. Confirmed via direct REPL reproduction before touching
+;; source.
+
+(deftest input-selection-on-an-empty-placeholder-showing-value-clamps-to-zero-not-the-placeholder
+  (let [ops (input-ops {:value "" :placeholder "Search the whole wide web"
+                        :start "2" :end "4"})
+        sel-op (first (filter :selection? ops))
+        caret-op (first (filter :caret? ops))]
+    (is (nil? sel-op)
+        "an empty value has nothing to select -- stale selection-start/end must clamp to [0,0], not paint a highlight against the placeholder's own characters")
+    (is (= 0 (:caret caret-op))
+        "the collapsed [0,0] range still paints a real caret, at the start of the (empty) value")
+    (is (= 4 (:x caret-op))
+        "the caret must sit at the box's own inset (position 0 of the empty value), not offset into the placeholder text")))
+
+(deftest input-selection-on-a-non-empty-value-is-unaffected-by-this-fix
+  (let [ops (input-ops {:value "hello" :placeholder "Search" :start "1" :end "3"})
+        sel-op (first (filter :selection? ops))]
+    (is (= 1 (:selection/start sel-op)))
+    (is (= 3 (:selection/end sel-op)))))
 
 (deftest input-caret-keeps-its-raw-character-index-alongside-the-pixel-x
   ;; browser.core-test's own form-control-caret-and-selection-project-
