@@ -1769,6 +1769,100 @@
          list -- only the comma separating the two top-level selectors
          should")))
 
+;; ---- :not()/:is()/:where() with a NESTED parenthesized argument, e.g.
+;;      :not(:nth-child(1)) ----
+;;
+;; Before this fix, functional-pseudo-class-pattern's argument capture was
+;; a strict [^()]* -- unable to contain ANY parens at all -- so the WHOLE
+;; :not()/:is()/:where() occurrence failed to match whenever its argument
+;; contained a parenthesized pseudo-class like :nth-child()/:nth-of-type()/
+;; :lang(). This silently broke a common real-world idiom entirely, not
+;; just mis-parsed it: confirmed via direct REPL reproduction before this
+;; fix that li:not(:nth-child(1)) matched ZERO real <li> siblings at all
+;; (not just the wrong ones -- every one, including the ones that should
+;; have matched). These tests exercise the real fix through the full
+;; parse-rules -> apply-cascade pipeline, the same discipline the rest of
+;; this file already uses.
+
+(deftest not-pseudo-class-with-a-nested-nth-child-argument-matches-correctly
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li3)
+        rules (css/parse-rules "li:not(:nth-child(1)) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes li1 :attrs :style/color]))
+        "li1 IS the first child, so :not(:nth-child(1)) must NOT match it")
+    (is (= "red" (get-in doc [:nodes li2 :attrs :style/color]))
+        "li2 is not the first child, so :not(:nth-child(1)) matches it")
+    (is (= "red" (get-in doc [:nodes li3 :attrs :style/color]))
+        "li3 is not the first child, so :not(:nth-child(1)) matches it")))
+
+(deftest is-pseudo-class-with-a-nested-nth-child-argument-matches-correctly
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        [li3 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li3)
+        rules (css/parse-rules ":is(:nth-child(1), :nth-child(3)) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes li1 :attrs :style/color])) "li1 matches the first alternative")
+    (is (nil? (get-in doc [:nodes li2 :attrs :style/color])) "li2 matches neither alternative")
+    (is (= "red" (get-in doc [:nodes li3 :attrs :style/color])) "li3 matches the second alternative")))
+
+(deftest where-pseudo-class-with-a-nested-nth-child-argument-matches-correctly
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li1 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li1)
+        [li2 doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li2)
+        rules (css/parse-rules ":where(:nth-child(2)) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes li1 :attrs :style/color])))
+    (is (= "red" (get-in doc [:nodes li2 :attrs :style/color])))))
+
+(deftest not-is-where-without-any-nested-parens-are-unaffected-by-this-fix
+  ;; Regression guard: every already-working non-nested form must stay
+  ;; byte-for-byte identical.
+  (let [[p1 doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p1)
+        doc (dom/set-attribute doc p1 :class "special")
+        [p2 doc] (dom/create-element doc :p)
+        doc (dom/append-child doc p1 p2)
+        rules (css/parse-rules "p:not(.special) { color: red } p:is(.special) { color: blue }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "blue" (get-in doc [:nodes p1 :attrs :style/color])))
+    (is (= "red" (get-in doc [:nodes p2 :attrs :style/color])))))
+
+(deftest is-with-a-once-nested-not-argument-also-starts-working-as-a-bonus-of-this-fix
+  ;; :is(:not(.a)) -- a nested FUNCTIONAL pseudo-class, not just a nested
+  ;; :nth-child() -- was previously documented as out of scope, but the
+  ;; same one-level-of-nesting fix incidentally makes this work too, since
+  ;; the recursive parse-simple-selector call on the now-correctly-
+  ;; captured inner text ":not(.a)" runs through this same fixed pattern
+  ;; again. Confirmed via direct REPL check this is a genuine improvement,
+  ;; not a coincidence -- documented as a bonus, not the fix's own primary
+  ;; target.
+  (let [[section doc] (dom/create-element dom/empty-document :section)
+        doc (dom/set-root doc section)
+        [d1 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d1)
+        [d2 doc] (dom/create-element doc :div)
+        doc (dom/append-child doc section d2)
+        doc (dom/set-attribute doc d2 :class "a")
+        rules (css/parse-rules "div:is(:not(.a)) { color: red }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes d1 :attrs :style/color])) "d1 has no class \"a\", so :not(.a) matches it, so :is(:not(.a)) matches it")
+    (is (nil? (get-in doc [:nodes d2 :attrs :style/color])) "d2 has class \"a\", so :not(.a) does NOT match it, so :is(:not(.a)) does not match it")))
+
 ;; ---- structural pseudo-classes: :first-child/:last-child/:only-child/
 ;;      :nth-child(), and their same-tag :first-of-type/:last-of-type/
 ;;      :nth-of-type() counterparts, plus :nth-child()'s/:nth-of-type()'s

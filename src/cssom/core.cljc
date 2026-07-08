@@ -1310,15 +1310,39 @@
    leftover text -- see `parse-simple-selector`'s docstring for the concrete
    bug this caused before this pattern existed).
 
-   The argument is captured as `[^()]*` -- deliberately unable to contain
-   another `(` or `)` -- which scopes this pattern (and everything that
-   consumes it) to NON-NESTED occurrences only: nested functional
-   pseudo-classes inside the argument (`:is(:not(.a))`, `:has(:is(.a))`) are
-   out of scope (see `parse-simple-selector`'s docstring for what happens
-   instead of crashing), and an attribute selector's own `[...]` inside the
-   argument is fine (`:not([hidden])`, `:has([hidden])`) since square
-   brackets never conflict with this pattern's parens."
-  #"(?i):(not|is|where|has)\(([^()]*)\)")
+   The argument is captured tolerating ONE level of nested parens
+   (`(?:[^()]|\\([^()]*\\))*`, the same bounded-nesting convention this
+   namespace's own `calc()`/`var()` fallback parsing already uses) --
+   previously captured as a strict `[^()]*` (deliberately unable to
+   contain ANY `(`/`)` at all), which silently broke every occurrence
+   whose argument contained a parenthesized pseudo-class like
+   `:nth-child()`/`:nth-of-type()`/`:lang()` -- a real, severe, and
+   completely silent bug, not merely a documented scope-cut: confirmed
+   via direct REPL reproduction before this fix that `li:not(:nth-child(1))`
+   matched ZERO elements at all (not just the wrong ones), for every real
+   list item that should have matched. Root cause: the old strict pattern
+   simply failed to match the WHOLE `:not(...)` occurrence whenever its
+   argument had its own parens, so `functional-matches` never captured it,
+   the un-stripped literal `:not`/`:is`/`:where`/`:has` text then got
+   mis-picked-up by the plain, argument-less `pseudo-class-pattern`
+   instead (the exact same 'unrecognized bare pseudo-class' bug class this
+   docstring's own paragraph above already documents for the
+   `.special`-inside-`:not(.special)` case), and `matches-pseudo?`'s
+   default `false` for an unrecognized name meant the ENTIRE compound
+   selector could never match anything, silently, for one of real CSS's
+   most common idioms (`:not(:nth-child(1))`, `:is(:nth-child(odd), .x)`).
+   One level of nesting also incidentally starts correctly handling the
+   previously-documented `:is(:not(.a))` shape too, confirmed via direct
+   REPL check with no regression on any already-working case (`:not(.a,
+   .b)`, `:is(h1, h2, h3)`, `:has(.badge)`, `:has(> img)` all still behave
+   identically). Genuinely deeper nesting (two levels, e.g.
+   `:is(:not(:nth-child(1)))`) remains out of scope -- the same bounded-
+   nesting cut this file's own `calc()`/`var()` fallback already commits
+   to, not a new or different limitation -- and an attribute selector's
+   own `[...]` inside the argument is unaffected either way
+   (`:not([hidden])`, `:has([hidden])`) since square brackets never
+   conflict with this pattern's parens."
+  #"(?i):(not|is|where|has)\(((?:[^()]|\([^()]*\))*)\)")
 
 (def nth-pseudo-class-pattern
   "Matches a single `:nth-child(...)` / `:nth-of-type(...)` /
@@ -1557,15 +1581,21 @@
    combinators inside the parens (`:is(.a .b)` is misparsed as a single
    compound requiring both classes on the SAME element, not a descendant
    relationship; `:has()`'s own leading `>` is the one deliberate, narrow
-   exception -- a single leading combinator, never a chain -- see above),
-   and no NESTED functional pseudo-classes inside the argument
-   (`:is(:not(.a))`, `:has(:is(.a))` -- `functional-pseudo-class-pattern`'s
-   argument capture deliberately cannot contain another `(`/`)`, so a
-   nested occurrence like this is never correctly parsed, though it also
-   never crashes). This covers the overwhelming majority of real-world
-   usage: `:not(.hidden)`, `:is(h1, h2, h3)`, `:where(.card, .panel)`,
-   `:has(.badge)`, `:has(> img)` are all compound-selector-only (plus, for
-   `:has()`, at most one leading `>`) in practice.
+   exception -- a single leading combinator, never a chain -- see above).
+   A single level of nesting inside the argument IS supported (a
+   parenthesized pseudo-class like `:not(:nth-child(1))`/
+   `:is(:nth-child(odd), .x)`, or a once-nested functional pseudo-class
+   like `:is(:not(.a))` -- see `functional-pseudo-class-pattern`'s own
+   docstring for the real, severe bug this fixed: previously EVERY
+   occurrence with any parens in its argument silently matched nothing at
+   all); genuinely DEEPER nesting (two levels, e.g.
+   `:is(:not(:nth-child(1)))`) remains out of scope, the same bounded-
+   nesting cut this file's own `calc()`/`var()` fallback parsing already
+   commits to elsewhere. This covers the overwhelming majority of real-
+   world usage: `:not(.hidden)`, `:is(h1, h2, h3)`, `:where(.card,
+   .panel)`, `:has(.badge)`, `:has(> img)`, and now also
+   `:not(:nth-child(2n+1))`-shaped forms, are all compound-selector-only
+   (plus, for `:has()`, at most one leading `>`) in practice.
 
    Structural pseudo-classes (`:first-child`/`:last-child`/`:only-child`/
    `:nth-child()` and their `:first-of-type`/`:last-of-type`/
