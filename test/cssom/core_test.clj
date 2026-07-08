@@ -671,6 +671,82 @@
   (is (nil? (range-check-doc {:type "number" :min "1" :max "10" :value "15" :disabled "disabled"}))
       "constraint validation (and so :in-range/:out-of-range) does not apply to a disabled control"))
 
+;; ---- radio button groups honor real form ownership, not the literal
+;; :form attribute string (https://html.spec.whatwg.org/multipage/input.html
+;; #radio-button-group) -- previously radio-group-node-ids compared only
+;; the literal :form attribute (both sides defaulting to "" when absent),
+;; so two same-named required radios in two DIFFERENT <form> elements,
+;; neither carrying an explicit form= attribute (the overwhelmingly
+;; common authoring shape: relying on the ancestor <form>, not the form=
+;; attribute), were incorrectly treated as ONE shared group -- checking
+;; the radio in form A silently satisfied form B's own required radio
+;; too. browser.document-input's own radio-group-node-ids already gets
+;; this right via ancestor-form-id; this mirrors that fix. ----
+
+(deftest same-named-required-radios-in-different-forms-are-independent-groups
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [form-a doc] (dom/create-element doc :form)
+        doc (dom/append-child doc root form-a)
+        [radio-a doc] (dom/create-element doc :input)
+        doc (dom/append-child doc form-a radio-a)
+        doc (dom/set-attribute doc radio-a :type "radio")
+        doc (dom/set-attribute doc radio-a :name "color")
+        doc (dom/set-attribute doc radio-a :checked "checked")
+        [form-b doc] (dom/create-element doc :form)
+        doc (dom/append-child doc root form-b)
+        [radio-b doc] (dom/create-element doc :input)
+        doc (dom/append-child doc form-b radio-b)
+        doc (dom/set-attribute doc radio-b :type "radio")
+        doc (dom/set-attribute doc radio-b :name "color")
+        doc (dom/set-attribute doc radio-b :required "required")
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes radio-b :attrs :style/color]))
+        "form B's own required radio must stay :invalid -- form A's checked radio must not satisfy it")))
+
+(deftest same-named-required-radios-in-the-same-form-still-share-a-group
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [form-a doc] (dom/create-element doc :form)
+        doc (dom/append-child doc root form-a)
+        [radio-a1 doc] (dom/create-element doc :input)
+        doc (dom/append-child doc form-a radio-a1)
+        doc (dom/set-attribute doc radio-a1 :type "radio")
+        doc (dom/set-attribute doc radio-a1 :name "color")
+        doc (dom/set-attribute doc radio-a1 :checked "checked")
+        [radio-a2 doc] (dom/create-element doc :input)
+        doc (dom/append-child doc form-a radio-a2)
+        doc (dom/set-attribute doc radio-a2 :type "radio")
+        doc (dom/set-attribute doc radio-a2 :name "color")
+        doc (dom/set-attribute doc radio-a2 :required "required")
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes radio-a2 :attrs :style/color]))
+        "two radios genuinely in the same form still share a group -- radio-a1 being checked satisfies radio-a2's requirement")))
+
+(deftest explicit-form-attribute-radio-groups-with-the-referenced-forms-own-radios
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [form-x doc] (dom/create-element doc :form)
+        doc (dom/append-child doc root form-x)
+        doc (dom/set-attribute doc form-x :id "shared-form")
+        [radio-in doc] (dom/create-element doc :input)
+        doc (dom/append-child doc form-x radio-in)
+        doc (dom/set-attribute doc radio-in :type "radio")
+        doc (dom/set-attribute doc radio-in :name "size")
+        doc (dom/set-attribute doc radio-in :checked "checked")
+        [radio-out doc] (dom/create-element doc :input)
+        doc (dom/append-child doc root radio-out)
+        doc (dom/set-attribute doc radio-out :type "radio")
+        doc (dom/set-attribute doc radio-out :name "size")
+        doc (dom/set-attribute doc radio-out :form "shared-form")
+        doc (dom/set-attribute doc radio-out :required "required")
+        rules (css/parse-rules "input:invalid { color: red } input:valid { color: green }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "green" (get-in doc [:nodes radio-out :attrs :style/color]))
+        "an explicit form= attribute pointing at radio-in's real owner form joins the same group even though radio-out sits outside that form in the tree")))
+
 ;; ---- sibling combinators (+ / ~) ----
 
 (deftest parses-adjacent-and-general-sibling-combinators

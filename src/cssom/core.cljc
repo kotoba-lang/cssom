@@ -2337,18 +2337,55 @@
   (when-let [option-id (and document (selected-option-id document (:node/id node)))]
     (option-value document option-id)))
 
+(defn- node-by-dom-id
+  [document dom-id]
+  (some (fn [[node-id candidate]]
+          (when (= dom-id (get-in candidate [:attrs :id]))
+            node-id))
+        (:nodes document)))
+
+(defn- ancestor-form-id
+  "The owning <form>'s node-id for node-id: an explicit `form=\"...\"`
+   attribute pointing at a real <form> by id, else the nearest ancestor
+   <form>. Mirrors browser.document-input's own already-correct
+   ancestor-form-id (https://html.spec.whatwg.org/multipage/forms.html#form-owner)."
+  [document node-id]
+  (or (when-let [form-dom-id (get-in document [:nodes node-id :attrs :form])]
+        (let [form-id (node-by-dom-id document form-dom-id)]
+          (when (= :form (get-in document [:nodes form-id :tag]))
+            form-id)))
+      (loop [parent-id (parent-node-id document node-id)]
+        (when parent-id
+          (if (= :form (get-in document [:nodes parent-id :tag]))
+            parent-id
+            (recur (parent-node-id document parent-id)))))))
+
 (defn- radio-group-node-ids
+  "The HTML radio button group containing node: same (non-empty) `name`
+   *and* same owner form (https://html.spec.whatwg.org/multipage/input.html#radio-button-group).
+   Previously compared only the literal :form ATTRIBUTE string (both
+   sides defaulting to \"\" when absent) instead of real form ownership
+   -- so two same-named radios in two DIFFERENT <form> elements, neither
+   carrying an explicit form= attribute (the overwhelmingly common
+   authoring shape: relying on the ancestor <form>, not the form=
+   attribute), were incorrectly treated as ONE shared group, corrupting
+   :required/:invalid constraint validation across unrelated forms.
+   browser.document-input's own radio-group-node-ids already gets this
+   right via ancestor-form-id; this mirrors that fix."
   [document node]
-  (let [name (get-in node [:attrs :name])
-        form (get-in node [:attrs :form])
-        root (:root document)]
-    (->> (descendant-node-ids document root)
-         (filter (fn [node-id]
-                   (let [candidate (get-in document [:nodes node-id])]
-                     (and (= :input (:tag candidate))
-                          (= "radio" (str/lower-case (str (or (get-in candidate [:attrs :type]) "text"))))
-                          (= (str name) (str (get-in candidate [:attrs :name])))
-                          (= (str form) (str (get-in candidate [:attrs :form])))))))
+  (let [node-id (:node/id node)
+        group-name (get-in node [:attrs :name])
+        named? (not (str/blank? (str group-name)))
+        group-form-id (ancestor-form-id document node-id)]
+    (->> (:nodes document)
+         (keep (fn [[id candidate]]
+                 (when (and (= :input (:tag candidate))
+                            (= "radio" (str/lower-case (str (or (get-in candidate [:attrs :type]) "text"))))
+                            (if named?
+                              (and (= group-name (get-in candidate [:attrs :name]))
+                                   (= group-form-id (ancestor-form-id document id)))
+                              (= id node-id)))
+                   id)))
          vec)))
 
 (defn- radio-required-satisfied?
