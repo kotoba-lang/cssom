@@ -4487,6 +4487,51 @@
         text-op (some #(and (= :text (:draw/op %)) %) ops)]
     (is (= 0.0 (:opacity text-op)))))
 
+;; ---- opacity is clamped to [0,1] in computed values (CSS Color Module
+;; Level 4: "Opacity values outside the range [0,1]... are clamped to the
+;; range [0,1] in computed values") -- previously read via parse-dbl with
+;; no clamp at all, so an out-of-range author value reached the
+;; multiplicative opacity accumulator unclamped: a parent's own opacity:2
+;; multiplied a child's correctly-declared opacity:0.5 up to 1.0 instead
+;; of the real, spec-clamped 0.5, and opacity:-1 propagated a negative
+;; alpha into dom-gpu's paint backends instead of the spec-mandated fully
+;; transparent 0. Confirmed via direct REPL reproduction before touching
+;; source. ----
+
+(deftest opacity-above-one-is-clamped-to-one
+  (is (= 1.0 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { opacity: 2; width: 100; height: 50 }")))))
+
+(deftest opacity-below-zero-is-clamped-to-zero
+  (is (= 0.0 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { opacity: -1; width: 100; height: 50 }")))))
+
+(deftest opacity-in-range-is-unaffected-by-clamping
+  (is (= 0.7 (:text-opacity (visibility-box-and-text-opacity
+                             ".box { opacity: 0.7; width: 100; height: 50 }")))))
+
+(deftest parent-opacity-above-one-does-not-inflate-a-childs-own-in-range-opacity
+  ;; The real regression: a parent's out-of-range opacity must clamp to 1
+  ;; BEFORE combining with a child's own opacity, not multiply the child's
+  ;; correct value up past what it declared.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [parent doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root parent)
+        doc (dom/set-attribute doc parent :class "parent")
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc parent child)
+        doc (dom/set-attribute doc child :class "child")
+        [text doc] (dom/create-text-node doc "CHILD_TEXT")
+        doc (dom/append-child doc child text)
+        rules (css/parse-rules ".parent { opacity: 2; width: 100; height: 50 } .child { opacity: 0.5 }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-op (some #(and (= :text (:draw/op %)) %) ops)]
+    (is (= 0.5 (:opacity text-op)))))
+
 (deftest li-list-style-none-suppresses-only-that-lis-marker-without-renumbering
   ;; Real CSS: `list-style: none` on one <li> only hides THAT marker box --
   ;; it does not renumber the <li>s around it, since real CSS's list

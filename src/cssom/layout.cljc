@@ -725,7 +725,18 @@
    :text-transform (style node :text-transform)
    :white-space (or (style node :white-space) (when (= :pre (:tag node)) "pre"))
    :text-overflow (style node :text-overflow)
-   :opacity (parse-dbl (style node :opacity) 1.0)
+   ;; CSS Color Module Level 4's `opacity`: "Opacity values outside the
+   ;; range [0,1]... are clamped to the range [0,1] in computed values."
+   ;; Previously read raw via parse-dbl with no clamp -- an author value
+   ;; like `opacity: 2` reached the multiplicative opacity accumulator
+   ;; below unclamped, so a child's OWN otherwise-correct opacity got
+   ;; multiplied by more than 1 instead of the real, spec-clamped 1,
+   ;; silently rendering it MORE opaque than its own declared opacity
+   ;; says it should be. A negative value (`opacity: -1`) is equally
+   ;; unclamped, propagating a negative alpha into dom-gpu's ->rgba and
+   ;; the WebGL/WebGPU paint backends instead of the spec-mandated fully
+   ;; transparent 0.
+   :opacity (max 0.0 (min 1.0 (parse-dbl (style node :opacity) 1.0)))
    :visibility (style node :visibility)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
