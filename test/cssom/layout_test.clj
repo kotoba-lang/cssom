@@ -3565,6 +3565,54 @@
     (is (= 15 (:x div-op)))
     (is (= 8 (:y div-op)))))
 
+;; ---- overflow:hidden/auto clipping (node-style previously read :overflow
+;;      via the raw, non-namespaced DOM attribute -- which nothing in real
+;;      HTML/CSS ever sets, since overflow is exclusively a CSS property --
+;;      instead of the cascade-resolved :style/overflow every other
+;;      property here reads. A stylesheet-authored `overflow: hidden` (the
+;;      overwhelmingly common way authors set it) silently never clipped.
+;;      ----
+
+(defn- overflow-container-clip-ops
+  [overflow-decl]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div (merge {:width 100 :height 40} overflow-decl))
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})]
+    (filter #(= :clip (:draw/op %)) ops)))
+
+(deftest overflow-hidden-produces-a-clip-push-and-pop-pair
+  (let [clip-ops (overflow-container-clip-ops {:overflow "hidden"})]
+    (is (= [:push :pop] (mapv :clip/op clip-ops)))
+    (is (every? #(= 100 (:w %)) clip-ops))
+    (is (every? #(= 40 (:h %)) clip-ops))))
+
+(deftest overflow-auto-also-clips-same-as-hidden
+  (is (= [:push :pop] (mapv :clip/op (overflow-container-clip-ops {:overflow "auto"})))))
+
+(deftest overflow-visible-does-not-clip
+  (is (empty? (overflow-container-clip-ops {:overflow "visible"}))))
+
+(deftest no-overflow-declared-at-all-does-not-clip
+  (is (empty? (overflow-container-clip-ops {}))))
+
+(deftest overflow-hidden-through-the-real-cascade-still-clips
+  ;; Unlike the direct dom/set-style tests above, this runs the real
+  ;; end-to-end pipeline (CSS text -> parse-rules + apply-cascade ->
+  ;; kotoba.wasm.dom tree -> draw-ops) to prove the fix holds for the
+  ;; actual authoring path, not just an already-":style/"-namespaced attr.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        rules (css/parse-rules "div { width: 100px; height: 40px; overflow: hidden; }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 200})
+        clip-ops (filter #(= :clip (:draw/op %)) ops)]
+    (is (= [:push :pop] (mapv :clip/op clip-ops)))))
+
 ;; ---- implicit <ul>/<ol> default `<li>` markers (with-implicit-list-markers)
 ;;      ----
 ;;

@@ -739,7 +739,21 @@
    :grid-area (style node :grid-area)
    :gap (parse-int (style node :gap) (:gap theme))
    :pointer-events (style node :pointer-events)
-   :overflow (attr node :overflow)
+   ;; :overflow is exclusively a CSS property in real HTML/CSS -- nothing
+   ;; ever sets it as a plain (non-namespaced) DOM attribute the way
+   ;; :scroll-top/:scroll-left below genuinely are (real runtime scroll-
+   ;; position state, not CSS). Previously read via `attr` like those two,
+   ;; so a stylesheet-authored `overflow: hidden` (the overwhelmingly
+   ;; common way authors set it) never reached this map at all, even
+   ;; though apply-cascade already resolves it correctly onto :style/
+   ;; overflow -- confirmed via direct REPL reproduction before this fix:
+   ;; a real cascaded `.container { overflow: hidden }` produced zero
+   ;; clip-push/clip-pop ops from layout-block's `clip?` check just below,
+   ;; silently letting an overflowing child paint outside its box.
+   ;; browser.document-input's own scrollable-node? already gets this
+   ;; right (checks `style` first, falling back to `attr`), confirming
+   ;; this file was the outlier, not an intentional design choice.
+   :overflow (style node :overflow)
    :scroll-top (parse-int (attr node :scroll-top) 0)
    :scroll-left (parse-int (attr node :scroll-left) 0)})
 
