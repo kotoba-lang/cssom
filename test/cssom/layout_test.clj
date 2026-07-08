@@ -3368,6 +3368,74 @@
   (let [div-op (absolute-child-op "right: auto; width: 40; height: 20")]
     (is (= 0 (:x div-op)))))
 
+;; ---- position:fixed (previously NOT recognized by `absolute?` at all --
+;;      a position:fixed child fell all the way through to being treated
+;;      like position:static: it stayed in normal flow and, unlike real
+;;      CSS, still occupied layout space and pushed its following siblings
+;;      down. Routed through the SAME partition-flow/layout-absolute-
+;;      children machinery position:absolute already uses -- see
+;;      absolute?'s own docstring for the honest containing-block-not-
+;;      real-viewport scope cut this implies.) ----
+
+(deftest fixed-child-does-not-push-its-following-sibling-down
+  ;; Real bug this guards, confirmed via direct REPL reproduction before
+  ;; touching source: the second, static sibling landed at y=28 (pushed
+  ;; down by the first, fixed child's own height) instead of y=4.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [fixed-el doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root fixed-el)
+        doc (dom/set-attribute doc fixed-el :class "fixed-box")
+        [static-el doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root static-el)
+        doc (dom/set-attribute doc static-el :class "static-box")
+        rules (css/parse-rules
+               ".fixed-box { position: fixed; width: 50px; height: 20px }
+                .static-box { width: 50px; height: 20px }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        node-ops (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
+    (is (= 2 (count node-ops)))
+    (is (every? #(= 4 (:y %)) node-ops)
+        "both the fixed child and its sibling must land at the SAME y --
+         the fixed child pulled out of flow, exactly like position:absolute
+         already does, not pushing the sibling down")))
+
+(deftest fixed-child-anchors-to-right-and-bottom-like-absolute-does
+  (let [div-op (absolute-child-op "position: fixed; right: 10; bottom: 5; width: 40; height: 20")]
+    (is (= 150 (:x div-op)))
+    (is (= 175 (:y div-op)))))
+
+(deftest fixed-child-honors-top-and-left-like-absolute-does
+  (let [div-op (absolute-child-op "position: fixed; top: 8; left: 15; width: 40; height: 20")]
+    (is (= 15 (:x div-op)))
+    (is (= 8 (:y div-op)))))
+
+(deftest sticky-child-still-stays-in-normal-flow-unlike-fixed
+  ;; Regression guard: this fix must NOT accidentally sweep position:sticky
+  ;; into the same out-of-flow treatment -- an unscrolled sticky element's
+  ;; correct position IS normal flow, so it should still push its
+  ;; following sibling down exactly like position:static would.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [sticky-el doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root sticky-el)
+        doc (dom/set-attribute doc sticky-el :class "sticky-box")
+        [static-el doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root static-el)
+        doc (dom/set-attribute doc static-el :class "static-box")
+        rules (css/parse-rules
+               ".sticky-box { position: sticky; width: 50px; height: 20px }
+                .static-box { width: 50px; height: 20px }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        node-ops (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
+    (is (= [4 28] (mapv :y node-ops)))))
+
 ;; ---- position:relative top/left/right/bottom (layout-children-block
 ;;      previously read NEITHER at all -- position:relative had
 ;;      byte-identical layout to position:static/unset, even though this

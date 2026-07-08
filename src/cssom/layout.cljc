@@ -968,8 +968,33 @@
        (assoc base :edge :bottom :x ox :y (- (+ oy total-h) thickness) :w total-w :h thickness)
        (assoc base :edge :left :x ox :y oy :w thickness :h total-h)])))
 
-(defn- absolute? [theme child]
-  (and (map? child) (= "absolute" (:position (node-style child theme)))))
+(defn- absolute?
+  "True for both `position: absolute` and `position: fixed` -- real bug
+   this guards: `fixed` was previously not recognized at all, so a
+   `position: fixed` child fell all the way through to being treated
+   like `position: static` -- it stayed in normal flow and, unlike real
+   CSS, still occupied layout space and pushed its following siblings
+   down. Confirmed via direct REPL reproduction: two block siblings, the
+   first `position: fixed`, and the second landed at y=28 (pushed down
+   by the first's own height) instead of y=4 -- the exact same two-
+   sibling layout with `position: absolute` on the first correctly
+   leaves the second at y=4, unaffected.
+
+   Routing `fixed` through the SAME partition-flow/layout-absolute-
+   children machinery `absolute` already uses is an honest, documented
+   scope-cut: this engine has no separate scroll-independent viewport
+   model (see the namespace docstring), so a `fixed` element is anchored
+   against its nearest containing block exactly like `absolute` is,
+   rather than the real viewport -- real fixed-to-viewport decoupling
+   under scrolling is a deeper, deliberately out-of-scope behavior, the
+   same kind of honest cut this file already makes elsewhere (e.g.
+   `layout-absolute-children`'s own `hsl()`-hue-unit-scoping comparison).
+   `position: sticky` is deliberately NOT included here -- its
+   unscrolled default position is legitimately identical to normal
+   flow, so leaving it in-flow is correct, not a gap, for a rendering
+   engine with no real scroll-position-dependent re-layout."
+  [theme child]
+  (and (map? child) (contains? #{"absolute" "fixed"} (:position (node-style child theme)))))
 
 (defn- partition-flow
   [theme children]
