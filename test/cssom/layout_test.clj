@@ -4178,8 +4178,8 @@
   (* (count text) 7))
 
 (defn- input-ops
-  [{:keys [value start end theme]}]
-  (let [[input doc] (dom/create-element dom/empty-document :input)
+  [{:keys [value start end theme tag] :or {tag :input}}]
+  (let [[input doc] (dom/create-element dom/empty-document tag)
         doc (dom/set-root doc input)
         doc (dom/set-attribute doc input :value value)
         doc (cond-> doc
@@ -4260,6 +4260,40 @@
 
 (deftest input-with-no-selection-attrs-produces-no-caret-or-selection-ops
   (let [ops (input-ops {:value "hi"})]
+    (is (empty? (filter :caret? ops)))
+    (is (empty? (filter :selection? ops)))))
+
+;; ---- <textarea> caret/selection painting -- previously gated to :input
+;; alone, even though browser.document-input tracks :selection-start/
+;; :selection-end on <textarea> exactly the same way as :input (editable-
+;; node?/reset-control-state/focus-editable's caret-placement path all
+;; already treat the two identically). A focused, actively-typed-into
+;; <textarea> had fully correct selection state in the DOM model, but its
+;; caret/selection-highlight was silently never painted at all. Confirmed
+;; via direct REPL reproduction before touching source. ----
+
+(deftest textarea-caret-renders-as-a-real-rect-just-like-input
+  (let [ops (input-ops {:tag :textarea :value "hello" :start "3" :end "3"})
+        caret-op (first (filter :caret? ops))]
+    (is (= :rect (:draw/op caret-op)))
+    (is (not (contains? caret-op :text)))))
+
+(deftest textarea-selection-renders-as-a-real-rect-just-like-input
+  (let [ops (input-ops {:tag :textarea :value "hello world" :start "1" :end "4"})
+        sel-op (first (filter :selection? ops))]
+    (is (= :rect (:draw/op sel-op)))
+    (is (str/starts-with? (:color sel-op) "rgba"))))
+
+(deftest textarea-with-no-selection-attrs-produces-no-caret-or-selection-ops
+  (let [ops (input-ops {:tag :textarea :value "hi"})]
+    (is (empty? (filter :caret? ops)))
+    (is (empty? (filter :selection? ops)))))
+
+(deftest select-still-never-gets-a-caret-or-selection-even-with-the-attrs-present
+  ;; Regression guard: the fix widens the gate from :input alone to
+  ;; #{:input :textarea} -- it must NOT also start affecting :select,
+  ;; which never has a real text-selection concept at all.
+  (let [ops (input-ops {:tag :select :start "1" :end "3"})]
     (is (empty? (filter :caret? ops)))
     (is (empty? (filter :selection? ops)))))
 

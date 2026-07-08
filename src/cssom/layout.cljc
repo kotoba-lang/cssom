@@ -3298,7 +3298,18 @@
                     showing-placeholder? (assoc :color "#767676")))
         selection-start (attr node :selection-start)
         selection-end (attr node :selection-end)
-        sel-ops (when (and (= tag :input) selection-start selection-end)
+        ;; Previously gated to :input alone, even though browser.document-
+        ;; input tracks :selection-start/:selection-end on <textarea>
+        ;; exactly the same way (editable-node?/reset-control-state/
+        ;; focus-editable's caret-placement path all already treat :input
+        ;; and :textarea identically) -- so a focused, actively-typed-into
+        ;; <textarea> had fully correct selection state in the DOM model,
+        ;; but its caret/selection-highlight was silently never painted at
+        ;; all, no matter what a real page did. control-text (above) was
+        ;; already unaffected -- :textarea already falls through to the
+        ;; same default text-rendering branch :input's own non-checkbox
+        ;; case uses -- only this gate was too narrow.
+        sel-ops (when (and (contains? #{:input :textarea} tag) selection-start selection-end)
                   (let [len (count control-text)
                         clamp #(max 0 (min len %))
                         s (some-> (parse-int selection-start nil) clamp)
