@@ -3108,7 +3108,25 @@
    'stretch to fill left+right' auto-width solving -- a real but deeper
    CSS behavior deliberately out of scope here, the same kind of honest,
    documented cut this file already makes elsewhere, e.g. `hsl()`'s
-   hue-unit scoping)."
+   hue-unit scoping).
+
+   Returns `{:below :above}` rather than one flat, sorted vector -- real
+   bug this guards: a negative `z-index` on a positioned element must
+   paint BEHIND its stacking context's own in-flow content (this is the
+   entire, well-known point of a negative z-index -- pinning an element
+   behind its container's other children), but `layout-block` used to
+   splice this function's ENTIRE output after in-flow content
+   unconditionally, regardless of z sign. Confirmed via direct REPL
+   reproduction before touching source: a `z-index: -1` absolutely
+   positioned red box painted LAST (topmost) over an in-flow green
+   sibling instead of behind it. `layout-block` now interleaves `:below`
+   right after its own background/border/outline (before in-flow
+   content) and keeps `:above` where the old, single splice point sat --
+   still simplistic versus real CSS's full stacking-context algorithm
+   (no separate treatment for 0-vs-auto vs explicit-positive z-index, no
+   nested stacking contexts of their own), but correctly resolves the
+   one case that was silently backwards. Ties within each group still
+   sort by `:z` ascending, same as before."
   [theme content-x content-y content-w content-h opacity inherited children]
   (let [placed (mapv (fn [child]
                         (let [cst (node-style child theme)
@@ -3124,10 +3142,12 @@
                               dy (+ content-y (cond top top
                                                      bottom (- content-h h bottom)
                                                      :else 0))]
-                          {:z (:z-index cst) :draw (translate-ops dx dy (:draw m))}))
+                          {:z (or (:z-index cst) 0) :draw (translate-ops dx dy (:draw m))}))
                       children)
-        sorted (sort-by :z placed)]
-    (vec (mapcat :draw sorted))))
+        sorted (sort-by :z placed)
+        {below true above false} (group-by #(neg? (:z %)) sorted)]
+    {:below (vec (mapcat :draw below))
+     :above (vec (mapcat :draw above))}))
 
 (defn- option-label
   [node value]
@@ -3291,7 +3311,7 @@
         node-h (clamp-height st (or explicit-h (+ h (* 2 inset))))
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
-        absolute-draws (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
+        {above-draws :above below-draws :below} (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
         box-shadow-draws (or (box-shadow-ops st x y node-w node-h opacity) [])
         border-draws (or (border-ops st x y node-w node-h opacity) [])
         outline-draws (or (outline-ops st x y node-w node-h opacity) [])
@@ -3322,7 +3342,15 @@
      ;; non-inset box-shadow BEHIND the element's own box. outline-draws
      ;; goes right after border-draws -- it paints OUTSIDE the box, on
      ;; top of everything else this element paints.
-     :draw (vec (concat box-shadow-draws rect border-draws outline-draws semantic clip-push draw clip-pop absolute-draws))}))
+     ;;
+     ;; below-draws (negative z-index positioned children) is spliced in
+     ;; HERE, right after this element's own background/border/outline
+     ;; but before its in-flow content -- see layout-absolute-children's
+     ;; own docstring for the real bug this fixes (a negative z-index
+     ;; child previously always painted on TOP of in-flow content,
+     ;; backwards from real CSS stacking order). above-draws (z-index >=
+     ;; 0) keeps the original splice point, after in-flow content.
+     :draw (vec (concat box-shadow-draws rect border-draws outline-draws below-draws semantic clip-push draw clip-pop above-draws))}))
 
 (defn layout-node
   ([node] (layout-node default-theme 0 0 320 1.0 {:color (:fg default-theme) :font-size (:font-size default-theme)

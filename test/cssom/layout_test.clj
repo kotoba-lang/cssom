@@ -3436,6 +3436,58 @@
         node-ops (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
     (is (= [4 28] (mapv :y node-ops)))))
 
+;; ---- negative z-index on a positioned child must paint BEHIND its
+;;      stacking context's own in-flow content (layout-absolute-children
+;;      previously spliced its ENTIRE output -- regardless of z sign --
+;;      after in-flow content, so a z-index:-1 element always painted on
+;;      TOP of everything, backwards from real CSS stacking order) ----
+
+(defn- z-index-stacking-colors
+  "Shared harness: a position:relative container with an in-flow sibling
+   and an absolutely-positioned, fully-overlapping child styled by
+   `abs-extra-style` (must include its own z-index); returns the real
+   paint-order colors (background, sibling, positioned child)."
+  [abs-extra-style]
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :class "container")
+        [sibling doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root sibling)
+        doc (dom/set-attribute doc sibling :class "sibling")
+        [abs-el doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root abs-el)
+        doc (dom/set-attribute doc abs-el :class "positioned")
+        rules (css/parse-rules
+               (str ".container { position: relative; width: 200; height: 100; padding: 0; background: blue } "
+                    ".sibling { width: 200; height: 100; background: green } "
+                    ".positioned { position: absolute; top: 0; left: 0; width: 200; height: 100; background: red; "
+                    abs-extra-style " }"))
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})]
+    (mapv :color (filterv #(= :rect (:draw/op %)) ops))))
+
+(deftest negative-z-index-positioned-child-paints-behind-in-flow-content
+  ;; Real bug this guards, confirmed via direct REPL reproduction before
+  ;; touching source: a z-index:-1 absolutely positioned red box painted
+  ;; LAST (topmost) over the in-flow green sibling instead of behind it.
+  (is (= ["blue" "red" "green"] (z-index-stacking-colors "z-index: -1"))))
+
+(deftest positive-z-index-positioned-child-still-paints-on-top
+  ;; Regression guard: this fix must not flip the already-correct
+  ;; positive-z-index case.
+  (is (= ["blue" "green" "red"] (z-index-stacking-colors "z-index: 1"))))
+
+(deftest zero-z-index-positioned-child-still-paints-on-top
+  (is (= ["blue" "green" "red"] (z-index-stacking-colors "z-index: 0"))))
+
+(deftest absent-z-index-positioned-child-still-paints-on-top
+  ;; Regression guard: node-style's own z-index default (0) must still
+  ;; resolve to the "paints on top" group when no z-index is declared at
+  ;; all, not just when it's explicitly written as 0.
+  (is (= ["blue" "green" "red"] (z-index-stacking-colors ""))))
+
 ;; ---- position:relative top/left/right/bottom (layout-children-block
 ;;      previously read NEITHER at all -- position:relative had
 ;;      byte-identical layout to position:static/unset, even though this
