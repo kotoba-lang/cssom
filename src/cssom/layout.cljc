@@ -2817,7 +2817,20 @@
         draws (mapcat
                (fn [idxs row-y row-cross-size]
                  (let [sizes (mapv #(nth main-sizes %) idxs)
-                       offs (place-main-axis "flex-start" sizes gap cw)]
+                       ;; justify-content, per ROW -- see this function's own
+                       ;; align-items fix above for the identical rationale.
+                       ;; This previously hardcoded "flex-start" instead of
+                       ;; reading (:justify-content st) like layout-flex's
+                       ;; own non-wrap path already does, so EVERY wrapped
+                       ;; row was packed at its own start regardless of the
+                       ;; container's actual justify-content -- confirmed via
+                       ;; a direct REPL reproduction: two flex-wrap:wrap
+                       ;; children under justify-content:flex-end (or
+                       ;; :center) both stayed at their flex-start offsets,
+                       ;; while the identical style with flex-wrap OMITTED
+                       ;; (the already-correct non-wrap path) correctly
+                       ;; right-aligned/centered them.
+                       offs (place-main-axis (:justify-content st) sizes gap cw)]
                    (mapcat (fn [child-idx off]
                              (let [m (nth measured child-idx)
                                    child-cross (:h (:box m))

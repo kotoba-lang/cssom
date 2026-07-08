@@ -1435,6 +1435,65 @@
   (let [[a b] (flex-wrap-span-boxes "flex-start" 300 [[50 20] [50 80]])]
     (is (= [4 4 50 20] a) "flex-start must stay byte-identical to this function's own pre-fix (align-items-ignoring) top-aligned behavior")))
 
+;; ---- flex-wrap:wrap + justify-content ----
+;;
+;; layout-flex-wrap-row's own main-axis packing hardcoded the literal
+;; "flex-start" instead of reading (:justify-content st), unlike layout-
+;; flex's own non-wrap path a few hundred lines away, which already reads
+;; it correctly. Confirmed via a direct REPL reproduction before touching
+;; source: two flex-wrap:wrap children under justify-content:flex-end (or
+;; :center) both stayed at their flex-start offsets, identical to omitting
+;; justify-content entirely, while the identical style with flex-wrap
+;; OMITTED (the already-correct non-wrap path) correctly right-aligned/
+;; centered them.
+
+(defn- flex-wrap-justify-boxes
+  "flex-wrap-span-boxes's own justify-content counterpart: builds a
+   flex-wrap:wrap row with N <span> children (each own [width height]
+   pair) under an explicit gap:0 and returns each child's own [x y w h]
+   draw box, in source order."
+  [justify container-width items]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div (merge {:display "flex" :flex-wrap "wrap" :width container-width :gap 0}
+                                           (when justify {:justify-content justify})))
+        doc (reduce (fn [doc [w h]]
+                      (let [[item doc] (dom/create-element doc :span)
+                            doc (dom/append-child doc div item)]
+                        (dom/set-style doc item {:width w :height h})))
+                    doc items)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width container-width})
+        spans (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)]
+    (mapv (fn [s] [(:x s) (:y s) (:w s) (:h s)]) spans)))
+
+(deftest flex-wrap-justify-content-flex-end-right-aligns-a-single-row
+  (let [[a b] (flex-wrap-justify-boxes "flex-end" 300 [[100 20] [100 20]])]
+    (is (= [96 4 100 20] a) "row content (200) right-aligned within the 292px content area: 292-200=92, plus the container's own 4px content-area left inset")
+    (is (= [196 4 100 20] b))))
+
+(deftest flex-wrap-justify-content-center-centers-a-single-row
+  (let [[a b] (flex-wrap-justify-boxes "center" 300 [[100 20] [100 20]])]
+    (is (= [50 4 100 20] a) "row content (200) centered within the 292px content area: (292-200)/2=46, plus the container's own 4px content-area left inset")
+    (is (= [150 4 100 20] b))))
+
+(deftest flex-wrap-justify-content-flex-start-is-unaffected-by-this-fix
+  (let [[a b] (flex-wrap-justify-boxes "flex-start" 300 [[100 20] [100 20]])]
+    (is (= [4 4 100 20] a) "flex-start must stay byte-identical to this function's own pre-fix (justify-content-ignoring) start-packed behavior")
+    (is (= [104 4 100 20] b))))
+
+(deftest flex-wrap-justify-content-is-scoped-to-each-rows-own-content-width-not-the-whole-container
+  ;; Mirrors the sibling align-items per-row-independence test above: each
+  ;; wrapped row must center against ITS OWN row content width, not the
+  ;; container's, or a shared whole-container width. Row 1 (two 140px
+  ;; items, 280 total) and row 2 (one 140px item, alone) each get their
+  ;; own, independently-computed centering offset.
+  (let [[a b c] (flex-wrap-justify-boxes "center" 300 [[140 20] [140 20] [140 20]])]
+    (is (= [10 4 140 20] a) "row 1 (280 content) centered within 292: (292-280)/2=6, plus the 4px inset")
+    (is (= [150 4 140 20] b))
+    (is (= [80 24 140 20] c) "row 2, alone, centered on ITS OWN 140px content within 292: (292-140)/2=76, plus the 4px inset -- not influenced by row 1's own, different offset")))
+
 (deftest grid-container-outline-paints-after-border
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
