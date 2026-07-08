@@ -3456,6 +3456,17 @@
 
     :else value))
 
+(defn- inherit-keyword?
+  "True when `value` is the CSS-wide `inherit` keyword (case-insensitive,
+   ignoring surrounding whitespace, matching how every other keyword value
+   in this file is compared -- see resolve-style-for's own docstring for
+   why a winning `inherit` declaration is removed from the resolved map
+   rather than stored as the literal string \"inherit\"). `initial`/`unset`/
+   `revert` are deliberately NOT handled here -- an honest, documented
+   scope-cut, not an oversight."
+  [value]
+  (and (string? value) (= "inherit" (str/lower-case (str/trim value)))))
+
 (defn- resolve-style-for
   "Cascade-resolves the declarations that target `pseudo-element` (nil for
    the real element itself, :before/:after for its generated content) on
@@ -3584,7 +3595,28 @@
    have a real one: only `apply-cascade`'s own second pass, never
    `computed-style`/`pseudo-element-style-for`, and never apply-cascade's
    own FIRST pass either, which must not let any @container rule contribute
-   before container widths are even known)."
+   before container widths are even known).
+
+   The CSS-wide `inherit` keyword (see `inherit-keyword?`): a winning
+   declaration whose value is `inherit` is REMOVED from the resulting map
+   rather than stored as the literal string \"inherit\" -- storing it
+   verbatim was a real, previously-unfixed bug (an extremely common author
+   idiom, `color: inherit`, silently rendered fully transparent/invisible
+   text downstream, since no color parser recognizes the word \"inherit\"
+   as a color). Removing the property from the map lets the SAME
+   already-existing `(or (:prop st) (:prop inherited))` fallback
+   `cssom.layout` already applies for every genuinely-inherited CSS
+   property (color/font-*/line-height/text-*/white-space) do the real
+   inheriting at layout time, for free -- exactly as if this element's
+   stylesheet/inline rules had never mentioned that property at all, which
+   is precisely what `inherit` should look like to a descendant lookup.
+   For a NON-inherited property (e.g. `display`), this only stops the
+   literal-string corruption -- it does not make `cssom.layout` treat that
+   property as inherited, since no per-property fallback exists for it
+   there; genuinely forcing inheritance for non-inherited properties is an
+   honest, documented scope-cut, not attempted here. `initial`/`unset`/
+   `revert` are separately, deliberately not handled at all (same
+   scope-cut)."
   ([document rules node pseudo-element]
    (resolve-style-for document rules node pseudo-element nil nil))
   ([document rules node pseudo-element counters]
@@ -3624,7 +3656,9 @@
                                                 :order idx})
                                              (inline-style node)))]
      (let [m (reduce (fn [m {:keys [property value]}]
-                        (assoc m property value))
+                        (if (inherit-keyword? value)
+                          (dissoc m property)
+                          (assoc m property value)))
                       {}
                       (sort-by (juxt :important? :inline? :unlayered? :layer :specificity :order)
                                (concat declarations inline-declarations)))]

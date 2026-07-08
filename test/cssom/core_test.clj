@@ -1,5 +1,6 @@
 (ns cssom.core-test
   (:require [cssom.core :as css]
+            [cssom.layout :as layout]
             [clojure.test :refer [deftest is]]
             [kotoba.wasm.dom :as dom]))
 
@@ -2792,3 +2793,81 @@
     (is (= [1 0 1] (css/specificity (-> rules second :rule/selectors first)))
         ":has(#id, .a) adds the MOST specific of its two arguments -- #id,
          not .a")))
+
+;; ---- CSS-wide `inherit` keyword ----
+
+(deftest inherit-keyword-removes-the-property-instead-of-storing-the-literal-string
+  ;; Real bug this guards: `color: inherit` (an extremely common real-world
+  ;; author idiom) previously stored the literal string "inherit" as the
+  ;; winning declaration's value -- no downstream color parser recognizes
+  ;; "inherit" as a color, so it silently rendered fully transparent,
+  ;; invisible text. Confirmed via direct REPL reproduction before touching
+  ;; source. Fixed by removing the property from the resolved map instead,
+  ;; letting cssom.layout's own already-existing per-property
+  ;; `(or (:prop st) (:prop inherited))` fallback do the real inheriting.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "div { color: red } span { color: inherit }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "red" (get-in doc [:nodes root :attrs :style/color])))
+    (is (nil? (get-in doc [:nodes child :attrs :style/color]))
+        "the winning `inherit` declaration must NOT leave the literal
+         string \"inherit\" on the node -- absent, so layout's own
+         inherited-value fallback can take over")))
+
+(deftest inherit-keyword-is-case-insensitive-and-tolerates-surrounding-whitespace
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "div { color: green } span { color:  InHeRiT  }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes child :attrs :style/color])))))
+
+(deftest inherit-keyword-loses-to-a-later-more-specific-declaration-like-any-other-value
+  ;; Sanity check that this fix doesn't special-case `inherit` OUTSIDE the
+  ;; normal cascade -- a more specific declaration on the SAME element
+  ;; still simply wins, exactly as if `inherit` had been any other value.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc child :class "override")
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "div { color: red } span { color: inherit } .override { color: purple }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "purple" (get-in doc [:nodes child :attrs :style/color])))))
+
+(deftest inherit-keyword-through-two-levels-with-no-intervening-rule-at-all
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [mid doc] (dom/create-element doc :section)
+        doc (dom/append-child doc root mid)
+        [leaf doc] (dom/create-element doc :span)
+        doc (dom/append-child doc mid leaf)
+        rules (css/parse-rules "div { color: blue } section { color: inherit } span { color: inherit }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes leaf :attrs :style/color])))
+    (is (nil? (get-in doc [:nodes mid :attrs :style/color])))))
+
+(deftest inherit-keyword-resolves-through-the-real-layout-pipeline-to-the-parents-actual-color
+  ;; End-to-end confirmation through the real cascade -> DOM -> layout
+  ;; pipeline (cssom.layout/draw-ops), not just the raw :style/color attr
+  ;; -- proving the fix genuinely reaches the visible text color, not just
+  ;; the cascade's own intermediate representation.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "div { color: red } span { color: inherit }")
+        doc (css/apply-cascade doc rules)
+        [txt doc] (dom/create-text-node doc "hello")
+        doc (dom/append-child doc child txt)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 480})
+        text-op (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= "red" (:color text-op))
+        "the child's real, painted text color must be the parent's red,
+         not the literal string \"inherit\" and not a default fallback")))
