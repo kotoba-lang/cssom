@@ -1078,6 +1078,44 @@
             offsets
             (recur (inc i) (+ pos (nth sizes i) gap) (conj offsets pos)))))
 
+      ;; space-around/space-evenly -- the two other spec-mandated (CSS
+      ;; Flexible Box Layout SS8.3) distribution keywords, previously
+      ;; missing from this cond entirely and silently falling through to
+      ;; :else's flush-start packing, identical to flex-start. Confirmed
+      ;; via a direct REPL reproduction before touching source: sizes
+      ;; [50 50 50] gap 0 container 300 under space-around/space-evenly
+      ;; produced the exact same offsets as flex-start. Both branches
+      ;; reserve `gap` as the same MINIMUM inter-item floor the
+      ;; space-between branch above already established (added to, not
+      ;; replaced by, the distributed free space): space-around gives
+      ;; each item a full `free/n` share split half-lead/half-trail (so
+      ;; adjacent items' half-shares combine into one full share between
+      ;; them, on top of `gap`); space-evenly divides free space into
+      ;; `n+1` equal gaps (before the first item, between each pair, and
+      ;; after the last), also on top of `gap` between items. For a
+      ;; single item, both correctly reduce to centering (one item has
+      ;; exactly one lead and one trail gap of equal size either way),
+      ;; matching real CSS.
+      (= justify "space-around")
+      (let [total (+ (reduce + 0 sizes) (* gap (max 0 (dec n))))
+            free (max 0 (- container-size total))
+            per-item (/ free n)
+            step (+ gap per-item)]
+        (loop [i 0 pos (/ per-item 2) offsets []]
+          (if (= i n)
+            offsets
+            (recur (inc i) (+ pos (nth sizes i) step) (conj offsets pos)))))
+
+      (= justify "space-evenly")
+      (let [total (+ (reduce + 0 sizes) (* gap (max 0 (dec n))))
+            free (max 0 (- container-size total))
+            unit (/ free (inc n))
+            step (+ gap unit)]
+        (loop [i 0 pos unit offsets []]
+          (if (= i n)
+            offsets
+            (recur (inc i) (+ pos (nth sizes i) step) (conj offsets pos)))))
+
       :else
       (loop [i 0 pos 0 offsets []]
         (if (= i n)

@@ -1238,6 +1238,80 @@
 (deftest space-between-with-zero-gap-is-unaffected-by-this-fix
   (is (= [4 109 214] (space-between-item-x-offsets 90 0))))
 
+;; ---- justify-content: space-around / space-evenly ----
+;;
+;; place-main-axis previously had NO branch for either of these two other
+;; spec-mandated (CSS Flexible Box Layout SS8.3) distribution keywords --
+;; both silently fell through to :else's flush-start packing, identical to
+;; flex-start. Confirmed via a direct REPL reproduction before touching
+;; source: three 50px-wide items under justify-content:space-around (or
+;; :space-evenly) produced the exact same offsets as flex-start. Fixed by
+;; mirroring space-between's own gap-as-minimum-floor pattern above:
+;; space-around gives each item a full free/n share split half-lead/half-
+;; trail; space-evenly divides free space into n+1 equal gaps (before the
+;; first item, between each pair, and after the last).
+
+(defn- space-distribution-item-x-offsets
+  "space-between-item-x-offsets's own space-around/space-evenly
+   counterpart: builds a flex row of three same-width items under the
+   given justify-content/gap, all under an explicit 300px container width."
+  [justify item-width gap]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :justify-content justify
+                                     :gap gap :width 300})
+        make-item (fn [doc]
+                    (let [[item doc] (dom/create-element doc :span)
+                          doc (dom/append-child doc div item)
+                          doc (dom/set-style doc item {:width item-width})]
+                      [item doc]))
+        [_ doc] (make-item doc)
+        [_ doc] (make-item doc)
+        [_ doc] (make-item doc)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})]
+    (mapv :x (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))))
+
+(deftest space-around-distributes-free-space-as-half-shares-around-each-item
+  (is (= [12 112 212] (space-distribution-item-x-offsets "space-around" 84 0))
+      "each item gets a full 100px/3 share split 50/50 lead/trail: item 1 leads by half a share (50), adjacent items' half-shares combine into one full share (100) between them"))
+
+(deftest space-around-reserves-gap-as-a-minimum-inter-item-spacing
+  (is (= [4 114 224] (space-distribution-item-x-offsets "space-around" 90 20))
+      "270px of items leaves no free space once the 40px gap floor (2 gaps x 20px) is reserved from the 292px content area -- degenerates to the gap floor alone, same as space-between's own equivalent floor case"))
+
+(deftest space-evenly-distributes-free-space-into-n-plus-1-equal-gaps
+  (is (= [16 112 208] (space-distribution-item-x-offsets "space-evenly" 84 0))
+      "4 equal gaps (before/between x2/after) of 40px each -- genuinely different from space-around's [12 112 212] at the identical item width, not an alias"))
+
+(deftest space-evenly-reserves-gap-as-a-minimum-inter-item-spacing
+  (is (= [6 112 218] (space-distribution-item-x-offsets "space-evenly" 84 20))
+      "the 20px author gap is still honored as a floor between items, on top of space-evenly's own equal-gap distribution"))
+
+(defn- single-item-x-offset
+  [justify item-width]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :justify-content justify :width 300})
+        [item doc] (dom/create-element doc :span)
+        doc (dom/append-child doc div item)
+        doc (dom/set-style doc item {:width item-width})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})]
+    (first (mapv :x (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)))))
+
+(deftest space-around-and-space-evenly-both-center-a-single-item-matching-plain-center
+  ;; With exactly one item, both distribution models degenerate to a
+  ;; single lead and a single trail gap of equal size -- i.e. centering,
+  ;; matching real CSS and matching this file's own plain justify-
+  ;; content:center behavior for the same input.
+  (is (= 104 (single-item-x-offset "space-around" 100)))
+  (is (= 104 (single-item-x-offset "space-evenly" 100)))
+  (is (= 104 (single-item-x-offset "center" 100))
+      "sanity check: matches plain center exactly, confirming the single-item degeneration is correct, not coincidental"))
+
 (deftest explicit-width-on-a-flex-child-is-not-touched-by-shrink-to-fit
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
