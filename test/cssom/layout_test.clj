@@ -797,6 +797,72 @@
     (is (= 86 (:w shadow-rect)))
     (is (= 46 (:h shadow-rect)))))
 
+;; ---- box-shadow-x/y/spread/blur and text-shadow-x/y/blur are eagerly
+;; coerced to numbers, not left as raw strings ----
+;;
+;; node-style previously left these six properties as whatever raw value
+;; reached :attrs, unlike sibling properties (:padding/:margin/:border-
+;; width) already parse-int'd a few lines above in the same function.
+;; The ordinary CSS-authored shorthand path (a real box-shadow/text-
+;; shadow declaration, via either a stylesheet rule or an inline style=
+;; attribute) already numeric-coerces these before they ever reach
+;; :attrs, so this gap was invisible for ordinary authored CSS -- but a
+;; script mutating an INDIVIDUAL style property directly (dom/set-style
+;; below simulates exactly what that uncoerced path delivers) could
+;; still reach box-shadow-ops'/layout-text's own raw (+ x dx (- spread))
+;; arithmetic with a genuine STRING value, crashing with
+;; ClassCastException on the JVM (confirmed via direct REPL reproduction
+;; before this fix) or silently producing JS string-concatenation
+;; garbage coordinates on this engine's real ClojureScript/JS target,
+;; where + compiles straight to the native, type-unchecked JS operator.
+
+(deftest box-shadow-string-coordinates-are-coerced-to-numbers-not-left-raw
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:box-shadow-x "8" :box-shadow-y "8" :box-shadow-color "#000000"
+                                     :width 100 :height 20})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))]
+    (is (= 8 (:x shadow-rect))
+        "a STRING \"8\" must resolve to the real number 8, not JS string-concatenation garbage or a crash")
+    (is (= 8 (:y shadow-rect)))))
+
+(deftest box-shadow-spread-as-a-string-is-also-coerced
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:box-shadow-x "0" :box-shadow-y "2" :box-shadow-spread "3"
+                                     :box-shadow-color "#123456"
+                                     :width 80 :height 40})
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 100})
+        shadow-rect (first (filter #(and (= :rect (:draw/op %)) (:box-shadow? %)) ops))]
+    (is (= -3 (:x shadow-rect)))
+    (is (= -1 (:y shadow-rect)))
+    (is (= 86 (:w shadow-rect)))
+    (is (= 46 (:h shadow-rect)))
+    "identical to box-shadow-spread-radius-expands-the-shadow-rect-outward above, but every value authored as a string"))
+
+(deftest text-shadow-string-coordinates-are-coerced-to-numbers-not-left-raw
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:text-shadow-x "3" :text-shadow-y "3" :text-shadow-color "#000000"
+                                     :width 100})
+        [t doc] (dom/create-text-node doc "hi")
+        doc (dom/append-child doc div t)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width 300})
+        text-ops (filterv #(= :text (:draw/op %)) ops)
+        [shadow-op real-op] text-ops]
+    (is (= 2 (count text-ops))
+        "a real text-shadow op must still be emitted alongside the real text, not silently dropped/crashed away")
+    (is (= 11 (:x shadow-op) (+ 3 (:x real-op)))
+        "the shadow op's own x must be the real text's x offset by the (coerced-from-string) 3px, not garbage")
+    (is (= 11 (:y shadow-op) (+ 3 (:y real-op))))))
+
 (deftest no-box-shadow-declared-produces-no-shadow-rect-at-all
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)

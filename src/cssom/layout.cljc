@@ -669,10 +669,37 @@
    :margin (parse-int (style node :margin) 0)
    :border-width (parse-int (style node :border-width) 0)
    :border-color (or (style node :border-color) "#000000")
-   :box-shadow-x (style node :box-shadow-x)
-   :box-shadow-y (style node :box-shadow-y)
-   :box-shadow-blur (style node :box-shadow-blur)
-   :box-shadow-spread (style node :box-shadow-spread)
+   ;; parse-int'd (unlike :left/:top/:width/etc a few lines up, which
+   ;; stay raw strings because real CSS auto/% are legitimate non-numeric
+   ;; values those properties must preserve for explicit-length's own
+   ;; unset-vs-zero distinction) -- box-shadow's offset/spread have NO
+   ;; such legitimate non-numeric CSS form (always a plain length or
+   ;; absent), yet box-shadow-ops below does raw (+ x dx (- spread))
+   ;; arithmetic directly against these, with zero coercion anywhere else
+   ;; in the pipeline. The shorthand-expansion path (cssom.core/expand-
+   ;; box-shadow-shorthand, and htmldom.core's own independent copy for
+   ;; inline style="...") already numeric-coerces these before they ever
+   ;; reach :attrs, so this is a no-op for ordinary authored CSS -- but
+   ;; browser/dom-bridge.cljc's set-style-property (a script mutating an
+   ;; INDIVIDUAL element.style.<prop> = value, e.g. via the QuickJS
+   ;; shim's element.style set trap) merges whatever JS handed it
+   ;; straight into :style-inline with NO coercion pass at all, so that
+   ;; path can and does deliver a raw string here. Confirmed via direct
+   ;; REPL reproduction before this fix: building a real element with
+   ;; :box-shadow-x/:box-shadow-y set to the strings "8"/"8" (simulating
+   ;; exactly what that uncoerced JS-mutation path produces) crashed
+   ;; draw-ops with `ClassCastException: class java.lang.String cannot
+   ;; be cast to class java.lang.Number` on the JVM -- and on this
+   ;; engine's real ClojureScript/JS target, the same string instead
+   ;; silently produces JS string-concatenation garbage (`+`/`-` compile
+   ;; straight to native JS operators there, with no runtime type check),
+   ;; which is exactly how a real demo page's own box-shadow rect was
+   ;; separately observed rendering with garbage coordinates like
+   ;; "460146820" before this fix, confirmed via a temporary console.log.
+   :box-shadow-x (parse-int (style node :box-shadow-x) 0)
+   :box-shadow-y (parse-int (style node :box-shadow-y) 0)
+   :box-shadow-blur (parse-int (style node :box-shadow-blur) 0)
+   :box-shadow-spread (parse-int (style node :box-shadow-spread) 0)
    :box-shadow-color (style node :box-shadow-color)
    :outline-width (parse-int (style node :outline-width) 0)
    :outline-color (or (style node :outline-color) "#000000")
@@ -684,9 +711,14 @@
    :font-weight (style node :font-weight)
    :font-style (style node :font-style)
    :font-family (style node :font-family)
-   :text-shadow-x (style node :text-shadow-x)
-   :text-shadow-y (style node :text-shadow-y)
-   :text-shadow-blur (style node :text-shadow-blur)
+   ;; parse-int'd for the exact same reason box-shadow-x/y/blur/spread
+   ;; above just were -- layout-text's own inline shadow-op does raw
+   ;; (+ line-x (or (:x text-shadow) 0)) arithmetic against these with
+   ;; zero coercion, the same crash/silent-garbage class this fix closes
+   ;; for box-shadow.
+   :text-shadow-x (parse-int (style node :text-shadow-x) 0)
+   :text-shadow-y (parse-int (style node :text-shadow-y) 0)
+   :text-shadow-blur (parse-int (style node :text-shadow-blur) 0)
    :text-shadow-color (style node :text-shadow-color)
    :text-decoration (style node :text-decoration)
    :text-align (style node :text-align)
