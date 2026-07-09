@@ -3532,10 +3532,10 @@
    when `pseudo-element` is nil, so existing behavior is unchanged.
 
    Cascade layers: each rule-based entry carries its :rule/layer-priority
-   (see `parse-rules`) as :layer, and the sort tuple below checks :unlayered?
-   and :layer *before* :specificity -- so layer membership decides first,
-   specificity only breaks ties within the same layer, exactly like real CSS
-   cascade layers.
+   (see `parse-rules`) as :layer, and the sort tuple below checks :layer
+   *before* :specificity -- so layer membership decides first, specificity
+   only breaks ties within the same layer, exactly like real CSS cascade
+   layers.
 
    `!important` layer-order reversal (CSS Cascading and Inheritance Level 5,
    the importance/cascade-origin step): for normal (non-`!important`)
@@ -3557,34 +3557,52 @@
    unaffected -- \"specificity/order tie-breaking within a layer\" is
    unchanged, as required.
 
-   Unlayered-beats-layered is deliberately *not* encoded as a magic \"one
-   past the highest layer index\" sentinel riding on :layer's numeric
-   magnitude (as it effectively was before this negation existed) -- doing
-   that would make the sentinel itself losable to negation (an unlayered
-   entry's sentinel would need its own reversal-proofing to stay above every
-   negated layer index, which the negation above does not attempt). Instead
-   it's a dedicated :unlayered? boolean (true iff the originating rule's
-   :rule/layer name is nil), compared *before* :layer: an unlayered
-   declaration beats every layered one of the same importance regardless of
-   either side's :layer value. Because :unlayered? sits above :layer in the
-   tuple and is unaffected by the negation above, this holds in *both* the
-   important and non-important groups -- matching real CSS, where an
-   unlayered `!important` declaration still beats every layered `!important`
-   declaration.
+   Unlayered-beats-layered is encoded as a \"one past the highest layer
+   index\" sentinel riding on :layer's own numeric magnitude -- unlayered
+   entries get `(inc max-layer-priority)` as their raw layer value instead
+   of a real `:rule/layer-priority`, guaranteeing it sorts after every real
+   layer for NORMAL declarations (a plain `(sort-by :layer ...)` already
+   picks the highest number). Crucially, this sentinel is subject to the
+   *exact same* `(if important? (- raw-layer) raw-layer)` negation every
+   real layer value already gets -- there is no separate :unlayered?
+   dimension to keep in sync. Negation preserves relative order across the
+   WHOLE numeric range uniformly, sentinel included: `-(max+1)` is smaller
+   than `-real-layer` for every real layer `<= max`, so for `!important`
+   declarations the sentinel sorts *first* (lowest priority) among the
+   important group -- meaning an unlayered `!important` declaration
+   correctly LOSES to every layered `!important` declaration, exactly
+   matching real CSS's own well-documented (if unintuitive) importance-
+   reversal behavior: `!important` doesn't just reverse layer order among
+   layers, it also flips unlayered from \"wins over everything\" to \"loses
+   to everything layered.\" An earlier, since-corrected version of this
+   function used a separate :unlayered? boolean compared *before* :layer
+   specifically to avoid this reversal (reasoning that the sentinel would
+   need its own \"reversal-proofing\") -- that reasoning was itself the bug:
+   a plain arithmetic sentinel *already* reverses correctly under the same
+   negation every other layer value uses, and the separate-boolean
+   approach instead pinned unlayered `!important` as an unconditional
+   winner, which both an author's real Chrome/Firefox and the CSS
+   Cascading and Inheritance Level 5 spec disagree with. Confirmed via
+   direct REPL reproduction before touching source: `@layer a { #hero {
+   color: red !important } } @layer b { #hero { color: blue !important }
+   } div#hero { color: green !important }` resolved to `green` (unlayered)
+   instead of the spec-correct `red` (layer `a`, the earliest-declared
+   layer, since importance reverses layer order too, and both layered
+   rules beat the unlayered one).
 
    Inline declarations have no layer concept in real CSS; per the Level 5
    spec they are treated like an unlayered declaration for cascade-layer
    purposes, and (like any unlayered declaration) always win over a layered
-   rule-based declaration of the same importance. Both of those already fall
-   out structurally here without needing any special-casing: :inline? is
-   compared *before* :unlayered?/:layer in the tuple, so once :important?
-   ties, a difference in :inline? decides the comparison and :unlayered?/
-   :layer are never consulted -- the concrete :unlayered?/:layer values given
-   to inline entries are inert for correctness (set to true / tied with the
-   stylesheet's highest resolved layer priority, respectively, purely for
-   documentation, matching the \"treated as unlayered\" framing). This
-   reasoning is unaffected by the :important? negation above, since :inline?
-   sits above :layer in the tuple regardless of :layer's sign.
+   rule-based declaration of the same importance -- but see the paragraph
+   above: for `!important` specifically, inline is EXEMPT from the
+   unlayered-loses-to-layered reversal precisely because :inline? sits
+   *above* :layer in the sort tuple, so once :important? ties, a difference
+   in :inline? decides the comparison and :layer (sentinel value and its
+   negation both) is never consulted at all -- inline's own :layer value is
+   inert for correctness (set to the stylesheet's highest resolved layer
+   priority, purely for documentation). This matches real CSS: an inline
+   `style=\"... !important\"` declaration beats even a layered `!important`
+   rule, unlike a plain unlayered `!important` rule-based declaration.
 
    Inline `!important` (real, common CSS -- e.g. `style=\"color: red
    !important\"`, routinely used to override a stubborn rule-based style):
@@ -3680,27 +3698,26 @@
   ([document rules node pseudo-element counters]
    (resolve-style-for document rules node pseudo-element counters nil))
   ([document rules node pseudo-element counters container-ctx]
-   (let [declarations (for [rule rules
-                             :let [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rule]
-                             selector selectors
-                             :when (= pseudo-element (pseudo-element-of selector))
-                             :when (if document
-                                     (matches? document node selector)
-                                     (matches? node selector))
-                             :when (container-rule-matches? rule (:node/id node) container-ctx)
-                             [property value] declarations]
-                         (let [{:keys [important?]} (get declaration-meta property)
-                               important? (boolean important?)
-                               raw-layer (or layer-priority 0)]
-                           {:property property
-                            :value value
-                            :important? important?
-                            :specificity (specificity selector)
-                            :inline? false
-                            :unlayered? (nil? layer)
-                            :layer (if important? (- raw-layer) raw-layer)
-                            :order order}))
-         max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
+   (let [max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
+         declarations (for [rule rules
+                            :let [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rule]
+                            selector selectors
+                            :when (= pseudo-element (pseudo-element-of selector))
+                            :when (if document
+                                    (matches? document node selector)
+                                    (matches? node selector))
+                            :when (container-rule-matches? rule (:node/id node) container-ctx)
+                            [property value] declarations]
+                        (let [{:keys [important?]} (get declaration-meta property)
+                              important? (boolean important?)
+                              raw-layer (if (nil? layer) (inc max-layer-priority) (or layer-priority 0))]
+                          {:property property
+                           :value value
+                           :important? important?
+                           :specificity (specificity selector)
+                           :inline? false
+                           :layer (if important? (- raw-layer) raw-layer)
+                           :order order}))
          node-inline-importance (inline-style-importance node)
          inline-declarations (when (nil? pseudo-element)
                                 (map-indexed (fn [idx [property value]]
@@ -3709,7 +3726,6 @@
                                                 :important? (contains? node-inline-importance property)
                                                 :specificity [1 0 0]
                                                 :inline? true
-                                                :unlayered? true
                                                 :layer max-layer-priority
                                                 :order idx})
                                              (inline-style node)))]
@@ -3718,7 +3734,7 @@
                           (dissoc m property)
                           (assoc m property value)))
                       {}
-                      (sort-by (juxt :important? :inline? :unlayered? :layer :specificity :order)
+                      (sort-by (juxt :important? :inline? :layer :specificity :order)
                                (concat declarations inline-declarations)))]
        (if (contains? m :content)
          (let [resolved (resolve-content-value node counters (:content m))]

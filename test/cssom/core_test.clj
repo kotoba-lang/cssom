@@ -1370,7 +1370,21 @@
          reversal -- the later-declared layer (b) still wins, exactly as
          before")))
 
-(deftest unlayered-important-declaration-still-beats-every-layered-important-declaration
+;; ---- an unlayered !important declaration LOSES to every layered
+;; !important declaration -- previously this file's own implementation
+;; and this exact test both encoded the OPPOSITE, confirmed via direct
+;; REPL reproduction before touching source. Real CSS Cascading and
+;; Inheritance Level 5: `!important` doesn't just reverse layer order
+;; among layers, it also flips unlayered from "wins over everything" (its
+;; normal-declaration behavior, still correctly unaffected here) to
+;; "loses to everything layered" -- a well-documented, unintuitive
+;; interaction (MDN/web.dev both call it out explicitly). Among the
+;; layered !important rules themselves, the earliest-declared layer wins
+;; (the reversal `important-declarations-reverse-layer-order-earlier-
+;; layer-wins` above already covers), so layer `a` (declared before `b`)
+;; wins here, and both beat the unlayered rule. ----
+
+(deftest layered-important-declarations-beat-an-unlayered-important-declaration
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
         doc (dom/set-attribute doc div :id "hero")
@@ -1379,12 +1393,10 @@
                 @layer b { #hero { color: blue !important } }
                 div { color: green !important }")
         doc (css/apply-cascade doc rules)]
-    (is (= "green" (get-in doc [:nodes div :attrs :style/color]))
-        "even though !important reverses layer order among layered
-         declarations, an unlayered !important declaration still wins over
-         every layered !important declaration, no matter the layer or
-         specificity of the layered rules -- unlayered-beats-layered holds
-         for both importance groups")))
+    (is (= "red" (get-in doc [:nodes div :attrs :style/color]))
+        "layer a is the earliest-declared layer, so it wins among the
+         layered !important rules -- and both layered !important
+         declarations correctly beat the unlayered !important one")))
 
 (deftest important-still-beats-non-important-across-layers-after-the-reversal-fix
   (let [[p doc] (dom/create-element dom/empty-document :p)
@@ -1426,6 +1438,23 @@
         "an inline !important declaration is still treated as the highest
          possible specificity within its importance group, so it beats a
          rule-based !important declaration -- matching real CSS")))
+
+(deftest inline-important-beats-a-layered-important-declaration-unaffected-by-the-unlayered-reversal-fix
+  ;; Real CSS: inline is exempt from the unlayered-loses-to-layered
+  ;; reversal the fix above introduced for plain (rule-based) unlayered
+  ;; !important declarations -- an inline !important declaration still
+  ;; wins even over a LAYERED !important rule, since :inline? is compared
+  ;; before :layer in the sort tuple and decides the comparison first.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :id "hero")
+        doc (dom/set-attribute doc div :style-inline {:color "purple"})
+        doc (dom/set-attribute doc div :style-inline-important #{:color})
+        rules (css/parse-rules "@layer a { #hero { color: red !important } }")
+        doc (css/apply-cascade doc rules)]
+    (is (= "purple" (get-in doc [:nodes div :attrs :style/color]))
+        "inline !important beats even a layered !important rule, unlike a
+         plain unlayered !important rule-based declaration")))
 
 (deftest rule-based-important-beats-a-plain-inline-declaration
   (let [[div doc] (dom/create-element dom/empty-document :div)
