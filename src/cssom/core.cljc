@@ -2549,6 +2549,24 @@
          "url" (not (re-matches url-format-pattern value))
          false)))
 
+(defn- length-constrained-control?
+  "Real HTML5's own restriction: minlength/maxlength apply ONLY to
+   text/search/url/tel/email/password <input>s and to <textarea>
+   (unlike `pattern-invalid?` above, which excludes <textarea>) -- NOT
+   to number/range/color/date/datetime-local/month/week/time, and NOT
+   to <select>/checkbox/radio either. Previously `constraint-invalid?`
+   had no type guard on minlength/maxlength at all, so a real, common
+   shape like <input type=\"number\" value=\"12345\" maxlength=\"3\">
+   spuriously matched :invalid instead of :valid, confirmed via direct
+   REPL reproduction through the real cascade. Fixed together with the
+   identical gap in kotoba-lang/browser's own document_input.cljc
+   validation-reason and quickjs_wasm.cljc's JS-facing
+   __kotobaValidationReason."
+  [node type]
+  (or (= :textarea (:tag node))
+      (and (= :input (:tag node))
+           (contains? #{"text" "search" "url" "tel" "email" "password"} type))))
+
 (defn- constraint-invalid?
   [document node]
   (let [attrs (:attrs node)
@@ -2556,7 +2574,8 @@
         value (control-value document node)
         length (count value)
         minlength (parse-int (:minlength attrs))
-        maxlength (parse-int (:maxlength attrs))]
+        maxlength (parse-int (:maxlength attrs))
+        length-constrained? (length-constrained-control? node type)]
     (and (not (constraint-validation-barred-control? node))
          (or (truthy-attr? (:invalid attrs))
              (and (truthy-attr? (:required attrs))
@@ -2565,9 +2584,11 @@
                     (and (= :input (:tag node)) (= "radio" type)) (not (radio-required-satisfied? document node))
                     :else (str/blank? value)))
              (and minlength
+                  length-constrained?
                   (pos? length)
                   (< length minlength))
              (and maxlength
+                  length-constrained?
                   (> length maxlength))
              (and (= :input (:tag node))
                   (range-invalid? type value attrs))

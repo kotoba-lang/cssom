@@ -427,6 +427,61 @@
     (is (= "green" (get-in doc [:nodes el :attrs :style/color]))
         "a value matching its own pattern must match :valid")))
 
+;; ---- minlength/maxlength are real HTML5's own restriction to text/
+;; search/url/tel/email/password <input>s and <textarea> -- NOT
+;; number/range/color/date/datetime-local/month/week/time, and not
+;; <select>/checkbox/radio either. constraint-invalid? previously had
+;; no type guard on minlength/maxlength at all, so a real, common
+;; shape like <input type="number" value="12345" maxlength="3">
+;; spuriously matched :invalid instead of :valid. Confirmed via direct
+;; REPL reproduction through the real cascade before touching source.
+;; Fixed together with the identical gap in kotoba-lang/browser's own
+;; document_input.cljc validation-reason and quickjs_wasm.cljc's
+;; JS-facing __kotobaValidationReason. ----
+
+(deftest length-constraints-do-not-apply-to-non-text-like-controls
+  (let [rules (css/parse-rules
+               "input:invalid, textarea:invalid, select:invalid { color: red } input:valid, textarea:valid, select:valid { color: green }")
+        build (fn [tag attrs]
+                (let [[root doc] (dom/create-element dom/empty-document :div)
+                      doc (dom/set-root doc root)
+                      [el doc] (dom/create-element doc tag)
+                      doc (reduce-kv #(dom/set-attribute %1 el %2 %3) doc attrs)
+                      doc (dom/append-child doc root el)
+                      doc (css/apply-cascade doc rules)]
+                  (get-in doc [:nodes el :attrs :style/color])))
+        ;; <select> has no `value` content attribute of its own -- its
+        ;; computed value comes from its selected (or, absent any
+        ;; explicit `selected`, first) <option>'s own value, so
+        ;; genuinely exercising the :select guard needs a real option
+        ;; child with a value longer than maxlength, not a bare
+        ;; attribute on the <select> itself.
+        build-select (fn [select-attrs option-value]
+                       (let [[root doc] (dom/create-element dom/empty-document :div)
+                             doc (dom/set-root doc root)
+                             [el doc] (dom/create-element doc :select)
+                             doc (reduce-kv #(dom/set-attribute %1 el %2 %3) doc select-attrs)
+                             [opt doc] (dom/create-element doc :option)
+                             doc (dom/set-attribute doc opt :value option-value)
+                             doc (dom/append-child doc el opt)
+                             doc (dom/append-child doc root el)
+                             doc (css/apply-cascade doc rules)]
+                         (get-in doc [:nodes el :attrs :style/color])))]
+    (is (= "green" (build :input {:type "number" :value "12345" :maxlength "3"}))
+        "maxlength must be ignored entirely for type=number")
+    (is (= "green" (build :input {:type "range" :value "99" :min "0" :max "100" :maxlength "1"}))
+        "maxlength must be ignored entirely for type=range")
+    (is (= "green" (build :input {:type "date" :value "2026-07-10" :maxlength "1"}))
+        "maxlength must be ignored entirely for type=date")
+    (is (= "green" (build-select {:maxlength "3"} "abcdef"))
+        "maxlength must be ignored entirely for a <select> -- previously entirely unguarded")
+    (is (= "red" (build :input {:type "text" :value "12345" :maxlength "3"}))
+        "maxlength must still apply to a real text-like input, unaffected by this fix")
+    (is (= "red" (build :textarea {:value "12345" :maxlength "3"}))
+        "maxlength must still apply to <textarea>, unaffected by this fix")
+    (is (= "red" (build :input {:type "email" :value "a" :minlength "5"}))
+        "minlength must still apply to a real text-like input, unaffected by this fix")))
+
 (deftest pattern-on-a-blank-optional-value-does-not-force-invalid
   (let [[root doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc root)
