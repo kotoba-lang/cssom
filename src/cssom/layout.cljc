@@ -764,6 +764,11 @@
    :box-sizing (or (style node :box-sizing) "content-box")
    :padding (parse-int (style node :padding)
                        (get ua-padding (:tag node) (:padding theme)))
+   ;; The DECLARED padding only -- author or UA -- with no theme fallback.
+   ;; The theme's uniform padding is a host decoration, not CSS: letting it
+   ;; widen a content-box `width` would make `div{width:50px}` occupy 58px
+   ;; because of a styling choice the author never made.
+   :padding/declared (parse-int (style node :padding) (get ua-padding (:tag node)))
    :padding-top (parse-int (style node :padding-top) nil)
    :padding-right (parse-int (style node :padding-right) nil)
    :padding-bottom (parse-int (style node :padding-bottom) nil)
@@ -961,9 +966,58 @@
         width (if-let [mx (explicit-length (:max-width st))] (min width mx) width)]
     width))
 
+(defn- content-inset
+  [st]
+  (+ (:padding st) (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
+
+(defn- declared-inset-side
+  "The part of the inset that a CONTENT-BOX `width` has to grow by: the
+   DECLARED padding on that side (author or UA, never the theme's own
+   decoration) plus the border, which always sits outside the content box."
+  [st side]
+  (+ (or (get st (keyword (str "padding-" (name side))))
+         (:padding/declared st)
+         0)
+     (:border-width st)))
+
+(defn- inset-side
+  "The content inset on ONE side: that side's own padding when the author
+   (or the UA stylesheet) gave it one, else the uniform padding this engine
+   has always had, plus the border when box-sizing is border-box."
+  [st side]
+  (+ (or (get st (keyword (str "padding-" (name side)))) (:padding st))
+     (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
+
+(defn- margin-side
+  "One side's margin: the per-side value when present (author or UA), else
+   the uniform `:margin`."
+  [st side]
+  (or (get st (keyword (str "margin-" (name side)))) (:margin st)))
+
 (defn- resolve-width
+  "The element's BORDER-BOX width.
+
+   Real CSS's default `box-sizing: content-box` means a declared `width` is
+   the CONTENT width: padding and border add OUTSIDE it, so
+   `width: 300px; padding: 16px` occupies 332px and lays its children out
+   in 300. This engine treated the declared width as the border box in both
+   modes, so the same element was 300px wide with 268px of content -- every
+   child inside it 32px too narrow, and the box itself 32px too small.
+   Caught by the conformance harness's geometry axis on an ordinary card
+   shape (`div{width:300px;padding:16px}`), where the browser reports 332
+   and 300 against this engine's 300 and 268.
+
+   With `box-sizing: border-box` the declared width IS the border box, and
+   nothing is added -- which is exactly why authors reach for it."
   [st avail]
-  (clamp-width st (parse-int (:width st) avail)))
+  (let [declared (parse-int (:width st) nil)]
+    (clamp-width st
+                 (cond
+                   (nil? declared) avail
+                   (= "border-box" (:box-sizing st)) declared
+                   :else (+ declared
+                            (declared-inset-side st :left)
+                            (declared-inset-side st :right))))))
 
 (defn- resolve-height
   "The :height counterpart to resolve-width's own defensive numeric
@@ -1045,24 +1099,6 @@
                       (long (* multiplier font-size))
                       normal)
       :else normal))))
-
-(defn- content-inset
-  [st]
-  (+ (:padding st) (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
-
-(defn- inset-side
-  "The content inset on ONE side: that side's own padding when the author
-   (or the UA stylesheet) gave it one, else the uniform padding this engine
-   has always had, plus the border when box-sizing is border-box."
-  [st side]
-  (+ (or (get st (keyword (str "padding-" (name side)))) (:padding st))
-     (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
-
-(defn- margin-side
-  "One side's margin: the per-side value when present (author or UA), else
-   the uniform `:margin`."
-  [st side]
-  (or (get st (keyword (str "margin-" (name side)))) (:margin st)))
 
 (defn- translate-ops
   [dx dy ops]
@@ -3857,7 +3893,13 @@
       (if-let [t (first ts)]
         (cond
           (= :break (:kind t))
-          (recur (rest ts) 0 [] (flush lines pieces x (:style t)))
+          ;; The <br> itself keeps its owners on the line it ends, so
+          ;; layout-inline-run can give it a real (zero-width) box. A
+          ;; browser reports one there, and without it every <br> was a
+          ;; missing element on the geometry axis.
+          (recur (rest ts) 0 []
+                 (conj lines {:pieces pieces :w x :style (:style t)
+                              :break-owners (:owners t)}))
 
           ;; An atomic inline never merges with a neighbouring piece and is
           ;; never split: it wraps to the next line whole, or overflows
@@ -4090,7 +4132,25 @@
                         rects])))
                  [[] rects]
                  (:pieces line))]
-            (recur (rest ls) (+ y line-h) (into text-draws line-draws) rects))
+            (recur (rest ls) (+ y line-h) (into text-draws line-draws)
+                   ;; the <br>'s own zero-width box, at the end of the line
+                   ;; it terminates
+                   (reduce (fn [rects owner]
+                             (update rects (:idx owner)
+                                     (fn [entry]
+                                       (-> (or entry {:node (:node owner) :st (:st owner)
+                                                      :opacity opacity :fragments []})
+                                           ;; same content-area box every
+                                           ;; other inline element reports
+                                           (update :fragments conj
+                                                   (let [ch (long (* 1.2 (or (:font-size (:style line))
+                                                                             (:font-size inherited)
+                                                                             (:font-size theme))))]
+                                                     {:x (+ base-x (:w line))
+                                                      :y (+ y (max 0 (quot (- line-h ch) 2)))
+                                                      :w 0 :h ch}))))))
+                           rects
+                           (:break-owners line))))
           {:draw (into (inline-owner-ops theme rects) text-draws)
            :h (+ (- y content-y) padding)})))))
 

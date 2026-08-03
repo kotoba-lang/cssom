@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 91/98 = 93%. Geometry: 199/325 element boxes (61%), 46/102
+**Line structure: 92/98 = 94%. Geometry: 220/325 element boxes (68%), 53/102
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -130,14 +130,49 @@ Inline boxes now report the font's **content area** (~1.2em, centred in the
 line box by half-leading) rather than the line box, matching what a browser
 reports for a `<span>`/`<a>`/`<b>`.
 
+### The bold-width mystery: the harness was wrong
+
+`b` scored 0/11 and it looked like an engine bug. Measured directly in the
+browser instead of assumed:
+
+| | per character |
+|---|---|
+| `<b>manual</b>` as rendered | 7.94px |
+| 40 `M`s, bold, same font/size | 11.05px |
+| 40 `M`s, regular | 7.00px |
+| plain text as rendered | 7.00px |
+
+This system's `monospace` face is fixed-pitch in **regular** and
+**proportional in bold**. The harness's single-character probe used `M` —
+the widest glyph — so it overstated every bold run by ~40%. The engine was
+being fed a wrong number and faithfully laying out to it.
+
+The probe is now a **per-character advance table** (ASCII 32–126, normal
+and bold) measured in the oracle and summed by `:measure-text`. b 0/11 →
+4/11, a 3/12 → 8/12, td 21/29 → 23/29, and one line-structure case
+recovered as well.
+
+The lesson is the one the loop keeps teaching: measure before attributing.
+
+### Then: a real box-model bug the axis exposed
+
+`div{width:300px;padding:16px}` reported 300px wide with 268px of content,
+where a browser reports 332 and 300. This engine read a declared `width` as
+the BORDER box in both modes; real CSS's default `box-sizing: content-box`
+means it is the CONTENT width and padding/border add outside it. Fixed —
+with the theme's own decorative padding deliberately excluded from that sum,
+since it is a host styling choice and not CSS.
+
+`<br>` also had no box at all (0/4); it now reports the same content-area
+box every other inline element does.
+
 ### Still open on the geometry axis
 
-`b` 0/11 is a WIDTH disagreement, not a box-model one: the harness feeds
-the oracle's own measured bold character advance into `:measure-text`, and
-the engine still comes out ~40% wide on bold runs. That is a harness-vs-
-engine metric question worth isolating before assuming which side is wrong.
+`input` 0/5: a browser does NOT inherit the page font into form controls
+(Chrome UA gives them 13.33px Arial), so their intrinsic width is computed
+from a font this harness does not measure at all.
 
-`div` 75/101 and `td` 21/29 are the remaining tail, not yet diagnosed.
+`div` 76/101, `p` 42/54, `span` 12/22, `b` 4/11 are the remaining tail.
 
 ### Known divergence the LINE axis does not see
 

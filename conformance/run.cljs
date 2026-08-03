@@ -145,16 +145,28 @@
     // -- otherwise every wrap point differs by the ratio between this
     // engine's 0.6-em approximation and the real font, and the corpus can
     // only ever contain text short enough never to wrap.
+    // A per-character advance TABLE, measured in the oracle, for normal
+    // and bold. Not a single average: measured here, this system's
+    // `monospace` face is fixed-pitch at 7.00px in regular but its BOLD
+    // variant is proportional -- a 40-char run of 'M' reports 11.05px per
+    // character while the real bold word `manual` reports 7.94. A single
+    // probe character is therefore a 40%-wrong proxy for bold text, which
+    // is what made every <b> box disagree (b 0/11) and looked like an
+    // engine bug until it was measured directly.
     var probe = document.createElement('span');
-    probe.textContent = 'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM';
     probe.style.cssText = 'font-family:monospace;font-size:14px;white-space:pre';
     document.body.appendChild(probe);
-    out['__char_width__'] = probe.getBoundingClientRect().width / 40;
-    // Bold glyphs are genuinely wider than regular ones even in a
-    // monospace face, so a single advance would mis-measure every <b>.
-    probe.style.fontWeight = 'bold';
-    out['__char_width_bold__'] = probe.getBoundingClientRect().width / 40;
+    var advances = { normal: {}, bold: {} };
+    ['normal', 'bold'].forEach(function (weight) {
+      probe.style.fontWeight = weight;
+      for (var code = 32; code <= 126; code++) {
+        var ch = String.fromCharCode(code);
+        probe.textContent = new Array(21).join(ch);
+        advances[weight][code] = probe.getBoundingClientRect().width / 20;
+      }
+    });
     probe.remove();
+    out['__advances__'] = advances;
     var pre = document.createElement('pre');
     pre.id = 'kotoba-conformance-out';
     pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(out))));
@@ -327,9 +339,9 @@
                       :theme {:padding 0
                               :gap 0
                               :measure-text (fn [text font-size weight & _]
-                                              (* (count (str text))
-                                                 (if (= "bold" weight) (:bold char-w) (:normal char-w))
-                                                 (/ (or font-size 14) 14)))}})))
+                                              (let [advance (if (= "bold" weight) (:bold char-w) (:normal char-w))]
+                                                (* (/ (or font-size 14) 14)
+                                                   (reduce + 0 (map advance (str text))))))}})))
 
 (defn- engine-lines
   "cssom.layout's own answer, in the same shape the oracle's is read into.
@@ -369,9 +381,8 @@
                       (filter #(= :text (:draw/op %)))
                       (remove inside-atomic?))
         word-w (fn [text fs weight]
-                 (* (count (str text))
-                    (if (= "bold" weight) (:bold char-w) (:normal char-w))
-                    (/ (or fs 14) 14)))]
+                 (let [advance (if (= "bold" weight) (:bold char-w) (:normal char-w))]
+                   (* (/ (or fs 14) 14) (reduce + 0 (map advance (str text))))))]
     (->> text-ops
          (mapcat (fn [op]
                    (let [fs (:font-size op 14)]
@@ -506,10 +517,11 @@
                        (catch :default e (println (str "oracle unusable: " b " -- " (ex-message e))) nil))]
             (or r (recur more (conj failures b))))))
       _ (println (str "\noracle:  " browser "\nwidth:   " width "px\ncases:   " (count cases) "\n"))
-      char-w {:normal (or (:__char_width__ oracle) 8.4)
-              :bold (or (:__char_width_bold__ oracle) (:__char_width__ oracle) 8.4)}
-      _ (println (str "char-w:  " (js/Math.round (* 100 (:normal char-w))) "/100 px normal, "
-                      (js/Math.round (* 100 (:bold char-w))) "/100 px bold (measured in the oracle)\n"))
+      advances (:__advances__ oracle)
+      char-w {:normal (fn [ch] (get-in advances [:normal (keyword (str (.charCodeAt ch 0)))] 8.4))
+              :bold (fn [ch] (get-in advances [:bold (keyword (str (.charCodeAt ch 0)))] 8.4))}
+      _ (println (str "metrics: per-character advance table measured in the oracle ("
+                      (count (:normal advances)) " chars x normal/bold)\n"))
       results (vec (map-indexed (fn [i c]
                                   (compare-case (get oracle (keyword (str "case-" i)) []) width char-w c))
                                 cases))

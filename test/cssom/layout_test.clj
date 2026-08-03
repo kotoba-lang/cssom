@@ -3232,9 +3232,15 @@
         ops (layout/draw-ops tree {:width 480})
         div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)
         child-op (some #(and (= :node (:draw/op %)) (= :span (:tag %)) %) ops)]
-    (is (= 120 (:w div-op))
-        "width: calc(100px + 20px) resolves to a real 120px box width in
-         draw-ops, cascade -> layout, end to end")
+    (is (= 152 (:w div-op))
+        "width: calc(100px + 20px) resolves to a real 120px CONTENT width,
+         and the box is 120 + 2x16 padding = 152px wide -- real CSS's
+         default `box-sizing: content-box`, where a declared width is the
+         content width and padding adds outside it. This assertion read 120
+         until the conformance harness caught the engine treating a
+         declared width as the border box (a card shape reported 300px wide
+         with 268px of content where the browser reports 332 and 300); the
+         calc() resolution this test exists for is unchanged")
     (is (= 16 (:x child-op))
         "padding: calc(2 * 8px) resolves to a real 16px content inset --
          the child (no margin of its own) starts 16px in from its
