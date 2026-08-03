@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 92/98 = 94%. Geometry: 220/325 element boxes (68%), 53/102
+**Line structure: 92/98 = 94%. Geometry: 235/325 element boxes (72%), 56/102
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -166,13 +166,34 @@ since it is a host styling choice and not CSS.
 `<br>` also had no box at all (0/4); it now reports the same content-area
 box every other inline element does.
 
+### Reading the tail by DIMENSION, not by case
+
+The harness now reports, per tag, WHICH of x/y/w/h disagrees, how often,
+and the median delta. A tail is far easier to attribute from "always `w`,
+always −750" than from a list of failing case names. Three causes fell out
+of one run:
+
+- **`div w −750`, `x −389`**: a form control as a flex item took the whole
+  container. Intrinsic sizing lived only on the inline path; it is now
+  shared, so an `<input>` is ~153px wherever it appears rather than 800.
+- **`p h +8`, `p y +12.25`**: a harness asymmetry, not an engine error.
+  The browser page sets `line-height: 20px` on the case container and the
+  engine was never told, so it applied its own `normal` (1.2em) rule and
+  gave an `<h1>` a 33px line box where the browser inherits 20. The engine
+  wrapper now carries the same declarations.
+- **`td`/`tr w +730`**: `colspan` was not implemented. A spanning cell sat
+  in ONE column, making that column as wide as the spanning content. Now a
+  spanning cell widens the columns it covers only if they cannot already
+  hold it (sharing the shortfall), and is laid out across them plus the
+  border-spacing that no longer separates anything. That case went from 1/7
+  boxes in agreement to 7/7.
+
 ### Still open on the geometry axis
 
-`input` 0/5: a browser does NOT inherit the page font into form controls
-(Chrome UA gives them 13.33px Arial), so their intrinsic width is computed
-from a font this harness does not measure at all.
-
-`div` 76/101, `p` 42/54, `span` 12/22, `b` 4/11 are the remaining tail.
+`input` w is now within ~7px rather than ~650: the remainder is that a
+browser does NOT inherit the page font into form controls (Chrome UA gives
+them 13.33px Arial), so their intrinsic width comes from a font this
+harness never measures.
 
 ### Known divergence the LINE axis does not see
 

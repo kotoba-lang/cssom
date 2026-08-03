@@ -327,7 +327,14 @@
      at their defaults they narrow the content width by 16px per nested
      box, scoring the theme instead of the layout."
   [{:keys [html css]} width char-w]
-  (let [doc (html/parse-into-document (str "<div id=\"root\">" html "</div>"))
+  (let [;; The wrapper carries the SAME declarations the browser page sets
+        ;; on `.kotoba-case`. Without them the engine never saw the
+        ;; container's `line-height: 20px` and fell back to its own
+        ;; `normal` (1.2em) rule, so an <h1> got a 33px line box where the
+        ;; browser -- which inherits the explicit 20px -- reports 20. That
+        ;; was a harness asymmetry being scored as an engine error.
+        doc (html/parse-into-document
+             (str "<div id=\"root\" style=\"font-size: 14px; line-height: 20px\">" html "</div>"))
         ;; apply-cascade runs even with no author CSS: it is also what folds
         ;; a `style="..."` attribute's :style-inline into the :style/* attrs
         ;; cssom.layout actually reads, so skipping it would silently drop
@@ -433,14 +440,23 @@
                                                 (close? (:y ob) (:y eb))
                                                 (close? (:w ob) (:w eb))
                                                 (close? (:h ob) (:h eb))))
-                                         pairs))]
+                                         pairs))
+                    ;; WHICH dimension disagrees, and by how much: a tail of
+                    ;; mismatches is far easier to attribute from "always h,
+                    ;; always +4" than from a list of failing cases.
+                    deltas (for [[ob eb] pairs
+                                 dim [:x :y :w :h]
+                                 :when (not (close? (get ob dim) (get eb dim)))]
+                             {:tag tag :dim dim
+                              :delta (- (or (get eb dim) 0) (or (get ob dim) 0))})]
                 (-> acc
                     (update :total + (max (count os) (count es)))
                     (update :agree + agree)
+                    (update :deltas into deltas)
                     (update :by-tag update tag (fnil (fn [[a t]] [(+ a agree) (+ t (max (count os) (count es)))]) [0 0]))
                     (cond-> (not= (count os) (count es))
                       (update :missing conj tag)))))
-            {:total 0 :agree 0 :missing [] :by-tag {}}
+            {:total 0 :agree 0 :missing [] :by-tag {} :deltas []}
             tags)))
 
 (defn- engine-boxes
@@ -564,6 +580,18 @@
                                       (update acc tag (fnil (fn [[a0 t0]] [(+ a0 a) (+ t0 t)]) [0 0])))
                                     acc (:by-tag g)))
                           {} geos)]
+      (let [all-deltas (mapcat :deltas geos)
+            by-dim (->> all-deltas
+                        (group-by (juxt :tag :dim))
+                        (map (fn [[[tag dim] ds]]
+                               [tag dim (count ds)
+                                (let [sorted (sort (map :delta ds))]
+                                  (nth sorted (quot (count sorted) 2)))]))
+                        (sort-by (fn [[_ _ n _]] (- n))))]
+        (println "          worst (tag, dimension, count, median delta engine-oracle):")
+        (doseq [[tag dim n med] (take 12 by-dim)]
+          (println (str "            " (pad-right tag 8) (pad-right (name dim) 3)
+                        (pad-left n 4) "  " (if (pos? med) (str "+" med) med)))))
       (println "          worst tags (agreeing/total):")
       (doseq [[tag [a t]] (->> per-tag (sort-by (fn [[_ [a t]]] (- a t))) (take 10))
               :when (< a t)]

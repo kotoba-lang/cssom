@@ -5329,3 +5329,40 @@
         table (first (filter #(and (= :node (:draw/op %)) (= :table (:tag %))) ops))]
     (is (< (:w table) 100)
         "narrow content means a narrow table, not a 400px-wide one")))
+
+(deftest a-colspan-cell-covers-its-columns
+  ;; Found by the geometry axis: the line-structure axis cannot see colspan
+  ;; at all (a spanning cell is alone on its row either way), and this
+  ;; engine placed it in ONE column -- making that column as wide as the
+  ;; spanning content and leaving the next one holding only its own.
+  (let [ops (table-ops [[:tr {} [:td {:colspan "2"} "spanning-header"]]
+                        [:tr {} [:td {} "a"] [:td {} "b"]]])
+        cells (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) ops)
+        spanning (first cells)
+        [c1 c2] (rest cells)]
+    (is (>= (:w spanning) (:w c1))
+        "the spanning cell covers BOTH columns rather than sitting in one.
+         The exact arithmetic -- both columns plus the border-spacing that
+         no longer separates anything between them -- is checked against a
+         REAL BROWSER by conformance/cases.edn's
+         :table/colspan-line-structure-only, which went from 1/7 boxes in
+         agreement to 7/7 with this change; asserting it a second time here
+         in absolute pixels would only pin this engine's own arithmetic")
+    (is (= (:x c1) (:x spanning))
+        "and starts at the first column it covers")
+    (is (< (:x c1) (:x c2))
+        "while the row below still has two independent cells")))
+
+(deftest a-form-control-has-an-intrinsic-width-outside-a-line-too
+  ;; Intrinsic sizing used to live only on the inline path, so an <input>
+  ;; as a flex item took the whole container: the geometry axis reported
+  ;; 800px against the browser's 153.
+  (let [[row doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc row)
+        doc (dom/set-style doc row {:display "flex"})
+        doc (build-inline-children doc row [[:label {} "name"] [:input {}]])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})
+        input (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
+    (is (< (:w input) 250)
+        "the control takes its own intrinsic width, not the container's")))

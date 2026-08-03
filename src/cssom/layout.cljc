@@ -2960,6 +2960,95 @@
         text-box (:box (layout-node theme 0 0 flex-item-shrink-to-fit-measure-width opacity text-inherited text))]
     (+ (:w text-box) (* 2 (content-inset st)))))
 
+(def ^:private inline-atomic-tags
+  "Inline-level elements that are ATOMIC: they participate in a line box as
+   a single unbreakable box of their own intrinsic size, rather than
+   contributing text that can wrap. Real CSS calls these atomic inline-level
+   boxes — replaced elements and form controls.
+
+   They differ from inline-level-tags in every step that matters: their
+   children are NOT flattened into the run (a `<button>`'s label is laid
+   out inside the button's own box by layout-block/layout-form-control,
+   which already works), their width comes from laying the element out and
+   reading its box rather than from measuring text, and their baseline is
+   the box's BOTTOM edge (real CSS `vertical-align: baseline` aligns a
+   replaced box's bottom margin edge with the text baseline), not a font
+   ascent.
+
+   `:svg`/`:canvas`/`:video`/`:audio`/`:iframe` are deliberately still
+   absent: this engine has no rendering for any of them, so giving them an
+   inline box would place an empty rectangle in the middle of a sentence
+   rather than fix anything."
+  #{:img :input :button :select :textarea})
+
+(def ^:private inline-atomic-default-input-chars
+  "HTML's own default `size` for a text input is 20 characters, which is
+   where every browser's ~20ch default text-field width comes from."
+  20)
+
+(defn- atomic-intrinsic-width
+  "The available width an atomic inline is laid out at — its intrinsic
+   size, NOT the full line width `resolve-width` would hand an ordinary
+   block child.
+
+   This is the whole difference between an `<input>` that sits in a
+   sentence and one that swallows the line: laid out as a block child a
+   form control fills its container (correct for a block, wrong for an
+   inline), and until this existed every atomic inline was wider than the
+   line it was placed on and therefore always wrapped alone — the exact
+   symptom the Blink conformance harness reported as `inline-replaced 0/3`.
+
+   Resolution order mirrors real CSS's own: an explicit width (including
+   the `<img width>` presentational hint, see presentational-size) wins;
+   otherwise each control type contributes the intrinsic size the HTML
+   spec gives it (`size` characters for text-like inputs, defaulting to
+   20; a small square for checkbox/radio; the widest option label for a
+   `<select>`); everything else falls back to the same shrink-to-fit
+   natural width flex items already use (flex-item-main-width), which is
+   what gives `<button>go</button>` a button-sized box.
+
+   Used wherever an atomic element needs a size of its own: inside a line
+   box, and (through flex-item-main-width/measure-child) as a flex item, a
+   grid item or a table cell's content. A BLOCK-level form control still
+   fills its container, which is what a browser does too."
+  [theme content-w opacity inherited child st]
+  (let [tag (:tag child)
+        font-size (parse-int (:font-size st) (:font-size theme))
+        char-w (long (* 0.6 font-size))
+        inset (content-inset st)
+        natural
+        (cond
+          (:width st) (resolve-width st content-w)
+
+          (contains? #{:input :textarea} tag)
+          (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
+            (if (contains? #{"checkbox" "radio"} input-type)
+              13
+              (+ (* char-w (parse-int (get-in child [:attrs :size]) inline-atomic-default-input-chars))
+                 (* 2 inset))))
+
+          (= :select tag)
+          ;; Widest option label -- a <select> is as wide as the longest
+          ;; thing it can display. Read straight off each <option>'s own
+          ;; text children rather than through option-label, which answers
+          ;; a different question (the label for one selected VALUE).
+          (let [labels (->> (:children child)
+                            (filter #(and (map? %) (= :option (:tag %))))
+                            (map #(->> (:children %) (filter string?) (str/join ""))))]
+            (+ (* char-w (apply max 1 (map count labels))) (* 2 inset)))
+
+          ;; A <button> and any other atomic element with no intrinsic
+          ;; rule of its own shrink-wraps to its label, exactly as a flex
+          ;; item does. Inlined rather than delegating to
+          ;; flex-item-main-width, which now consults THIS function for
+          ;; atomic tags -- delegating would recurse forever.
+          :else
+          (let [cs (:children child)]
+            (if (and (= 1 (count cs)) (string? (first cs)))
+              (flex-item-natural-text-width theme opacity inherited st (first cs))
+              content-w)))]
+    (max 0 (min content-w natural))))
+
 (defn- flex-item-main-width
   "Real CSS flex-basis:auto (the default) falls back to an item's own
    explicit width if set, else shrink-wraps to its own preferred
@@ -2984,9 +3073,21 @@
    scope-cut."
   [theme content-w opacity inherited child st]
   (let [cs (:children child)
-        natural (if (and (= 1 (count cs)) (string? (first cs)))
+        natural (cond
+                  ;; A replaced element or form control has an INTRINSIC
+                  ;; size wherever it appears -- as a flex item, a grid
+                  ;; item or a table cell's content, not only inside a line
+                  ;; box. Before this the intrinsic sizing lived solely on
+                  ;; the inline path, so an <input> inside a flex row took
+                  ;; the whole 800px container where a browser gives it
+                  ;; ~153px.
+                  (contains? inline-atomic-tags (:tag child))
+                  (atomic-intrinsic-width theme content-w opacity inherited child st)
+
+                  (and (= 1 (count cs)) (string? (first cs)))
                   (flex-item-natural-text-width theme opacity inherited st (first cs))
-                  content-w)]
+
+                  :else content-w)]
     (min content-w (clamp-width st natural))))
 
 (defn- measure-child
@@ -3165,6 +3266,16 @@
 (defn- table-cells [row]
   (vec (filter #(and (map? %) (contains? table-cell-tags (:tag %))) (:children row))))
 
+(defn- cell-colspan
+  "A cell's `colspan`, clamped to at least 1. Real CSS lets a cell cover
+   several columns; this engine used to place every cell in exactly one,
+   so a `colspan=\"2\"` header made its own column as wide as the whole
+   header and left the next one holding only its own short content --
+   visible on the geometry axis as a table 11px too wide with both cells
+   in the wrong place, while the line-structure axis saw nothing at all."
+  [cell]
+  (max 1 (parse-int (get-in cell [:attrs :colspan]) 1)))
+
 (defn- table-column-widths
   "Real CSS's automatic table layout, in the one form that matters for a
    readable table: every column is as wide as its widest cell needs to be,
@@ -3181,13 +3292,41 @@
    one column), and each is listed in layout-table's own docstring."
   [theme content-w opacity inherited rows]
   (let [rows (mapv :row rows)
-        n-cols (apply max 0 (map (comp count table-cells) rows))
-        natural (vec (for [col (range n-cols)]
-                       (apply max 1
-                              (for [row rows
-                                    :let [cell (nth (table-cells row) col nil)]
-                                    :when cell]
-                                (:w (:box (measure-child theme content-w opacity inherited cell true)))))))
+        ;; each row as [{:cell :col :span :natural} ...]
+        placed (mapv (fn [row]
+                       (first (reduce (fn [[acc col] cell]
+                                        (let [span (cell-colspan cell)]
+                                          [(conj acc {:cell cell :col col :span span
+                                                      :natural (:w (:box (measure-child theme content-w opacity
+                                                                                        inherited cell true)))})
+                                           (+ col span)]))
+                                      [[] 0]
+                                      (table-cells row))))
+                     rows)
+        n-cols (apply max 0 (for [row placed, c row] (+ (:col c) (:span c))))
+        ;; single-column cells set each column's own natural width...
+        base (vec (for [col (range n-cols)]
+                    (apply max 1
+                           (for [row placed
+                                 c row
+                                 :when (and (= 1 (:span c)) (= col (:col c)))]
+                             (:natural c)))))
+        ;; ...then a spanning cell widens the columns it covers only if
+        ;; they cannot already hold it, sharing the shortfall equally --
+        ;; real CSS's own automatic-layout distribution, minus the
+        ;; proportional weighting it does by each column's own demand.
+        natural (reduce (fn [widths c]
+                          (if (= 1 (:span c))
+                            widths
+                            (let [cols (range (:col c) (+ (:col c) (:span c)))
+                                  have (reduce + 0 (map #(nth widths % 1) cols))
+                                  short (- (:natural c) have)]
+                              (if (pos? short)
+                                (let [add (long (Math/ceil (/ short (:span c))))]
+                                  (reduce #(update %1 %2 + add) widths cols))
+                                widths))))
+                        base
+                        (for [row placed, c row] c))
         total (reduce + 0 natural)]
     (if (and (pos? total) (> total content-w))
       (mapv #(long (* % (/ content-w total))) natural)
@@ -3244,15 +3383,23 @@
         (reduce
          (fn [{:keys [draws height groups]} {:keys [row group]}]
            (let [cells (table-cells row)
-                 laid (vec (map-indexed
-                            (fn [i cell]
-                              (let [cw (nth widths i (or (last widths) content-w))
-                                    {:keys [box draw]} (layout-node theme 0 0 cw opacity inherited cell)]
-                                {:w cw :h (:h box)
-                                 :draw (translate-ops (+ content-x (nth col-offsets i 0))
-                                                      (+ rows-y0 height)
-                                                      draw)}))
-                            cells))
+                 laid (first
+                       (reduce
+                        (fn [[acc col] cell]
+                          (let [span (cell-colspan cell)
+                                ;; a spanning cell is as wide as the columns
+                                ;; it covers PLUS the border-spacing between
+                                ;; them, which no longer separates anything
+                                cw (+ (reduce + 0 (map #(nth widths % 0) (range col (+ col span))))
+                                      (* spacing (dec span)))
+                                {:keys [box draw]} (layout-node theme 0 0 cw opacity inherited cell)]
+                            [(conj acc {:w cw :h (:h box)
+                                        :draw (translate-ops (+ content-x (nth col-offsets col 0))
+                                                             (+ rows-y0 height)
+                                                             draw)})
+                             (+ col span)]))
+                        [[] 0]
+                        cells))
                  row-h (apply max 0 (map :h laid))
                  rst (node-style row theme)
                  row-op (merge {:draw/op :node :id (:node/id row) :tag :tr
@@ -3524,27 +3671,6 @@
   #{:a :abbr :b :bdi :bdo :br :cite :code :data :dfn :em :i :kbd :label
     :mark :q :s :samp :small :span :strong :sub :sup :time :u :var :wbr})
 
-(def ^:private inline-atomic-tags
-  "Inline-level elements that are ATOMIC: they participate in a line box as
-   a single unbreakable box of their own intrinsic size, rather than
-   contributing text that can wrap. Real CSS calls these atomic inline-level
-   boxes — replaced elements and form controls.
-
-   They differ from inline-level-tags in every step that matters: their
-   children are NOT flattened into the run (a `<button>`'s label is laid
-   out inside the button's own box by layout-block/layout-form-control,
-   which already works), their width comes from laying the element out and
-   reading its box rather than from measuring text, and their baseline is
-   the box's BOTTOM edge (real CSS `vertical-align: baseline` aligns a
-   replaced box's bottom margin edge with the text baseline), not a font
-   ascent.
-
-   `:svg`/`:canvas`/`:video`/`:audio`/`:iframe` are deliberately still
-   absent: this engine has no rendering for any of them, so giving them an
-   inline box would place an empty rectangle in the middle of a sentence
-   rather than fix anything."
-  #{:img :input :button :select :textarea})
-
 (defn- inline-atomic-element?
   "True for an element that participates in a line as one unbreakable box:
    a replaced/form-control tag (inline-atomic-tags), or ANY element an
@@ -3635,65 +3761,6 @@
 
     :else false))
 
-(def ^:private inline-atomic-default-input-chars
-  "HTML's own default `size` for a text input is 20 characters, which is
-   where every browser's ~20ch default text-field width comes from."
-  20)
-
-(defn- inline-atomic-avail-width
-  "The available width an atomic inline is laid out at — its intrinsic
-   size, NOT the full line width `resolve-width` would hand an ordinary
-   block child.
-
-   This is the whole difference between an `<input>` that sits in a
-   sentence and one that swallows the line: laid out as a block child a
-   form control fills its container (correct for a block, wrong for an
-   inline), and until this existed every atomic inline was wider than the
-   line it was placed on and therefore always wrapped alone — the exact
-   symptom the Blink conformance harness reported as `inline-replaced 0/3`.
-
-   Resolution order mirrors real CSS's own: an explicit width (including
-   the `<img width>` presentational hint, see presentational-size) wins;
-   otherwise each control type contributes the intrinsic size the HTML
-   spec gives it (`size` characters for text-like inputs, defaulting to
-   20; a small square for checkbox/radio; the widest option label for a
-   `<select>`); everything else falls back to the same shrink-to-fit
-   natural width flex items already use (flex-item-main-width), which is
-   what gives `<button>go</button>` a button-sized box.
-
-   Deliberately scoped to the INLINE path: a block-level form control
-   keeps its existing fill-the-container behaviour, which is a separate
-   (and separately risky) change with its own downstream expectations in
-   kotoba-lang/browser."
-  [theme content-w opacity inherited child st]
-  (let [tag (:tag child)
-        font-size (parse-int (:font-size st) (:font-size theme))
-        char-w (long (* 0.6 font-size))
-        inset (content-inset st)
-        natural
-        (cond
-          (:width st) (resolve-width st content-w)
-
-          (contains? #{:input :textarea} tag)
-          (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
-            (if (contains? #{"checkbox" "radio"} input-type)
-              13
-              (+ (* char-w (parse-int (get-in child [:attrs :size]) inline-atomic-default-input-chars))
-                 (* 2 inset))))
-
-          (= :select tag)
-          ;; Widest option label -- a <select> is as wide as the longest
-          ;; thing it can display. Read straight off each <option>'s own
-          ;; text children rather than through option-label, which answers
-          ;; a different question (the label for one selected VALUE).
-          (let [labels (->> (:children child)
-                            (filter #(and (map? %) (= :option (:tag %))))
-                            (map #(->> (:children %) (filter string?) (str/join ""))))]
-            (+ (* char-w (apply max 1 (map count labels))) (* 2 inset)))
-
-          :else (flex-item-main-width theme content-w opacity inherited child st))]
-    (max 0 (min content-w natural))))
-
 (defn- inline-inherited
   "The text style context an inline box (or a generated node) hands to its
    own children — the same `inherited` map shape, and the same
@@ -3762,7 +3829,7 @@
                  (cond
                    (inline-atomic-element? theme child)
                    (let [st (node-style child theme)
-                         avail (inline-atomic-avail-width theme content-w opacity inherited child st)
+                         avail (atomic-intrinsic-width theme content-w opacity inherited child st)
                          {:keys [box draw]} (layout-node theme 0 0 avail opacity inherited child)]
                      (conj acc {:kind :atomic :w (:w box) :h (:h box) :draw draw
                                 :owners owners :opacity opacity}))
