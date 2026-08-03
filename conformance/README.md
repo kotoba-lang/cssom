@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 139/142 = 98%. Geometry: 390/493 element boxes (79%),
-106/150 cases with every box in agreement**, on a corpus grown 105 → 150. The corpus has grown
+**Line structure: 139/142 = 98%. Geometry: 415/493 element boxes (84%),
+114/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
@@ -283,6 +283,26 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round ten: what the widened corpus was hiding
+
+Four real rules, each found by attributing a delta cluster to its cases:
+
+- **A box that establishes a formatting context does not collapse margins
+  with its children.** `overflow: hidden` is the obvious one — it is *why*
+  authors reach for it — and a flex or grid ITEM is the same, decided by
+  the parent rather than by a declaration. This one cluster was `p y −14`
+  and `div h −30.75` across a dozen boxes.
+- **A caption participates in its table's width.** The table grows to fit
+  the caption's MIN-content (its longest word) and the caption then wraps
+  inside that width. Measured: `Caption text` gave a 24px table here where
+  the browser reports 49, with the caption overflowing it.
+- **Whitespace-only text runs are the space between inline elements.** The
+  parser dropped them entirely, so `<a>one</a>\n  <a>two</a>` rendered as
+  `onetwo` — with no way for layout to recover the gap. kotoba-lang/htmldom
+  now keeps them; layout drops the ones that would form a stray row between
+  blocks, because that decision needs the box tree the tokenizer cannot
+  see. Geometry 81% → 84% on this alone.
 
 ### Round nine: widening the corpus again
 

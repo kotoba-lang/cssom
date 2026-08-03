@@ -898,6 +898,11 @@
    ;; right (checks `style` first, falling back to `attr`), confirming
    ;; this file was the outlier, not an intentional design choice.
    :float (style node :float)
+   ;; Set by measure-child on a FLEX or GRID item: such a box establishes
+   ;; its own formatting context, so margins never collapse through it --
+   ;; the same rule `overflow` triggers, but decided by the PARENT, which is
+   ;; why it arrives as an attr rather than a declaration.
+   :independent-fc? (boolean (attr node :kotoba/independent-fc))
    :overflow (style node :overflow)
    :scroll-top (parse-int (attr node :scroll-top) 0)
    :scroll-left (parse-int (attr node :scroll-left) 0)})
@@ -3163,7 +3168,10 @@
 
 (defn- measure-child
   [theme content-w opacity inherited child shrink-to-fit?]
-  (let [child-avail (if (map? child)
+  (let [child (if (map? child)
+                (assoc-in child [:attrs :kotoba/independent-fc] true)
+                child)
+        child-avail (if (map? child)
                        (let [st (node-style child theme)]
                          (if (and shrink-to-fit? (not (:width st)))
                            (flex-item-main-width theme content-w opacity inherited child st)
@@ -3446,7 +3454,42 @@
         avail-content (max 0 (- (resolve-width st avail-width) (* 2 inset)))
         caption (first (filter #(and (map? %) (= :caption (:tag %))) (:children node)))
         rows (table-rows node)
-        widths (table-column-widths theme avail-content opacity inherited rows)
+        base-widths (table-column-widths theme avail-content opacity inherited rows)
+        ;; A CAPTION participates in the table's width: real CSS makes the
+        ;; table at least as wide as the caption needs, and the extra width
+        ;; goes to the columns. Measured: a two-cell table under a
+        ;; `Caption text` caption is 49px wide in the browser (the caption's
+        ;; own min-content) where this engine reported 24 -- the cells'
+        ;; width alone, with the caption overflowing it.
+        ;; MIN-content, not max-content: a table grows to fit the caption's
+        ;; longest WORD, and the caption then wraps inside that width. Using
+        ;; the whole caption's width instead made the table as wide as the
+        ;; unwrapped caption -- measured, `Caption text` gave a 84px table
+        ;; where the browser reports 49 (the width of `Caption`) with the
+        ;; caption wrapped onto two lines.
+        caption-w (if caption
+                    (let [measure-text (:measure-text theme)
+                          cst (node-style caption theme)
+                          fs (parse-int (:font-size cst) (:font-size theme))
+                          words (->> (:children caption)
+                                     (keep real-text-child)
+                                     (mapcat #(str/split (str %) #"\s+"))
+                                     (remove str/blank?))]
+                      (+ (* 2 (content-inset cst))
+                         (apply max 0
+                                (map (fn [w]
+                                       (if measure-text
+                                         (measure-text w fs (:font-weight cst) (:font-style cst) (:font-family cst))
+                                         (* (count w) (long (* 0.6 fs)))))
+                                     words))))
+                    0)
+        widths (let [cols-w (reduce + 0 base-widths)
+                     spacing-w (* (:border-spacing st) (inc (count base-widths)))
+                     short (- caption-w (+ cols-w spacing-w))]
+                 (if (and (pos? short) (seq base-widths))
+                   (let [add (long (Math/ceil (/ short (count base-widths))))]
+                     (mapv #(+ % add) base-widths))
+                   base-widths))
         ;; Real CSS: a table with `width: auto` is SHRINK-TO-FIT -- it is as
         ;; wide as its columns need, not as wide as its container. Filling
         ;; the container (what resolve-width does, correctly, for an
@@ -4412,6 +4455,26 @@
   ([theme children] (inline-runs theme children 2))
   ([theme children min-items]
   (->> (split-block-in-inline theme children)
+       ;; A whitespace-only text child that is not part of an inline run is
+       ;; dropped: between two blocks it would otherwise become a stray row
+       ;; of its own. The parser deliberately KEEPS such runs (they are the
+       ;; space between inline elements, `<a>one</a> <a>two</a>`), and this
+       ;; is the box-tree-aware half of that decision -- the same division
+       ;; of labour as whitespace collapsing itself.
+       ((fn [cs]
+          (let [inline-neighbour? (fn [i]
+                                    (some #(when-let [c (nth cs % nil)]
+                                             (and (not (nil? c))
+                                                  (or (some? (real-text-child c))
+                                                      (and (map? c) (inline-flow-candidate? theme c)))))
+                                          [(dec i) (inc i)]))]
+            (vec (keep-indexed
+                  (fn [i c]
+                    (when-not (and (some? (real-text-child c))
+                                   (str/blank? (real-text-child c))
+                                   (not (inline-neighbour? i)))
+                      c))
+                  cs)))))
        (remove (fn [child]
                  ;; Children that render NOTHING are dropped before grouping
                  ;; rather than passed through as zero-height rows. Real CSS
@@ -4834,7 +4897,20 @@
         {:keys [draw h]} (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
                                                content-w opacity inherited in-flow
                                                (and (zero? inset-t) (zero? inset-b)
-                                                    (zero? (:border-width st))))
+                                                    (zero? (:border-width st))
+                                                    ;; A box that establishes its own
+                                                    ;; formatting context does NOT collapse
+                                                    ;; margins with its children -- which is
+                                                    ;; exactly why authors reach for
+                                                    ;; `overflow: hidden` to contain them.
+                                                    ;; Measured: a `<p>` inside an
+                                                    ;; `overflow: hidden` div starts at y=14
+                                                    ;; in the browser (its own margin intact)
+                                                    ;; where this engine collapsed it out to
+                                                    ;; y=0, and the container came out 28px
+                                                    ;; short.
+                                                    (contains? #{nil "visible"} (:overflow st))
+                                                    (not (:independent-fc? st))))
         explicit-h (resolve-height st)
         node-h (clamp-height st (or explicit-h (+ h inset-t inset-b)))
         node-w w
