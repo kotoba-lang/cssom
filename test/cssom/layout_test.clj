@@ -2409,10 +2409,16 @@
          otherwise adjoin was already consumed by the ::before merge) --
          2 :text draw-ops total, not 3 (unmerged) and not 1 (a three-way
          merge this feature deliberately does not attempt)")
-    (is (= ["→ middle" " ←"] (mapv :text text-ops))
+    (is (= ["→ middle" "←"] (mapv :text text-ops))
         "generated ::before text is concatenated with the real child text
          it merged with, in document order; generated ::after text
-         remains on its own, separate, in document order after that")
+         remains its own separate draw-op, in document order after that.
+         Its leading space is gone from the op's own :text because the
+         inline formatting context (layout-inline-run) now collapses the
+         whitespace BETWEEN the two runs into the inter-piece gap on the
+         shared line, exactly as real CSS does -- the space is still
+         rendered, as horizontal distance rather than as a leading space
+         character inside the second op")
     (is (= "red" (:color (first text-ops)))
         "the merged ::before+text run paints with ::before's own declared
          color, not the element's inherited black -- see
@@ -2422,12 +2428,17 @@
         "::after (unmerged here) still inherits the element's own color,
          exactly like any real child would, unaffected by the merge
          feature")
-    (is (< (:y (first text-ops)) (:y (second text-ops)))
-        "::after still lays out as its own separate row BELOW the merged
-         ::before+text run, in this engine's vertical block flow -- the
-         merge only ever collapses a pseudo with ITS OWN adjacent real
-         text onto one shared line, it doesn't turn ::after into part of
-         that same line")))
+    (is (= (:y (first text-ops)) (:y (second text-ops)))
+        "::after shares ONE line box with the merged ::before+text run
+         (same :y, different :x) -- real CSS renders `→ middle ←` on one
+         line, and since layout-inline-run landed (this file's general
+         inline formatting context) so does this engine. This assertion
+         previously required the opposite (::after stacked on its own row
+         BELOW) and was correct only as a statement of the missing-inline-
+         flow limitation it documented, not of real CSS")
+    (is (< (:x (first text-ops)) (:x (second text-ops)))
+        "document order on that shared line runs left to right: the
+         merged ::before+text run first, then ::after after it")))
 
 (deftest before-content-empty-string-still-produces-a-real-empty-text-draw-op
   ;; content: ""; is a common icon-only generated-content idiom -- still a
@@ -2744,14 +2755,19 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["X " "nested"] (mapv :text text-ops))
+    (is (= ["X" "nested"] (mapv :text text-ops))
         "::before and the <span>'s own nested text stay two genuinely
-         separate draw-ops -- no merge fires when the immediately
-         adjacent real child is an element, not a text node")
-    (is (< (:y (first text-ops)) (:y (second text-ops)))
-        "still two stacked rows, exactly as before this fix existed --
-         this case is a deliberate, documented scope boundary, not a
-         regression")))
+         separate draw-ops -- no STRING merge fires when the immediately
+         adjacent real child is an element, not a text node (each keeps
+         its own style context, which is exactly why they must stay two
+         ops). ::before's trailing space now lives in the inter-piece gap
+         the inline formatting context computes, not in the op's :text")
+    (is (= (:y (first text-ops)) (:y (second text-ops)))
+        "the two ops share ONE line box (same :y) -- what used to be two
+         stacked rows here was the missing-inline-flow limitation, closed
+         by layout-inline-run; real CSS renders `X nested` on one line")
+    (is (< (:x (first text-ops)) (:x (second text-ops)))
+        "and in document order left to right on that line")))
 
 (deftest before-merges-with-first-adjacent-text-but-a-later-element-sibling-is-unaffected
   ;; Explicit out-of-scope case #2: `<li>text<b>bold</b></li>` with a
@@ -2782,13 +2798,15 @@
         "::before merges with the immediately-adjacent real text child
          ('text') into one run; the <b>'s own text ('bold') is a
          genuinely separate draw-op, unaffected by the merge")
-    (is (< (:y (first text-ops)) (:y (second text-ops)))
-        "the merged run and the <b> element still stack as two separate
-         rows -- this fix narrows the FIRST gap (pseudo-to-adjacent-text)
-         without attempting to also merge the remaining text-vs-element
-         gap, which stays exactly as unmerged as this engine's general
-         lack of inline flow already made it (see this namespace's own
-         docstring)")))
+    (is (= (:y (first text-ops)) (:y (second text-ops)))
+        "the merged run and the <b> now share ONE line box -- the
+         text-vs-element gap this test used to pin as permanently
+         unmerged is exactly what layout-inline-run closed. They remain
+         two separate draw-ops (the <b> carries its own style context),
+         which is what an inline formatting context is FOR: same line,
+         separate painted runs")
+    (is (< (:x (first text-ops)) (:x (second text-ops)))
+        "with the <b>'s run placed after the merged run on that line")))
 
 ;; ---- adjacent real DOM text-node siblings merging onto one shared line
 ;;      (see merge-adjacent-text-runs) ----
@@ -2898,9 +2916,15 @@
         "three genuinely separate draw-ops -- the <b> element boundary
          blocks the 'a'/'b' text fragments from merging with each other,
          even though both are real text-node children of the same <li>")
-    (is (apply < (mapv :y text-ops))
-        "still three stacked rows -- this engine's general lack of inline
-         flow, unaffected by the text-run merge")))
+    (is (apply = (mapv :y text-ops))
+        "all three runs share ONE line box -- `a<b>x</b>b` is one line in
+         real CSS, and is one line here since layout-inline-run landed.
+         merge-adjacent-text-runs' own scope is unchanged by that: it
+         still refuses to merge 'a' and 'b' into one STRING across the
+         <b> boundary (they are not adjacent children), and inline flow
+         is what puts the three separate runs on one line instead")
+    (is (apply < (mapv :x text-ops))
+        "laid out left to right in document order on that line")))
 
 (deftest mixed-bare-string-and-map-shaped-text-nodes-still-merge-as-one-run
   ;; real-text-child accepts two shapes a text-node child can have by the
@@ -4888,3 +4912,196 @@
         "the author's own explicit counter-driven numbering renders exactly
          as before this feature existed -- not doubled, not replaced by the
          implicit bullet this <ul>'s <li>s would otherwise get")))
+
+;; ---- general inline formatting context (layout-inline-run) ----
+;;
+;; The limitation this whole file's ns docstring used to call permanent --
+;; "This engine has NO general inline-flow layout at all -- every child a
+;; block-level parent lays out gets its own row" -- is what these tests
+;; cover being closed: text and adjacent inline-level elements now share
+;; line boxes, wrap together, keep their own per-fragment style, and sit
+;; on one shared baseline. The two pre-existing narrow exceptions
+;; (merge-adjacent-text-runs' string merge, with-generated-content's
+;; pseudo-plus-adjacent-text merge) still exist and still do exactly what
+;; they did -- they are STRING merges inside one styled run, which inline
+;; flow neither replaces nor duplicates.
+;;
+;; These two helpers exist only in this section: the explicit
+;; create-element/append-child ladder every older test in this file writes
+;; out by hand stops being readable at the ~5-node trees an inline run
+;; needs (text, element, nested element, text again), and every one of
+;; these tests would otherwise repeat 12 near-identical binding lines.
+
+(defn- build-inline-children
+  [doc parent specs]
+  (reduce (fn [doc spec]
+            (if (string? spec)
+              (let [[t doc] (dom/create-text-node doc spec)]
+                (dom/append-child doc parent t))
+              (let [[tag style & kids] spec
+                    [el doc] (dom/create-element doc tag)
+                    doc (dom/append-child doc parent el)
+                    doc (if (seq style) (dom/set-style doc el style) doc)]
+                (build-inline-children doc el kids))))
+          doc
+          specs))
+
+(defn- inline-ops
+  "draw-ops for a `<p>` whose children are `specs` -- a vector of strings
+   (real text nodes) and `[tag style & children]` vectors (real elements
+   with real cascade-shaped inline style)."
+  ([specs] (inline-ops specs {} {:width 480}))
+  ([specs p-style opts]
+   (let [[p doc] (dom/create-element dom/empty-document :p)
+         doc (dom/set-root doc p)
+         doc (if (seq p-style) (dom/set-style doc p p-style) doc)
+         doc (build-inline-children doc p specs)
+         [_ doc] (dom/consume-ops doc)]
+     (layout/draw-ops (dom/tree doc) opts))))
+
+(defn- text-draw-ops [ops] (filterv #(= :text (:draw/op %)) ops))
+
+(deftest inline-element-shares-one-line-box-with-adjacent-text
+  ;; The canonical case: `<p>hello <b>world</b></p>`. Before
+  ;; layout-inline-run this rendered as two stacked rows.
+  (let [t (text-draw-ops (inline-ops ["hello " [:b {} "world"]]))]
+    (is (= ["hello" "world"] (mapv :text t))
+        "two separate draw-ops (each fragment keeps its own style context)
+         but ONE inline run -- the trailing space of the text node is now
+         the inter-piece gap, not a character inside the op")
+    (is (apply = (mapv :y t))
+        "same line box")
+    (is (= [8 56] (mapv :x t))
+        "laid out at the content origin (block inset 4 + run padding 4)
+         then advanced by the measured width of 'hello' (5 chars x the
+         engine's own (long (* 0.6 14)) = 8px char width = 40) plus one
+         collapsed space (8) -- 8 + 40 + 8 = 56")))
+
+(deftest each-inline-fragment-keeps-its-own-resolved-style
+  (let [t (text-draw-ops (inline-ops ["plain " [:b {:color "#ff0000" :font-weight "bold"} "loud"]]))]
+    (is (= "#e6ebf5" (:color (first t)))
+        "the bare text keeps the inherited theme foreground")
+    (is (= "#ff0000" (:color (second t)))
+        "the <b> fragment paints in its OWN declared color on the same
+         line -- the exact thing merge-generated-with-text's docstring
+         called impossible for a single :text op, and the reason inline
+         flow keeps fragments as separate ops instead of concatenating")
+    (is (= "bold" (:font-weight (second t))))
+    (is (nil? (:font-weight (first t))))))
+
+(deftest inline-run-wraps-across-fragment-boundaries
+  ;; Wrapping is decided over the WHOLE run, not per child: 'aaaa bbbb'
+  ;; fits, adding the <b> does not, so the <b> starts the second line.
+  (let [t (text-draw-ops (inline-ops ["aaaa bbbb " [:b {} "cccc"]] {} {:width 100}))]
+    (is (= ["aaaa bbbb" "cccc"] (mapv :text t))
+        "the two same-style words stay ONE draw-op (adjacent pieces
+         sharing style + owners are merged, so a real paragraph does not
+         become one op per word)")
+    (is (= [8 8] (mapv :x t)))
+    (is (= [8 28] (mapv :y t))
+        "second line advanced by the line box height (theme line-height 20)")))
+
+(deftest br-forces-a-new-line-box
+  (let [t (text-draw-ops (inline-ops ["a" [:br {}] "b"]))]
+    (is (= ["a" "b"] (mapv :text t)))
+    (is (= [8 28] (mapv :y t)))
+    (is (= [8 8] (mapv :x t)))))
+
+(deftest whitespace-only-text-nodes-between-inline-elements-collapse
+  ;; The shape a real HTML parser produces for indented source:
+  ;; `<a>one</a>\n  <a>two</a>` -- three children, the middle one pure
+  ;; whitespace. Before inline flow that middle node became its own
+  ;; (blank, space-consuming) row and the two links stacked.
+  (let [ops (inline-ops [[:a {} "one"] "\n  " [:a {} "two"]])
+        t (text-draw-ops ops)]
+    (is (= ["one" "two"] (mapv :text t))
+        "the whitespace-only node contributes no draw-op of its own")
+    (is (apply = (mapv :y t)))
+    (is (= [8 40] (mapv :x t))
+        "collapsed to exactly ONE space between the two links: 8 + 24 + 8")))
+
+(deftest inline-element-emits-a-node-draw-op-for-hit-testing
+  ;; Without this an inline <a> would be unclickable: browser's
+  ;; session/node-at and dom-gpu's retained hit testing both scan :node ops.
+  (let [ops (inline-ops ["click " [:a {} "here"]])
+        a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %))) ops))]
+    (is (some? a-op) "the inline <a> still gets its own :node draw-op")
+    (is (= {:x 56 :y 8 :w 32 :h 20} (select-keys a-op [:x :y :w :h]))
+        "box spans exactly the fragment it painted, not the whole line")))
+
+(deftest wrapped-inline-box-gets-per-line-backgrounds-and-one-union-node-op
+  (let [ops (inline-ops ["x " [:a {:background "#123456"} "aaaa bbbb cccc"]] {} {:width 100})
+        rects (filterv #(and (= :rect (:draw/op %)) (= "#123456" (:color %))) ops)
+        a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %))) ops))]
+    (is (= 2 (count rects))
+        "the wrapped inline box's background follows BOTH line boxes
+         rather than filling one rectangle around them")
+    (is (= [8 28] (mapv :y rects)))
+    (is (= {:x 8 :y 8 :h 40} (select-keys a-op [:x :y :h]))
+        "one union :node op covering both fragments -- the documented
+         over-covering approximation of real CSS's per-fragment box list")))
+
+(deftest nested-inline-elements-inherit-and-override
+  (let [t (text-draw-ops
+           (inline-ops ["x " [:span {:color "#00ff00"} "outer " [:b {:font-weight "bold"} "inner"]]]))]
+    (is (= ["x" "outer" "inner"] (mapv :text t)))
+    (is (apply = (mapv :y t)) "all three on one line")
+    (is (= ["#e6ebf5" "#00ff00" "#00ff00"] (mapv :color t))
+        "the nested <b> inherits its parent <span>'s declared color")
+    (is (= [nil nil "bold"] (mapv :font-weight t))
+        "while adding its own weight on top of it")))
+
+(deftest mixed-font-sizes-share-one-baseline
+  ;; dom-gpu's hosts paint a :text op at (+ y font-size), so equal :y
+  ;; would mean MIS-aligned baselines for mixed sizes. Each piece's :y is
+  ;; offset so (+ y font-size) is identical across the line.
+  (let [t (text-draw-ops (inline-ops ["small " [:span {:font-size 28} "big"]]))]
+    (is (= [22 8] (mapv :y t)))
+    (is (apply = (map (fn [op] (+ (:y op) (:font-size op))) t))
+        "one shared baseline at y=36")))
+
+(deftest text-align-centers-a-mixed-inline-line
+  (let [t (text-draw-ops (inline-ops ["a " [:b {} "bc"]] {:text-align "center"} {:width 480}))]
+    (is (apply = (mapv :y t)))
+    (is (= [224 240] (mapv :x t))
+        "the WHOLE line (8 + 8 + 16 = 32px wide) is centered in the 464px
+         content width as one unit -- (464 - 32) / 2 = 216, + the 8px
+         content origin")))
+
+(deftest a-block-child-inside-an-inline-element-falls-back-to-block-rows
+  ;; Real CSS splits the inline box around the block child
+  ;; (block-in-inline); this engine does not implement that, so the whole
+  ;; run keeps its pre-existing block-row behavior rather than being
+  ;; silently mis-nested into one line box.
+  (let [t (text-draw-ops (inline-ops ["text " [:span {} [:div {} "block"]]]))]
+    (is (= ["text " "block"] (mapv :text t))
+        "unchanged legacy path, trailing space and all")
+    (is (apply < (mapv :y t)) "still two stacked rows")))
+
+(deftest non-normal-white-space-keeps-the-pre-existing-path
+  (let [t (text-draw-ops (inline-ops ["a " [:span {:white-space "pre"} "b"]]))]
+    (is (apply < (mapv :y t))
+        "a `white-space: pre` inline box opts out of the collapsing
+         tokenizer entirely rather than being quietly re-collapsed")))
+
+(deftest replaced-and-form-control-elements-are-not-inline-level-here
+  (let [ops (inline-ops ["label " [:input {}]])
+        t (text-draw-ops ops)
+        input-op (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
+    (is (= 8 (:y (first t))))
+    (is (< (:y (first t)) (:y input-op))
+        "an <input> keeps its own block row -- documented scope-cut, it
+         has an intrinsic size an inline run cannot measure as a word")))
+
+(deftest explicit-display-block-takes-a-span-out-of-inline-flow
+  (let [t (text-draw-ops (inline-ops ["x " [:span {:display "block"} "y"]]))]
+    (is (apply < (mapv :y t))
+        "author display wins over the inline-level tag default")))
+
+(deftest a-lone-text-child-is-byte-for-byte-unchanged
+  ;; The single most common shape in the whole engine stays on
+  ;; layout-text's exact pre-existing path -- inline flow only engages
+  ;; for runs of two or more inline children (see inline-runs).
+  (let [t (text-draw-ops (inline-ops ["hello world"]))]
+    (is (= 1 (count t)))
+    (is (= {:text "hello world" :x 8 :y 8 :font-size 14} (select-keys (first t) [:text :x :y :font-size])))))
