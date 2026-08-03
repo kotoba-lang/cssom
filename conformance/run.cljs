@@ -108,8 +108,17 @@
         // to the line box being compared. Skipped on both sides -- see
         // engine-lines' matching containment filter -- so the comparison
         // measures one inline formatting context rather than two.
-        if (node.parentElement &&
-            node.parentElement.closest('img,input,button,select,textarea')) continue;
+        // An ATOMIC inline's contents are its own formatting context --
+        // form controls and replaced elements by tag, and anything the
+        // author made `display: inline-block`, which is the same concept
+        // spelled in CSS. Excluded on both sides (see engine-lines' own
+        // filter) so the comparison measures ONE inline formatting context.
+        var inAtomic = false;
+        for (var a = node.parentElement; a && a !== root; a = a.parentElement) {
+          if (a.matches('img,input,button,select,textarea') ||
+              getComputedStyle(a).display === 'inline-block') { inAtomic = true; break; }
+        }
+        if (inAtomic) continue;
         var re = /\\S+/g, m;
         while ((m = re.exec(text))) {
           var range = document.createRange();
@@ -387,7 +396,8 @@
         ;; parentage -- a text op inside an atomic box's rect is that box's
         ;; content.
         atomic-boxes (filterv #(and (= :node (:draw/op %))
-                                    (contains? #{:img :input :button :select :textarea} (:tag %)))
+                                    (or (contains? #{:img :input :button :select :textarea} (:tag %))
+                                        (= "inline-block" (:display %))))
                               ops)
         inside-atomic? (fn [op]
                          (some (fn [b]

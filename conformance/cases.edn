@@ -483,4 +483,220 @@
  {:id :float/left-and-right-floats
   :group :float
   :html "<div style=\"width: 300px\"><span style=\"float: left\">L</span><span style=\"float: right\">R</span>middle text</div>"}
+
+ ;; ================= corpus round 2 =================
+ ;; The line axis reached 99% and the geometry axis 88% on 105 cases, which
+ ;; is exactly when a corpus stops earning its keep. These 45 cases go into
+ ;; territory the harness had never measured at all -- selectors and the
+ ;; cascade, custom properties, overflow, stacking, sticky, rtl, text
+ ;; spacing, nested tables, richer forms, and larger real-page shapes -- on
+ ;; the expectation that the scores FALL. A number that only ever rises is
+ ;; measuring the corpus, not the engine.
+
+ ;; ---- selectors and the cascade ----
+
+ {:id :selector/child-vs-descendant
+  :group :selector
+  :html "<div class=\"o\"><p>direct</p><section><p>nested</p></section></div>"
+  :css ".o > p { color: #ff0000 } .o p { color: #00ff00 }"}
+
+ {:id :selector/nth-child
+  :group :selector
+  :oracle/blind true
+  :html "<ul class=\"n\"><li>one</li><li>two</li><li>three</li></ul>"
+  :css ".n li:nth-child(2) { font-weight: bold }"}
+
+ {:id :selector/attribute-presence
+  :group :selector
+  :html "<p><a href=\"/x\" download>dl</a> <a href=\"/y\">plain</a></p>"
+  :css "a[download] { font-weight: bold }"}
+
+ {:id :selector/not-and-is
+  :group :selector
+  :html "<div><p class=\"skip\">a</p><p>b</p><p>c</p></div>"
+  :css "p:not(.skip) { font-style: italic }"}
+
+ {:id :selector/specificity-conflict
+  :group :selector
+  :html "<p id=\"hero\" class=\"lead\">text</p>"
+  :css "p { color: #111111 } .lead { color: #222222 } #hero { color: #333333 }"}
+
+ {:id :selector/important-beats-specificity
+  :group :selector
+  :html "<p id=\"hero\">text</p>"
+  :css "p { color: #ff0000 !important } #hero { color: #00ff00 }"}
+
+ {:id :cascade/custom-property
+  :group :selector
+  :html "<div class=\"vars\"><p>uses a variable</p></div>"
+  :css ".vars { --pad: 20px } .vars p { padding: var(--pad) }"}
+
+ {:id :cascade/inherited-font-size-chain
+  :group :selector
+  :html "<div style=\"font-size: 20px\"><div><p>inherits twice</p></div></div>"}
+
+ ;; ---- overflow and stacking ----
+
+ {:id :overflow/hidden-clips-nothing-in-flow
+  :group :overflow
+  :html "<div style=\"overflow: hidden; width: 200px\"><p>alpha beta gamma delta epsilon</p></div>"}
+
+ {:id :overflow/scroll-container
+  :group :overflow
+  :html "<div style=\"overflow: scroll; width: 160px; height: 60px\"><p>alpha beta gamma delta epsilon zeta</p></div>"}
+
+ {:id :stacking/z-index-order
+  :group :stacking
+  :html "<div style=\"position: relative; height: 40px\"><div style=\"position: absolute; left: 0; top: 0; z-index: 2\">front</div><div style=\"position: absolute; left: 100px; top: 0; z-index: 1\">back</div></div>"}
+
+ {:id :stacking/negative-z-index
+  :group :stacking
+  :html "<div style=\"position: relative; height: 40px\"><div style=\"position: absolute; left: 120px; top: 0; z-index: -1\">under</div><p>flow</p></div>"}
+
+ {:id :position/sticky-in-flow
+  :group :position
+  :html "<div style=\"height: 60px\"><div style=\"position: sticky; top: 0\">sticky</div><p>after</p></div>"}
+
+ ;; ---- text spacing and direction ----
+
+ {:id :text/letter-spacing
+  :group :text
+  :html "<p style=\"letter-spacing: 2px\">spaced out</p>"}
+
+ {:id :text/word-spacing
+  :group :text
+  :html "<p style=\"word-spacing: 10px\">one two three</p>"}
+
+ {:id :text/text-indent
+  :group :text
+  :html "<p style=\"text-indent: 30px; width: 200px\">alpha beta gamma delta epsilon</p>"}
+
+ {:id :text/direction-rtl
+  :group :text
+  :html "<p style=\"direction: rtl\">alpha beta</p>"}
+
+ {:id :text/nowrap-in-narrow-box
+  :group :text
+  :html "<div style=\"width: 80px\"><p style=\"white-space: nowrap\">alpha beta gamma</p></div>"}
+
+ {:id :text/overflow-wrap-anywhere
+  :group :text
+  :html "<div style=\"width: 90px\"><p style=\"overflow-wrap: break-word\">short aaaaaaaaaaaaaaaaaaaa</p></div>"}
+
+ {:id :text/decoration-underline
+  :group :text
+  :html "<p>plain <span style=\"text-decoration: underline\">marked</span> tail</p>"}
+
+ ;; ---- more inline ----
+
+ {:id :inline/small-and-code
+  :group :inline
+  :html "<p>see <small>fine print</small> and <code>x = 1</code> ok</p>"}
+
+ {:id :inline/nested-anchors-and-strong
+  :group :inline
+  :html "<p>read <a href=\"/x\">the <strong>full</strong> guide</a> now</p>"}
+
+ {:id :inline/mark-and-del
+  :group :inline
+  :html "<p>a <mark>marked</mark> b <del>removed</del> c</p>"}
+
+ {:id :inline/inline-block-with-padding
+  :group :inline-block
+  :html "<p>a <span style=\"display: inline-block; padding: 8px\">box</span> b</p>"}
+
+ {:id :inline/two-inline-blocks
+  :group :inline-block
+  :html "<p><span style=\"display: inline-block; width: 40px\">one</span><span style=\"display: inline-block; width: 40px\">two</span></p>"}
+
+ ;; ---- tables, deeper ----
+
+ {:id :table/with-caption
+  :group :table
+  :html "<table><caption>Caption text</caption><tr><td>a</td><td>b</td></tr></table>"}
+
+ {:id :table/nested-table
+  :group :table
+  :html "<table><tr><td><table><tr><td>inner</td></tr></table></td><td>outer</td></tr></table>"}
+
+ {:id :table/rowspan-is-a-known-gap
+  :group :table
+  :html "<table><tr><td rowspan=\"2\">tall</td><td>a</td></tr><tr><td>b</td></tr></table>"}
+
+ {:id :table/cells-with-explicit-width
+  :group :table
+  :html "<table><tr><td style=\"width: 120px\">wide</td><td>rest</td></tr></table>"}
+
+ {:id :table/empty-cells
+  :group :table
+  :html "<table><tr><td>a</td><td></td><td>c</td></tr></table>"}
+
+ ;; ---- forms, richer ----
+
+ {:id :form/radio-group
+  :group :inline-replaced
+  :html "<p><input type=\"radio\" name=\"g\"> one <input type=\"radio\" name=\"g\"> two</p>"}
+
+ {:id :form/select-multiple
+  :group :inline-replaced
+  :html "<p>pick <select multiple><option>a</option><option>b</option></select> end</p>"}
+
+ {:id :form/input-with-size
+  :group :inline-replaced
+  :html "<p>code <input size=\"5\" value=\"12345\"> end</p>"}
+
+ {:id :form/fieldset-and-legend
+  :group :inline-replaced
+  :html "<fieldset><legend>Group</legend><p>inside</p></fieldset>"}
+
+ {:id :form/button-with-nested-inline
+  :group :inline-replaced
+  :html "<p><button>save <b>now</b></button> tail</p>"}
+
+ ;; ---- lists, deeper ----
+
+ {:id :list/ordered-with-start
+  :group :generated
+  :oracle/blind true
+  :html "<ol start=\"5\"><li>five</li><li>six</li></ol>"}
+
+ {:id :list/list-style-none
+  :group :generated
+  :oracle/blind true
+  :html "<ul style=\"list-style: none\"><li>a</li><li>b</li></ul>"}
+
+ ;; ---- larger real-page shapes ----
+
+ {:id :page/pricing-grid
+  :group :page
+  :html "<div style=\"display: grid; grid-template-columns: repeat(3, 160px); gap: 12px\"><div><h3>Free</h3><p>0 yen</p></div><div><h3>Pro</h3><p>1000 yen</p></div><div><h3>Team</h3><p>5000 yen</p></div></div>"}
+
+ {:id :page/comment-thread
+  :group :page
+  :html "<div style=\"width: 320px\"><div><b>alice</b> <small>2h</small><p>First comment here.</p></div><div style=\"margin-left: 24px\"><b>bob</b> <small>1h</small><p>A reply to it.</p></div></div>"}
+
+ {:id :page/breadcrumb
+  :group :page
+  :html "<nav><a href=\"/\">Home</a> &rsaquo; <a href=\"/docs\">Docs</a> &rsaquo; <span>Page</span></nav>"}
+
+ {:id :page/table-of-contents
+  :group :page
+  :oracle/blind true
+  :html "<nav style=\"width: 200px\"><h4>Contents</h4><ul><li><a href=\"#a\">First section</a></li><li><a href=\"#b\">Second section</a></li></ul></nav>"}
+
+ {:id :page/hero-with-floated-image
+  :group :page
+  :html "<div style=\"width: 300px\"><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"80\" height=\"60\" style=\"float: left\">Headline text that wraps beside the floated image and continues below it.</div>"}
+
+ {:id :page/form-row
+  :group :page
+  :html "<form style=\"display: flex; gap: 8px\"><label>Email</label><input type=\"email\" value=\"a@b.c\"><button>Send</button></form>"}
+
+ {:id :page/article-with-blockquote
+  :group :page
+  :html "<article style=\"width: 280px\"><h2>Title</h2><p>Intro paragraph.</p><blockquote>A quoted line.</blockquote><p>Closing paragraph.</p></article>"}
+
+ {:id :page/definition-heavy
+  :group :page
+  :html "<dl style=\"width: 260px\"><dt>alpha</dt><dd>first definition</dd><dt>beta</dt><dd>second definition</dd></dl>"}
 ]

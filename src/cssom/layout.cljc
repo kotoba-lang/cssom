@@ -3009,6 +3009,9 @@
    where every browser's ~20ch default text-field width comes from."
   20)
 
+(declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited
+         inline-max-content-width)
+
 (defn- atomic-intrinsic-width
   "The available width an atomic inline is laid out at — its intrinsic
    size, NOT the full line width `resolve-width` would hand an ordinary
@@ -3061,18 +3064,25 @@
             (+ (* char-w (apply max 1 (map count labels))) (* 2 inset)))
 
           ;; A <button> and any other atomic element with no intrinsic
-          ;; rule of its own shrink-wraps to its label, exactly as a flex
+          ;; rule of its own shrink-wraps to its content, exactly as a flex
           ;; item does. Inlined rather than delegating to
           ;; flex-item-main-width, which now consults THIS function for
           ;; atomic tags -- delegating would recurse forever.
           :else
           (let [cs (:children child)]
-            (if (and (= 1 (count cs)) (string? (first cs)))
+            (cond
+              (and (= 1 (count cs)) (string? (first cs)))
               (flex-item-natural-text-width theme opacity inherited st (first cs))
-              content-w)))]
-    (max 0 (min content-w natural))))
 
-(declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited)
+              ;; MIXED inline content counts too: `<button>save <b>now</b>
+              ;; </button>` fell through to the container width, so a button
+              ;; with any markup in its label swallowed the whole line and
+              ;; pushed the text after it onto the next one.
+              (and (seq cs) (every? #(inline-flow-candidate? theme %) cs))
+              (inline-max-content-width theme content-w opacity inherited st cs)
+
+              :else content-w)))]
+    (max 0 (min content-w natural))))
 
 (defn- inline-max-content-width
   "The width an inline run would occupy on ONE line -- real CSS's
@@ -3747,8 +3757,9 @@
    Replaced and form-control elements are inline-level too, but they are
    ATOMIC rather than text-like, so they live in inline-atomic-tags below
    and take a different path through the run."
-  #{:a :abbr :b :bdi :bdo :br :cite :code :data :dfn :em :i :kbd :label
-    :mark :q :s :samp :small :span :strong :sub :sup :time :u :var :wbr})
+  #{:a :abbr :b :bdi :bdo :br :cite :code :data :del :dfn :em :i :ins :kbd
+    :label :mark :meter :output :progress :q :ruby :rt :rp :s :samp :small
+    :span :strong :sub :sup :time :u :var :wbr})
 
 (defn- inline-atomic-element?
   "True for an element that participates in a line as one unbreakable box:

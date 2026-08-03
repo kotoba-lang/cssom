@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 100/101 = 99%. Geometry: 295/334 element boxes (88%), 80/105
-cases with every box in agreement.** The corpus has grown
+**Line structure: 139/142 = 98%. Geometry: 390/493 element boxes (79%),
+106/150 cases with every box in agreement**, on a corpus grown 105 → 150. The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
@@ -284,6 +284,37 @@ container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
 
+### Round nine: widening the corpus again
+
+The line axis had reached 99% and geometry 88% on 105 cases — which is
+exactly when a corpus stops earning its keep. 45 cases were added in
+territory the harness had never touched: selectors and the cascade
+(specificity, `!important`, `:nth-child`, `:not`, attribute presence,
+custom properties), overflow and scroll containers, `z-index` stacking,
+`position: sticky`, `direction: rtl`, letter/word spacing, `text-indent`,
+nested tables, `rowspan`, richer forms, and six larger page shapes
+(pricing grid, comment thread, breadcrumb, table of contents, hero with a
+floated image, form row).
+
+Both scores fell, which is the point: line 99% → 94%, geometry 88% → 78%.
+Fixing what the new cases exposed brought them back to 98% and 79% on the
+larger corpus. What they exposed:
+
+- **`<mark>`, `<del>`, `<ins>`, `<meter>`, `<output>`, `<progress>`, ruby
+  tags were not inline-level**, so any of them broke the sentence around it
+  into stacked rows.
+- **An atomic inline with MIXED content had no max-content width.**
+  `<button>save <b>now</b></button>` fell back to the container width, so a
+  button with any markup in its label swallowed the whole line and pushed
+  the text after it onto the next one.
+- **`&rsaquo;` and friends painted as literal source text** — a breadcrumb
+  (`Home &rsaquo; Docs`) showed the entity. Another 25 page-furniture
+  entities landed in kotoba-lang/htmldom.
+- Harness: **an `inline-block`'s contents are their own formatting
+  context**, exactly like a form control's, and must be excluded from the
+  line comparison on both sides. The engine had that case geometrically
+  right (2/2 boxes) while the line metric scored it wrong.
+
 ### Round eight: block-in-inline
 
 An inline box containing a BLOCK box is now split around it, as real CSS
@@ -296,7 +327,14 @@ children, with the block children hoisted between them — so nothing
 downstream needed a new concept. Bounded v1: the block must be a DIRECT
 child of the inline element.
 
-### The one remaining line-structure failure is deliberate
+### The three remaining line-structure failures
+
+`table/rowspan` (unimplemented — a spanning cell occupies one row) and
+`page/hero-with-floated-image` (the float band's documented v1 boundary:
+the narrowed width applies to the whole run rather than only to the lines
+beside the float) are honest gaps, now measured.
+
+The third is deliberate:
 
 `position/fixed-leaves-flow` stays red and is NOT chased. `position: fixed`
 takes the box out of flow and OVERLAPS the content beside it, so "which line
