@@ -590,8 +590,14 @@
                         (sort-by (fn [[_ _ n _]] (- n))))]
         (println "          worst (tag, dimension, count, median delta engine-oracle):")
         (doseq [[tag dim n med] (take 12 by-dim)]
-          (println (str "            " (pad-right tag 8) (pad-right (name dim) 3)
-                        (pad-left n 4) "  " (if (pos? med) (str "+" med) med)))))
+          (let [cases (->> results
+                           (filter (fn [r] (some #(and (= tag (:tag %)) (= dim (:dim %)))
+                                                 (:deltas (:geo r)))))
+                           (map :id)
+                           (take 3))]
+            (println (str "            " (pad-right tag 8) (pad-right (name dim) 3)
+                          (pad-left n 4) "  " (pad-left (if (pos? med) (str "+" med) med) 8)
+                          "   " (str/join ", " (map str cases)))))))
       (println "          worst tags (agreeing/total):")
       (doseq [[tag [a t]] (->> per-tag (sort-by (fn [[_ [a t]]] (- a t))) (take 10))
               :when (< a t)]

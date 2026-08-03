@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 92/98 = 94%. Geometry: 235/325 element boxes (72%), 56/102
+**Line structure: 92/98 = 94%. Geometry: 249/325 element boxes (77%), 63/102
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -187,6 +187,26 @@ of one run:
   hold it (sharing the shortfall), and is laid out across them plus the
   border-spacing that no longer separates anything. That case went from 1/7
   boxes in agreement to 7/7.
+
+### Round three: the deltas name their own causes
+
+With per-dimension deltas attributed to case ids, three more fell out:
+
+- **A space belongs to the run that contains it.** The gap in
+  `a <b>b</b>` is a space in the PARAGRAPH's font; this engine charged the
+  *following* fragment's font, and since this system's bold face is
+  proportional (3.88px space against the regular 7.00px), every following
+  inline box landed ~3px left of where the browser draws it.
+- **`display: flex` is a BLOCK-level flex container.** It fills its
+  containing block; only its ITEMS shrink-to-fit. This engine shrink-wrapped
+  the container, so a row of three one-character items was 21px wide where
+  a browser reports 800 — and `justify-content` then distributed space
+  inside that 21px box. Ten boxes, all of them scored as passes by the line
+  axis.
+- **The explicit-line-height flag was dropped on the way into inline
+  boxes**, so a larger inline inside a declared `line-height: 20px` grew
+  the line box to 1.2 × its own size instead of overflowing it the way a
+  browser does.
 
 ### Still open on the geometry axis
 

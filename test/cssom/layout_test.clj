@@ -5366,3 +5366,36 @@
         input (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
     (is (< (:w input) 250)
         "the control takes its own intrinsic width, not the container's")))
+
+(deftest a-flex-container-is-block-level
+  ;; `display: flex` makes a BLOCK-level flex container: it fills its
+  ;; containing block and only its ITEMS shrink-to-fit. This engine
+  ;; shrink-wrapped the container itself, so a row of three one-character
+  ;; items was 21px wide where a browser reports 800 -- and every
+  ;; justify-content computation then distributed space inside that 21px.
+  ;; The line-structure axis scored all of those cases as passes; the
+  ;; geometry axis reported div w -750 across ten boxes.
+  (let [[row doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc row)
+        doc (dom/set-style doc row {:display "flex"})
+        doc (build-inline-children doc row [[:div {} "a"] [:div {} "b"] [:div {} "c"]])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})
+        container (first (filter #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))]
+    (is (= 800 (:w container)))))
+
+(deftest an-inherited-explicit-line-height-survives-into-inline-boxes
+  ;; The `normal` floor (1.2em) must not override a line-height the page
+  ;; actually declared -- including for a LARGER inline inside it, which
+  ;; overflows the line box in a real browser rather than growing it.
+  (let [[wrap doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc wrap)
+        doc (dom/set-style doc wrap {:line-height 20})
+        doc (build-inline-children doc wrap ["small " [:span {:font-size 24} "big"] " tail"])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})
+        wrap-op (first (filter #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))]
+    (is (= 24 (:h wrap-op))
+        "the line box is the declared 20px raised only to the 24px inline's
+         own ascent -- not 1.2 x 24 = 28, which is what the `normal` rule
+         would give if the declared value were forgotten on the way in")))

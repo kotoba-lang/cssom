@@ -3221,9 +3221,17 @@
                            dy (if column? (+ cy off) (+ cy c-off))]
                        (translate-ops dx dy (:draw m))))
                    measured offsets)
-            node-w (if column? (+ cross-content (* 2 inset)) (+ main-content (* 2 inset)))
             node-h (if column? (+ main-content (* 2 inset)) (+ cross-content (* 2 inset)))
-            node-w (if (:width st) w node-w)]
+            ;; A `display: flex` box is a BLOCK-level flex container: it
+            ;; fills its containing block's width exactly like any other
+            ;; block, and only its ITEMS shrink-to-fit. This shrink-wrapped
+            ;; the container itself to the sum of its items, so a flex row
+            ;; of three one-character divs was 21px wide where the browser
+            ;; reports 800 -- and every justify-content computation then
+            ;; distributed space inside that 21px box. Found by the geometry
+            ;; axis (div w -750 across ten boxes); the line-structure axis
+            ;; scored all of those cases as passes.
+            node-w w]
         {:box-w node-w :box-h node-h :draws (vec draws)}))))
 
 ;; ---- grid layout ----
@@ -3774,7 +3782,8 @@
     (assoc inherited
            :color (or (:color st) (:color inherited))
            :font-size font-size
-           :line-height (resolve-line-height (:line-height st) font-size (:line-height inherited))
+           :line-height (resolve-line-height (:line-height st) font-size (:line-height inherited)
+                                            (boolean (:line-height/explicit? inherited)))
            :font-weight (or (:font-weight st) (:font-weight inherited))
            :font-style (or (:font-style st) (:font-style inherited))
            :font-family (or (:font-family st) (:font-family inherited))
@@ -3893,11 +3902,20 @@
    characters that are actually measured, so wrapping must see the
    transformed text."
   [fragments]
-  (loop [frs fragments pending-space? false out []]
+  ;; `pending-style` doubles as the pending-space flag: it is the style of
+  ;; the fragment whose OWN trailing whitespace is waiting to become the
+  ;; next separator. Carrying the style matters -- a space is part of the
+  ;; text run that contains it and is rendered in that run's font, so the
+  ;; gap in `a <b>b</b>` is a space in the PARAGRAPH's font, not the
+  ;; bold one. Measured against Chrome: it reports 7.00px there, while this
+  ;; system's proportional bold space is 3.88px, so charging the incoming
+  ;; fragment's font put every following inline box ~3px left of where the
+  ;; browser draws it.
+  (loop [frs fragments pending-style nil out []]
     (if-let [fr (first frs)]
       (cond
         (= :break (:kind fr))
-        (recur (rest frs) false (conj out fr))
+        (recur (rest frs) nil (conj out fr))
 
         ;; An atomic inline is one indivisible token. It consumes any
         ;; pending whitespace as its own leading space (`text <img> text`
@@ -3905,7 +3923,8 @@
         ;; leaves none behind, so the space after it comes from the next
         ;; text fragment's own leading whitespace.
         (= :atomic (:kind fr))
-        (recur (rest frs) false (conj out (assoc fr :space-before? pending-space?)))
+        (recur (rest frs) nil (conj out (assoc fr :space-before? (some? pending-style)
+                                                  :space-style pending-style)))
 
         :else
         (let [text (apply-text-transform (:text-transform (:style fr)) (str (:text fr)))
@@ -3913,17 +3932,23 @@
               trail? (boolean (re-find #"\s$" text))
               words (remove str/blank? (str/split text #"\s+"))]
           (if (empty? words)
-            (recur (rest frs) (or pending-space? (pos? (count text))) out)
             (recur (rest frs)
-                   trail?
+                   (or pending-style (when (pos? (count text)) (:style fr)))
+                   out)
+            (recur (rest frs)
+                   (when trail? (:style fr))
                    (into out
                          (map-indexed (fn [i word]
-                                        {:kind :word
-                                         :text word
-                                         :space-before? (if (zero? i) (or pending-space? lead?) true)
-                                         :style (:style fr)
-                                         :owners (:owners fr)
-                                         :opacity (:opacity fr)})
+                                        (let [space-style (if (zero? i)
+                                                            (or pending-style (when lead? (:style fr)))
+                                                            (:style fr))]
+                                          {:kind :word
+                                           :text word
+                                           :space-before? (some? space-style)
+                                           :space-style space-style
+                                           :style (:style fr)
+                                           :owners (:owners fr)
+                                           :opacity (:opacity fr)}))
                                       words))))))
       out)))
 
@@ -3973,7 +3998,8 @@
           ;; alone, exactly like an over-wide single word.
           (= :atomic (:kind t))
           (let [sep (if (and (seq pieces) (:space-before? t))
-                      (w-of " " {:font-size (or (:font-size (:style (peek pieces))) 14)})
+                      (w-of " " (or (:space-style t)
+                                    {:font-size (or (:font-size (:style (peek pieces))) 14)}))
                       0)
                 piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h])
                                      :kind :atomic :x x :w (:w t)))]
@@ -3985,7 +4011,9 @@
           (let [st (:style t)
                 word (:text t)
                 ww (w-of word st)
-                sep (if (and (seq pieces) (:space-before? t)) (w-of " " st) 0)]
+                sep (if (and (seq pieces) (:space-before? t))
+                      (w-of " " (or (:space-style t) st))
+                      0)]
             (if (and (seq pieces) (> (+ x sep ww) content-w))
               (recur (rest ts) ww
                      [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww}]
