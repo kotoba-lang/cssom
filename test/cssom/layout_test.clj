@@ -5105,3 +5105,22 @@
   (let [t (text-draw-ops (inline-ops ["hello world"]))]
     (is (= 1 (count t)))
     (is (= {:text "hello world" :x 8 :y 8 :font-size 14} (select-keys (first t) [:text :x :y :font-size])))))
+
+(deftest a-display-none-element-does-not-split-an-inline-run
+  ;; Found by conformance/run.cljs differential testing against a real
+  ;; Blink browser, not by hand: `keep <span style="display:none">gone
+  ;; </span> this` used to produce TWO one-child inline runs (neither
+  ;; reaching inline-runs' two-child threshold), so the two visible words
+  ;; stacked on separate lines while every real browser puts them on one.
+  (let [t (text-draw-ops (inline-ops ["keep " [:span {:display "none"} "gone"] " this"]))]
+    (is (= ["keep this"] (mapv :text t))
+        "the hidden element contributes no draw-op, and the text that
+         surrounded it becomes one contiguous run on one line -- exactly
+         what a real browser renders. Before the fix these were two
+         one-child runs and therefore two stacked rows")))
+
+(deftest a-script-element-does-not-split-an-inline-run
+  (let [t (text-draw-ops (inline-ops ["keep " [:script {} "var x = 1"] " this"]))]
+    (is (= ["keep this"] (mapv :text t))
+        "same for a non-rendered tag: <script> source never reaches layout
+         and never breaks the line around it")))

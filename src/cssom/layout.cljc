@@ -3608,6 +3608,23 @@
    CSS puts on one line and this file used to stack."
   [theme children]
   (->> (vec children)
+       (remove (fn [child]
+                 ;; Children that render NOTHING are dropped before grouping
+                 ;; rather than passed through as zero-height rows. Real CSS
+                 ;; treats `display: none` and a `<script>`/`<style>` as
+                 ;; absent from the box tree entirely, and keeping them here
+                 ;; broke inline flow in a way a real page hits constantly:
+                 ;; `keep <span style="display:none">gone</span> this` split
+                 ;; into TWO one-child runs (neither reaching the two-child
+                 ;; threshold), so `keep` and `this` stacked on separate
+                 ;; lines -- found by conformance/run.cljs differential
+                 ;; testing against a real Blink browser, which puts them on
+                 ;; one line. Dropping them also removes the stray inter-row
+                 ;; `gap` each one used to contribute to block flow.
+                 (and (map? child)
+                      (= :element (:node/type child))
+                      (or (non-rendered-tag? (:tag child))
+                          (= "none" (:display (node-style child theme)))))))
        (partition-by #(inline-flow-candidate? theme %))
        (mapcat (fn [group]
                  (if (and (next group) (inline-flow-candidate? theme (first group)))
