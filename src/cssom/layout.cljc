@@ -610,6 +610,14 @@
         measure-text (:measure-text theme)
         char-w (long (* 0.6 font-size))
         content-w (max 0 (- avail-width (* 2 padding)))
+        ;; `white-space: normal`/`nowrap` collapse EVERY run of whitespace,
+        ;; newlines included, into a single space. The parser deliberately
+        ;; keeps newlines (it cannot see CSS, and `pre-line`/`pre-wrap` need
+        ;; them), so the collapse happens here, per the property's declared
+        ;; value -- which is what makes those two modes implementable at all.
+        text (if (contains? #{nil "normal" "nowrap"} white-space)
+               (str/replace (str text) #"\s+" " ")
+               text)
         text (apply-text-transform text-transform text)
         measure #(measure-text % font-size font-weight font-style font-family)
         line-w #(if measure-text (measure %) (* (count %) char-w))
@@ -2248,7 +2256,6 @@
         idx-range (range n)
         explicit? (fn [i] (let [{:keys [col row]} (nth requests i)] (boolean (or col row))))
         explicit-idxs (filter explicit? idx-range)
-        auto-idxs (remove explicit? idx-range)
         resolve-explicit
         (fn [occupied {:keys [col row]}]
           (cond
@@ -2274,21 +2281,36 @@
                                                        :row-start rs :row-end re})}))
                 {:occupied #{} :placements (vec (repeat n nil))}
                 explicit-idxs)
+        ;; The auto-placement CURSOR is shared with the explicitly placed
+        ;; items and only ever moves forward, so this pass walks every child
+        ;; in DOM order: an explicit item advances the cursor to just past
+        ;; itself, and the next auto item resumes from there. Before this the
+        ;; cursor started at (0,0) and only skipped OCCUPIED cells, so
+        ;; `<div style="grid-column: 2">right</div><div>next</div>` in a
+        ;; two-column grid put `next` at row 1 column 1 -- beside and BEFORE
+        ;; the explicit item -- where a browser wraps it to row 2, since the
+        ;; cursor is past column 2 by then. Measured against Chrome.
         phase2 (reduce
-                (fn [{:keys [occupied placements cursor-row cursor-col]} i]
-                  (loop [r cursor-row c cursor-col]
-                    (if (contains? occupied [r c])
-                      (if (< (inc c) n-cols)
-                        (recur r (inc c))
-                        (recur (inc r) 0))
-                      (let [wrap? (>= (inc c) n-cols)]
-                        {:occupied (conj occupied [r c])
-                         :placements (assoc placements i {:col-start c :col-end (inc c)
-                                                           :row-start r :row-end (inc r)})
-                         :cursor-row (if wrap? (inc r) r)
-                         :cursor-col (if wrap? 0 (inc c))}))))
+                (fn [{:keys [occupied placements cursor-row cursor-col] :as state} i]
+                  (if-let [p (nth placements i)]
+                    (assoc state
+                           :cursor-row (:row-start p)
+                           :cursor-col (:col-end p))
+                    (loop [r cursor-row c cursor-col]
+                      (cond
+                        (>= c n-cols) (recur (inc r) 0)
+                        (contains? occupied [r c])
+                        (if (< (inc c) n-cols) (recur r (inc c)) (recur (inc r) 0))
+                        :else
+                        (let [wrap? (>= (inc c) n-cols)]
+                          (assoc state
+                                 :occupied (conj occupied [r c])
+                                 :placements (assoc placements i {:col-start c :col-end (inc c)
+                                                                  :row-start r :row-end (inc r)})
+                                 :cursor-row (if wrap? (inc r) r)
+                                 :cursor-col (if wrap? 0 (inc c))))))))
                 (assoc phase1 :cursor-row 0 :cursor-col 0)
-                auto-idxs)]
+                idx-range)]
     (:placements phase2)))
 
 (defn- span-width

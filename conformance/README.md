@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 92/98 = 94%. Geometry: 278/325 element boxes (86%), 71/102
+**Line structure: 95/98 = 97%. Geometry: 284/325 element boxes (87%), 75/102
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -251,6 +251,27 @@ half-leading. Closing those cases means adding a font-metrics model (real
 ascent/descent per face, measurable by the same probe that already measures
 advances), not tuning constants until one browser on one machine agrees.
 That is a deliberate stopping point, recorded rather than fitted.
+
+### Round six: the last two structural gaps on the line axis
+
+- **Grid auto-placement shares its cursor with explicitly placed items.**
+  `<div style="grid-column: 2">right</div><div>next</div>` in a two-column
+  grid put `next` beside and BEFORE the explicit item; a browser wraps it to
+  the next row, because the cursor is already past column 2. The cursor now
+  walks every child in DOM order and only ever moves forward.
+
+- **Whitespace collapsing is a CSS decision, not a parser one.** The parser
+  collapsed newlines along with spaces, which destroyed the information
+  `white-space: pre-line`/`pre-wrap` need before layout ever ran — both were
+  permanent failures for a reason no amount of layout work could fix.
+  kotoba-lang/htmldom now keeps newlines (collapsing only space/tab runs)
+  and cssom.layout collapses them for `normal`/`nowrap`, per the declared
+  property. Both modes now match the browser.
+
+The three remaining line-structure failures are all genuine engine gaps
+with no ambiguity about what they are: no `block-in-inline` split, no float
+positioning, and `fixed` anchored to its containing block rather than the
+viewport.
 
 ### Still open on the geometry axis
 

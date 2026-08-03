@@ -525,8 +525,13 @@
   ;; parser), but a <div> with NO white-space at all must still behave
   ;; exactly as before this feature existed: byte-for-byte unaffected.
   (let [ops (text-ops-of :div nil "a\nb\nc" 800)]
-    (is (= ["a\nb\nc"] (map :text ops))
-        "pre-existing behavior, unchanged: the embedded newline is baked into a single draw-op's string")))
+    (is (= ["a b c"] (map :text ops))
+        "an element WITHOUT `white-space: pre` collapses its newlines into
+         single spaces, exactly as real CSS `normal` does. This asserted
+         the newline survived into the draw-op, which was only true while
+         the parser destroyed newlines for everyone -- with the parser now
+         keeping them (so `pre-line`/`pre-wrap` are implementable), the
+         collapse belongs here and this is what a browser paints")))
 
 (deftest nowrap-keeps-long-text-on-one-line-overflowing-a-narrow-box
   (let [wrapped (text-ops-of :div nil "this is a long line of text that would normally wrap" 100)
