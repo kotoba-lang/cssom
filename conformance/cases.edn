@@ -155,4 +155,274 @@
 
  {:id :text/white-space-nowrap
   :group :text
-  :html "<p style=\"white-space: nowrap\">one two three</p>"}]
+  :html "<p style=\"white-space: nowrap\">one two three</p>"}
+
+ ;; ---- wrapping (comparable because the harness feeds the oracle's own
+ ;;      measured character advance into the engine's :measure-text hook) ----
+
+ {:id :wrap/long-paragraph
+  :group :wrap
+  :html "<p style=\"width: 200px\">alpha beta gamma delta epsilon zeta eta theta iota</p>"}
+
+ {:id :wrap/inline-element-straddles-break
+  :group :wrap
+  :html "<p style=\"width: 200px\">alpha beta gamma <b>delta epsilon</b> zeta eta</p>"}
+
+ {:id :wrap/nested-inline-wraps
+  :group :wrap
+  :html "<p style=\"width: 160px\">one <span>two <b>three four</b> five</span> six</p>"}
+
+ {:id :wrap/single-word-longer-than-line
+  :group :wrap
+  :html "<p style=\"width: 80px\">short aaaaaaaaaaaaaaaaaaaa tail</p>"}
+
+ {:id :wrap/link-wraps-across-two-lines
+  :group :wrap
+  :html "<p style=\"width: 140px\">see <a href=\"/x\">the documentation index</a> now</p>"}
+
+ {:id :wrap/multiple-spaces-collapse
+  :group :wrap
+  :html "<p style=\"width: 300px\">one     two\n\n   three</p>"}
+
+ {:id :wrap/leading-and-trailing-whitespace
+  :group :wrap
+  :html "<p style=\"width: 300px\">   padded text   </p>"}
+
+ ;; ---- block / box model ----
+
+ {:id :block/nested-divs-stack
+  :group :block
+  :html "<div><div>a</div><div><div>b</div><div>c</div></div><div>d</div></div>"}
+
+ {:id :block/headings-and-paragraphs
+  :group :block
+  :html "<h1>title</h1><p>body</p><h2>sub</h2><p>more</p>"}
+
+ {:id :block/blockquote
+  :group :block
+  :html "<p>before</p><blockquote>quoted</blockquote><p>after</p>"}
+
+ {:id :block/explicit-width-does-not-change-line-count
+  :group :block
+  :html "<div style=\"width: 120px\">one</div><div style=\"width: 300px\">two</div>"}
+
+ {:id :box/padding-shifts-content
+  :group :box
+  :html "<div style=\"padding: 20px\">padded</div><div>next</div>"}
+
+ {:id :box/border-box-sizing
+  :group :box
+  :html "<div style=\"box-sizing: border-box; width: 200px; padding: 10px\">sized</div><div>next</div>"}
+
+ {:id :box/max-width-forces-wrap
+  :group :box
+  :html "<div style=\"max-width: 120px\">alpha beta gamma delta</div>"}
+
+ {:id :box/min-width
+  :group :box
+  :html "<div style=\"min-width: 300px; width: 50px\">wide</div><div>next</div>"}
+
+ {:id :box/explicit-height-reserves-space
+  :group :box
+  :html "<div style=\"height: 60px\">tall</div><div>below</div>"}
+
+ ;; ---- flex ----
+
+ {:id :flex/justify-center
+  :group :flex
+  :html "<div style=\"display: flex; justify-content: center\"><div>a</div><div>b</div></div>"}
+
+ {:id :flex/justify-space-between
+  :group :flex
+  :html "<div style=\"display: flex; justify-content: space-between\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :flex/align-items-center
+  :group :flex
+  :html "<div style=\"display: flex; align-items: center; height: 80px\"><div>a</div><div>b</div></div>"}
+
+ {:id :flex/wrap-two-rows
+  :group :flex
+  :html "<div style=\"display: flex; flex-wrap: wrap; width: 200px\"><div style=\"width: 90px\">a</div><div style=\"width: 90px\">b</div><div style=\"width: 90px\">c</div></div>"}
+
+ {:id :flex/nested-flex
+  :group :flex
+  :html "<div style=\"display: flex\"><div style=\"display: flex\"><span>a</span><span>b</span></div><div>c</div></div>"}
+
+ {:id :flex/text-and-control-in-flex
+  :group :flex
+  :html "<div style=\"display: flex; gap: 8px\"><label>name</label><input value=\"v\"></div>"}
+
+ ;; ---- grid ----
+
+ {:id :grid/repeat-tracks
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: repeat(3, 100px)\"><div>a</div><div>b</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/fr-tracks
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 1fr 1fr\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :grid/template-areas
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 100px 100px; grid-template-areas: 'head head' 'side main'\"><div style=\"grid-area: head\">h</div><div style=\"grid-area: side\">s</div><div style=\"grid-area: main\">m</div></div>"}
+
+ {:id :grid/explicit-placement
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 80px 80px\"><div style=\"grid-column: 2\">right</div><div>next</div></div>"}
+
+ {:id :grid/row-gap
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 80px; gap: 20px\"><div>a</div><div>b</div></div>"}
+
+ ;; ---- position ----
+
+ {:id :position/absolute-right-bottom
+  :group :position
+  :html "<div style=\"position: relative; height: 80px\"><div style=\"position: absolute; right: 0; bottom: 0\">corner</div><div>flow</div></div>"}
+
+ {:id :position/relative-shift-is-paint-only
+  :group :position
+  :html "<div><div style=\"position: relative; left: 40px\">moved</div><div>after</div></div>"}
+
+ {:id :position/fixed-leaves-flow
+  :group :position
+  :html "<div><div style=\"position: fixed; left: 300px; top: 0\">fixed</div><div>a</div><div>b</div></div>"}
+
+ ;; ---- text ----
+
+ {:id :text/line-height-multiplier
+  :group :text
+  :html "<div style=\"line-height: 2; width: 160px\">alpha beta gamma delta epsilon</div>"}
+
+ {:id :text/font-size-inherits
+  :group :text
+  :html "<div style=\"font-size: 24px\">big <span>inherited</span> text</div>"}
+
+ {:id :text/align-right
+  :group :text
+  :html "<p style=\"text-align: right\">a <b>b</b> c</p>"}
+
+ {:id :text/lowercase-transform
+  :group :text
+  :html "<p>GO <span style=\"text-transform: lowercase\">QUIET</span> OK</p>"}
+
+ {:id :text/capitalize-transform
+  :group :text
+  :html "<p>go <span style=\"text-transform: capitalize\">two words</span> ok</p>"}
+
+ {:id :text/pre-wrap
+  :group :text
+  :html "<div style=\"white-space: pre-wrap; width: 300px\">l1\nl2  spaced</div>"}
+
+ {:id :text/pre-line
+  :group :text
+  :html "<div style=\"white-space: pre-line; width: 300px\">l1\nl2   collapsed</div>"}
+
+ ;; ---- inline, deeper ----
+
+ {:id :inline/sub-and-sup
+  :group :inline
+  :html "<p>H<sub>2</sub>O and x<sup>2</sup> end</p>"}
+
+ {:id :inline/deeply-nested
+  :group :inline
+  :html "<p>a <span>b <em>c <b>d</b> e</em> f</span> g</p>"}
+
+ {:id :inline/anchor-with-nested-bold
+  :group :inline
+  :html "<p>see <a href=\"/x\">the <b>bold</b> link</a> now</p>"}
+
+ {:id :inline/inline-inside-heading
+  :group :inline
+  :html "<h2>title with <em>emphasis</em> inside</h2>"}
+
+ {:id :inline/br-at-end
+  :group :inline
+  :html "<p>line<br></p>"}
+
+ {:id :inline/adjacent-inline-elements-no-space
+  :group :inline
+  :html "<p><b>ab</b><i>cd</i></p>"}
+
+ {:id :inline/visibility-hidden-inline-keeps-space
+  :group :inline
+  :html "<p>a <span style=\"visibility: hidden\">bbbb</span> c</p>"}
+
+ ;; ---- lists ----
+
+ {:id :list/ordered-items
+  :group :generated
+  :oracle/blind true
+  :html "<ol><li>one</li><li>two</li></ol>"}
+
+ {:id :list/nested-lists
+  :group :generated
+  :oracle/blind true
+  :html "<ul><li>a<ul><li>b</li></ul></li></ul>"}
+
+ ;; ---- forms ----
+
+ {:id :form/label-input-button-row
+  :group :inline-replaced
+  :html "<p><label>name</label> <input value=\"v\"> <button>ok</button></p>"}
+
+ {:id :form/checkbox-and-label
+  :group :inline-replaced
+  :html "<p><input type=\"checkbox\"> agree to terms</p>"}
+
+ {:id :form/select-in-sentence
+  :group :inline-replaced
+  :html "<p>pick <select><option>alpha</option><option>beta</option></select> then go</p>"}
+
+ {:id :form/textarea-in-sentence
+  :group :inline-replaced
+  :html "<p>note <textarea>body</textarea> end</p>"}
+
+ {:id :form/disabled-input
+  :group :inline-replaced
+  :html "<p>x <input value=\"v\" disabled> y</p>"}
+
+ ;; ---- known gaps: these SHOULD fail until implemented ----
+
+ {:id :gap/float-right-wraps-text
+  :group :float
+  :html "<div style=\"width: 240px\"><span style=\"float: right\">R</span>alpha beta gamma delta epsilon</div>"}
+
+ {:id :gap/inline-block
+  :group :inline-block
+  :html "<p>a <span style=\"display: inline-block; width: 60px\">box</span> b</p>"}
+
+ {:id :gap/vertical-align-top
+  :group :vertical-align
+  :html "<p>base <span style=\"vertical-align: top; font-size: 24px\">top</span> end</p>"}
+
+ {:id :gap/table-with-header
+  :group :table
+  :html "<table><thead><tr><th>h1</th><th>h2</th></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody></table>"}
+
+ {:id :gap/inline-padding-shifts-following-text
+  :group :inline-box-model
+  :html "<p>a <span style=\"padding-left: 40px\">b</span> c</p>"}
+
+ ;; ---- real-page shapes ----
+
+ {:id :page/nav-bar
+  :group :page
+  :html "<nav style=\"display: flex; gap: 16px\"><a href=\"/\">Home</a><a href=\"/docs\">Docs</a><a href=\"/about\">About</a></nav>"}
+
+ {:id :page/card
+  :group :page
+  :html "<div style=\"width: 300px; padding: 16px\"><h3>Card title</h3><p>Body text with a <a href=\"/x\">link</a> inside it.</p></div>"}
+
+ {:id :page/article-paragraphs
+  :group :page
+  :html "<article style=\"width: 260px\"><h1>Heading</h1><p>First paragraph with <em>emphasis</em> and <strong>strength</strong>.</p><p>Second paragraph here.</p></article>"}
+
+ {:id :page/definition-list
+  :group :page
+  :html "<dl><dt>term</dt><dd>definition</dd><dt>other</dt><dd>meaning</dd></dl>"}
+
+ {:id :page/footer-inline-links
+  :group :page
+  :html "<footer><p>&copy; 2026 <a href=\"/a\">Privacy</a> &middot; <a href=\"/b\">Terms</a></p></footer>"}
+]

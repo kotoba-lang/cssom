@@ -121,6 +121,20 @@
       }
       out[root.id] = words;
     }
+    // The oracle's OWN character width, measured rather than guessed: the
+    // page is monospace, so one Range over a known-length string gives the
+    // exact per-character advance this browser uses. Handing that back lets
+    // the engine side wrap against the same metrics (see engine-lines'
+    // :measure-text), which is what makes WRAPPING cases comparable at all
+    // -- otherwise every wrap point differs by the ratio between this
+    // engine's 0.6-em approximation and the real font, and the corpus can
+    // only ever contain text short enough never to wrap.
+    var probe = document.createElement('span');
+    probe.textContent = 'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM';
+    probe.style.cssText = 'font-family:monospace;font-size:14px;white-space:pre';
+    document.body.appendChild(probe);
+    out['__char_width__'] = probe.getBoundingClientRect().width / 40;
+    probe.remove();
     var pre = document.createElement('pre');
     pre.id = 'kotoba-conformance-out';
     pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(out))));
@@ -266,13 +280,23 @@
 (defn- engine-lines
   "cssom.layout's own answer, in the same shape the oracle's is read into.
 
+   `char-w` is the ORACLE's own measured per-character advance (see the
+   measurement script's `__char_width__` probe), threaded in through the
+   engine's existing `:measure-text` theme hook -- the same hook a real
+   host uses to make wrap decisions agree with how it will actually paint.
+   Supplying it here is not a thumb on the scale: it removes the one
+   difference the comparison cannot legitimately judge (this engine has no
+   glyph shaping, so its 0.6-em approximation disagrees with any real font
+   by a constant factor) and leaves the actual question -- WHERE the engine
+   decides to break -- fully on the engine.
+
    Each `:text` draw-op is split back into words positioned by this
    engine's own width model, because that is the granularity the browser
    side is measured at; the op's vertical span is `[y, y + font-size]`,
    which is exactly the em box the real hosts paint into (dom-gpu draws at
    `y + font-size`, the baseline). Splitting per word also means a wrapped
    line compares correctly rather than as one blob."
-  [{:keys [html css]} width]
+  [{:keys [html css]} width char-w]
   (let [doc (html/parse-into-document (str "<div id=\"root\">" html "</div>"))
         ;; apply-cascade runs even with no author CSS: it is also what folds
         ;; a `style="..."` attribute's :style-inline into the :style/* attrs
@@ -280,7 +304,23 @@
         ;; every inline style in the corpus.
         doc (css/apply-cascade doc (css/parse-rules (or css "")))
         [_ doc] (dom/consume-ops doc)
-        ops (layout/draw-ops (dom/tree doc) {:width width})
+        ops (layout/draw-ops (dom/tree doc)
+                             {:width width
+                              ;; :padding/:gap are this ENGINE'S own theme --
+                              ;; a host styling choice (every box gets a 4px
+                              ;; inset and rows get a 4px gap), not CSS. Left
+                              ;; at their defaults they narrow the content
+                              ;; width by 16px per nested box, so every
+                              ;; wrapping case would be scored on the theme
+                              ;; rather than on where the engine decides to
+                              ;; break. Zeroed here so the comparison is
+                              ;; layout-vs-layout.
+                              :theme {:padding 0
+                                      :gap 0
+                                      :measure-text (fn [text font-size & _]
+                                                      (* (count (str text))
+                                                         char-w
+                                                         (/ (or font-size 14) 14)))}})
         ;; Mirror of the oracle script's own `closest(...)` skip: a form
         ;; control's or replaced box's INNER text is its own formatting
         ;; context. Done geometrically here because draw-ops carry no
@@ -297,16 +337,15 @@
         text-ops (->> ops
                       (filter #(= :text (:draw/op %)))
                       (remove inside-atomic?))
-        char-w (fn [fs] (long (* 0.6 (or fs 14))))]
+        word-w (fn [text fs] (* (count (str text)) char-w (/ (or fs 14) 14)))]
     (->> text-ops
          (mapcat (fn [op]
-                   (let [fs (:font-size op 14)
-                         cw (char-w fs)]
+                   (let [fs (:font-size op 14)]
                      (loop [words (str/split (str (:text op)) #"(?=\s)|(?<=\s)")
                             x (:x op)
                             out []]
                        (if-let [w (first words)]
-                         (recur (rest words) (+ x (* cw (count w)))
+                         (recur (rest words) (+ x (word-w w fs))
                                 (if (str/blank? w)
                                   out
                                   (conj out {:text w :left x
@@ -316,9 +355,9 @@
 
 ;; ---- comparison ----
 
-(defn- compare-case [oracle-words width c]
+(defn- compare-case [oracle-words width char-w c]
   (let [lines (cluster-lines oracle-words)
-        mine (try (engine-lines c width)
+        mine (try (engine-lines c width char-w)
                   (catch :default e {:error (ex-message e)}))]
     (cond
       (map? mine)
@@ -363,8 +402,10 @@
                        (catch :default e (println (str "oracle unusable: " b " -- " (ex-message e))) nil))]
             (or r (recur more (conj failures b))))))
       _ (println (str "\noracle:  " browser "\nwidth:   " width "px\ncases:   " (count cases) "\n"))
+      char-w (or (:__char_width__ oracle) 8.4)
+      _ (println (str "char-w:  " (js/Math.round (* 100 char-w)) "/100 px (measured in the oracle)\n"))
       results (vec (map-indexed (fn [i c]
-                                  (compare-case (get oracle (keyword (str "case-" i)) []) width c))
+                                  (compare-case (get oracle (keyword (str "case-" i)) []) width char-w c))
                                 cases))
       scorable (remove #(= :unscorable (:status %)) results)
       passed (filter #(= :pass (:status %)) scorable)

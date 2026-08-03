@@ -3213,10 +3213,20 @@
   #{:img :input :button :select :textarea})
 
 (defn- inline-atomic-element?
-  [child]
+  "True for an element that participates in a line as one unbreakable box:
+   a replaced/form-control tag (inline-atomic-tags), or ANY element an
+   author gives `display: inline-block`.
+
+   `inline-block` is exactly this concept in CSS — a box that lays its own
+   children out internally as a block, but sits in its parent's line like a
+   word — so it needs no separate machinery here, only admission to the
+   same atomic path. Before this, an `inline-block` span fell through to a
+   block row and broke the sentence around it in two."
+  [theme child]
   (and (map? child)
        (= :element (:node/type child))
-       (contains? inline-atomic-tags (:tag child))))
+       (or (contains? inline-atomic-tags (:tag child))
+           (= "inline-block" (:display (node-style child theme))))))
 
 (defn- inline-level-element?
   "True when `child` is an element this file will flow into a line box:
@@ -3273,7 +3283,7 @@
     ;; no subtree requirement: whatever is inside it is laid out by its own
     ;; box, not flattened into this line, so `block-in-inline` cannot arise.
     ;; It still has to be statically positioned and actually displayed.
-    (inline-atomic-element? child)
+    (inline-atomic-element? theme child)
     (let [st (node-style child theme)]
       (and (= "static" (:position st))
            (not= "none" (:display st))
@@ -3417,7 +3427,7 @@
               (reduce
                (fn [acc child]
                  (cond
-                   (inline-atomic-element? child)
+                   (inline-atomic-element? theme child)
                    (let [st (node-style child theme)
                          avail (inline-atomic-avail-width theme content-w opacity inherited child st)
                          {:keys [box draw]} (layout-node theme 0 0 avail opacity inherited child)]

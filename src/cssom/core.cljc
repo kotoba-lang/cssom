@@ -881,6 +881,26 @@
       (= "content" k-lower) (parse-content-value v)
       (= "counter-reset" k-lower) (parse-counter-property v 0)
       (= "counter-increment" k-lower) (parse-counter-property v 1)
+
+      ;; `line-height` is the one common property where a UNITLESS number
+      ;; is not a length at all but a ratio of the element's own font-size
+      ;; (`line-height: 2` = twice the font size), and it is by far the
+      ;; most common way real CSS writes it. parse-style-value coerces any
+      ;; bare integer to a number, which erases the very distinction
+      ;; `line-height` depends on -- `2` and `2px` both arrived at
+      ;; cssom.layout's resolve-line-height as the number 2, and it can
+      ;; only read a number as absolute pixels. The result, confirmed by
+      ;; differential testing against a real browser: `line-height: 2`
+      ;; rendered as a TWO-PIXEL line height, stacking every wrapped line
+      ;; almost exactly on top of the previous one, while the decimal form
+      ;; `line-height: 1.5` (which survives as a string, since it is not an
+      ;; integer) worked correctly all along. Keeping a unitless integer as
+      ;; a STRING here routes it down resolve-line-height's existing
+      ;; multiplier branch; `2px` still coerces to the number 2 and stays
+      ;; absolute, which is the distinction real CSS makes.
+      (and (= "line-height" k-lower) (re-matches #"\s*-?\d+\s*" (str v)))
+      (str/trim (str v))
+
       :else (parse-style-value v))))
 
 (def ^:private border-style-keywords
