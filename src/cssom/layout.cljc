@@ -690,6 +690,29 @@
   {:b "bold" :strong "bold" :th "bold"
    :h1 "bold" :h2 "bold" :h3 "bold" :h4 "bold" :h5 "bold" :h6 "bold"})
 
+(def ^:private ua-margin-scale
+  "Vertical margins from the HTML5 UA stylesheet, as multiples of the
+   element's OWN font size -- `p { margin: 1em 0 }`, `h1 { margin: .67em 0 }`
+   and so on. These are the rules that make a page look like a document
+   rather than a wall of text, and this engine had none of them: the
+   conformance harness's geometry axis reported `p` 40/54 for exactly this
+   reason.
+
+   They are VERTICAL only, which is why they had to wait for the per-side
+   box model: applied as this engine's old uniform margin they would have
+   indented every paragraph sideways as well."
+  {:p 1.0 :blockquote 1.0 :ul 1.0 :ol 1.0 :dl 1.0 :pre 1.0 :figure 1.0
+   :h1 0.67 :h2 0.83 :h3 1.0 :h4 1.33 :h5 1.67 :h6 2.33})
+
+(def ^:private ua-box-sides
+  "Horizontal UA-stylesheet box values -- the list indent every browser
+   applies (`ul, ol { padding-left: 40px }`) and a blockquote's own side
+   margins. Horizontal-only, for the same reason ua-margin-scale is
+   vertical-only."
+  {:ul {:padding-left 40} :ol {:padding-left 40}
+   :blockquote {:margin-left 40 :margin-right 40}
+   :dd {:margin-left 40}})
+
 (def ^:private ua-padding
   "UA-stylesheet padding defaults, in the uniform form this engine's box
    model can express. Real Chrome ships `td, th { padding: 1px }`; without
@@ -707,6 +730,18 @@
    honest simplification: a heading nested inside larger text will not
    compound, which real `em` would."
   {:h1 2.0 :h2 1.5 :h3 1.17 :h4 1.0 :h5 0.83 :h6 0.67 :small 0.83 :sub 0.83 :sup 0.83})
+
+(defn- ua-margin-y
+  "The UA vertical margin for `node`, in pixels, resolved against the
+   element's own (possibly UA-scaled) font size the way real `em` margins
+   are."
+  [node theme]
+  (when-let [scale (get ua-margin-scale (:tag node))]
+    (let [fs (or (parse-int (get-in node [:attrs :style/font-size]) nil)
+                 (when-let [heading-scale (get ua-font-scale (:tag node))]
+                   (long (* heading-scale (:font-size theme))))
+                 (:font-size theme))]
+      (long (* scale fs)))))
 
 (defn- node-style [node theme]
   ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
@@ -729,6 +764,19 @@
    :box-sizing (or (style node :box-sizing) "content-box")
    :padding (parse-int (style node :padding)
                        (get ua-padding (:tag node) (:padding theme)))
+   :padding-top (parse-int (style node :padding-top) nil)
+   :padding-right (parse-int (style node :padding-right) nil)
+   :padding-bottom (parse-int (style node :padding-bottom) nil)
+   :padding-left (parse-int (style node :padding-left)
+                            (get-in ua-box-sides [(:tag node) :padding-left]))
+   :margin-top (parse-int (style node :margin-top)
+                          (ua-margin-y node theme))
+   :margin-bottom (parse-int (style node :margin-bottom)
+                             (ua-margin-y node theme))
+   :margin-left (parse-int (style node :margin-left)
+                           (get-in ua-box-sides [(:tag node) :margin-left]))
+   :margin-right (parse-int (style node :margin-right)
+                            (get-in ua-box-sides [(:tag node) :margin-right]))
    ;; Real CSS's `border-spacing` defaults to 2px in every browser: cells
    ;; are separated by it AND the table is inset by it on all four sides.
    ;; Measured against Chrome, its absence was the single reason table/tr
@@ -970,7 +1018,8 @@
    constant regardless of any real author CSS, confirmed via direct REPL
    reproduction: `line-height: 60`/`line-height: 100`/no declaration at
    all produced the identical box height."
-  [raw font-size theme-default]
+  ([raw font-size theme-default] (resolve-line-height raw font-size theme-default false))
+  ([raw font-size theme-default inherited-explicit?]
   (let [;; CSS `line-height: normal` is not a fixed number of pixels: it is
         ;; the font's own natural leading, ~1.2x the font size in every real
         ;; browser. This engine used the theme's flat pixel default for
@@ -981,17 +1030,39 @@
         ;; of it -- caught by the conformance harness the same hour the
         ;; heading sizes landed (an `<h1>` and the paragraph after it were
         ;; clustered onto one line).
-        normal (max (or theme-default 0) (long (* 1.2 font-size)))]
+        ;; ...but an INHERITED explicit line-height is a real declared
+        ;; length and must win over that natural leading: a container
+        ;; saying `line-height: 20px` means 20px for the 28px heading
+        ;; inside it too, however cramped. Confirmed against the browser --
+        ;; without this distinction an `<h1>` inside such a container
+        ;; reported a 33px box where Chrome reports 20px.
+        normal (if inherited-explicit?
+                 (or theme-default (long (* 1.2 font-size)))
+                 (max (or theme-default 0) (long (* 1.2 font-size))))]
     (cond
       (number? raw) (long raw)
       (string? raw) (if-let [multiplier (parse-dbl raw nil)]
                       (long (* multiplier font-size))
                       normal)
-      :else normal)))
+      :else normal))))
 
 (defn- content-inset
   [st]
   (+ (:padding st) (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
+
+(defn- inset-side
+  "The content inset on ONE side: that side's own padding when the author
+   (or the UA stylesheet) gave it one, else the uniform padding this engine
+   has always had, plus the border when box-sizing is border-box."
+  [st side]
+  (+ (or (get st (keyword (str "padding-" (name side)))) (:padding st))
+     (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
+
+(defn- margin-side
+  "One side's margin: the per-side value when present (author or UA), else
+   the uniform `:margin`."
+  [st side]
+  (or (get st (keyword (str "margin-" (name side)))) (:margin st)))
 
 (defn- translate-ops
   [dx dy ops]
@@ -3975,7 +4046,7 @@
                                                      (-> (or entry {:node (:node owner) :st (:st owner)
                                                                     :opacity (:opacity piece) :fragments []})
                                                          (update :fragments conj
-                                                                 {:x px :y y :w (:w piece) :h line-h})))))
+                                                                 {:x px :y py :w (:w piece) :h (:h piece)})))))
                                          rects
                                          (:owners piece))]
                        [(into draws (translate-ops px py (:draw piece))) rects])
@@ -3993,13 +4064,24 @@
                                               :color (:text-shadow-color st)))
                            main-op (cond-> (assoc base :draw/op :text :x px :y py :color (:color st))
                                      (:text-decoration st) (assoc :text-decoration (:text-decoration st)))
+                           ;; An inline box's own height is the font's
+                           ;; CONTENT AREA (~1.2em), vertically centered in
+                           ;; the line box by half-leading -- NOT the line
+                           ;; box itself, which is what this reported
+                           ;; before. Measured against Chrome: a 14px <b>
+                           ;; on a 20px line reports y=1 h=18, where this
+                           ;; engine reported y=0 h=20, so every inline
+                           ;; element's box missed on both axes at once.
+                           content-h (long (* 1.2 (:font-size st)))
+                           half-leading (max 0 (quot (- line-h content-h) 2))
                            rects (reduce (fn [rects owner]
                                            (update rects (:idx owner)
                                                    (fn [entry]
                                                      (-> (or entry {:node (:node owner) :st (:st owner)
                                                                     :opacity (:opacity piece) :fragments []})
                                                          (update :fragments conj
-                                                                 {:x px :y y :w (:w piece) :h line-h})))))
+                                                                 {:x px :y (+ y half-leading)
+                                                                  :w (:w piece) :h content-h})))))
                                          rects
                                          (:owners piece))]
                        [(cond-> draws
@@ -4086,25 +4168,49 @@
    flex/grid item would need the identical treatment applied inside
    `layout-flex`/`layout-grid`'s own placement functions instead, an
    honest, documented scope-cut left for a future cycle."
-  [theme content-x content-y content-w opacity inherited children]
-  (loop [remaining (inline-runs theme children) y content-y draws [] height 0]
+  ([theme content-x content-y content-w opacity inherited children]
+   (layout-children-block theme content-x content-y content-w opacity inherited children false))
+  ([theme content-x content-y content-w opacity inherited children collapse-through?]
+  (loop [remaining (inline-runs theme children) y content-y draws [] height 0 prev-mb 0 first? true]
     (if-let [child (first remaining)]
       (if-let [run (and (map? child) (:inline/run child))]
         (let [{:keys [draw h]} (layout-inline-run theme content-x y content-w opacity inherited run)
               advance (+ h (:gap theme))]
-          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance)))
+          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) 0 false))
         (let [cst (when (map? child) (node-style child theme))
-              child-margin (or (:margin cst) 0)
-              child-y (+ y child-margin)
-              {:keys [box draw]} (layout-node theme (+ content-x child-margin) child-y content-w opacity inherited child)
+              mt (if cst (margin-side cst :top) 0)
+              mb (if cst (margin-side cst :bottom) 0)
+              ml (if cst (margin-side cst :left) 0)
+              ;; Real CSS collapses ADJACENT vertical margins: the gap
+              ;; between two siblings is the LARGER of the first's bottom
+              ;; and the second's top, not their sum. Without this, UA
+              ;; margins would double every gap between paragraphs and no
+              ;; page would ever match a browser.
+              ;; Parent-child collapsing: when the parent has no top
+              ;; border or padding to separate them, the FIRST child's top
+              ;; margin collapses THROUGH the parent and ends up outside it
+              ;; -- which is why a browser reports the first `<p>` of a
+              ;; container at the container's own top edge, not 1em below
+              ;; it. Measured directly against Chrome, where an unstyled
+              ;; wrapper's first paragraph sits at y=0.
+              gap-before (cond
+                           (and first? collapse-through?) 0
+                           first? mt
+                           :else (max prev-mb mt))
+              mr (if cst (margin-side cst :right) 0)
+              child-y (+ y gap-before)
+              {:keys [box draw]} (layout-node theme (+ content-x ml) child-y
+                                              (max 0 (- content-w ml mr))
+                                              opacity inherited child)
               child-h (:h box)
-              advance (+ child-margin child-h child-margin (:gap theme))
+              advance (+ gap-before child-h (:gap theme))
               draw (if (and cst (= "relative" (:position cst)))
                      (let [[dx dy] (relative-offset cst)]
                        (translate-ops dx dy draw))
                      draw)]
-          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance))))
-      {:draw draws :h (max 0 (- height (:gap theme)))})))
+          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) mb false)))
+      {:draw draws :h (max 0 (+ (- height (:gap theme))
+                                (if collapse-through? 0 prev-mb)))}))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing
@@ -4342,15 +4448,29 @@
   [theme x y avail-width opacity inherited st node]
   (let [w (resolve-width st avail-width)
         inset (content-inset st)
-        content-x (+ x (:margin st) inset)
-        content-y (+ y (:margin st) inset)
-        content-w (max 0 (- w (* 2 inset)))
+        inset-l (inset-side st :left)
+        inset-r (inset-side st :right)
+        inset-t (inset-side st :top)
+        inset-b (inset-side st :bottom)
+        ;; `x`/`y` are the BORDER-BOX origin the parent already placed this
+        ;; box at, margins included -- layout-children-block owns a child's
+        ;; margins because collapsing can only be decided between siblings.
+        ;; Adding them again here double-counted every margin; invisible
+        ;; while every margin was 0, immediately visible once the UA
+        ;; stylesheet gave `<p>` a real one (a paragraph's own text sat
+        ;; 14px below its own box).
+        content-x (+ x inset-l)
+        content-y (+ y inset-t)
+        content-w (max 0 (- w inset-l inset-r))
         scroll-x (:scroll-left st)
         scroll-y (:scroll-top st)
         {:keys [in-flow out-of-flow]} (partition-flow theme (:children node))
-        {:keys [draw h]} (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y) content-w opacity inherited in-flow)
+        {:keys [draw h]} (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
+                                               content-w opacity inherited in-flow
+                                               (and (zero? inset-t) (zero? inset-b)
+                                                    (zero? (:border-width st))))
         explicit-h (resolve-height st)
-        node-h (clamp-height st (or explicit-h (+ h (* 2 inset))))
+        node-h (clamp-height st (or explicit-h (+ h inset-t inset-b)))
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
         {above-draws :above below-draws :below} (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
@@ -4460,7 +4580,9 @@
                           (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
                color (or (:color st) (:color inherited))
                font-size (parse-int (:font-size st) (:font-size inherited))
-               line-height (resolve-line-height (:line-height st) font-size (or (:line-height inherited) (:line-height theme)))
+               line-height (resolve-line-height (:line-height st) font-size
+                                                (or (:line-height inherited) (:line-height theme))
+                                                (boolean (:line-height/explicit? inherited)))
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
                font-family (or (:font-family st) (:font-family inherited))
@@ -4473,7 +4595,10 @@
                text-transform (or (:text-transform st) (:text-transform inherited))
                white-space (or (:white-space st) (:white-space inherited))
                text-overflow (or (:text-overflow st) (:text-overflow inherited))
-               inherited (assoc inherited :color color :font-size font-size :line-height line-height
+               inherited (assoc inherited
+                                :line-height/explicit? (boolean (or (:line-height st)
+                                                                    (:line-height/explicit? inherited)))
+                                :color color :font-size font-size :line-height line-height
                                 :font-weight font-weight :font-style font-style :font-family font-family
                                 :text-shadow-x text-shadow-x :text-shadow-y text-shadow-y
                                 :text-shadow-blur text-shadow-blur :text-shadow-color text-shadow-color

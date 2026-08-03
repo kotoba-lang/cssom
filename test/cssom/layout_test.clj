@@ -4947,12 +4947,15 @@
           specs))
 
 (defn- inline-ops
-  "draw-ops for a `<p>` whose children are `specs` -- a vector of strings
+  "draw-ops for a `<div>` whose children are `specs` -- a vector of strings
    (real text nodes) and `[tag style & children]` vectors (real elements
    with real cascade-shaped inline style)."
   ([specs] (inline-ops specs {} {:width 480}))
   ([specs p-style opts]
-   (let [[p doc] (dom/create-element dom/empty-document :p)
+   ;; a <div>, not a <p>: since the UA stylesheet landed a <p> carries real
+   ;; vertical margins, which would shift every absolute coordinate in this
+   ;; section for reasons that have nothing to do with inline flow.
+   (let [[p doc] (dom/create-element dom/empty-document :div)
          doc (dom/set-root doc p)
          doc (if (seq p-style) (dom/set-style doc p p-style) doc)
          doc (build-inline-children doc p specs)
@@ -5026,8 +5029,12 @@
   (let [ops (inline-ops ["click " [:a {} "here"]])
         a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %))) ops))]
     (is (some? a-op) "the inline <a> still gets its own :node draw-op")
-    (is (= {:x 56 :y 8 :w 32 :h 20} (select-keys a-op [:x :y :w :h]))
-        "box spans exactly the fragment it painted, not the whole line")))
+    (is (= {:x 56 :y 10 :w 32 :h 16} (select-keys a-op [:x :y :w :h]))
+        "box spans exactly the fragment it painted, and its HEIGHT is the
+         font's content area (1.2em) centred in the line box by
+         half-leading -- not the line box itself. Measured against Chrome,
+         which reports y=1 h=18 for a 14px inline on a 20px line where this
+         engine used to report y=0 h=20, missing on both axes at once")))
 
 (deftest wrapped-inline-box-gets-per-line-backgrounds-and-one-union-node-op
   (let [ops (inline-ops ["x " [:a {:background "#123456"} "aaaa bbbb cccc"]] {} {:width 100})
@@ -5036,8 +5043,10 @@
     (is (= 2 (count rects))
         "the wrapped inline box's background follows BOTH line boxes
          rather than filling one rectangle around them")
-    (is (= [8 28] (mapv :y rects)))
-    (is (= {:x 8 :y 8 :h 40} (select-keys a-op [:x :y :h]))
+    (is (= [10 30] (mapv :y rects))
+        "each line's background sits at that line's content area, not its
+         full line box")
+    (is (= {:x 8 :y 10 :h 36} (select-keys a-op [:x :y :h]))
         "one union :node op covering both fragments -- the documented
          over-covering approximation of real CSS's per-fragment box list")))
 

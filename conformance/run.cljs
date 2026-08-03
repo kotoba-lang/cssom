@@ -150,6 +150,10 @@
     probe.style.cssText = 'font-family:monospace;font-size:14px;white-space:pre';
     document.body.appendChild(probe);
     out['__char_width__'] = probe.getBoundingClientRect().width / 40;
+    // Bold glyphs are genuinely wider than regular ones even in a
+    // monospace face, so a single advance would mis-measure every <b>.
+    probe.style.fontWeight = 'bold';
+    out['__char_width_bold__'] = probe.getBoundingClientRect().width / 40;
     probe.remove();
     var pre = document.createElement('pre');
     pre.id = 'kotoba-conformance-out';
@@ -322,9 +326,9 @@
                      {:width width
                       :theme {:padding 0
                               :gap 0
-                              :measure-text (fn [text font-size & _]
+                              :measure-text (fn [text font-size weight & _]
                                               (* (count (str text))
-                                                 char-w
+                                                 (if (= "bold" weight) (:bold char-w) (:normal char-w))
                                                  (/ (or font-size 14) 14)))}})))
 
 (defn- engine-lines
@@ -364,7 +368,10 @@
         text-ops (->> ops
                       (filter #(= :text (:draw/op %)))
                       (remove inside-atomic?))
-        word-w (fn [text fs] (* (count (str text)) char-w (/ (or fs 14) 14)))]
+        word-w (fn [text fs weight]
+                 (* (count (str text))
+                    (if (= "bold" weight) (:bold char-w) (:normal char-w))
+                    (/ (or fs 14) 14)))]
     (->> text-ops
          (mapcat (fn [op]
                    (let [fs (:font-size op 14)]
@@ -372,7 +379,7 @@
                             x (:x op)
                             out []]
                        (if-let [w (first words)]
-                         (recur (rest words) (+ x (word-w w fs))
+                         (recur (rest words) (+ x (word-w w fs (:font-weight op)))
                                 (if (str/blank? w)
                                   out
                                   (conj out {:text w :left x
@@ -499,8 +506,10 @@
                        (catch :default e (println (str "oracle unusable: " b " -- " (ex-message e))) nil))]
             (or r (recur more (conj failures b))))))
       _ (println (str "\noracle:  " browser "\nwidth:   " width "px\ncases:   " (count cases) "\n"))
-      char-w (or (:__char_width__ oracle) 8.4)
-      _ (println (str "char-w:  " (js/Math.round (* 100 char-w)) "/100 px (measured in the oracle)\n"))
+      char-w {:normal (or (:__char_width__ oracle) 8.4)
+              :bold (or (:__char_width_bold__ oracle) (:__char_width__ oracle) 8.4)}
+      _ (println (str "char-w:  " (js/Math.round (* 100 (:normal char-w))) "/100 px normal, "
+                      (js/Math.round (* 100 (:bold char-w))) "/100 px bold (measured in the oracle)\n"))
       results (vec (map-indexed (fn [i c]
                                   (compare-case (get oracle (keyword (str "case-" i)) []) width char-w c))
                                 cases))

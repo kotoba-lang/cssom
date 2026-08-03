@@ -7,7 +7,12 @@
 (deftest parses-simple-selector-rules
   (let [rules (css/parse-rules "main.note, #hero { color: red; padding: 8px } .muted { color: gray }")]
     (is (= 2 (count rules)))
-    (is (= {:color "red" :padding 8}
+    (is (= {:color "red" :padding 8
+            ;; `padding: 8px` now also expands to its four per-side
+            ;; longhands (real CSS's 1-to-4 value rule), which is what makes
+            ;; the one-axis UA rules (`p { margin: 1em 0 }`) expressible at
+            ;; all. The uniform key stays for every existing reader.
+            :padding-top 8 :padding-right 8 :padding-bottom 8 :padding-left 8}
            (:rule/declarations (first rules))))
     (is (= :main (-> rules first :rule/selectors first :selector/parts first :selector/tag)))
     (is (= ["note"] (-> rules first :rule/selectors first :selector/parts first :selector/classes)))))

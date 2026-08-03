@@ -954,6 +954,59 @@
             {}
             tokens)))
 
+(defn- expand-box-side-shorthand
+  "Expands a `margin`/`padding` shorthand into its four per-side longhands
+   using real CSS's own 1-to-4 value rule: one value applies to all four
+   sides, two are vertical/horizontal, three are top/horizontal/bottom, and
+   four are top/right/bottom/left clockwise.
+
+   This is what makes the user-agent stylesheet expressible at all. Real UA
+   rules are overwhelmingly one-axis -- `p { margin: 1em 0 }` is vertical
+   only, `ul { padding-left: 40px }` is horizontal only -- and this engine's
+   box model had a single UNIFORM margin/padding, so applying either would
+   have moved the box in the wrong axis too. The conformance harness's
+   geometry axis reported that ceiling precisely: `p` 40/54 and `li` 0/8
+   failing for one shared, structural reason.
+
+   The uniform `:margin`/`:padding` key is still emitted alongside the
+   longhands (set to the first value) so every existing reader that has
+   only ever known the uniform form keeps working unchanged."
+  [prop v]
+  (let [;; paren-aware: `padding: calc(2 * 8px)` is ONE value whose own
+        ;; internal spaces must not be mistaken for side separators.
+        tokens (loop [chars (seq (str/trim (str v))) depth 0 cur "" out []]
+                 (if-let [c (first chars)]
+                   (cond
+                     (= c \() (recur (rest chars) (inc depth) (str cur c) out)
+                     (= c \)) (recur (rest chars) (dec depth) (str cur c) out)
+                     (and (zero? depth) (re-matches #"\s" (str c)))
+                     (recur (rest chars) depth "" (if (str/blank? cur) out (conj out cur)))
+                     :else (recur (rest chars) depth (str cur c) out))
+                   (if (str/blank? cur) out (conj out cur))))
+        n (count tokens)
+        [t r b l] (case n
+                    1 [(tokens 0) (tokens 0) (tokens 0) (tokens 0)]
+                    2 [(tokens 0) (tokens 1) (tokens 0) (tokens 1)]
+                    3 [(tokens 0) (tokens 1) (tokens 2) (tokens 1)]
+                    [(tokens 0) (tokens 1) (tokens 2) (tokens 3)])]
+    (when (and (pos? n) (<= n 4)
+               ;; Only expand when EVERY token is a length this engine can
+               ;; actually resolve. Anything else -- a percentage, `auto`,
+               ;; or outright nonsense (a var() regression guard in the test
+               ;; suite passes `margin: 1px solid 3px dashed`) -- is left
+               ;; completely untouched for the generic path to store raw,
+               ;; this namespace's standing degrade-don't-guess posture.
+               ;; Silently keeping the first token of an unparseable
+               ;; shorthand would be a guess dressed as a value.
+               (every? #(or (re-matches #"-?\d+(px)?" %)
+                            (re-matches calc-pattern %))
+                       tokens))
+      {(keyword prop) (parse-style-value (tokens 0))
+       (keyword (str prop "-top")) (parse-style-value t)
+       (keyword (str prop "-right")) (parse-style-value r)
+       (keyword (str prop "-bottom")) (parse-style-value b)
+       (keyword (str prop "-left")) (parse-style-value l)})))
+
 (defn- expand-text-shadow-shorthand
   "Parses a `text-shadow` shorthand value (real CSS's own grammar,
    `<offset-x> <offset-y> <blur-radius>? <color>?` -- offsets are
@@ -1226,6 +1279,12 @@
                      (let [important? (boolean (re-find #"(?i)!important\s*$" v))
                            value (str/replace v #"(?i)\s*!important\s*$" "")]
                        (cond
+                         (and (contains? #{"margin" "padding"} (str/lower-case k))
+                              (some? (expand-box-side-shorthand (str/lower-case k) value)))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-box-side-shorthand (str/lower-case k) value))
+
                          (= "border" (str/lower-case k))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])

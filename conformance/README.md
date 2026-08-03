@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 91/98 = 93%. Geometry: 183/325 element boxes (56%), 37/102
+**Line structure: 91/98 = 93%. Geometry: 199/325 element boxes (61%), 46/102
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -100,17 +100,44 @@ it cannot see CSS).
 After fixing those: geometry 47% → 56%, td 6/29 → 21/29, tr 0/15 → 9/15,
 table 0/9 → 5/9, tbody out of the worst-tag list entirely.
 
+### Round two on the geometry axis (per-side box model)
+
+The uniform-box-model ceiling is gone: `margin`/`padding` now expand to
+four per-side longhands (real CSS's 1-to-4 value rule), so the UA
+stylesheet's one-axis rules are expressible and applied — `p { margin: 1em
+0 }`, heading margins from `.67em` to `2.33em`, `ul, ol { padding-left:
+40px }`, `blockquote` side margins. `li` left the worst-tag list entirely.
+
+Three further real rules had to follow, each one found by the oracle
+disagreeing rather than by reading a spec:
+
+- **Adjacent vertical margins collapse** to the larger of the two, not
+  their sum. Without it every gap between paragraphs doubled.
+- **A parent's first child's top margin collapses THROUGH the parent** when
+  the parent has no top border or padding — which is why a browser puts the
+  first `<p>` of a plain wrapper at the wrapper's own top edge, not 1em
+  below it.
+- **An inherited explicit `line-height` beats the `normal` floor.** The
+  1.2em floor added last round is right for `normal`, but a container
+  saying `line-height: 20px` means 20px for the 28px heading inside it too,
+  however cramped — the engine reported a 33px box where Chrome reports 20.
+
+And one plain bug the same work exposed: `layout-block` added a child's
+margin AGAIN after the parent had already positioned it — a double count
+that was invisible while every margin was zero.
+
+Inline boxes now report the font's **content area** (~1.2em, centred in the
+line box by half-leading) rather than the line box, matching what a browser
+reports for a `<span>`/`<a>`/`<b>`.
+
 ### Still open on the geometry axis
 
-`p` 40/54 and `li` 0/8 are one shared cause: this engine's box model has a
-single uniform `:margin`/`:padding`, so the UA stylesheet's vertical-only
-`p { margin: 1em 0 }` and horizontal-only `ul { padding-left: 40px }`
-cannot be expressed at all — applying them uniformly would indent
-horizontally too. Per-side box model is the next structural gap.
+`b` 0/11 is a WIDTH disagreement, not a box-model one: the harness feeds
+the oracle's own measured bold character advance into `:measure-text`, and
+the engine still comes out ~40% wide on bold runs. That is a harness-vs-
+engine metric question worth isolating before assuming which side is wrong.
 
-`span`/`a`/`b` (7/22, 3/12, 6/11) are the inline box's own height: this
-engine reports the LINE box height for an inline element, where a browser
-reports the font's content area (~1.15em).
+`div` 75/101 and `td` 21/29 are the remaining tail, not yet diagnosed.
 
 ### Known divergence the LINE axis does not see
 
