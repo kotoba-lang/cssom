@@ -897,6 +897,7 @@
    ;; browser.document-input's own scrollable-node? already gets this
    ;; right (checks `style` first, falling back to `attr`), confirming
    ;; this file was the outlier, not an intentional design choice.
+   :float (style node :float)
    :overflow (style node :overflow)
    :scroll-top (parse-int (attr node :scroll-top) 0)
    :scroll-left (parse-int (attr node :scroll-left) 0)})
@@ -3816,6 +3817,14 @@
   (cond
     (inline-flow-text? child) true
 
+    ;; A floated element is BLOCKIFIED and positioned by its container's
+    ;; float machinery (see layout-children-block), so it never
+    ;; participates in a line box even when its tag is inline-level.
+    (and (map? child)
+         (= :element (:node/type child))
+         (contains? #{"left" "right"} (:float (node-style child theme))))
+    false
+
     ;; An atomic inline (an <img>/<input>/<button>/<select>/<textarea>) has
     ;; no subtree requirement: whatever is inside it is laid out by its own
     ;; box, not flattened into this line, so `block-in-inline` cannot arise.
@@ -4349,7 +4358,8 @@
    pre-existing path, byte for byte. Inline flow only engages where the
    old behavior was genuinely WRONG: two or more inline things that real
    CSS puts on one line and this file used to stack."
-  [theme children]
+  ([theme children] (inline-runs theme children 2))
+  ([theme children min-items]
   (->> (vec children)
        (remove (fn [child]
                  ;; Children that render NOTHING are dropped before grouping
@@ -4370,10 +4380,11 @@
                           (= "none" (:display (node-style child theme)))))))
        (partition-by #(inline-flow-candidate? theme %))
        (mapcat (fn [group]
-                 (if (and (next group) (inline-flow-candidate? theme (first group)))
+                 (if (and (>= (count group) min-items)
+                          (inline-flow-candidate? theme (first group)))
                    [{:inline/run (vec group)}]
                    group)))
-       vec))
+       vec)))
 
 ;; ---- block (normal-flow) layout ----
 
@@ -4411,10 +4422,62 @@
   ([theme content-x content-y content-w opacity inherited children]
    (layout-children-block theme content-x content-y content-w opacity inherited children false))
   ([theme content-x content-y content-w opacity inherited children collapse-through?]
-  (loop [remaining (inline-runs theme children) y content-y draws [] height 0 prev-mb 0 first? true]
+  (let [;; ---- floats ----
+        ;; A `float: left|right` box is taken out of normal flow, placed
+        ;; against its container's corresponding edge, and NARROWS the
+        ;; content beside it. This engine had no float concept at all: a
+        ;; floated span simply stayed inline where it was written, so a
+        ;; right-floated badge sat at the START of the text instead of the
+        ;; end (measured: x=0 against the browser's 233 in a 240px box).
+        ;;
+        ;; Bounded v1, documented rather than pretended: floats are placed
+        ;; at the TOP of their container (the overwhelmingly common
+        ;; authoring shape -- a float is written before the text it should
+        ;; sit beside), and the band they exclude applies to content within
+        ;; their own height. Floats appearing after other content, floats
+        ;; that stack vertically when they do not fit side by side, and
+        ;; `clear` are NOT implemented.
+        floated? (fn [c] (and (map? c) (= :element (:node/type c))
+                              (contains? #{"left" "right"} (:float (node-style c theme)))))
+        floats (filterv floated? children)
+        children (filterv (complement floated?) children)
+        laid-floats
+        (first (reduce (fn [[acc left-x right-x] f]
+                         (let [fst (node-style f theme)
+                               m (measure-child theme content-w opacity inherited f true)
+                               fw (:w (:box m))
+                               fh (:h (:box m))
+                               right? (= "right" (:float fst))
+                               x (if right? (- right-x fw) left-x)]
+                           [(conj acc {:w fw :h fh :right? right?
+                                       :draw (translate-ops x content-y (:draw m))})
+                            (if right? left-x (+ left-x fw))
+                            (if right? (- right-x fw) right-x)]))
+                       [[] content-x (+ content-x content-w)]
+                       floats))
+        band {:h (apply max 0 (map :h laid-floats))
+              :left (reduce + 0 (map :w (remove :right? laid-floats)))
+              :right (reduce + 0 (map :w (filter :right? laid-floats)))}
+        float-draws (vec (mapcat :draw laid-floats))]
+  (loop [remaining (inline-runs theme children
+                                ;; With a float band present even a LONE
+                                ;; inline child must flow as a run: it has
+                                ;; to sit beside the float in the narrowed
+                                ;; band rather than take a full-width block
+                                ;; row of its own (measured: the text beside
+                                ;; a left float reported x=0 w=800 against
+                                ;; the browser's x=7 w=70).
+                                (if (pos? (:h band)) 1 2))
+         y content-y draws float-draws
+         height 0 prev-mb 0 first? true]
     (if-let [child (first remaining)]
       (if-let [run (and (map? child) (:inline/run child))]
-        (let [{:keys [draw h]} (layout-inline-run theme content-x y content-w opacity inherited run)
+        (let [in-band? (< (- y content-y) (:h band))
+              {:keys [draw h]} (layout-inline-run theme
+                                                  (+ content-x (if in-band? (:left band) 0))
+                                                  y
+                                                  (- content-w (if in-band? (+ (:left band) (:right band)) 0))
+                                                  opacity inherited run)
               advance (+ h (:gap theme))]
           (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) 0 false))
         (let [cst (when (map? child) (node-style child theme))
@@ -4449,8 +4512,13 @@
                        (translate-ops dx dy draw))
                      draw)]
           (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) mb false)))
-      {:draw draws :h (max 0 (+ (- height (:gap theme))
-                                (if collapse-through? 0 prev-mb)))}))))
+      {:draw draws
+       ;; the container is at least as tall as its floats -- real CSS only
+       ;; does this for a container that establishes a formatting context,
+       ;; another documented simplification
+       :h (max (:h band)
+               (max 0 (+ (- height (:gap theme))
+                         (if collapse-through? 0 prev-mb))))})))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing

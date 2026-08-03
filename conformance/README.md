@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 95/98 = 97%. Geometry: 284/325 element boxes (87%), 75/102
+**Line structure: 99/101 = 98%. Geometry: 294/333 element boxes (88%), 80/105
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -268,10 +268,25 @@ That is a deliberate stopping point, recorded rather than fitted.
   and cssom.layout collapses them for `normal`/`nowrap`, per the declared
   property. Both modes now match the browser.
 
-The three remaining line-structure failures are all genuine engine gaps
-with no ambiguity about what they are: no `block-in-inline` split, no float
-positioning, and `fixed` anchored to its containing block rather than the
-viewport.
+### Round seven: floats
+
+`float: left|right` is implemented, bounded and documented rather than
+pretended: a floated box is blockified, taken out of the inline run, placed
+against its container's edge, and NARROWS the content beside it for its own
+height. Before this there was no float concept at all — a right-floated
+badge sat at the START of the text (x=0 against the browser's 233 in a 240px
+box). Three corpus cases were added (a tall float with text wrapping beside
+it, two left floats side by side, and a left plus a right float); all three
+agree with the browser on both axes.
+
+Not implemented, and named: floats that appear AFTER other content in their
+container (v1 places floats at the container's top, the shape real markup
+almost always uses), floats stacking vertically when they do not fit side by
+side, and `clear`.
+
+The two remaining line-structure failures are genuine engine gaps with no
+ambiguity about what they are: no `block-in-inline` split, and `fixed`
+anchored to its containing block rather than the viewport.
 
 ### Still open on the geometry axis
 

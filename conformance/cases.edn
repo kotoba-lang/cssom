@@ -462,4 +462,18 @@
  {:id :table/colspan-line-structure-only
   :group :table
   :html "<table><tr><td colspan=\"2\">spanning</td></tr><tr><td>a</td><td>b</td></tr></table>"}
+
+ ;; ---- floats (bounded v1: leading floats + a narrowing band) ----
+
+ {:id :float/text-wraps-beside-a-tall-float
+  :group :float
+  :html "<div style=\"width: 200px\"><span style=\"float: left; width: 60px; height: 60px\">F</span>alpha beta gamma delta epsilon zeta eta theta</div>"}
+
+ {:id :float/two-left-floats-sit-side-by-side
+  :group :float
+  :html "<div style=\"width: 300px\"><span style=\"float: left\">AA</span><span style=\"float: left\">BB</span>tail text here</div>"}
+
+ {:id :float/left-and-right-floats
+  :group :float
+  :html "<div style=\"width: 300px\"><span style=\"float: left\">L</span><span style=\"float: right\">R</span>middle text</div>"}
 ]

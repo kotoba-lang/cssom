@@ -5413,3 +5413,52 @@
          not model at all. The 20 is right for the rule this engine can
          actually express; the remaining gap is recorded in
          conformance/README.md rather than fitted with a guessed constant.)")))
+
+;; ---- floats ----
+
+(deftest a-right-float-sits-at-the-container-edge
+  ;; This engine had no float concept at all: a floated span stayed inline
+  ;; where it was written, so a right-floated badge sat at the START of the
+  ;; text. Measured against the browser: x=0 here against its 233 in a
+  ;; 240px box.
+  (let [[box doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc box)
+        doc (dom/set-style doc box {:width 240})
+        doc (build-inline-children doc box [[:span {:float "right"} "R"] "alpha beta"])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        floated (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))
+        ;; the float paints its OWN label too, so pick the flow text by name
+        text (first (filter #(= "alpha beta" (:text %)) (text-draw-ops ops)))]
+    (is (= (- 240 (:w floated)) (:x floated))
+        "flush against the container's right edge")
+    (is (< (:x text) (:x floated))
+        "with the text before it, not after")))
+
+(deftest a-left-float-narrows-the-text-beside-it
+  (let [[box doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc box)
+        doc (dom/set-style doc box {:width 200})
+        doc (build-inline-children doc box [[:span {:float "left" :width 60 :height 60} "F"]
+                                            "alpha beta gamma delta epsilon"])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        floated (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))
+        t (text-draw-ops ops)]
+    (is (= 0 (:x floated)) "the float is at the left edge")
+    (is (every? #(>= (:x %) 60) (remove #(= "F" (:text %)) t))
+        "and every run of the flow text -- the float's own label aside --
+         starts after it, in the narrowed band")))
+
+(deftest a-floated-element-leaves-the-inline-run
+  ;; `float` blockifies: a floated box is positioned by its container, so
+  ;; it must not be treated as inline-level content even when its tag is.
+  (let [[box doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc box)
+        doc (build-inline-children doc box [[:span {:float "left"} "F"] "text"])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        floated (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
+    (is (= 20 (:h floated))
+        "it reports a BLOCK box (one line-height tall), not an inline box's
+         1.2em content area")))
