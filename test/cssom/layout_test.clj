@@ -4954,8 +4954,14 @@
               (let [[t doc] (dom/create-text-node doc spec)]
                 (dom/append-child doc parent t))
               (let [[tag style & kids] spec
+                    ;; a few keys are real ATTRIBUTES, not style: the table
+                    ;; spans and the form-control ones layout reads directly
+                    attr-keys #{:colspan :rowspan :type :value :size :href :alt :name}
+                    attrs (select-keys style attr-keys)
+                    style (apply dissoc style attr-keys)
                     [el doc] (dom/create-element doc tag)
                     doc (dom/append-child doc parent el)
+                    doc (reduce-kv (fn [d k v] (dom/set-attribute d el k v)) doc attrs)
                     doc (if (seq style) (dom/set-style doc el style) doc)]
                 (build-inline-children doc el kids))))
           doc
@@ -5480,3 +5486,31 @@
         "the inline content before the block joins the preceding line, the
          block gets its own row, and the content after it starts a new
          line -- all still inside the same <span>")))
+
+(deftest a-rowspan-cell-covers-its-rows
+  ;; A spanning cell occupies the same column in the rows below it, and
+  ;; those rows must SKIP that column. Without it the cells after it
+  ;; shifted left into space a browser reserves, and the spanning cell was
+  ;; only ever one row tall.
+  (let [ops (table-ops [[:tr {} [:td {:rowspan "2"} "tall"] [:td {} "a"]]
+                        [:tr {} [:td {} "b"]]])
+        cells (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) ops)
+        tall (first cells)
+        [a b] (rest cells)]
+    (is (> (:h tall) (:h a))
+        "the spanning cell is taller than a single-row cell")
+    (is (= (:x a) (:x b))
+        "and the cell in the row below lands in the SECOND column, under
+         `a`, because the first is still occupied by the spanning cell")
+    (is (< (:x tall) (:x a)))))
+
+(deftest a-table-cell-centres-its-content-vertically
+  ;; `vertical-align: middle` is the UA default for a table cell, which is
+  ;; what makes a rowspan cell sit BETWEEN the rows it covers rather than at
+  ;; the top of the first one.
+  (let [ops (table-ops [[:tr {} [:td {:rowspan "2"} "tall"] [:td {} "a"]]
+                        [:tr {} [:td {} "b"]]])
+        t (text-draw-ops ops)
+        y-of (fn [s] (:y (first (filter #(= s (:text %)) t))))]
+    (is (< (y-of "a") (y-of "tall") (y-of "b"))
+        "the spanning cell's text sits between the two rows' own text")))

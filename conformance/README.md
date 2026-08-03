@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 139/142 = 98%. Geometry: 415/493 element boxes (84%),
-114/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
+**Line structure: 140/142 = 99%. Geometry: 417/493 element boxes (85%),
+115/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
@@ -284,6 +284,20 @@ container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
 
+### Round eleven: rowspan, and the rule behind it
+
+`rowspan` is implemented: cells are assigned their [row col colspan
+rowspan] by an occupancy walk, the rows below skip the columns a spanning
+cell still holds, a spanning cell grows the last row it covers when the
+rows cannot hold it, and its own box spans every row it covers.
+
+The browser's expectation for the corpus case named the rule that made it
+work: **a table cell's UA default is `vertical-align: middle`**, so its
+content is centred in the cell box — which is exactly what makes a rowspan
+cell sit BETWEEN the rows it covers rather than at the top of the first
+one. The browser renders `tall` (rowspan 2) on its own line between `a` and
+`b`; this engine had it beside `a`.
+
 ### Round ten: what the widened corpus was hiding
 
 Four real rules, each found by attributing a delta cluster to its cases:
@@ -349,7 +363,6 @@ child of the inline element.
 
 ### The three remaining line-structure failures
 
-`table/rowspan` (unimplemented — a spanning cell occupies one row) and
 `page/hero-with-floated-image` (the float band's documented v1 boundary:
 the narrowed width applies to the whole run rather than only to the lines
 beside the float) are honest gaps, now measured.

@@ -3373,57 +3373,81 @@
   [cell]
   (max 1 (parse-int (get-in cell [:attrs :colspan]) 1)))
 
+(defn- cell-rowspan
+  "A cell's `rowspan`, clamped to at least 1. A spanning cell occupies the
+   same column in the rows below it, and those rows must SKIP that column
+   -- without which the cells after it shifted left into the space a
+   browser reserves, and the spanning cell itself was only ever one row
+   tall."
+  [cell]
+  (max 1 (parse-int (get-in cell [:attrs :rowspan]) 1)))
+
+(defn- assign-table-cells
+  "Assigns every cell its [row col colspan rowspan], walking rows in order
+   and skipping columns still occupied by a `rowspan` from above -- the
+   same occupancy walk a real table layout does.
+
+   Returns `[{:cell :row :col :colspan :rowspan :natural} ...]` in document
+   order, where `:natural` is the cell's own shrink-to-fit width."
+  [theme content-w opacity inherited rows]
+  (first
+   (reduce
+    (fn [[acc occupied] [row-idx {:keys [row]}]]
+      (let [[acc' occupied' _]
+            (reduce
+             (fn [[acc occupied col] cell]
+               (let [colspan (cell-colspan cell)
+                     rowspan (cell-rowspan cell)
+                     col (loop [c col] (if (contains? occupied [row-idx c]) (recur (inc c)) c))
+                     cells (for [r (range row-idx (+ row-idx rowspan))
+                                 c (range col (+ col colspan))]
+                             [r c])]
+                 [(conj acc {:cell cell :row row-idx :col col
+                             :colspan colspan :rowspan rowspan
+                             :natural (:w (:box (measure-child theme content-w opacity
+                                                               inherited cell true)))})
+                  (into occupied cells)
+                  (+ col colspan)]))
+             [acc occupied 0]
+             (table-cells row))]
+        [acc' occupied']))
+    [[] #{}]
+    (map-indexed vector rows))))
+
 (defn- table-column-widths
   "Real CSS's automatic table layout, in the one form that matters for a
    readable table: every column is as wide as its widest cell needs to be,
    and if the columns together want more than the table has, they are
    scaled down proportionally rather than overflowing.
 
-   Cell content is measured with the same shrink-to-fit machinery flex
-   items and atomic inlines already use (measure-child with shrink-to-fit),
-   so a cell holding one short label reports that label's width instead of
-   the container's. Deliberately NOT implemented: `table-layout: fixed`,
-   `<col>`/`<colgroup>` widths, `colspan`/`rowspan`, border collapsing and
-   `border-spacing` -- each is a real feature this returns honest wrong
-   answers for rather than pretending (a `colspan` cell is simply placed in
-   one column), and each is listed in layout-table's own docstring."
-  [theme content-w opacity inherited rows]
-  (let [rows (mapv :row rows)
-        ;; each row as [{:cell :col :span :natural} ...]
-        placed (mapv (fn [row]
-                       (first (reduce (fn [[acc col] cell]
-                                        (let [span (cell-colspan cell)]
-                                          [(conj acc {:cell cell :col col :span span
-                                                      :natural (:w (:box (measure-child theme content-w opacity
-                                                                                        inherited cell true)))})
-                                           (+ col span)]))
-                                      [[] 0]
-                                      (table-cells row))))
-                     rows)
-        n-cols (apply max 0 (for [row placed, c row] (+ (:col c) (:span c))))
-        ;; single-column cells set each column's own natural width...
+   Takes the cell ASSIGNMENTS (see assign-table-cells), so a `colspan` cell
+   contributes to the columns it actually covers: it widens them only when
+   they cannot already hold it, sharing the shortfall equally -- real CSS's
+   own distribution, minus the proportional weighting it does by each
+   column's own demand.
+
+   Deliberately NOT implemented: `table-layout: fixed`, `<col>`/`<colgroup>`
+   widths, and border collapsing."
+  [content-w spacing assigns]
+  (let [n-cols (apply max 0 (map #(+ (:col %) (:colspan %)) assigns))
         base (vec (for [col (range n-cols)]
                     (apply max 1
-                           (for [row placed
-                                 c row
-                                 :when (and (= 1 (:span c)) (= col (:col c)))]
-                             (:natural c)))))
-        ;; ...then a spanning cell widens the columns it covers only if
-        ;; they cannot already hold it, sharing the shortfall equally --
-        ;; real CSS's own automatic-layout distribution, minus the
-        ;; proportional weighting it does by each column's own demand.
-        natural (reduce (fn [widths c]
-                          (if (= 1 (:span c))
+                           (for [a assigns
+                                 :when (and (= 1 (:colspan a)) (= col (:col a)))]
+                             (:natural a)))))
+        natural (reduce (fn [widths a]
+                          (if (= 1 (:colspan a))
                             widths
-                            (let [cols (range (:col c) (+ (:col c) (:span c)))
-                                  have (reduce + 0 (map #(nth widths % 1) cols))
-                                  short (- (:natural c) have)]
+                            (let [cols (range (:col a) (+ (:col a) (:colspan a)))
+                                  have (+ (reduce + 0 (map #(nth widths % 1) cols))
+                                          (* spacing (dec (:colspan a))))
+                                  short (- (:natural a) have)]
                               (if (pos? short)
-                                (let [add (long (Math/ceil (/ short (:span c))))]
+                                (let [add (long (Math/ceil (/ short (:colspan a))))]
                                   (reduce #(update %1 %2 + add) widths cols))
                                 widths))))
                         base
-                        (for [row placed, c row] c))
+                        assigns)
         total (reduce + 0 natural)]
     (if (and (pos? total) (> total content-w))
       (mapv #(long (* % (/ content-w total))) natural)
@@ -3454,7 +3478,8 @@
         avail-content (max 0 (- (resolve-width st avail-width) (* 2 inset)))
         caption (first (filter #(and (map? %) (= :caption (:tag %))) (:children node)))
         rows (table-rows node)
-        base-widths (table-column-widths theme avail-content opacity inherited rows)
+        assigns (assign-table-cells theme avail-content opacity inherited rows)
+        base-widths (table-column-widths avail-content (:border-spacing st) assigns)
         ;; A CAPTION participates in the table's width: real CSS makes the
         ;; table at least as wide as the caption needs, and the extra width
         ;; goes to the columns. Measured: a two-cell table under a
@@ -3511,53 +3536,90 @@
         caption-layout (when caption
                          (layout-node theme content-x content-y content-w opacity inherited caption))
         rows-y0 (+ content-y spacing (if caption-layout (:h (:box caption-layout)) 0))
-        {:keys [draws height groups]}
+        ;; Row heights: single-row cells set their own row, then a
+        ;; rowspan cell grows its LAST row if the rows it covers cannot
+        ;; already hold it -- the same shortfall rule colspan uses across
+        ;; columns.
+        n-rows (count rows)
+        laid-cells (mapv (fn [a]
+                           (let [cw (+ (reduce + 0 (map #(nth widths % 0)
+                                                        (range (:col a) (+ (:col a) (:colspan a)))))
+                                       (* spacing (dec (:colspan a))))
+                                 m (layout-node theme 0 0 cw opacity inherited (:cell a))]
+                             (assoc a :w cw :h (:h (:box m)) :draw (:draw m))))
+                         assigns)
+        row-heights
+        (let [base (vec (for [r (range n-rows)]
+                          (apply max 0 (for [c laid-cells
+                                             :when (and (= 1 (:rowspan c)) (= r (:row c)))]
+                                         (:h c)))))]
+          (reduce (fn [hs c]
+                    (if (= 1 (:rowspan c))
+                      hs
+                      (let [rs (range (:row c) (+ (:row c) (:rowspan c)))
+                            have (+ (reduce + 0 (map #(nth hs % 0) rs))
+                                    (* spacing (dec (:rowspan c))))
+                            short (- (:h c) have)]
+                        (if (pos? short)
+                          (update hs (last rs) + short)
+                          hs))))
+                  base
+                  laid-cells))
+        row-offsets (vec (reductions (fn [acc rh] (+ acc rh spacing)) 0 row-heights))
+        {:keys [draws groups]}
         (reduce
-         (fn [{:keys [draws height groups]} {:keys [row group]}]
-           (let [cells (table-cells row)
-                 laid (first
-                       (reduce
-                        (fn [[acc col] cell]
-                          (let [span (cell-colspan cell)
-                                ;; a spanning cell is as wide as the columns
-                                ;; it covers PLUS the border-spacing between
-                                ;; them, which no longer separates anything
-                                cw (+ (reduce + 0 (map #(nth widths % 0) (range col (+ col span))))
-                                      (* spacing (dec span)))
-                                {:keys [box draw]} (layout-node theme 0 0 cw opacity inherited cell)]
-                            [(conj acc {:w cw :h (:h box)
-                                        :draw (translate-ops (+ content-x (nth col-offsets col 0))
-                                                             (+ rows-y0 height)
-                                                             draw)})
-                             (+ col span)]))
-                        [[] 0]
-                        cells))
-                 row-h (apply max 0 (map :h laid))
+         (fn [{:keys [draws groups]} {:keys [row-idx row group]}]
+           (let [row-y (+ rows-y0 (nth row-offsets row-idx 0))
+                 row-h (nth row-heights row-idx 0)
                  rst (node-style row theme)
                  row-op (merge {:draw/op :node :id (:node/id row) :tag :tr
-                                :x (+ content-x spacing) :y (+ rows-y0 height)
+                                :x (+ content-x spacing) :y row-y
                                 :w (max 0 (- content-w (* 2 spacing))) :h row-h
                                 :class (attr row :class) :listeners (listeners row)
                                 :opacity opacity}
                                (style-passthrough rst))
                  row-bg (when-let [bg (:background rst)]
-                          [{:draw/op :rect :x (+ content-x spacing) :y (+ rows-y0 height)
+                          [{:draw/op :rect :x (+ content-x spacing) :y row-y
                             :w (max 0 (- content-w (* 2 spacing))) :h row-h
-                            :color bg :tag :tr :opacity opacity}])]
-             {:draws (vec (concat draws row-bg [row-op] (mapcat :draw laid)))
-              :height (+ height row-h spacing)
-              ;; A row group's box is the union of its rows' boxes, which is
-              ;; what a browser reports for <thead>/<tbody>/<tfoot>.
-              ;; the group's own box is the union of its rows PLUS the
-              ;; border-spacing between them (but not a trailing one, which
-              ;; the emit step below subtracts back off)
+                            :color bg :tag :tr :opacity opacity}])
+                 cells (filter #(= row-idx (:row %)) laid-cells)
+                 cell-draws (mapcat
+                             (fn [c]
+                               ;; A table cell's UA default is
+                               ;; `vertical-align: middle`, so its content
+                               ;; is centred in the cell box -- which is
+                               ;; what makes a `rowspan` cell sit BETWEEN
+                               ;; the rows it covers rather than at the top
+                               ;; of the first one. Measured: the browser
+                               ;; renders `tall` (rowspan 2) on its own line
+                               ;; between `a` and `b`, where this engine put
+                               ;; it beside `a`.
+                               (let [cell-h (+ (reduce + 0 (map #(nth row-heights % 0)
+                                                                (range (:row c) (+ (:row c) (:rowspan c)))))
+                                               (* spacing (dec (:rowspan c))))
+                                     dy (max 0 (quot (- cell-h (:h c)) 2))
+                                     cell-id (:node/id (:cell c))]
+                                 (->> (translate-ops (+ content-x (nth col-offsets (:col c) 0))
+                                                     (+ row-y dy)
+                                                     (:draw c))
+                                      ;; the cell's OWN box spans every row
+                                      ;; it covers, even though its content
+                                      ;; is centred inside that box
+                                      (mapv (fn [op]
+                                              (if (and (= :node (:draw/op op))
+                                                       (= cell-id (:id op)))
+                                                (assoc op :y row-y :h cell-h)
+                                                op))))))
+                             cells)]
+             {:draws (vec (concat draws row-bg [row-op] cell-draws))
               :groups (if group
                         (update groups group
-                                (fn [g] {:y (min (:y g (+ rows-y0 height)) (+ rows-y0 height))
+                                (fn [g] {:y (min (:y g row-y) row-y)
                                          :h (+ (:h g 0) row-h spacing)}))
                         groups)}))
-         {:draws [] :height 0 :groups {}}
-         rows)
+         {:draws [] :groups {}}
+         (map-indexed (fn [i r] (assoc r :row-idx i)) rows))
+        height (+ (reduce + 0 row-heights) (* spacing (count row-heights)))
         group-ops (mapv (fn [[g {:keys [y h]}]]
                           (merge {:draw/op :node :id (:node/id g) :tag (:tag g)
                                   :x (+ content-x spacing) :y y

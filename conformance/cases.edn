@@ -619,7 +619,7 @@
   :group :table
   :html "<table><tr><td><table><tr><td>inner</td></tr></table></td><td>outer</td></tr></table>"}
 
- {:id :table/rowspan-is-a-known-gap
+ {:id :table/rowspan
   :group :table
   :html "<table><tr><td rowspan=\"2\">tall</td><td>a</td></tr><tr><td>b</td></tr></table>"}
 
