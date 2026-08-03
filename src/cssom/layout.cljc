@@ -43,10 +43,16 @@
    line, wraps as one unit at the content width, collapses whitespace
    across fragment boundaries the way real CSS does, keeps each fragment's
    own color/font-size/weight/style/decoration as its own draw-op, and
-   sits every fragment on one shared baseline. Bounded, documented cuts
-   remain, each at the fn that owns it: replaced/form-control elements
-   (`<img>`, `<input>`, ...) are not inline-level here and keep their block
-   row (inline-level-tags); an inline box containing a BLOCK box keeps the
+   sits every fragment on one shared baseline. Replaced elements and form
+   controls (`<img>`, `<input>`, `<button>`, `<select>`, `<textarea>`) flow
+   in that line too, as ATOMIC inlines: laid out at their own intrinsic
+   width (inline-atomic-avail-width) and sitting with their bottom edge on
+   the text baseline, the real CSS `vertical-align: baseline` default.
+   Bounded, documented cuts remain, each at the fn that owns it:
+   `<svg>`/`<canvas>`/`<video>`/`<iframe>` are still not inline-level,
+   because this engine cannot render them at all (inline-atomic-tags);
+   `vertical-align` values other than the baseline default are not modeled;
+   an inline box containing a BLOCK box keeps the
    old block-row path rather than being mis-nested, since real CSS's
    block-in-inline box split is not implemented (inline-flow-candidate?);
    a non-normal `white-space` keeps the old path (inline-flow-candidate?);
@@ -656,6 +662,25 @@
 
 ;; ---- per-node computed style bag ----
 
+(defn- presentational-size
+  "HTML's `width`/`height` ATTRIBUTES on `<img>` are presentational hints
+   that a real UA stylesheet maps onto the CSS `width`/`height` properties,
+   which is why `<img width=\"10\" height=\"10\">` has a real 10px box in
+   every browser with no CSS at all. This engine had no such mapping, so
+   such an image resolved through the ordinary block path to the FULL
+   available width -- visible the moment images became inline-level, where
+   a full-width image forced a line break after every one of them.
+
+   Restricted to `<img>` on purpose: the other elements that historically
+   honour these attributes (`<canvas>`/`<embed>`/`<iframe>`/`<video>`/
+   `<td>`) have no rendering in this engine at all, so mapping the
+   attribute for them would size a box that never paints."
+  [node k]
+  (when (= :img (:tag node))
+    (let [v (get-in node [:attrs k])]
+      (when (and v (re-matches #"\d+" (str v)))
+        (parse-int v nil)))))
+
 (defn- node-style [node theme]
   ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
   ;; UA-stylesheet rule, not !important -- any author :display the cascade
@@ -668,8 +693,8 @@
    :right (style node :right)
    :bottom (style node :bottom)
    :z-index (parse-int (style node :z-index) 0)
-   :width (style node :width)
-   :height (style node :height)
+   :width (or (style node :width) (presentational-size node :width))
+   :height (or (style node :height) (presentational-size node :height))
    :min-width (style node :min-width)
    :max-width (style node :max-width)
    :min-height (style node :min-height)
@@ -3160,17 +3185,38 @@
    `span { display: block }`) correctly takes it back OUT of inline flow —
    see inline-level-element?.
 
-   Deliberately EXCLUDED even though real CSS makes them inline-level:
-   `:img`, `:input`, `:select`, `:textarea`, `:button`, `:svg`, `:canvas`,
-   `:video`, `:audio`, `:iframe` — every one of them is a REPLACED or
-   form-control box with its own intrinsic size, which this file lays out
-   through layout-form-control/layout-block and which an inline run has no
-   way to measure as a word-sized fragment. They keep their existing
-   block-row behavior, which is an honest, documented scope-cut (a real
-   browser flows an `<img>` inline with text; this engine stacks it), not
-   an oversight."
+   Replaced and form-control elements are inline-level too, but they are
+   ATOMIC rather than text-like, so they live in inline-atomic-tags below
+   and take a different path through the run."
   #{:a :abbr :b :bdi :bdo :br :cite :code :data :dfn :em :i :kbd :label
     :mark :q :s :samp :small :span :strong :sub :sup :time :u :var :wbr})
+
+(def ^:private inline-atomic-tags
+  "Inline-level elements that are ATOMIC: they participate in a line box as
+   a single unbreakable box of their own intrinsic size, rather than
+   contributing text that can wrap. Real CSS calls these atomic inline-level
+   boxes — replaced elements and form controls.
+
+   They differ from inline-level-tags in every step that matters: their
+   children are NOT flattened into the run (a `<button>`'s label is laid
+   out inside the button's own box by layout-block/layout-form-control,
+   which already works), their width comes from laying the element out and
+   reading its box rather than from measuring text, and their baseline is
+   the box's BOTTOM edge (real CSS `vertical-align: baseline` aligns a
+   replaced box's bottom margin edge with the text baseline), not a font
+   ascent.
+
+   `:svg`/`:canvas`/`:video`/`:audio`/`:iframe` are deliberately still
+   absent: this engine has no rendering for any of them, so giving them an
+   inline box would place an empty rectangle in the middle of a sentence
+   rather than fix anything."
+  #{:img :input :button :select :textarea})
+
+(defn- inline-atomic-element?
+  [child]
+  (and (map? child)
+       (= :element (:node/type child))
+       (contains? inline-atomic-tags (:tag child))))
 
 (defn- inline-level-element?
   "True when `child` is an element this file will flow into a line box:
@@ -3223,6 +3269,16 @@
   (cond
     (inline-flow-text? child) true
 
+    ;; An atomic inline (an <img>/<input>/<button>/<select>/<textarea>) has
+    ;; no subtree requirement: whatever is inside it is laid out by its own
+    ;; box, not flattened into this line, so `block-in-inline` cannot arise.
+    ;; It still has to be statically positioned and actually displayed.
+    (inline-atomic-element? child)
+    (let [st (node-style child theme)]
+      (and (= "static" (:position st))
+           (not= "none" (:display st))
+           (contains? #{nil "inline" "inline-block"} (:display st))))
+
     (inline-level-element? theme child)
     (let [st (node-style child theme)]
       (and (contains? #{nil "normal"} (:white-space st))
@@ -3235,6 +3291,65 @@
                    (:children child))))
 
     :else false))
+
+(def ^:private inline-atomic-default-input-chars
+  "HTML's own default `size` for a text input is 20 characters, which is
+   where every browser's ~20ch default text-field width comes from."
+  20)
+
+(defn- inline-atomic-avail-width
+  "The available width an atomic inline is laid out at — its intrinsic
+   size, NOT the full line width `resolve-width` would hand an ordinary
+   block child.
+
+   This is the whole difference between an `<input>` that sits in a
+   sentence and one that swallows the line: laid out as a block child a
+   form control fills its container (correct for a block, wrong for an
+   inline), and until this existed every atomic inline was wider than the
+   line it was placed on and therefore always wrapped alone — the exact
+   symptom the Blink conformance harness reported as `inline-replaced 0/3`.
+
+   Resolution order mirrors real CSS's own: an explicit width (including
+   the `<img width>` presentational hint, see presentational-size) wins;
+   otherwise each control type contributes the intrinsic size the HTML
+   spec gives it (`size` characters for text-like inputs, defaulting to
+   20; a small square for checkbox/radio; the widest option label for a
+   `<select>`); everything else falls back to the same shrink-to-fit
+   natural width flex items already use (flex-item-main-width), which is
+   what gives `<button>go</button>` a button-sized box.
+
+   Deliberately scoped to the INLINE path: a block-level form control
+   keeps its existing fill-the-container behaviour, which is a separate
+   (and separately risky) change with its own downstream expectations in
+   kotoba-lang/browser."
+  [theme content-w opacity inherited child st]
+  (let [tag (:tag child)
+        font-size (parse-int (:font-size st) (:font-size theme))
+        char-w (long (* 0.6 font-size))
+        inset (content-inset st)
+        natural
+        (cond
+          (:width st) (resolve-width st content-w)
+
+          (contains? #{:input :textarea} tag)
+          (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
+            (if (contains? #{"checkbox" "radio"} input-type)
+              13
+              (+ (* char-w (parse-int (get-in child [:attrs :size]) inline-atomic-default-input-chars))
+                 (* 2 inset))))
+
+          (= :select tag)
+          ;; Widest option label -- a <select> is as wide as the longest
+          ;; thing it can display. Read straight off each <option>'s own
+          ;; text children rather than through option-label, which answers
+          ;; a different question (the label for one selected VALUE).
+          (let [labels (->> (:children child)
+                            (filter #(and (map? %) (= :option (:tag %))))
+                            (map #(->> (:children %) (filter string?) (str/join ""))))]
+            (+ (* char-w (apply max 1 (map count labels))) (* 2 inset)))
+
+          :else (flex-item-main-width theme content-w opacity inherited child st))]
+    (max 0 (min content-w natural))))
 
 (defn- inline-inherited
   "The text style context an inline box (or a generated node) hands to its
@@ -3264,9 +3379,19 @@
   "Flattens an inline run (a vector of adjacent inline-flow-candidate?
    children) into a flat vector of atomic fragments in document order:
 
-     {:kind :text  :text \"...\" :style <inherited-shaped map>
+     {:kind :text   :text \"...\" :style <inherited-shaped map>
       :owners [<owner> ...] :opacity <n>}
-     {:kind :break :style ... :owners ... :opacity ...}   ; <br>
+     {:kind :break  :style ... :owners ... :opacity ...}         ; <br>
+     {:kind :atomic :w <px> :h <px> :draw [<ops laid out at 0,0>]
+      :owners ... :opacity ...}                                  ; <img>/<input>/...
+
+   An `:atomic` fragment is measured HERE, by laying the element out at the
+   origin through the ordinary layout-node path, so a replaced/form-control
+   box reports the same size inside a line that it would as a block row —
+   there is no second, inline-only size model to drift from it. Laying out
+   at `0,0` and translating later is the same technique layout-flex/
+   layout-grid/layout-absolute-children already use, and is safe for the
+   same reason: layout-node only ever ADDS its `x`/`y` as an offset.
 
    `:owners` is the stack of enclosing inline ELEMENTS (outermost first)
    the fragment sits inside, each `{:idx <n> :node <element> :st <style>}`.
@@ -3286,12 +3411,19 @@
    with-generated-content/with-implicit-list-markers/with-details-visibility
    pipeline layout-node applies, so those features compose with inline
    flow instead of being bypassed by it."
-  [theme inherited opacity items]
+  [theme inherited opacity content-w items]
   (let [counter (atom 0)]
     (letfn [(walk [items inherited opacity owners acc]
               (reduce
                (fn [acc child]
                  (cond
+                   (inline-atomic-element? child)
+                   (let [st (node-style child theme)
+                         avail (inline-atomic-avail-width theme content-w opacity inherited child st)
+                         {:keys [box draw]} (layout-node theme 0 0 avail opacity inherited child)]
+                     (conj acc {:kind :atomic :w (:w box) :h (:h box) :draw draw
+                                :owners owners :opacity opacity}))
+
                    (generated-node? child)
                    (conj acc {:kind :text
                               :text (:generated/text child)
@@ -3353,8 +3485,19 @@
   [fragments]
   (loop [frs fragments pending-space? false out []]
     (if-let [fr (first frs)]
-      (if (= :break (:kind fr))
+      (cond
+        (= :break (:kind fr))
         (recur (rest frs) false (conj out fr))
+
+        ;; An atomic inline is one indivisible token. It consumes any
+        ;; pending whitespace as its own leading space (`text <img> text`
+        ;; keeps a space on each side, exactly as a browser renders it) and
+        ;; leaves none behind, so the space after it comes from the next
+        ;; text fragment's own leading whitespace.
+        (= :atomic (:kind fr))
+        (recur (rest frs) false (conj out (assoc fr :space-before? pending-space?)))
+
+        :else
         (let [text (apply-text-transform (:text-transform (:style fr)) (str (:text fr)))
               lead? (boolean (re-find #"^\s" text))
               trail? (boolean (re-find #"\s$" text))
@@ -3405,8 +3548,24 @@
         flush (fn [lines pieces w style] (conj lines {:pieces pieces :w w :style style}))]
     (loop [ts tokens x 0 pieces [] lines []]
       (if-let [t (first ts)]
-        (if (= :break (:kind t))
+        (cond
+          (= :break (:kind t))
           (recur (rest ts) 0 [] (flush lines pieces x (:style t)))
+
+          ;; An atomic inline never merges with a neighbouring piece and is
+          ;; never split: it wraps to the next line whole, or overflows
+          ;; alone, exactly like an over-wide single word.
+          (= :atomic (:kind t))
+          (let [sep (if (and (seq pieces) (:space-before? t))
+                      (w-of " " {:font-size (or (:font-size (:style (peek pieces))) 14)})
+                      0)
+                piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h])
+                                     :kind :atomic :x x :w (:w t)))]
+            (if (and (seq pieces) (> (+ x sep (:w t)) content-w))
+              (recur (rest ts) (:w t) [(piece 0)] (flush lines pieces x nil))
+              (recur (rest ts) (+ x sep (:w t)) (conj pieces (piece (+ x sep))) lines)))
+
+          :else
           (let [st (:style t)
                 word (:text t)
                 ww (w-of word st)
@@ -3429,7 +3588,8 @@
                                       :w (- x' (:x last-piece))))
                          (conj pieces {:text word :style st :owners (:owners t)
                                        :opacity (:opacity t) :x (+ x sep) :w ww}))
-                       lines)))))
+                       lines))))
+          )
         (if (and (empty? pieces) (empty? lines))
           []
           (flush lines pieces x nil))))))
@@ -3450,16 +3610,24 @@
    ONE baseline instead of one top edge. For a line whose pieces all share
    one font size (the overwhelmingly common case, and every pre-existing
    single-text-child layout) this reduces EXACTLY to `y = line-top`,
-   which is byte-for-byte what layout-text already emits."
+   which is byte-for-byte what layout-text already emits.
+
+   An ATOMIC inline (an `<img>`/`<input>`/`<button>`) contributes its whole
+   BOX HEIGHT as ascent, because real CSS `vertical-align: baseline` puts a
+   replaced box's bottom margin edge on the text baseline. A 40px-tall
+   button on a 14px line therefore pushes the baseline down to 40 and grows
+   the line box to fit, rather than being clipped by it or overlapping the
+   line above."
   [line inherited theme]
   (let [pieces (:pieces line)
         fallback-fs (or (:font-size (:style line)) (:font-size inherited) (:font-size theme))
         fallback-lh (or (:line-height (:style line)) (:line-height inherited) (:line-height theme))
-        font-sizes (keep #(:font-size (:style %)) pieces)
+        ascents (concat (keep #(:font-size (:style %)) pieces)
+                        (keep #(when (= :atomic (:kind %)) (:h %)) pieces))
         line-heights (keep #(:line-height (:style %)) pieces)
-        max-fs (if (seq font-sizes) (apply max font-sizes) fallback-fs)
+        max-ascent (if (seq ascents) (apply max ascents) fallback-fs)
         max-lh (if (seq line-heights) (apply max line-heights) fallback-lh)]
-    {:h (max max-lh max-fs) :baseline max-fs}))
+    {:h (max max-lh max-ascent) :baseline max-ascent}))
 
 (defn- inline-owner-ops
   "Background + `:node` draw-ops for the inline ELEMENTS a laid-out run
@@ -3538,7 +3706,7 @@
   [theme content-x content-y content-w opacity inherited items]
   (let [padding (:padding theme)
         inner-w (max 0 (- content-w (* 2 padding)))
-        fragments (inline-fragments theme inherited opacity items)
+        fragments (inline-fragments theme inherited opacity inner-w items)
         lines (inline-line-breaker theme inner-w (inline-tokens fragments))
         text-align (:text-align inherited)]
     (if (empty? lines)
@@ -3558,33 +3726,50 @@
                 [line-draws rects]
                 (reduce
                  (fn [[draws rects] piece]
-                   (let [st (:style piece)
-                         px (+ base-x (:x piece))
-                         py (- baseline (:font-size st))
-                         base (cond-> {:text (:text piece) :font-size (:font-size st) :opacity (:opacity piece)}
-                                (:font-weight st) (assoc :font-weight (:font-weight st))
-                                (:font-style st) (assoc :font-style (:font-style st))
-                                (:font-family st) (assoc :font-family (:font-family st)))
-                         shadow-op (when (and (:text-shadow-color st) (not= "none" (:text-shadow-color st)))
-                                     (assoc base :draw/op :text
-                                            :x (+ px (or (:text-shadow-x st) 0))
-                                            :y (+ py (or (:text-shadow-y st) 0))
-                                            :color (:text-shadow-color st)))
-                         main-op (cond-> (assoc base :draw/op :text :x px :y py :color (:color st))
-                                   (:text-decoration st) (assoc :text-decoration (:text-decoration st)))
-                         rects (reduce (fn [rects owner]
-                                         (update rects (:idx owner)
-                                                 (fn [entry]
-                                                   (-> (or entry {:node (:node owner) :st (:st owner)
-                                                                  :opacity (:opacity piece) :fragments []})
-                                                       (update :fragments conj
-                                                               {:x px :y y :w (:w piece) :h line-h})))))
-                                       rects
-                                       (:owners piece))]
-                     [(cond-> draws
-                        shadow-op (conj shadow-op)
-                        true (conj main-op))
-                      rects]))
+                   (if (= :atomic (:kind piece))
+                     ;; Atomic inline: the element was already laid out at
+                     ;; the origin by inline-fragments, so placing it is a
+                     ;; translate -- its bottom edge onto the baseline, the
+                     ;; real CSS `vertical-align: baseline` default.
+                     (let [px (+ base-x (:x piece))
+                           py (- baseline (:h piece))
+                           rects (reduce (fn [rects owner]
+                                           (update rects (:idx owner)
+                                                   (fn [entry]
+                                                     (-> (or entry {:node (:node owner) :st (:st owner)
+                                                                    :opacity (:opacity piece) :fragments []})
+                                                         (update :fragments conj
+                                                                 {:x px :y y :w (:w piece) :h line-h})))))
+                                         rects
+                                         (:owners piece))]
+                       [(into draws (translate-ops px py (:draw piece))) rects])
+                     (let [st (:style piece)
+                           px (+ base-x (:x piece))
+                           py (- baseline (:font-size st))
+                           base (cond-> {:text (:text piece) :font-size (:font-size st) :opacity (:opacity piece)}
+                                  (:font-weight st) (assoc :font-weight (:font-weight st))
+                                  (:font-style st) (assoc :font-style (:font-style st))
+                                  (:font-family st) (assoc :font-family (:font-family st)))
+                           shadow-op (when (and (:text-shadow-color st) (not= "none" (:text-shadow-color st)))
+                                       (assoc base :draw/op :text
+                                              :x (+ px (or (:text-shadow-x st) 0))
+                                              :y (+ py (or (:text-shadow-y st) 0))
+                                              :color (:text-shadow-color st)))
+                           main-op (cond-> (assoc base :draw/op :text :x px :y py :color (:color st))
+                                     (:text-decoration st) (assoc :text-decoration (:text-decoration st)))
+                           rects (reduce (fn [rects owner]
+                                           (update rects (:idx owner)
+                                                   (fn [entry]
+                                                     (-> (or entry {:node (:node owner) :st (:st owner)
+                                                                    :opacity (:opacity piece) :fragments []})
+                                                         (update :fragments conj
+                                                                 {:x px :y y :w (:w piece) :h line-h})))))
+                                         rects
+                                         (:owners piece))]
+                       [(cond-> draws
+                          shadow-op (conj shadow-op)
+                          true (conj main-op))
+                        rects])))
                  [[] rects]
                  (:pieces line))]
             (recur (rest ls) (+ y line-h) (into text-draws line-draws) rects))

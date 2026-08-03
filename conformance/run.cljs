@@ -102,6 +102,13 @@
       while ((node = walker.nextNode())) {
         var text = node.nodeValue;
         if (!text.trim()) continue;
+        // Text INSIDE an atomic inline (a button's label, a select's
+        // options) belongs to that control's own formatting context, not
+        // to the line box being compared. Skipped on both sides -- see
+        // engine-lines' matching containment filter -- so the comparison
+        // measures one inline formatting context rather than two.
+        if (node.parentElement &&
+            node.parentElement.closest('img,input,button,select,textarea')) continue;
         var re = /\\S+/g, m;
         while ((m = re.exec(text))) {
           var range = document.createRange();
@@ -274,7 +281,22 @@
         doc (css/apply-cascade doc (css/parse-rules (or css "")))
         [_ doc] (dom/consume-ops doc)
         ops (layout/draw-ops (dom/tree doc) {:width width})
-        text-ops (filter #(= :text (:draw/op %)) ops)
+        ;; Mirror of the oracle script's own `closest(...)` skip: a form
+        ;; control's or replaced box's INNER text is its own formatting
+        ;; context. Done geometrically here because draw-ops carry no
+        ;; parentage -- a text op inside an atomic box's rect is that box's
+        ;; content.
+        atomic-boxes (filterv #(and (= :node (:draw/op %))
+                                    (contains? #{:img :input :button :select :textarea} (:tag %)))
+                              ops)
+        inside-atomic? (fn [op]
+                         (some (fn [b]
+                                 (and (>= (:x op) (:x b)) (<= (:x op) (+ (:x b) (:w b)))
+                                      (>= (:y op) (:y b)) (<= (:y op) (+ (:y b) (:h b)))))
+                               atomic-boxes))
+        text-ops (->> ops
+                      (filter #(= :text (:draw/op %)))
+                      (remove inside-atomic?))
         char-w (fn [fs] (long (* 0.6 (or fs 14))))]
     (->> text-ops
          (mapcat (fn [op]

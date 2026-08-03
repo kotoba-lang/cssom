@@ -5084,14 +5084,27 @@
         "a `white-space: pre` inline box opts out of the collapsing
          tokenizer entirely rather than being quietly re-collapsed")))
 
-(deftest replaced-and-form-control-elements-are-not-inline-level-here
+(deftest a-form-control-is-an-atomic-inline-on-the-same-line-as-its-label
+  ;; This test previously pinned the opposite ("an <input> keeps its own
+  ;; block row -- documented scope-cut"), which the Blink conformance
+  ;; harness scored as inline-replaced 0/3. Form controls and replaced
+  ;; elements are inline-level in real CSS, and now here too.
   (let [ops (inline-ops ["label " [:input {}]])
         t (text-draw-ops ops)
         input-op (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
-    (is (= 8 (:y (first t))))
-    (is (< (:y (first t)) (:y input-op))
-        "an <input> keeps its own block row -- documented scope-cut, it
-         has an intrinsic size an inline run cannot measure as a word")))
+    (is (= 8 (:y input-op))
+        "the control sits at the top of the line box it made taller")
+    (is (= 22 (:y (first t)))
+        "and the label text is pushed down so BOTH sit on one baseline:
+         the control's bottom edge (8 + 28) and the text's own baseline
+         (22 + 14) are both y=36 -- real CSS `vertical-align: baseline`")
+    (is (< (:x (first t)) (:x input-op))
+        "label first, control after it, on that one line")
+    (is (< (:w input-op) 200)
+        "and the control takes its INTRINSIC width (20 characters, HTML's
+         own default `size`) rather than the full container width a block
+         child would fill -- the fix that made a form control fit on a
+         line at all")))
 
 (deftest explicit-display-block-takes-a-span-out-of-inline-flow
   (let [t (text-draw-ops (inline-ops ["x " [:span {:display "block"} "y"]]))]
@@ -5124,3 +5137,54 @@
     (is (= ["keep this"] (mapv :text t))
         "same for a non-rendered tag: <script> source never reaches layout
          and never breaks the line around it")))
+
+(deftest an-img-flows-inline-at-its-presentational-size
+  ;; <img width/height> are presentational hints real UA stylesheets map
+  ;; onto CSS width/height. Without that mapping the image resolved to the
+  ;; full container width and forced a line break after every image.
+  (let [ops (inline-ops ["before " [:img {}] " after"]
+                        {} {:width 480})
+        img-op (first (filter #(and (= :node (:draw/op %)) (= :img (:tag %))) ops))]
+    (is (some? img-op)))
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [t1 doc] (dom/create-text-node doc "before ")
+        doc (dom/append-child doc p t1)
+        [img doc] (dom/create-element doc :img)
+        doc (dom/set-attribute doc img :width "10")
+        doc (dom/set-attribute doc img :height "10")
+        doc (dom/append-child doc p img)
+        [t2 doc] (dom/create-text-node doc " after")
+        doc (dom/append-child doc p t2)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480})
+        t (text-draw-ops ops)
+        img-op (first (filter #(and (= :node (:draw/op %)) (= :img (:tag %))) ops))]
+    (is (= [10 10] [(:w img-op) (:h img-op)])
+        "the width/height attributes size the box")
+    (is (apply = (mapv :y t))
+        "text on both sides shares one line")
+    (is (< (:x (first t)) (:x img-op) (:x (second t)))
+        "with the image between them in document order")
+    (is (= (+ (:y img-op) (:h img-op)) (+ (:y (first t)) (:font-size (first t))))
+        "and the image's BOTTOM edge on the text baseline, real CSS's
+         `vertical-align: baseline` for a replaced box")))
+
+(deftest a-button-shrink-wraps-to-its-label-inside-a-line
+  (let [ops (inline-ops ["hit " [:button {} "go"] " now"])
+        t (text-draw-ops ops)
+        b (first (filter #(and (= :node (:draw/op %)) (= :button (:tag %))) ops))]
+    (is (= ["hit" "go" "now"] (mapv :text t)))
+    (is (< (:w b) 100)
+        "the button is as wide as its own label, not the container")
+    (is (= (:y (first t)) (:y (last t)))
+        "the text before and after the button is on one line")))
+
+(deftest an-atomic-inline-wraps-whole-rather-than-splitting
+  ;; A narrow line: the button cannot fit after the text, so it moves to
+  ;; the next line intact instead of being broken or overlapping.
+  (let [ops (inline-ops ["aaaa bbbb " [:button {} "wide-label-here"]] {} {:width 140})
+        t (text-draw-ops ops)
+        b (first (filter #(and (= :node (:draw/op %)) (= :button (:tag %))) ops))]
+    (is (< (:y (first t)) (:y b))
+        "the atomic box wrapped to a later line")))

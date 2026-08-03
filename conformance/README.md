@@ -33,7 +33,8 @@ are correct).
 
 ## Result — 2026-08-04
 
-**27/32 = 84%** (2 cases unscorable, see below). Per group:
+**30/32 = 94%** (2 cases unscorable, see below), up from 27/32 = 84% at the
+first run. Per group:
 
 | group | | |
 |---|---|---|
@@ -44,20 +45,42 @@ are correct).
 | text | 3/3 | 100% |
 | visibility | 2/2 | 100% |
 | float | 1/1 | 100% |
+| inline-replaced | 3/3 | 100% |
 | block | 3/4 | 75% |
-| inline-replaced | 0/3 | 0% |
 | table | 0/1 | 0% |
 
-The five failures are all known, documented scope-cuts rather than
-surprises: `<img>`/`<input>`/`<button>` are not inline-level in this engine
-(they keep their own block row), an inline box containing a block box is
-not split (`block-in-inline`), and there is no table layout at all.
+The two remaining failures are known, documented scope-cuts rather than
+surprises: an inline box containing a block box is not split
+(`block-in-inline`), and there is no table layout at all.
 
-The harness has already paid for itself once: it found that a
+`inline-replaced` went 0/3 → 3/3 when `<img>`/`<input>`/`<button>`/
+`<select>`/`<textarea>` became atomic inline boxes, sized by their own
+intrinsic width and baseline-aligned by their bottom edge.
+
+### Known divergence this metric no longer sees
+
+A control's INNER text (a `<button>`'s label, an `<input>`'s value) is
+excluded from the line comparison on both sides, because it belongs to that
+control's own formatting context rather than to the line being measured.
+That exclusion hides a real divergence found on the way here: this engine
+paints a button's label at the top inset of its box, while a browser
+centers it vertically. Measuring that needs a different axis — comparing
+the control's own box and its content position — and is a candidate for the
+next corpus dimension rather than something to pretend the current one
+covers.
+
+### Bugs found
+
+The harness has already paid for itself twice. It found that a
 `display: none` element in the middle of a sentence split the surrounding
 text into two one-child inline runs, stacking `keep`/`this` on separate
 lines where every real browser puts them on one. That bug was invisible to
 497 passing unit tests. Fixed in the same change, with regression tests.
+
+It also caught, via the downstream `kotoba-lang/browser` suite, an arity
+error in the new `<select>` intrinsic-width path that this repo's own 502
+tests never reached — a reminder that cssom's consumers exercise shapes its
+own corpus does not.
 
 ## Two cases are unscorable, on purpose
 
