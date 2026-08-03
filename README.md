@@ -17,21 +17,30 @@ reverse.
 - `cssom.core`: selector tokenizing/parsing (tag/id/class/attribute
   operators/pseudo-classes), specificity, cascade resolution
   (`apply-cascade`) against a `kotoba.wasm.dom` document.
-- `cssom.layout`: reference projection from a `kotoba.wasm.dom` tree to
-  renderer draw ops (rects/text/semantic node ops). Documented in its own
-  docstring as a *reference* implementation — vertical block-stacking with
-  padding/gap only. It does not implement `display: flex`, `position:
-  absolute/relative`, min/max-width, border-box sizing, or border draw-ops;
-  real hosts (or a future revision of this repo) can replace it with a full
-  box-model/flexbox engine while keeping the same `draw-ops` data boundary.
+- `cssom.layout`: projection from a `kotoba.wasm.dom` tree to renderer draw
+  ops (rects/text/semantic node ops). A host can still replace it wholesale
+  while keeping the same `draw-ops` data boundary.
 
 ## Maturity
+
+The `cssom.layout` namespace docstring is the authority on exactly what is
+and is not implemented, down to the individual property; this table is the
+summary. **It was stale until 2026-08-03** — it claimed flexbox/position/
+box-model were "not implemented" long after they landed, so trust the
+docstrings over any prose that disagrees with them.
 
 | | |
 |---|---|
 | Role | ui-substrate |
-| Tests | `clojure -M:test` |
-| Flexbox / position / box-model layout | not implemented (see `cssom.layout` docstring) |
+| Tests | `clojure -M:test` (497 tests / 1004 assertions) |
+| Box model | padding/border/margin, min/max-width, `content-box`/`border-box` |
+| Block flow | implemented |
+| Inline flow | implemented (`layout-inline-run`) — text and inline-level elements share line boxes, wrap as one unit, collapse whitespace across fragments, share one baseline |
+| Flexbox | `flex-direction`/`flex-wrap`/`justify-content`/`align-items`/`gap` |
+| Grid | fixed/`fr` tracks, `repeat()`, `minmax()`, named areas, explicit + auto placement |
+| Positioning | `absolute`/`fixed` (containing-block anchored, `z-index` ordered), `relative` (block-flow children only) |
+| Generated content | `::before`/`::after`, implicit list markers, CSS counters |
+| Not implemented | `vertical-align` beyond baseline, inline padding/border/margin, block-in-inline box splitting, replaced elements (`<img>`/form controls) as inline-level, floats, real glyph shaping (a host supplies `:measure-text`, else a per-character approximation is used) |
 
 ## Test
 

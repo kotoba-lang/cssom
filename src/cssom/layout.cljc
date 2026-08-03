@@ -35,16 +35,29 @@
    reads that and synthesizes a layout-only child that flows through the
    exact same text-wrapping/paint path (layout-text) real text already
    uses, positioned immediately before/after the element's real children.
-   This engine has NO general inline-flow layout at all — every child a
-   block-level parent lays out (layout-children-block) gets its own row,
-   full stop, whether it's an element, a real text node, or generated
-   content, so a `<b>`/`<a>`/`<span>` sitting next to real text is stacked
-   below it rather than flowing onto the same line the way real CSS
-   inline-level boxes do; this is a real, general limitation, not
-   something specific to generated content, and fixing it in general is
-   out of scope here (it would be a large layout-engine feature in its own
-   right, comparable in scope to this file's flexbox/grid support). The
-   ONE bounded exception carved out of that limitation: a ::before
+   general INLINE FLOW (see layout-inline-run): a maximal run of two or
+   more adjacent inline-level children — real text nodes, generated
+   content, and inline-level elements (inline-level-tags, or any element
+   an author gives `display: inline`) — shares line boxes instead of each
+   getting its own block row, so `<li>text<b>bold</b></li>` renders on ONE
+   line, wraps as one unit at the content width, collapses whitespace
+   across fragment boundaries the way real CSS does, keeps each fragment's
+   own color/font-size/weight/style/decoration as its own draw-op, and
+   sits every fragment on one shared baseline. Bounded, documented cuts
+   remain, each at the fn that owns it: replaced/form-control elements
+   (`<img>`, `<input>`, ...) are not inline-level here and keep their block
+   row (inline-level-tags); an inline box containing a BLOCK box keeps the
+   old block-row path rather than being mis-nested, since real CSS's
+   block-in-inline box split is not implemented (inline-flow-candidate?);
+   a non-normal `white-space` keeps the old path (inline-flow-candidate?);
+   inline padding/border/margin are not applied and a wrapped inline box
+   reports one union `:node` box (inline-owner-ops); `vertical-align`
+   other than the baseline default is not modeled (inline-line-metrics);
+   and a LONE inline child deliberately stays on the pre-existing
+   layout-text path, byte for byte (inline-runs). Two older, narrower
+   string-level merges predate this and still do exactly what they did —
+   they collapse text into ONE styled run, which is a different thing from
+   flowing separately styled runs onto one line. The first: a ::before
    immediately followed by (or ::after immediately preceded by) the SAME
    element's own real text-node child with nothing else in between is
    merged into a single text run sharing one line (see with-generated-content's
@@ -75,16 +88,13 @@
    These two exceptions compose: merge-adjacent-text-runs runs first, so a
    ::before/::after directly bordering what was originally several real
    text-node siblings still sees (and merges with) the WHOLE
-   already-combined run, not just its first fragment. Every other
-   inline-adjacency shape — an ELEMENT instead of a text child (e.g.
-   `<li>text<b>bold</b></li>`), ::before and ::after both wrapping one
-   shared text child — is explicitly NOT covered by either exception and
-   keeps behaving exactly as this whole-file limitation already made it
-   behave, no worse. In particular, a text run broken by an intervening
-   ELEMENT child (e.g. `<li>a<b>x</b>b</li>`) does NOT merge the `a`/`b`
-   text fragments across the `<b>` — they are not adjacent in the children
-   vector, so each surviving run (here, two separate one-node runs) merges
-   independently, same as not merging at all. Real hosts can still swap
+   already-combined run, not just its first fragment. Neither merge ever
+   reaches across an ELEMENT boundary — `<li>a<b>x</b>b</li>` still yields
+   three separate runs, since `a` and `b` are not adjacent children — and
+   that is now correct rather than a limitation: the three runs carry
+   three different style contexts, and layout-inline-run puts them on one
+   shared line as three separate draw-ops, which is exactly what real CSS
+   does. Real hosts can still swap
    this for text shaping/WebGPU buffers etc — the draw-ops data boundary
    is unchanged. Word-wrap itself normally decides
    line breaks with a per-character `(long (* 0.6 font-size))`
@@ -3130,26 +3140,502 @@
     [(cond left left right (- right) :else 0)
      (cond top top bottom (- bottom) :else 0)]))
 
+;; ---- inline formatting context ----
+
+(def ^:private inline-level-tags
+  "Tags whose real HTML5 UA stylesheet default is `display: inline`, i.e.
+   the ones that must share a line box with adjacent text instead of
+   stacking as their own block row (see layout-inline-run).
+
+   This engine has no UA stylesheet of its own — cssom.core's cascade only
+   ever resolves AUTHOR declarations, so `node-style`'s `:display` is
+   simply nil for an element no author rule targets (confirmed by reading
+   node-style: `(style node :display)` with a `[hidden]`-only fallback).
+   That is why inline-level-ness has to be a tag-name set here rather than
+   a `(= \"inline\" display)` check alone: a real `<b>`/`<a>`/`<span>` in
+   real-world HTML almost never carries an explicit `display: inline`
+   declaration, it just IS inline by UA default. An explicit author
+   `display: inline` on any other element (e.g. a `<div>`) is honored too,
+   and an explicit non-inline display on one of these tags (e.g.
+   `span { display: block }`) correctly takes it back OUT of inline flow —
+   see inline-level-element?.
+
+   Deliberately EXCLUDED even though real CSS makes them inline-level:
+   `:img`, `:input`, `:select`, `:textarea`, `:button`, `:svg`, `:canvas`,
+   `:video`, `:audio`, `:iframe` — every one of them is a REPLACED or
+   form-control box with its own intrinsic size, which this file lays out
+   through layout-form-control/layout-block and which an inline run has no
+   way to measure as a word-sized fragment. They keep their existing
+   block-row behavior, which is an honest, documented scope-cut (a real
+   browser flows an `<img>` inline with text; this engine stacks it), not
+   an oversight."
+  #{:a :abbr :b :bdi :bdo :br :cite :code :data :dfn :em :i :kbd :label
+    :mark :q :s :samp :small :span :strong :sub :sup :time :u :var :wbr})
+
+(defn- inline-level-element?
+  "True when `child` is an element this file will flow into a line box:
+   inline-level by author `display: inline` or by inline-level-tags UA
+   default, statically positioned, and actually rendered.
+
+   `position` must be `static`: a `relative`/`absolute`/`fixed` inline box
+   would need its own offset/anchoring treatment inside the line, which
+   layout-children-block/layout-absolute-children already implement for
+   block rows — routing it through the inline path instead would silently
+   drop that, so a positioned element always stays on the existing path."
+  [theme child]
+  (and (map? child)
+       (= :element (:node/type child))
+       (not (non-rendered-tag? (:tag child)))
+       (let [st (node-style child theme)]
+         (and (= "static" (:position st))
+              (not= "none" (:display st))
+              (if (:display st)
+                (= "inline" (:display st))
+                (contains? inline-level-tags (:tag child)))))))
+
+(defn- inline-flow-text?
+  [child]
+  (or (some? (real-text-child child))
+      (generated-node? child)))
+
+(defn- inline-flow-candidate?
+  "True when `child` can participate in an inline formatting context (see
+   layout-inline-run): a real text node, a generated ::before/::after
+   node, or an inline-level element whose WHOLE subtree is itself made of
+   nothing but those things.
+
+   The whole-subtree requirement is the guard that keeps this feature
+   honest: `<span><div>x</div></span>` is legal HTML, and real CSS handles
+   it by splitting the inline box around the block child (the
+   `block-in-inline` box-tree fixup). This engine does not implement that
+   split, so rather than silently mis-nesting such a subtree into one line
+   box, the whole element falls back to the pre-existing block-row path —
+   exactly the behavior it had before this feature existed, no worse.
+
+   `white-space` must be normal for the same class of reason: `pre`/
+   `pre-wrap`/`pre-line`/`nowrap` each mean the run must preserve or
+   re-interpret newlines and runs of spaces, which layout-text already
+   implements per-property for a single text child; the inline tokenizer
+   here collapses whitespace unconditionally, so anything declaring a
+   non-normal `white-space` keeps the existing single-child path rather
+   than being quietly re-collapsed."
+  [theme child]
+  (cond
+    (inline-flow-text? child) true
+
+    (inline-level-element? theme child)
+    (let [st (node-style child theme)]
+      (and (contains? #{nil "normal"} (:white-space st))
+           (every? (fn [c]
+                     (or (inline-flow-text? c)
+                         (and (map? c)
+                              (= :element (:node/type c))
+                              (non-rendered-tag? (:tag c)))
+                         (inline-flow-candidate? theme c)))
+                   (:children child))))
+
+    :else false))
+
+(defn- inline-inherited
+  "The text style context an inline box (or a generated node) hands to its
+   own children — the same `inherited` map shape, and the same
+   own-declaration-wins-over-inherited resolution, layout-node's element
+   branch already builds for block boxes, factored out so a nested
+   `<span style=\"color:red\"><b>x</b></span>` resolves identically whether
+   it is laid out as a block row (layout-node) or as a fragment inside a
+   line box (inline-fragments)."
+  [inherited st]
+  (let [font-size (parse-int (:font-size st) (:font-size inherited))]
+    (assoc inherited
+           :color (or (:color st) (:color inherited))
+           :font-size font-size
+           :line-height (resolve-line-height (:line-height st) font-size (:line-height inherited))
+           :font-weight (or (:font-weight st) (:font-weight inherited))
+           :font-style (or (:font-style st) (:font-style inherited))
+           :font-family (or (:font-family st) (:font-family inherited))
+           :text-shadow-x (or (:text-shadow-x st) (:text-shadow-x inherited))
+           :text-shadow-y (or (:text-shadow-y st) (:text-shadow-y inherited))
+           :text-shadow-blur (or (:text-shadow-blur st) (:text-shadow-blur inherited))
+           :text-shadow-color (or (:text-shadow-color st) (:text-shadow-color inherited))
+           :text-decoration (or (:text-decoration st) (:text-decoration inherited))
+           :text-transform (or (:text-transform st) (:text-transform inherited)))))
+
+(defn- inline-fragments
+  "Flattens an inline run (a vector of adjacent inline-flow-candidate?
+   children) into a flat vector of atomic fragments in document order:
+
+     {:kind :text  :text \"...\" :style <inherited-shaped map>
+      :owners [<owner> ...] :opacity <n>}
+     {:kind :break :style ... :owners ... :opacity ...}   ; <br>
+
+   `:owners` is the stack of enclosing inline ELEMENTS (outermost first)
+   the fragment sits inside, each `{:idx <n> :node <element> :st <style>}`.
+   The `:idx` is a per-run occurrence counter, NOT the element's
+   `:node/id`: two sibling `<b>x</b><b>x</b>` elements in a hand-built
+   tree can be entirely equal maps with no id at all, and the fragment→
+   owner grouping in layout-inline-run must still keep their boxes apart.
+
+   Nested inline elements recurse with their own resolved style context
+   (inline-inherited) and their own multiplicative opacity/visibility
+   accumulation — the same accumulator layout-node applies for block
+   boxes, so a `visibility: hidden` inline box paints nothing while still
+   occupying its space in the line. `display: none` and non-rendered tags
+   (`<script>`/`<style>`/...) contribute no fragment at all. An inline
+   element's own ::before/::after, implicit list markers, and
+   `<details>`/`<summary>` visibility filtering go through the exact same
+   with-generated-content/with-implicit-list-markers/with-details-visibility
+   pipeline layout-node applies, so those features compose with inline
+   flow instead of being bypassed by it."
+  [theme inherited opacity items]
+  (let [counter (atom 0)]
+    (letfn [(walk [items inherited opacity owners acc]
+              (reduce
+               (fn [acc child]
+                 (cond
+                   (generated-node? child)
+                   (conj acc {:kind :text
+                              :text (:generated/text child)
+                              :style (inline-inherited inherited (:generated/style child))
+                              :owners owners
+                              :opacity opacity})
+
+                   (some? (real-text-child child))
+                   (conj acc {:kind :text
+                              :text (real-text-child child)
+                              :style inherited
+                              :owners owners
+                              :opacity opacity})
+
+                   (and (map? child) (= :element (:node/type child)))
+                   (if (non-rendered-tag? (:tag child))
+                     acc
+                     (let [st (node-style child theme)]
+                       (if (= "none" (:display st))
+                         acc
+                         (let [opacity (* opacity (:opacity st)
+                                          (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
+                               inherited (inline-inherited inherited st)
+                               owners (conj owners {:idx (swap! counter inc) :node child :st st})]
+                           (if (= :br (:tag child))
+                             (conj acc {:kind :break :style inherited :owners owners :opacity opacity})
+                             (walk (with-generated-content
+                                     child
+                                     (with-implicit-list-markers
+                                       child
+                                       (with-details-visibility child (:children child))))
+                                   inherited opacity owners acc))))))
+
+                   :else acc))
+               acc
+               items))]
+      (walk items inherited opacity [] []))))
+
+(defn- inline-tokens
+  "Turns inline-fragments' fragments into the word/break token stream the
+   line breaker consumes, applying real CSS `white-space: normal`
+   whitespace collapsing ACROSS fragment boundaries — the part a
+   per-child layout can't express at all.
+
+   Each `{:kind :word}` token carries `:space-before?`, true when at least
+   one whitespace character separated it from the previous token in source
+   order, whether that whitespace lived at the end of the previous
+   fragment, at the start of this one, in a whitespace-ONLY fragment
+   between them (the shape `<a>x</a>\\n  <a>y</a>` produces, and the reason
+   those whitespace-only text nodes must not become their own boxes), or
+   any combination — all of which collapse to exactly ONE space, as real
+   CSS does. A leading space at the start of a line is dropped by the line
+   breaker, matching real CSS's own line-start whitespace removal.
+
+   `text-transform` is applied HERE, before wrapping, for the same reason
+   layout-text applies it before its own word-wrap: it rewrites the
+   characters that are actually measured, so wrapping must see the
+   transformed text."
+  [fragments]
+  (loop [frs fragments pending-space? false out []]
+    (if-let [fr (first frs)]
+      (if (= :break (:kind fr))
+        (recur (rest frs) false (conj out fr))
+        (let [text (apply-text-transform (:text-transform (:style fr)) (str (:text fr)))
+              lead? (boolean (re-find #"^\s" text))
+              trail? (boolean (re-find #"\s$" text))
+              words (remove str/blank? (str/split text #"\s+"))]
+          (if (empty? words)
+            (recur (rest frs) (or pending-space? (pos? (count text))) out)
+            (recur (rest frs)
+                   trail?
+                   (into out
+                         (map-indexed (fn [i word]
+                                        {:kind :word
+                                         :text word
+                                         :space-before? (if (zero? i) (or pending-space? lead?) true)
+                                         :style (:style fr)
+                                         :owners (:owners fr)
+                                         :opacity (:opacity fr)})
+                                      words))))))
+      out)))
+
+(defn- inline-line-breaker
+  "Greedily packs inline-tokens into line boxes no wider than `content-w`,
+   the same greedy word-packing rule text-lines/text-lines-measured
+   already use for a single text child (as many words as fit, never split
+   a word, an over-wide lone word gets its own overflowing line) —
+   generalized so consecutive words can come from DIFFERENT fragments with
+   DIFFERENT styles, which is the entire point of an inline formatting
+   context.
+
+   Adjacent words sharing the same style AND the same owner stack are
+   merged into ONE piece (one eventual `:text` draw-op) rather than one op
+   per word: a paragraph of 40 plain words stays a single draw-op the way
+   it does today, so this feature does not multiply a real page's op count
+   by its word count. A style or owner change starts a new piece, which is
+   exactly the granularity a host needs to paint two different colors/
+   weights on one line.
+
+   Widths come from the host's real `:measure-text` when the theme
+   supplies one, else this file's `(long (* 0.6 font-size))` per-character
+   approximation — identical to layout-text's own `line-w`, so wrap
+   decisions inside an inline run agree with wrap decisions for a plain
+   text child at the same font size."
+  [theme content-w tokens]
+  (let [measure-text (:measure-text theme)
+        w-of (fn [text st]
+               (if measure-text
+                 (measure-text text (:font-size st) (:font-weight st) (:font-style st) (:font-family st))
+                 (* (count text) (long (* 0.6 (:font-size st))))))
+        flush (fn [lines pieces w style] (conj lines {:pieces pieces :w w :style style}))]
+    (loop [ts tokens x 0 pieces [] lines []]
+      (if-let [t (first ts)]
+        (if (= :break (:kind t))
+          (recur (rest ts) 0 [] (flush lines pieces x (:style t)))
+          (let [st (:style t)
+                word (:text t)
+                ww (w-of word st)
+                sep (if (and (seq pieces) (:space-before? t)) (w-of " " st) 0)]
+            (if (and (seq pieces) (> (+ x sep ww) content-w))
+              (recur (rest ts) ww
+                     [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww}]
+                     (flush lines pieces x st))
+              (let [last-piece (peek pieces)
+                    merge? (and last-piece
+                                (= (:style last-piece) st)
+                                (= (:owners last-piece) (:owners t))
+                                (= (:opacity last-piece) (:opacity t)))
+                    x' (+ x sep ww)]
+                (recur (rest ts) x'
+                       (if merge?
+                         (conj (pop pieces)
+                               (assoc last-piece
+                                      :text (str (:text last-piece) (if (pos? sep) " " "") word)
+                                      :w (- x' (:x last-piece))))
+                         (conj pieces {:text word :style st :owners (:owners t)
+                                       :opacity (:opacity t) :x (+ x sep) :w ww}))
+                       lines)))))
+        (if (and (empty? pieces) (empty? lines))
+          []
+          (flush lines pieces x nil))))))
+
+(defn- inline-line-metrics
+  "One line box's own height and baseline offset. Height is the tallest
+   `line-height` among the line's own pieces (real CSS's own
+   max-of-the-inline-boxes line box height, minus the strut/half-leading
+   subtleties this engine does not model); the baseline sits one
+   MAX-font-size below the line top.
+
+   That baseline rule is what makes mixed font sizes on one line line up
+   the way a reader expects: kotoba-lang/dom-gpu's WebGL/WebGPU hosts both
+   paint a `:text` op at `(+ y font-size)` (a real, checked convention —
+   see webgl.cljs' `:text` case), i.e. `:y` is the top of the em box and
+   `y + font-size` is the baseline, so giving each piece
+   `y = baseline - its own font-size` makes every piece on the line share
+   ONE baseline instead of one top edge. For a line whose pieces all share
+   one font size (the overwhelmingly common case, and every pre-existing
+   single-text-child layout) this reduces EXACTLY to `y = line-top`,
+   which is byte-for-byte what layout-text already emits."
+  [line inherited theme]
+  (let [pieces (:pieces line)
+        fallback-fs (or (:font-size (:style line)) (:font-size inherited) (:font-size theme))
+        fallback-lh (or (:line-height (:style line)) (:line-height inherited) (:line-height theme))
+        font-sizes (keep #(:font-size (:style %)) pieces)
+        line-heights (keep #(:line-height (:style %)) pieces)
+        max-fs (if (seq font-sizes) (apply max font-sizes) fallback-fs)
+        max-lh (if (seq line-heights) (apply max line-heights) fallback-lh)]
+    {:h (max max-lh max-fs) :baseline max-fs}))
+
+(defn- inline-owner-ops
+  "Background + `:node` draw-ops for the inline ELEMENTS a laid-out run
+   passed through, derived from where their own text fragments actually
+   landed.
+
+   A `:node` op is what every downstream consumer uses to find an element
+   on screen — kotoba-lang/browser's `session/node-at` click routing,
+   dom-gpu's retained-tree hit testing, the accessibility projection — so
+   an inline `<a>` that emitted only `:text` ops would be invisible to
+   clicks. Each element gets ONE node op spanning the union of its
+   fragments, plus one background rect PER LINE (a two-line link's
+   background follows both line boxes rather than filling the rectangle
+   around them). The single union node op for a wrapped inline box is an
+   honest, documented approximation of real CSS's per-fragment box list:
+   it over-covers the ragged edge of a multi-line inline box for hit
+   testing, and is exactly right for the single-line case that is by far
+   the common one.
+
+   Padding/margin/border on an inline box are deliberately NOT applied —
+   real CSS applies horizontal (but not vertical) padding/border to inline
+   boxes, shifting the following text; this engine's box model resolves
+   those only for block boxes (content-inset), so an inline box here paints
+   only its background. Documented scope-cut, not an oversight."
+  [theme rects]
+  (let [ordered (sort-by key rects)]
+    (vec
+     (concat
+      (mapcat (fn [[_ {:keys [node st opacity fragments]}]]
+                (when-let [bg (default-bg (:tag node) st theme)]
+                  (mapv (fn [r]
+                          {:draw/op :rect :x (:x r) :y (:y r) :w (:w r) :h (:h r)
+                           :color bg :tag (:tag node) :opacity opacity})
+                        fragments)))
+              ordered)
+      (map (fn [[_ {:keys [node st opacity fragments]}]]
+             (let [x0 (apply min (map :x fragments))
+                   y0 (apply min (map :y fragments))
+                   x1 (apply max (map #(+ (:x %) (:w %)) fragments))
+                   y1 (apply max (map #(+ (:y %) (:h %)) fragments))]
+               (merge {:draw/op :node :id (:node/id node) :tag (:tag node)
+                       :x x0 :y y0 :w (- x1 x0) :h (- y1 y0)
+                       :class (attr node :class) :listeners (listeners node)
+                       :opacity opacity}
+                      (style-passthrough st))))
+           ordered)))))
+
+(defn- layout-inline-run
+  "Lays out one INLINE FORMATTING CONTEXT: a maximal run of adjacent
+   inline-level children (text nodes, generated ::before/::after content,
+   and inline elements) that share line boxes instead of each getting
+   their own block row.
+
+   This is the general inline flow this file spent its whole life without
+   (the ns docstring's long-standing `<li>text<b>bold</b></li>` example) —
+   text and an adjacent `<b>`/`<a>`/`<span>` now flow onto the SAME line,
+   wrapping together at `content-w`, each fragment keeping its own
+   color/font-size/weight/style/decoration, all sharing one baseline.
+
+   Geometry deliberately mirrors layout-text's own conventions exactly so
+   a run is interchangeable with the single text child it replaces: the
+   theme's `:padding` insets the run on all four sides, lines advance by
+   their own line-height, and `text-align` offsets each line individually
+   by that line's own measured width within the same content width the
+   line breaker wrapped against. Returns the `{:draw :h}` shape
+   layout-children-block already advances on.
+
+   Scope-cuts, all deliberate and each documented at the function that
+   owns it: replaced/form-control elements are not inline-level here
+   (inline-level-tags), an inline box containing a block box falls back to
+   block rows (inline-flow-candidate?), non-normal `white-space` keeps the
+   old path (inline-flow-candidate?), inline padding/border/margin are not
+   applied and a wrapped inline box gets one union node op
+   (inline-owner-ops), and `vertical-align` other than the baseline
+   default is not modeled at all (inline-line-metrics)."
+  [theme content-x content-y content-w opacity inherited items]
+  (let [padding (:padding theme)
+        inner-w (max 0 (- content-w (* 2 padding)))
+        fragments (inline-fragments theme inherited opacity items)
+        lines (inline-line-breaker theme inner-w (inline-tokens fragments))
+        text-align (:text-align inherited)]
+    (if (empty? lines)
+      {:draw [] :h 0}
+      (loop [ls lines
+             y (+ content-y padding)
+             text-draws []
+             rects {}]
+        (if-let [line (first ls)]
+          (let [{line-h :h baseline-off :baseline} (inline-line-metrics line inherited theme)
+                align-offset (case text-align
+                               "center" (/ (max 0 (- inner-w (:w line))) 2)
+                               "right" (max 0 (- inner-w (:w line)))
+                               0)
+                base-x (+ content-x padding align-offset)
+                baseline (+ y baseline-off)
+                [line-draws rects]
+                (reduce
+                 (fn [[draws rects] piece]
+                   (let [st (:style piece)
+                         px (+ base-x (:x piece))
+                         py (- baseline (:font-size st))
+                         base (cond-> {:text (:text piece) :font-size (:font-size st) :opacity (:opacity piece)}
+                                (:font-weight st) (assoc :font-weight (:font-weight st))
+                                (:font-style st) (assoc :font-style (:font-style st))
+                                (:font-family st) (assoc :font-family (:font-family st)))
+                         shadow-op (when (and (:text-shadow-color st) (not= "none" (:text-shadow-color st)))
+                                     (assoc base :draw/op :text
+                                            :x (+ px (or (:text-shadow-x st) 0))
+                                            :y (+ py (or (:text-shadow-y st) 0))
+                                            :color (:text-shadow-color st)))
+                         main-op (cond-> (assoc base :draw/op :text :x px :y py :color (:color st))
+                                   (:text-decoration st) (assoc :text-decoration (:text-decoration st)))
+                         rects (reduce (fn [rects owner]
+                                         (update rects (:idx owner)
+                                                 (fn [entry]
+                                                   (-> (or entry {:node (:node owner) :st (:st owner)
+                                                                  :opacity (:opacity piece) :fragments []})
+                                                       (update :fragments conj
+                                                               {:x px :y y :w (:w piece) :h line-h})))))
+                                       rects
+                                       (:owners piece))]
+                     [(cond-> draws
+                        shadow-op (conj shadow-op)
+                        true (conj main-op))
+                      rects]))
+                 [[] rects]
+                 (:pieces line))]
+            (recur (rest ls) (+ y line-h) (into text-draws line-draws) rects))
+          {:draw (into (inline-owner-ops theme rects) text-draws)
+           :h (+ (- y content-y) padding)})))))
+
+(defn- inline-runs
+  "Groups `children` into layout entries: each maximal run of TWO OR MORE
+   adjacent inline-flow-candidate? children becomes one
+   `{:inline/run [...]}` entry (laid out by layout-inline-run), everything
+   else passes through as the plain child it already was.
+
+   The two-or-more threshold is deliberate. A LONE inline child already
+   occupies its own line either way, so routing it through the inline path
+   would change nothing a reader can see while changing every existing
+   single-text-child geometry (and every test asserting it) for no benefit
+   — including the single most common case in this whole engine, a block
+   whose only child is one text node, which stays on layout-text's exact
+   pre-existing path, byte for byte. Inline flow only engages where the
+   old behavior was genuinely WRONG: two or more inline things that real
+   CSS puts on one line and this file used to stack."
+  [theme children]
+  (->> (vec children)
+       (partition-by #(inline-flow-candidate? theme %))
+       (mapcat (fn [group]
+                 (if (and (next group) (inline-flow-candidate? theme (first group)))
+                   [{:inline/run (vec group)}]
+                   group)))
+       vec))
+
 ;; ---- block (normal-flow) layout ----
 
 (defn- layout-children-block
-  "Stacks `children` into successive block-level rows: every entry (an
-   element, a real text node, or a generated-content node -- see
-   with-generated-content) gets its own row, full stop, advancing the
-   running Y offset by that entry's own full height afterward. There is
-   NO inline flow here (or anywhere in this file) -- multiple inline-level
-   children never share one line box the way real CSS lays out e.g. text
-   next to a `<b>`/`<a>`/`<span>` -- see this namespace's own docstring
-   for why that's out of scope in general. The two narrow, already-merged
-   exceptions -- (1) a RUN of two-or-more adjacent real text-node siblings
-   collapsed into ONE text child (see merge-adjacent-text-runs), and (2) a
-   ::before/::after generated node combined with ONE directly-adjacent
-   (possibly already-collapsed-by-(1)) real text-node sibling into a
-   single entry (see merge-generated-with-text) -- are both resolved
-   upstream by with-generated-content before `children` ever reaches this
-   function -- by the time a child arrives here it is already exactly one
-   row, so this function itself needs no inline-flow concept at all to
-   honor either exception correctly.
+  "Stacks `children` into successive block-level rows, advancing the
+   running Y offset by each entry's own full height afterward.
+
+   `children` is first grouped by inline-runs: every maximal run of TWO OR
+   MORE adjacent inline-level children becomes a single entry laid out as
+   one inline formatting context (layout-inline-run) — one or more shared
+   line boxes — instead of one row per child. Everything else (a block
+   element, a lone text child, a replaced/form-control element, an inline
+   box this engine cannot flow) is still exactly one row, and takes the
+   identical path it always did. The two older string-level merges
+   upstream in with-generated-content ((1) a run of adjacent real
+   text-node siblings collapsed into ONE text child, see
+   merge-adjacent-text-runs; (2) a ::before/::after generated node
+   combined with one directly-adjacent real text-node sibling, see
+   merge-generated-with-text) still run before this function sees
+   `children`, and compose with inline flow rather than competing with it:
+   they decide what belongs in one styled run, inline flow decides which
+   runs share a line.
 
    A child with `position: relative` (see `relative-offset`) is
    translated by its own real CSS offset AFTER being measured/laid out
@@ -3163,19 +3649,23 @@
    `layout-flex`/`layout-grid`'s own placement functions instead, an
    honest, documented scope-cut left for a future cycle."
   [theme content-x content-y content-w opacity inherited children]
-  (loop [remaining children y content-y draws [] height 0]
+  (loop [remaining (inline-runs theme children) y content-y draws [] height 0]
     (if-let [child (first remaining)]
-      (let [cst (when (map? child) (node-style child theme))
-            child-margin (or (:margin cst) 0)
-            child-y (+ y child-margin)
-            {:keys [box draw]} (layout-node theme (+ content-x child-margin) child-y content-w opacity inherited child)
-            child-h (:h box)
-            advance (+ child-margin child-h child-margin (:gap theme))
-            draw (if (and cst (= "relative" (:position cst)))
-                   (let [[dx dy] (relative-offset cst)]
-                     (translate-ops dx dy draw))
-                   draw)]
-        (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance)))
+      (if-let [run (and (map? child) (:inline/run child))]
+        (let [{:keys [draw h]} (layout-inline-run theme content-x y content-w opacity inherited run)
+              advance (+ h (:gap theme))]
+          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance)))
+        (let [cst (when (map? child) (node-style child theme))
+              child-margin (or (:margin cst) 0)
+              child-y (+ y child-margin)
+              {:keys [box draw]} (layout-node theme (+ content-x child-margin) child-y content-w opacity inherited child)
+              child-h (:h box)
+              advance (+ child-margin child-h child-margin (:gap theme))
+              draw (if (and cst (= "relative" (:position cst)))
+                     (let [[dx dy] (relative-offset cst)]
+                       (translate-ops dx dy draw))
+                     draw)]
+          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance))))
       {:draw draws :h (max 0 (- height (:gap theme)))})))
 
 (defn- layout-absolute-children
