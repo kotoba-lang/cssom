@@ -284,6 +284,13 @@
   :group :position
   :html "<div><div style=\"position: relative; left: 40px\">moved</div><div>after</div></div>"}
 
+ ;; The LINE-structure comparison for this case is ill-defined and it is
+ ;; kept as a known failure rather than chased: `position: fixed` takes the
+ ;; box out of flow and OVERLAPS the content beside it, so "which line is
+ ;; this word on" has no single right answer -- the browser's own word
+ ;; rects for the fixed box and for the flow text occupy the same band. The
+ ;; GEOMETRY axis, which asks the well-defined question (where is the box,
+ ;; how big is it), agrees with the browser on every box in this case.
  {:id :position/fixed-leaves-flow
   :group :position
   :html "<div><div style=\"position: fixed; left: 300px; top: 0\">fixed</div><div>a</div><div>b</div></div>"}

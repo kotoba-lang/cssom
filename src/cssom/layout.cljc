@@ -4343,6 +4343,46 @@
           {:draw (into (inline-owner-ops theme rects) text-draws)
            :h (+ (- y content-y) padding)})))))
 
+;; ---- block-in-inline ----
+
+(defn- split-block-in-inline
+  "Real CSS's `block-in-inline` box-tree fixup: an inline box containing a
+   BLOCK box is SPLIT around it -- the inline content before the block
+   joins the preceding line, the block gets its own row, and the content
+   after it starts a new line, all still styled by the same inline element.
+
+   `<p>text <span>a <div>b</div> c</span> end</p>` renders as three lines in
+   every browser (`text a` / `b` / `c end`); this engine refused to flow the
+   whole `<span>` at all when it saw the block child (inline-flow-candidate?
+   returns false), so the paragraph fell apart into five stacked rows.
+
+   The split is expressed as data: the offending element is replaced by a
+   clone holding each run of inline children, with the block children
+   hoisted between them. Downstream, each clone is an ordinary inline
+   element and each hoisted block an ordinary block row -- no new concept
+   is needed anywhere else.
+
+   Bounded v1: the block child must be a DIRECT child of the inline
+   element. A block nested two inline levels deep (`<span><em><div>`) is
+   left alone and keeps the pre-existing block-row fallback."
+  [theme children]
+  (let [block-child? (fn [c] (and (map? c)
+                                  (= :element (:node/type c))
+                                  (not (inline-flow-candidate? theme c))))]
+    (vec (mapcat
+          (fn [child]
+            (if (and (inline-level-element? theme child)
+                     (some block-child? (:children child)))
+              (->> (:children child)
+                   (partition-by block-child?)
+                   (mapcat (fn [group]
+                             (if (block-child? (first group))
+                               group
+                               [(assoc child :children (vec group))]))))
+              [child]))
+          children))))
+
+
 (defn- inline-runs
   "Groups `children` into layout entries: each maximal run of TWO OR MORE
    adjacent inline-flow-candidate? children becomes one
@@ -4360,7 +4400,7 @@
    CSS puts on one line and this file used to stack."
   ([theme children] (inline-runs theme children 2))
   ([theme children min-items]
-  (->> (vec children)
+  (->> (split-block-in-inline theme children)
        (remove (fn [child]
                  ;; Children that render NOTHING are dropped before grouping
                  ;; rather than passed through as zero-height rows. Real CSS

@@ -5462,3 +5462,21 @@
     (is (= 20 (:h floated))
         "it reports a BLOCK box (one line-height tall), not an inline box's
          1.2em content area")))
+
+(deftest an-inline-box-splits-around-a-block-child
+  ;; Real CSS's `block-in-inline` fixup. `<p>text <span>a <div>b</div>
+  ;; c</span> end</p>` is three lines in every browser -- `text a` / `b` /
+  ;; `c end` -- because the inline box is split around the block. This
+  ;; engine refused to flow the whole <span> at all once it saw the block
+  ;; child, so the paragraph fell apart into five stacked rows.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        doc (build-inline-children doc p ["text " [:span {} "a " [:div {} "b"] " c"] " end"])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        t (text-draw-ops ops)
+        lines (->> t (group-by :y) (sort-by key) (mapv (fn [[_ ops]] (->> ops (sort-by :x) (map :text) (str/join " ")))))]
+    (is (= ["text a" "b" "c end"] lines)
+        "the inline content before the block joins the preceding line, the
+         block gets its own row, and the content after it starts a new
+         line -- all still inside the same <span>")))

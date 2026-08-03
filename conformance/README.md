@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 99/101 = 98%. Geometry: 294/333 element boxes (88%), 80/105
+**Line structure: 100/101 = 99%. Geometry: 295/334 element boxes (88%), 80/105
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -284,9 +284,28 @@ container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
 
-The two remaining line-structure failures are genuine engine gaps with no
-ambiguity about what they are: no `block-in-inline` split, and `fixed`
-anchored to its containing block rather than the viewport.
+### Round eight: block-in-inline
+
+An inline box containing a BLOCK box is now split around it, as real CSS
+does: `<p>text <span>a <div>b</div> c</span> end</p>` renders as `text a` /
+`b` / `c end`, three lines, with both fragments still styled by the same
+`<span>`. This engine used to refuse to flow the whole span once it saw the
+block child, so the paragraph fell apart into five stacked rows. The split
+is expressed as data — the element is replaced by a clone per run of inline
+children, with the block children hoisted between them — so nothing
+downstream needed a new concept. Bounded v1: the block must be a DIRECT
+child of the inline element.
+
+### The one remaining line-structure failure is deliberate
+
+`position/fixed-leaves-flow` stays red and is NOT chased. `position: fixed`
+takes the box out of flow and OVERLAPS the content beside it, so "which line
+is this word on" has no single right answer — the browser's own word rects
+for the fixed box and for the flow text occupy the same band. The GEOMETRY
+axis, which asks the well-defined question (where is the box, how big is
+it), agrees with the browser on every box in that case. Contorting the
+engine to satisfy an ill-defined comparison would make the number better
+and the engine worse.
 
 ### Still open on the geometry axis
 
