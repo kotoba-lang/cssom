@@ -2972,6 +2972,141 @@
 
 ;; ---- grid layout ----
 
+;; ---- table layout ----
+
+(def ^:private table-row-group-tags
+  "The wrappers a real HTML parser puts between `<table>` and its `<tr>`s.
+   `<tbody>` in particular is INSERTED by the parser even when the author
+   never wrote it, so a table layout that only looked at direct `<tr>`
+   children of `<table>` would find no rows at all on most real markup."
+  #{:thead :tbody :tfoot})
+
+(def ^:private table-cell-tags #{:td :th})
+
+(defn- table-rows
+  "Every `<tr>` under `node`, in document order, flattening the
+   `<thead>`/`<tbody>`/`<tfoot>` wrappers. Row groups are flattened rather
+   than laid out as boxes of their own: this engine models a table as rows
+   of cells, and a row group contributes no geometry a reader can see
+   unless it is styled, which is a deliberate scope-cut recorded in
+   layout-table."
+  [node]
+  (vec (mapcat (fn [child]
+                 (cond
+                   (not (map? child)) nil
+                   (= :tr (:tag child)) [child]
+                   (contains? table-row-group-tags (:tag child))
+                   (filter #(and (map? %) (= :tr (:tag %))) (:children child))
+                   :else nil))
+               (:children node))))
+
+(defn- table-cells [row]
+  (vec (filter #(and (map? %) (contains? table-cell-tags (:tag %))) (:children row))))
+
+(defn- table-column-widths
+  "Real CSS's automatic table layout, in the one form that matters for a
+   readable table: every column is as wide as its widest cell needs to be,
+   and if the columns together want more than the table has, they are
+   scaled down proportionally rather than overflowing.
+
+   Cell content is measured with the same shrink-to-fit machinery flex
+   items and atomic inlines already use (measure-child with shrink-to-fit),
+   so a cell holding one short label reports that label's width instead of
+   the container's. Deliberately NOT implemented: `table-layout: fixed`,
+   `<col>`/`<colgroup>` widths, `colspan`/`rowspan`, border collapsing and
+   `border-spacing` -- each is a real feature this returns honest wrong
+   answers for rather than pretending (a `colspan` cell is simply placed in
+   one column), and each is listed in layout-table's own docstring."
+  [theme content-w opacity inherited rows]
+  (let [n-cols (apply max 0 (map (comp count table-cells) rows))
+        natural (vec (for [col (range n-cols)]
+                       (apply max 1
+                              (for [row rows
+                                    :let [cell (nth (table-cells row) col nil)]
+                                    :when cell]
+                                (:w (:box (measure-child theme content-w opacity inherited cell true)))))))
+        total (reduce + 0 natural)]
+    (if (and (pos? total) (> total content-w))
+      (mapv #(long (* % (/ content-w total))) natural)
+      natural)))
+
+(defn- layout-table
+  "Lays out a `<table>` as rows of cells: columns sized by their widest
+   cell (table-column-widths), rows as tall as their tallest cell, cells
+   laid out through the ordinary layout-node path at their own column
+   width so a cell's contents (including inline flow, nested blocks, form
+   controls) behave exactly as they would anywhere else.
+
+   `<tr>` and the cells keep their own `:node` draw-ops, so hit testing,
+   the accessibility projection and click routing see a real table
+   structure rather than a flat pile of text.
+
+   Honest scope-cuts, all of them real CSS features this does NOT do:
+   `colspan`/`rowspan` (a spanning cell occupies one column/row),
+   `table-layout: fixed`, `<col>`/`<colgroup>` sizing, border collapsing,
+   `border-spacing`, `<caption>` placement (a caption is laid out as an
+   ordinary block row above the rows), row-group boxes, and vertical
+   alignment within a cell. Before this existed a table rendered as one
+   stacked column of every cell in document order -- the two conformance
+   cases scored 0/2 -- so this is a large step from nothing, not a
+   complete table implementation."
+  [theme x y avail-width opacity inherited st node]
+  (let [w (resolve-width st avail-width)
+        inset (content-inset st)
+        content-x (+ x (:margin st) inset)
+        content-y (+ y (:margin st) inset)
+        content-w (max 0 (- w (* 2 inset)))
+        caption (first (filter #(and (map? %) (= :caption (:tag %))) (:children node)))
+        rows (table-rows node)
+        widths (table-column-widths theme content-w opacity inherited rows)
+        col-offsets (vec (reductions + 0 widths))
+        caption-layout (when caption
+                         (layout-node theme content-x content-y content-w opacity inherited caption))
+        rows-y0 (+ content-y (if caption-layout (:h (:box caption-layout)) 0))
+        {:keys [draws height]}
+        (reduce
+         (fn [{:keys [draws height]} row]
+           (let [cells (table-cells row)
+                 laid (vec (map-indexed
+                            (fn [i cell]
+                              (let [cw (nth widths i (or (last widths) content-w))
+                                    {:keys [box draw]} (layout-node theme 0 0 cw opacity inherited cell)]
+                                {:w cw :h (:h box)
+                                 :draw (translate-ops (+ content-x (nth col-offsets i 0))
+                                                      (+ rows-y0 height)
+                                                      draw)}))
+                            cells))
+                 row-h (apply max 0 (map :h laid))
+                 rst (node-style row theme)
+                 row-op (merge {:draw/op :node :id (:node/id row) :tag :tr
+                                :x content-x :y (+ rows-y0 height) :w content-w :h row-h
+                                :class (attr row :class) :listeners (listeners row)
+                                :opacity opacity}
+                               (style-passthrough rst))
+                 row-bg (when-let [bg (:background rst)]
+                          [{:draw/op :rect :x content-x :y (+ rows-y0 height) :w content-w :h row-h
+                            :color bg :tag :tr :opacity opacity}])]
+             {:draws (vec (concat draws row-bg [row-op] (mapcat :draw laid)))
+              :height (+ height row-h)}))
+         {:draws [] :height 0}
+         rows)
+        table-h (clamp-height st (+ (- rows-y0 y) height inset))
+        table-w w]
+    {:box {:x x :y y :w table-w :h table-h}
+     :draw (vec (concat
+                 (or (box-shadow-ops st x y table-w table-h opacity) [])
+                 (when-let [bg (default-bg :table st theme)]
+                   [{:draw/op :rect :x x :y y :w table-w :h table-h :color bg :tag :table :opacity opacity}])
+                 (or (border-ops st x y table-w table-h opacity) [])
+                 (or (outline-ops st x y table-w table-h opacity) [])
+                 [(merge {:draw/op :node :id (:node/id node) :tag :table
+                          :x x :y y :w table-w :h table-h
+                          :class (attr node :class) :listeners (listeners node)
+                          :opacity opacity}
+                         (style-passthrough st))]
+                 (:draw caption-layout)
+                 draws))}))
+
 (defn- layout-grid
   "display:grid subset: explicit `grid-template-columns`/`grid-template-rows`
    track lists (fixed px + fr, plus `repeat()`/`minmax()` composing over
@@ -4259,6 +4394,10 @@
            (cond
              (contains? #{:input :select :textarea} tag)
              (layout-form-control theme x y avail-width opacity st node)
+
+             (or (= "table" (:display st))
+                 (and (nil? (:display st)) (= :table tag)))
+             (layout-table theme x y avail-width opacity inherited st (assoc node :children children))
 
              (= "flex" (:display st))
              (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node children)

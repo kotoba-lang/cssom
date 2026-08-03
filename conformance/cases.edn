@@ -425,4 +425,41 @@
  {:id :page/footer-inline-links
   :group :page
   :html "<footer><p>&copy; 2026 <a href=\"/a\">Privacy</a> &middot; <a href=\"/b\">Terms</a></p></footer>"}
+
+ ;; ---- tables (layout-table) ----
+
+ {:id :table/three-columns
+  :group :table
+  :html "<table><tr><td>a</td><td>b</td><td>c</td></tr><tr><td>d</td><td>e</td><td>f</td></tr></table>"}
+
+ {:id :table/column-widths-follow-widest-cell
+  :group :table
+  :html "<table><tr><td>wide-content-here</td><td>x</td></tr><tr><td>a</td><td>b</td></tr></table>"}
+
+ {:id :table/cell-with-inline-content
+  :group :table
+  :html "<table><tr><td>go <b>now</b></td><td>ok</td></tr></table>"}
+
+ {:id :table/single-row
+  :group :table
+  :html "<table><tr><td>only</td><td>row</td></tr></table>"}
+
+ {:id :table/tfoot
+  :group :table
+  :html "<table><tbody><tr><td>body</td><td>x</td></tr></tbody><tfoot><tr><td>foot</td><td>y</td></tr></tfoot></table>"}
+
+ {:id :table/cell-with-a-link
+  :group :table
+  :html "<table><tr><td><a href=\"/x\">link</a></td><td>next</td></tr></table>"}
+
+ ;; PASSES, but for a reason worth naming: `colspan` is NOT implemented
+ ;; (layout-table places a spanning cell in one column), and this metric
+ ;; cannot see that, because the spanning cell is alone on its row either
+ ;; way so the LINE STRUCTURE matches. What differs is the cell's WIDTH,
+ ;; which needs the geometry axis this harness does not have yet -- the
+ ;; same blind spot that hides a button label's vertical centering. Kept in
+ ;; the corpus as a placeholder for that axis, not as evidence colspan works.
+ {:id :table/colspan-line-structure-only
+  :group :table
+  :html "<table><tr><td colspan=\"2\">spanning</td></tr><tr><td>a</td><td>b</td></tr></table>"}
 ]

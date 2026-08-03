@@ -33,29 +33,35 @@ are correct).
 
 ## Result — 2026-08-04
 
-**30/32 = 94%** (2 cases unscorable, see below), up from 27/32 = 84% at the
-first run. Per group:
+**91/98 = 93%** (4 cases unscorable, see below) on a corpus that has grown
+34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
+(corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
+falls when the corpus grows is the corpus doing its job. Per group:
 
 | group | | |
 |---|---|---|
-| inline | 11/11 | 100% |
-| flex | 3/3 | 100% |
-| grid | 2/2 | 100% |
-| position | 2/2 | 100% |
-| text | 3/3 | 100% |
+| inline | 18/18 | 100% |
+| inline-replaced | 8/8 | 100% |
+| table | 9/9 | 100% |
+| flex | 9/9 | 100% |
+| box | 5/5 | 100% |
+| page | 5/5 | 100% |
+| inline-block | 1/1 | 100% |
 | visibility | 2/2 | 100% |
-| float | 1/1 | 100% |
-| inline-replaced | 3/3 | 100% |
-| block | 3/4 | 75% |
-| table | 0/1 | 0% |
+| block | 7/8 | 88% |
+| grid | 6/7 | 86% |
+| wrap | 6/7 | 86% |
+| text | 8/10 | 80% |
+| position | 4/5 | 80% |
+| float | 1/2 | 50% |
 
-The two remaining failures are known, documented scope-cuts rather than
-surprises: an inline box containing a block box is not split
-(`block-in-inline`), and there is no table layout at all.
-
-`inline-replaced` went 0/3 → 3/3 when `<img>`/`<input>`/`<button>`/
-`<select>`/`<textarea>` became atomic inline boxes, sized by their own
-intrinsic width and baseline-aligned by their bottom edge.
+The seven remaining failures are all genuine gaps, now measured rather
+than asserted: no float positioning, no `block-in-inline` split, `fixed`
+anchored to its containing block rather than the viewport, grid
+auto-placement not resuming after an explicitly placed item, one wrap
+point inside a nested inline, and CSS-driven `white-space: pre-wrap`/
+`pre-line` (the parser collapses newlines before layout ever sees them —
+it cannot see CSS).
 
 ### Known divergence this metric no longer sees
 

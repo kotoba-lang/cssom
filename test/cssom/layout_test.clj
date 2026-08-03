@@ -5188,3 +5188,70 @@
         b (first (filter #(and (= :node (:draw/op %)) (= :button (:tag %))) ops))]
     (is (< (:y (first t)) (:y b))
         "the atomic box wrapped to a later line")))
+
+;; ---- table layout ----
+
+(defn- table-ops
+  "draw-ops for a `<table>` built from the same `[tag style & children]`
+   spec vectors the inline tests use, with the engine's own theme insets
+   zeroed so the assertions read as plain geometry."
+  [rows]
+  (let [[table doc] (dom/create-element dom/empty-document :table)
+        doc (dom/set-root doc table)
+        doc (build-inline-children doc table rows)
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})))
+
+(deftest table-cells-share-a-row
+  ;; Before layout-table existed, a table rendered as ONE stacked column of
+  ;; every cell in document order -- the conformance corpus scored tables
+  ;; 0/2 against a real browser.
+  (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {} "b"]] [:tr {} [:td {} "c"] [:td {} "d"]]])
+        t (text-draw-ops ops)]
+    (is (= ["a" "b" "c" "d"] (mapv :text t)))
+    (is (= (:y (nth t 0)) (:y (nth t 1)))
+        "first row's two cells share a line")
+    (is (= (:y (nth t 2)) (:y (nth t 3)))
+        "and so do the second row's")
+    (is (< (:y (nth t 0)) (:y (nth t 2)))
+        "with the second row below the first")
+    (is (< (:x (nth t 0)) (:x (nth t 1)))
+        "cells advance across the row")))
+
+(deftest table-flattens-thead-and-tbody
+  ;; A real HTML parser INSERTS <tbody> even when the author never wrote
+  ;; it, so a layout that only looked for direct <tr> children would find
+  ;; no rows on most real markup.
+  (let [t (text-draw-ops
+           (table-ops [[:thead {} [:tr {} [:th {} "h1"] [:th {} "h2"]]]
+                       [:tbody {} [:tr {} [:td {} "a"] [:td {} "b"]]]]))]
+    (is (= ["h1" "h2" "a" "b"] (mapv :text t)))
+    (is (= (:y (nth t 0)) (:y (nth t 1))))
+    (is (= (:y (nth t 2)) (:y (nth t 3))))
+    (is (< (:y (nth t 0)) (:y (nth t 2))))))
+
+(deftest table-columns-size-to-their-widest-cell
+  (let [ops (table-ops [[:tr {} [:td {} "wide-content"] [:td {} "x"]] [:tr {} [:td {} "a"] [:td {} "b"]]])
+        cells (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) ops)
+        col0 (mapv :w (take-nth 2 cells))
+        col1 (mapv :w (take-nth 2 (rest cells)))]
+    (is (apply = col0) "a column has ONE width, shared by every cell in it")
+    (is (apply = col1))
+    (is (> (first col0) (first col1))
+        "and it is the width of the widest cell in that column")))
+
+(deftest table-emits-row-and-cell-node-ops-for-hit-testing
+  (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {} "b"]]])]
+    (is (= 1 (count (filter #(and (= :node (:draw/op %)) (= :table (:tag %))) ops))))
+    (is (= 1 (count (filter #(and (= :node (:draw/op %)) (= :tr (:tag %))) ops))))
+    (is (= 2 (count (filter #(and (= :node (:draw/op %)) (= :td (:tag %))) ops)))
+        "click routing and the accessibility projection see a real table
+         structure, not a flat pile of text")))
+
+(deftest table-cell-contents-use-the-ordinary-layout-path
+  ;; A cell is laid out through layout-node at its own column width, so
+  ;; inline flow inside a cell behaves exactly as it does anywhere else.
+  (let [t (text-draw-ops (table-ops [[:tr {} [:td {} "go " [:b {} "now"]] [:td {} "x"]]]))]
+    (is (= ["go" "now" "x"] (mapv :text t)))
+    (is (apply = (mapv :y t))
+        "the cell's own inline run shares the line, and so does the next cell")))
