@@ -1,0 +1,158 @@
+;; Layout conformance corpus: each case is rendered BOTH by cssom.layout and
+;; by a real Blink browser (Brave; Chrome is the same engine), and the two
+;; are compared on LINE STRUCTURE -- which text ends up on which line, in
+;; which order -- rather than on exact pixel coordinates, because this
+;; engine has no glyph shaping and its `(long (* 0.6 font-size))` character
+;; approximation can never match a real font's metrics. Line structure is
+;; the part that is genuinely comparable, and it is exactly the part this
+;; engine has historically got wrong.
+;;
+;; Keep case content SHORT enough not to wrap at the harness width: a
+;; wrapped run's break point DOES depend on real font metrics, so those
+;; cases are reported separately (:wrapped) instead of being scored as
+;; failures for a reason the comparison cannot legitimately judge.
+;;
+;; A failing case is a MEASUREMENT, not a bug report -- several here are
+;; known, documented scope-cuts (floats, tables, <img>/form controls as
+;; inline-level). They are in the corpus precisely so the coverage number
+;; tells the truth about them.
+
+[{:id :inline/text-plus-bold
+  :group :inline
+  :html "<p>Read the <b>manual</b> today.</p>"}
+
+ {:id :inline/anchor-in-sentence
+  :group :inline
+  :html "<p>Go to <a href=\"/x\">docs</a> now.</p>"
+  :css "a { color: #4ea1ff }"}
+
+ {:id :inline/three-inline-siblings
+  :group :inline
+  :html "<p>a <b>b</b> <i>c</i> d</p>"}
+
+ {:id :inline/nested-inline
+  :group :inline
+  :html "<p>x <span>outer <b>inner</b></span> y</p>"}
+
+ {:id :inline/whitespace-only-nodes-between-elements
+  :group :inline
+  :html "<p><a>one</a>\n  <a>two</a>\n</p>"}
+
+ {:id :inline/br-breaks-line
+  :group :inline
+  :html "<p>alpha<br>beta</p>"}
+
+ {:id :inline/two-brs
+  :group :inline
+  :html "<p>alpha<br><br>beta</p>"}
+
+ {:id :inline/span-display-block
+  :group :inline
+  :html "<p>x <span style=\"display: block\">y</span> z</p>"}
+
+ {:id :inline/em-strong-code
+  :group :inline
+  :html "<p>use <em>em</em> <strong>st</strong> <code>cd</code> ok</p>"}
+
+ {:id :inline/mixed-font-size
+  :group :inline
+  :html "<p>small <span style=\"font-size: 24px\">big</span> tail</p>"}
+
+ {:id :inline/label-and-text
+  :group :inline
+  :html "<p>pre <label>lab</label> post</p>"}
+
+ {:id :inline/img-is-inline-level
+  :group :inline-replaced
+  :html "<p>before <img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"10\" height=\"10\"> after</p>"}
+
+ {:id :inline/input-is-inline-level
+  :group :inline-replaced
+  :html "<p>name <input value=\"v\"> end</p>"}
+
+ {:id :inline/button-is-inline-level
+  :group :inline-replaced
+  :html "<p>hit <button>go</button> now</p>"}
+
+ {:id :block/divs-stack
+  :group :block
+  :html "<div>one</div><div>two</div><div>three</div>"}
+
+ {:id :block/paragraph-then-heading
+  :group :block
+  :html "<p>para</p><h1>head</h1><p>tail</p>"}
+
+ {:id :block/nested-block-in-inline
+  :group :block
+  :html "<p>text <span>a <div>b</div> c</span> end</p>"}
+
+ {:id :block/pre-preserves-newlines
+  :group :block
+  :html "<pre>l1\nl2\nl3</pre>"}
+
+ {:id :flex/row-items-share-a-line
+  :group :flex
+  :html "<div style=\"display: flex\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :flex/column-items-stack
+  :group :flex
+  :html "<div style=\"display: flex; flex-direction: column\"><div>a</div><div>b</div></div>"}
+
+ {:id :flex/text-in-flex-items
+  :group :flex
+  :html "<div style=\"display: flex; gap: 8px\"><span>one</span><span>two</span></div>"}
+
+ {:id :grid/two-columns
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 100px 100px\"><div>a</div><div>b</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/single-column
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 100px\"><div>a</div><div>b</div></div>"}
+
+ {:id :position/absolute-leaves-flow
+  :group :position
+  :html "<div style=\"position: relative\"><div style=\"position: absolute; left: 300px; top: 0\">abs</div><div>flow1</div><div>flow2</div></div>"}
+
+ {:id :position/relative-does-not-move-siblings
+  :group :position
+  :html "<div><div style=\"position: relative; top: 4px\">shifted</div><div>after</div></div>"}
+
+ {:id :generated/before-content-joins-line
+  :group :generated
+  :oracle/blind true
+  :html "<ul><li>one</li><li>two</li></ul>"
+  :css "li::before { content: \"* \" }"}
+
+ {:id :generated/list-markers
+  :group :generated
+  :oracle/blind true
+  :html "<ul><li>one</li><li>two</li></ul>"}
+
+ {:id :float/left-float-shares-line
+  :group :float
+  :html "<div><span style=\"float: left\">L</span><span>next to it</span></div>"}
+
+ {:id :table/cells-share-a-row
+  :group :table
+  :html "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>"}
+
+ {:id :visibility/display-none-is-not-rendered
+  :group :visibility
+  :html "<p>keep <span style=\"display: none\">gone</span> this</p>"}
+
+ {:id :visibility/hidden-reserves-space
+  :group :visibility
+  :html "<div><div style=\"visibility: hidden\">hid</div><div>below</div></div>"}
+
+ {:id :text/align-center-line
+  :group :text
+  :html "<p style=\"text-align: center\">a <b>b</b></p>"}
+
+ {:id :text/uppercase-transform
+  :group :text
+  :html "<p>go <span style=\"text-transform: uppercase\">loud</span> ok</p>"}
+
+ {:id :text/white-space-nowrap
+  :group :text
+  :html "<p style=\"white-space: nowrap\">one two three</p>"}]
