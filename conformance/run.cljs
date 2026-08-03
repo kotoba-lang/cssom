@@ -53,6 +53,7 @@
         "--width" (recur (drop 2 args) (assoc out :width (js/parseInt (second args) 10)))
         "--ledger" (recur (drop 2 args) (assoc out :ledger (second args)))
         "--only" (recur (drop 2 args) (assoc out :only (second args)))
+        "--debug-geometry" (recur (rest args) (assoc out :debug-geometry true))
         (recur (rest args) out))
       out)))
 
@@ -119,7 +120,22 @@
           words.push({ text: m[0], top: r.top, bottom: r.bottom, left: r.left });
         }
       }
-      out[root.id] = words;
+      // The GEOMETRY axis: every element's own box, relative to the case
+      // root. The line axis answers 'what ended up on which line'; this
+      // answers 'how big is each box and where does it sit' -- the
+      // question that hid colspan (a spanning cell is alone on its row
+      // either way) and a button label's vertical centering.
+      var boxes = [];
+      var els = root.querySelectorAll('*');
+      var rootRect = root.getBoundingClientRect();
+      for (var j = 0; j < els.length; j++) {
+        var el = els[j];
+        var r = el.getBoundingClientRect();
+        boxes.push({ tag: el.tagName.toLowerCase(),
+                     x: r.left - rootRect.left, y: r.top - rootRect.top,
+                     w: r.width, h: r.height });
+      }
+      out[root.id] = { words: words, boxes: boxes };
     }
     // The oracle's OWN character width, measured rather than guessed: the
     // page is monospace, so one Range over a known-length string gives the
@@ -277,6 +293,40 @@
 
 ;; ---- the cssom side ----
 
+(defn- engine-ops
+  "One layout pass through the real pipeline: htmldom parse -> cssom.core
+   cascade -> cssom.layout draw-ops, at the harness width.
+
+   Two theme settings, both of which remove something the comparison
+   cannot legitimately judge rather than helping the engine:
+
+   - `:measure-text` is fed the ORACLE's own measured per-character
+     advance (see the measurement script's `__char_width__` probe) through
+     the engine's existing host hook. Without it every wrap point differs
+     by the constant ratio between this engine's 0.6-em approximation and
+     the real font, and the corpus could only hold text short enough never
+     to wrap. Where to BREAK is still entirely the engine's decision.
+   - `:padding`/`:gap` are this engine's own theme (every box gets a 4px
+     inset, every row a 4px gap) -- a host styling choice, not CSS. Left
+     at their defaults they narrow the content width by 16px per nested
+     box, scoring the theme instead of the layout."
+  [{:keys [html css]} width char-w]
+  (let [doc (html/parse-into-document (str "<div id=\"root\">" html "</div>"))
+        ;; apply-cascade runs even with no author CSS: it is also what folds
+        ;; a `style="..."` attribute's :style-inline into the :style/* attrs
+        ;; cssom.layout actually reads, so skipping it would silently drop
+        ;; every inline style in the corpus.
+        doc (css/apply-cascade doc (css/parse-rules (or css "")))
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc)
+                     {:width width
+                      :theme {:padding 0
+                              :gap 0
+                              :measure-text (fn [text font-size & _]
+                                              (* (count (str text))
+                                                 char-w
+                                                 (/ (or font-size 14) 14)))}})))
+
 (defn- engine-lines
   "cssom.layout's own answer, in the same shape the oracle's is read into.
 
@@ -297,30 +347,7 @@
    `y + font-size`, the baseline). Splitting per word also means a wrapped
    line compares correctly rather than as one blob."
   [{:keys [html css]} width char-w]
-  (let [doc (html/parse-into-document (str "<div id=\"root\">" html "</div>"))
-        ;; apply-cascade runs even with no author CSS: it is also what folds
-        ;; a `style="..."` attribute's :style-inline into the :style/* attrs
-        ;; cssom.layout actually reads, so skipping it would silently drop
-        ;; every inline style in the corpus.
-        doc (css/apply-cascade doc (css/parse-rules (or css "")))
-        [_ doc] (dom/consume-ops doc)
-        ops (layout/draw-ops (dom/tree doc)
-                             {:width width
-                              ;; :padding/:gap are this ENGINE'S own theme --
-                              ;; a host styling choice (every box gets a 4px
-                              ;; inset and rows get a 4px gap), not CSS. Left
-                              ;; at their defaults they narrow the content
-                              ;; width by 16px per nested box, so every
-                              ;; wrapping case would be scored on the theme
-                              ;; rather than on where the engine decides to
-                              ;; break. Zeroed here so the comparison is
-                              ;; layout-vs-layout.
-                              :theme {:padding 0
-                                      :gap 0
-                                      :measure-text (fn [text font-size & _]
-                                                      (* (count (str text))
-                                                         char-w
-                                                         (/ (or font-size 14) 14)))}})
+  (let [ops (engine-ops {:html html :css css} width char-w)
         ;; Mirror of the oracle script's own `closest(...)` skip: a form
         ;; control's or replaced box's INNER text is its own formatting
         ;; context. Done geometrically here because draw-ops carry no
@@ -353,12 +380,80 @@
                          out)))))
          cluster-lines)))
 
+
 ;; ---- comparison ----
 
-(defn- compare-case [oracle-words width char-w c]
-  (let [lines (cluster-lines oracle-words)
-        mine (try (engine-lines c width char-w)
-                  (catch :default e {:error (ex-message e)}))]
+(def ^:private geometry-tolerance-px
+  "How far a box may differ before the geometry axis calls it a mismatch.
+   Not zero: both sides now wrap against the SAME measured character
+   advance, so text-derived widths land within a pixel, but sub-pixel
+   rounding is real on the browser side (fractional device pixels) and this
+   engine works in whole pixels throughout."
+  2)
+
+(defn- geometry-agreement
+  "Matches each element box between the two sides by tag and occurrence
+   order -- both sides walk the same document, so the Nth `<td>` on one
+   side is the Nth `<td>` on the other -- and reports how many agree
+   within geometry-tolerance-px on all four of x/y/w/h.
+
+   Matching by tag+occurrence rather than by injected ids keeps the corpus
+   readable (cases stay plain HTML a person can eyeball) at the cost of
+   being wrong if one side drops an element entirely; that shows up as a
+   count mismatch, which is reported rather than silently zipped away."
+  [oracle-boxes engine-boxes]
+  (let [by-tag (fn [boxes] (group-by :tag boxes))
+        o (by-tag oracle-boxes)
+        e (by-tag engine-boxes)
+        tags (distinct (concat (keys o) (keys e)))
+        close? (fn [a b] (<= (abs (- (or a 0) (or b 0))) geometry-tolerance-px))]
+    (reduce (fn [acc tag]
+              (let [os (get o tag []) es (get e tag [])
+                    pairs (map vector os es)
+                    agree (count (filter (fn [[ob eb]]
+                                           (and (close? (:x ob) (:x eb))
+                                                (close? (:y ob) (:y eb))
+                                                (close? (:w ob) (:w eb))
+                                                (close? (:h ob) (:h eb))))
+                                         pairs))]
+                (-> acc
+                    (update :total + (max (count os) (count es)))
+                    (update :agree + agree)
+                    (update :by-tag update tag (fnil (fn [[a t]] [(+ a agree) (+ t (max (count os) (count es)))]) [0 0]))
+                    (cond-> (not= (count os) (count es))
+                      (update :missing conj tag)))))
+            {:total 0 :agree 0 :missing [] :by-tag {}}
+            tags)))
+
+(defn- engine-boxes
+  "Element boxes from the engine's own `:node` draw-ops, relative to the
+   root box, in the same shape the oracle reports."
+  [ops]
+  (let [nodes (filterv #(= :node (:draw/op %)) ops)
+        root (first (filter #(= :div (:tag %)) nodes))
+        rx (:x root 0) ry (:y root 0)]
+    (->> nodes
+         (remove #(identical? % root))
+         (remove #(= :document (:tag %)))
+         (mapv (fn [op] {:tag (name (:tag op))
+                         :x (- (:x op) rx) :y (- (:y op) ry)
+                         :w (:w op) :h (:h op)})))))
+
+(defn- engine-render
+  "Both axes from one layout pass: the line structure and the element
+   boxes."
+  [c width char-w]
+  {:lines (engine-lines c width char-w)
+   :boxes (engine-boxes (engine-ops c width char-w))})
+
+(defn- compare-case [oracle-data width char-w c]
+  (let [oracle-words (:words oracle-data)
+        lines (cluster-lines oracle-words)
+        rendered (try (engine-render c width char-w)
+                      (catch :default e {:error (ex-message e)}))
+        mine (if (:error rendered) rendered (:lines rendered))
+        geo (when-not (:error rendered)
+              (geometry-agreement (:boxes oracle-data) (:boxes rendered)))]
     (cond
       (map? mine)
       {:id (:id c) :group (:group c) :status :error :detail (:error mine)}
@@ -370,14 +465,16 @@
       ;; through no fault of either. Marked in the corpus, excluded from
       ;; the score, and printed, rather than silently counted as a failure.
       (:oracle/blind c)
-      {:id (:id c) :group (:group c) :status :unscorable
+      {:id (:id c) :group (:group c) :status :unscorable :geo geo
        :detail "oracle cannot see generated content" :expected lines :actual mine}
 
       (= lines mine)
-      {:id (:id c) :group (:group c) :status :pass}
+      {:id (:id c) :group (:group c) :status :pass :geo geo
+       :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)}
 
       :else
-      {:id (:id c) :group (:group c) :status :fail :expected lines :actual mine})))
+      {:id (:id c) :group (:group c) :status :fail :geo geo
+       :expected lines :actual mine})))
 
 ;; ---- report ----
 
@@ -414,6 +511,11 @@
                     (sort-by key)
                     (mapv (fn [[g rs]]
                             [g (count (filter #(= :pass (:status %)) rs)) (count rs)])))]
+  (when (:debug-geometry (parse-args *command-line-args*))
+    (doseq [r results :when (seq (:oracle-boxes r))]
+      (println "GEO" (:id r))
+      (println "  oracle:" (pr-str (mapv (juxt :tag :x :y :w :h) (:oracle-boxes r))))
+      (println "  engine:" (pr-str (mapv (juxt :tag :x :y :w :h) (:engine-boxes r))))))
   (doseq [r results]
     (println (str (pad-right (name (:status r)) 16)
                   (pad-right (str (:id r)) 48)
@@ -426,6 +528,26 @@
     (println (str "  " (pad-right (name g) 20) (pad-left p 2) "/" (pad-left t 2)
                   (pad-left (pct p t) 5) "%")))
   (println)
+  (let [geos (keep :geo results)
+        boxes-total (reduce + 0 (map :total geos))
+        boxes-agree (reduce + 0 (map :agree geos))
+        clean (count (filter #(and (:geo %) (pos? (:total (:geo %)))
+                                   (= (:total (:geo %)) (:agree (:geo %))))
+                             results))
+        with-boxes (count (filter #(pos? (:total (:geo % {:total 0}))) results))]
+    (println (str "GEOMETRY  " boxes-agree "/" boxes-total " element boxes agree within "
+                  geometry-tolerance-px "px  (" (pct boxes-agree boxes-total) "%)"))
+    (println (str "          " clean "/" with-boxes " cases with every box in agreement"))
+    (let [per-tag (reduce (fn [acc g]
+                            (reduce (fn [acc [tag [a t]]]
+                                      (update acc tag (fnil (fn [[a0 t0]] [(+ a0 a) (+ t0 t)]) [0 0])))
+                                    acc (:by-tag g)))
+                          {} geos)]
+      (println "          worst tags (agreeing/total):")
+      (doseq [[tag [a t]] (->> per-tag (sort-by (fn [[_ [a t]]] (- a t))) (take 10))
+              :when (< a t)]
+        (println (str "            " (pad-right tag 12) a "/" t))))
+    (println))
   (println (str "TOTAL " (count passed) "/" (count scorable) " = " (pct (count passed) (count scorable)) "%"
                 (let [u (count (filter #(= :unscorable (:status %)) results))]
                   (when (pos? u) (str "   (" u " unscorable, excluded)")))))
@@ -437,6 +559,8 @@
                  :conformance/pct (pct (count passed) (count scorable))
                  :conformance/unscorable (vec (sort (map :id (filter #(= :unscorable (:status %)) results))))
                  :conformance/by-group (into {} (map (fn [[g p t]] [g [p t]]) by-group))
-                 :conformance/failing (vec (sort (map :id (remove #(= :pass (:status %)) scorable))))}]
+                 :conformance/failing (vec (sort (map :id (remove #(= :pass (:status %)) scorable))))
+                 :conformance/geometry-boxes-agree (reduce + 0 (map :agree (keep :geo results)))
+                 :conformance/geometry-boxes-total (reduce + 0 (map :total (keep :geo results)))}]
       (fs/appendFileSync ledger (str (pr-str entry) "\n"))
       (println (str "\nappended to " ledger)))))

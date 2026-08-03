@@ -5255,3 +5255,62 @@
     (is (= ["go" "now" "x"] (mapv :text t)))
     (is (apply = (mapv :y t))
         "the cell's own inline run shares the line, and so does the next cell")))
+
+(deftest ua-stylesheet-defaults-apply-without-author-css
+  ;; This engine had NO user-agent stylesheet: <b> was not bold, <em> was
+  ;; not italic, and every heading rendered at body size. Authors never
+  ;; write those rules -- the UA does -- so the whole class was invisible
+  ;; until the conformance harness gained a geometry axis.
+  (let [t (text-draw-ops (inline-ops ["plain " [:b {} "strong"]]))]
+    (is (= [nil "bold"] (mapv :font-weight t))
+        "<b> is bold with no author CSS at all"))
+  (let [t (text-draw-ops (inline-ops ["plain " [:em {} "stressed"]]))]
+    (is (= [nil "italic"] (mapv :font-style t))))
+  (let [[h1 doc] (dom/create-element dom/empty-document :h1)
+        doc (dom/set-root doc h1)
+        [t doc] (dom/create-text-node doc "title")
+        doc (dom/append-child doc h1 t)
+        [_ doc] (dom/consume-ops doc)
+        op (first (text-draw-ops (layout/draw-ops (dom/tree doc) {:width 400})))]
+    (is (= 28 (:font-size op)) "h1 is 2em of the theme's base size")
+    (is (= "bold" (:font-weight op)))))
+
+(deftest normal-line-height-follows-font-size
+  ;; `line-height: normal` is ~1.2x the font size in every real browser,
+  ;; not a fixed pixel count. With the theme's flat 20px default an <h1> at
+  ;; 28px got a 20px line box, so its text overflowed and the NEXT block
+  ;; painted on top of it -- caught by the harness the same hour heading
+  ;; sizes landed.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build-inline-children doc root [[:h1 {} "title"] [:p {} "body"]])
+        [_ doc] (dom/consume-ops doc)
+        t (text-draw-ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}}))]
+    (is (= ["title" "body"] (mapv :text t)))
+    (is (>= (- (:y (second t)) (:y (first t))) 28)
+        "the paragraph clears the heading's own line box rather than
+         overlapping it")))
+
+(deftest table-uses-border-spacing-and-cell-padding-defaults
+  ;; Measured against Chrome: `border-spacing: 2px` (cells separated by it
+  ;; AND the table inset by it on all four sides) and `td { padding: 1px }`
+  ;; are UA defaults. Their absence was the single reason table geometry
+  ;; never matched -- a two-cell table reported 49x20 here against the
+  ;; browser's 59x26.
+  (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {} "b"]]])
+        table (first (filter #(and (= :node (:draw/op %)) (= :table (:tag %))) ops))
+        cells (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) ops)]
+    (is (= 2 (:x (first cells))) "first cell inset by the border-spacing")
+    (is (= 2 (:y (first cells))))
+    (is (= (+ 2 (:w (first cells)) 2) (:x (second cells)))
+        "and cells separated by it")
+    (is (= (+ (:x (second cells)) (:w (second cells)) 2) (:w table))
+        "with the table closing on a trailing spacing too")))
+
+(deftest a-table-shrink-wraps-to-its-columns
+  ;; Real CSS: a table with `width: auto` is shrink-to-fit, not
+  ;; fill-the-container the way an ordinary block is.
+  (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {} "b"]]])
+        table (first (filter #(and (= :node (:draw/op %)) (= :table (:tag %))) ops))]
+    (is (< (:w table) 100)
+        "narrow content means a narrow table, not a 400px-wide one")))

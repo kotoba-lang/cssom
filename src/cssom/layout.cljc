@@ -681,6 +681,33 @@
       (when (and v (re-matches #"\d+" (str v)))
         (parse-int v nil)))))
 
+(def ^:private ua-font-weight
+  "The UA stylesheet's own `font-weight: bold` set. This engine has no user-
+   agent stylesheet at all, which the conformance harness's geometry axis
+   made impossible to ignore: `<b>`, `<strong>`, `<th>` and every heading
+   rendered in NORMAL weight, because nothing anywhere said otherwise.
+   Authors do not write `b { font-weight: bold }` -- the UA does."
+  {:b "bold" :strong "bold" :th "bold"
+   :h1 "bold" :h2 "bold" :h3 "bold" :h4 "bold" :h5 "bold" :h6 "bold"})
+
+(def ^:private ua-padding
+  "UA-stylesheet padding defaults, in the uniform form this engine's box
+   model can express. Real Chrome ships `td, th { padding: 1px }`; without
+   it every table cell was 2px short in each axis, which the conformance
+   harness's geometry axis reported as td 6/29."
+  {:td 1 :th 1})
+
+(def ^:private ua-font-style
+  {:em "italic" :i "italic" :cite "italic" :dfn "italic" :var "italic" :address "italic"})
+
+(def ^:private ua-font-scale
+  "Heading font sizes from the HTML5 UA stylesheet, as multiples of the
+   base font size (`h1 { font-size: 2em }` and so on down). Resolved
+   against the THEME's base size rather than the inherited size -- an
+   honest simplification: a heading nested inside larger text will not
+   compound, which real `em` would."
+  {:h1 2.0 :h2 1.5 :h3 1.17 :h4 1.0 :h5 0.83 :h6 0.67 :small 0.83 :sub 0.83 :sup 0.83})
+
 (defn- node-style [node theme]
   ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
   ;; UA-stylesheet rule, not !important -- any author :display the cascade
@@ -700,7 +727,15 @@
    :min-height (style node :min-height)
    :max-height (style node :max-height)
    :box-sizing (or (style node :box-sizing) "content-box")
-   :padding (parse-int (style node :padding) (:padding theme))
+   :padding (parse-int (style node :padding)
+                       (get ua-padding (:tag node) (:padding theme)))
+   ;; Real CSS's `border-spacing` defaults to 2px in every browser: cells
+   ;; are separated by it AND the table is inset by it on all four sides.
+   ;; Measured against Chrome, its absence was the single reason table/tr
+   ;; geometry never matched -- a 2-cell table reported 49x20 here against
+   ;; the browser's 59x26, an exactly-4px-per-axis difference plus the cell
+   ;; padding above.
+   :border-spacing (parse-int (style node :border-spacing) 2)
    :margin (parse-int (style node :margin) 0)
    :border-width (parse-int (style node :border-width) 0)
    :border-color (or (style node :border-color) "#000000")
@@ -741,10 +776,12 @@
    :outline-offset (parse-int (style node :outline-offset) 0)
    :background (or (style node :background) (style node :background-color))
    :color (style node :color)
-   :font-size (style node :font-size)
+   :font-size (or (style node :font-size)
+                  (when-let [scale (get ua-font-scale (:tag node))]
+                    (long (* scale (:font-size theme)))))
    :line-height (style node :line-height)
-   :font-weight (style node :font-weight)
-   :font-style (style node :font-style)
+   :font-weight (or (style node :font-weight) (get ua-font-weight (:tag node)))
+   :font-style (or (style node :font-style) (get ua-font-style (:tag node)))
    :font-family (style node :font-family)
    ;; parse-int'd for the exact same reason box-shadow-x/y/blur/spread
    ;; above just were -- layout-text's own inline shadow-op does raw
@@ -934,12 +971,23 @@
    reproduction: `line-height: 60`/`line-height: 100`/no declaration at
    all produced the identical box height."
   [raw font-size theme-default]
-  (cond
-    (number? raw) (long raw)
-    (string? raw) (if-let [multiplier (parse-dbl raw nil)]
-                    (long (* multiplier font-size))
-                    theme-default)
-    :else theme-default))
+  (let [;; CSS `line-height: normal` is not a fixed number of pixels: it is
+        ;; the font's own natural leading, ~1.2x the font size in every real
+        ;; browser. This engine used the theme's flat pixel default for
+        ;; every element regardless of size, which is fine while everything
+        ;; is 14px and silently broken the moment anything is not: with UA
+        ;; heading sizes in place an `<h1>` at 28px got a 20px line box, so
+        ;; its own text overflowed its box and the NEXT block painted on top
+        ;; of it -- caught by the conformance harness the same hour the
+        ;; heading sizes landed (an `<h1>` and the paragraph after it were
+        ;; clustered onto one line).
+        normal (max (or theme-default 0) (long (* 1.2 font-size)))]
+    (cond
+      (number? raw) (long raw)
+      (string? raw) (if-let [multiplier (parse-dbl raw nil)]
+                      (long (* multiplier font-size))
+                      normal)
+      :else normal)))
 
 (defn- content-inset
   [st]
@@ -2797,7 +2845,7 @@
         text-inherited (assoc inherited
                               :color (or (:color st) (:color inherited))
                               :font-size font-size
-                              :line-height (resolve-line-height (:line-height st) font-size (:line-height inherited))
+                              :line-height (resolve-line-height (:line-height st) font-size (or (:line-height inherited) (:line-height theme)))
                               :font-weight (or (:font-weight st) (:font-weight inherited))
                               :font-style (or (:font-style st) (:font-style inherited))
                               :font-family (or (:font-family st) (:font-family inherited))
@@ -2984,19 +3032,26 @@
 (def ^:private table-cell-tags #{:td :th})
 
 (defn- table-rows
-  "Every `<tr>` under `node`, in document order, flattening the
-   `<thead>`/`<tbody>`/`<tfoot>` wrappers. Row groups are flattened rather
-   than laid out as boxes of their own: this engine models a table as rows
-   of cells, and a row group contributes no geometry a reader can see
-   unless it is styled, which is a deliberate scope-cut recorded in
-   layout-table."
+  "Every `<tr>` under `node`, in document order, as `{:row <tr> :group
+   <thead|tbody|tfoot or nil>}`.
+
+   The rows are flattened out of their `<thead>`/`<tbody>`/`<tfoot>`
+   wrappers -- a real HTML parser INSERTS `<tbody>` even when the author
+   never wrote one, so looking only at direct `<tr>` children finds no rows
+   at all on most real markup -- but each row REMEMBERS its group, so
+   layout-table can still emit a box for the group itself. A row group with
+   no box of its own was measurable: the geometry axis of the conformance
+   harness reported `tbody 0/9`, because the browser has a box there and
+   this engine had nothing to match it with."
   [node]
   (vec (mapcat (fn [child]
                  (cond
                    (not (map? child)) nil
-                   (= :tr (:tag child)) [child]
+                   (= :tr (:tag child)) [{:row child :group nil}]
                    (contains? table-row-group-tags (:tag child))
-                   (filter #(and (map? %) (= :tr (:tag %))) (:children child))
+                   (for [r (:children child)
+                         :when (and (map? r) (= :tr (:tag r)))]
+                     {:row r :group child})
                    :else nil))
                (:children node))))
 
@@ -3018,7 +3073,8 @@
    answers for rather than pretending (a `colspan` cell is simply placed in
    one column), and each is listed in layout-table's own docstring."
   [theme content-w opacity inherited rows]
-  (let [n-cols (apply max 0 (map (comp count table-cells) rows))
+  (let [rows (mapv :row rows)
+        n-cols (apply max 0 (map (comp count table-cells) rows))
         natural (vec (for [col (range n-cols)]
                        (apply max 1
                               (for [row rows
@@ -3051,21 +3107,35 @@
    cases scored 0/2 -- so this is a large step from nothing, not a
    complete table implementation."
   [theme x y avail-width opacity inherited st node]
-  (let [w (resolve-width st avail-width)
-        inset (content-inset st)
+  (let [inset (content-inset st)
+        avail-content (max 0 (- (resolve-width st avail-width) (* 2 inset)))
+        caption (first (filter #(and (map? %) (= :caption (:tag %))) (:children node)))
+        rows (table-rows node)
+        widths (table-column-widths theme avail-content opacity inherited rows)
+        ;; Real CSS: a table with `width: auto` is SHRINK-TO-FIT -- it is as
+        ;; wide as its columns need, not as wide as its container. Filling
+        ;; the container (what resolve-width does, correctly, for an
+        ;; ordinary block) put every `<table>`, `<tr>` and row-group box in
+        ;; the wrong place at once: the geometry axis reported table 0/9 and
+        ;; tr 0/15 purely because of this one decision.
+        spacing (:border-spacing st)
+        n-cols (count widths)
+        natural-w (+ (reduce + 0 widths) (* spacing (inc n-cols)))
+        w (if (:width st)
+            (resolve-width st avail-width)
+            (min (resolve-width st avail-width) (+ natural-w (* 2 inset))))
         content-x (+ x (:margin st) inset)
         content-y (+ y (:margin st) inset)
         content-w (max 0 (- w (* 2 inset)))
-        caption (first (filter #(and (map? %) (= :caption (:tag %))) (:children node)))
-        rows (table-rows node)
-        widths (table-column-widths theme content-w opacity inherited rows)
-        col-offsets (vec (reductions + 0 widths))
+        col-offsets (vec (reductions (fn [acc cw] (+ acc cw spacing))
+                                     spacing
+                                     widths))
         caption-layout (when caption
                          (layout-node theme content-x content-y content-w opacity inherited caption))
-        rows-y0 (+ content-y (if caption-layout (:h (:box caption-layout)) 0))
-        {:keys [draws height]}
+        rows-y0 (+ content-y spacing (if caption-layout (:h (:box caption-layout)) 0))
+        {:keys [draws height groups]}
         (reduce
-         (fn [{:keys [draws height]} row]
+         (fn [{:keys [draws height groups]} {:keys [row group]}]
            (let [cells (table-cells row)
                  laid (vec (map-indexed
                             (fn [i cell]
@@ -3079,17 +3149,37 @@
                  row-h (apply max 0 (map :h laid))
                  rst (node-style row theme)
                  row-op (merge {:draw/op :node :id (:node/id row) :tag :tr
-                                :x content-x :y (+ rows-y0 height) :w content-w :h row-h
+                                :x (+ content-x spacing) :y (+ rows-y0 height)
+                                :w (max 0 (- content-w (* 2 spacing))) :h row-h
                                 :class (attr row :class) :listeners (listeners row)
                                 :opacity opacity}
                                (style-passthrough rst))
                  row-bg (when-let [bg (:background rst)]
-                          [{:draw/op :rect :x content-x :y (+ rows-y0 height) :w content-w :h row-h
+                          [{:draw/op :rect :x (+ content-x spacing) :y (+ rows-y0 height)
+                            :w (max 0 (- content-w (* 2 spacing))) :h row-h
                             :color bg :tag :tr :opacity opacity}])]
              {:draws (vec (concat draws row-bg [row-op] (mapcat :draw laid)))
-              :height (+ height row-h)}))
-         {:draws [] :height 0}
+              :height (+ height row-h spacing)
+              ;; A row group's box is the union of its rows' boxes, which is
+              ;; what a browser reports for <thead>/<tbody>/<tfoot>.
+              ;; the group's own box is the union of its rows PLUS the
+              ;; border-spacing between them (but not a trailing one, which
+              ;; the emit step below subtracts back off)
+              :groups (if group
+                        (update groups group
+                                (fn [g] {:y (min (:y g (+ rows-y0 height)) (+ rows-y0 height))
+                                         :h (+ (:h g 0) row-h spacing)}))
+                        groups)}))
+         {:draws [] :height 0 :groups {}}
          rows)
+        group-ops (mapv (fn [[g {:keys [y h]}]]
+                          (merge {:draw/op :node :id (:node/id g) :tag (:tag g)
+                                  :x (+ content-x spacing) :y y
+                                  :w (max 0 (- content-w (* 2 spacing))) :h (max 0 (- h spacing))
+                                  :class (attr g :class) :listeners (listeners g)
+                                  :opacity opacity}
+                                 (style-passthrough (node-style g theme))))
+                        groups)
         table-h (clamp-height st (+ (- rows-y0 y) height inset))
         table-w w]
     {:box {:x x :y y :w table-w :h table-h}
@@ -3105,6 +3195,7 @@
                           :opacity opacity}
                          (style-passthrough st))]
                  (:draw caption-layout)
+                 group-ops
                  draws))}))
 
 (defn- layout-grid
@@ -4315,7 +4406,7 @@
      (let [gstyle (:generated/style node)
            color (or (:color gstyle) (:color inherited))
            font-size (parse-int (:font-size gstyle) (:font-size inherited))
-           line-height (resolve-line-height (:line-height gstyle) font-size (:line-height inherited))
+           line-height (resolve-line-height (:line-height gstyle) font-size (or (:line-height inherited) (:line-height theme)))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
            font-style (or (:font-style gstyle) (:font-style inherited))
            font-family (or (:font-family gstyle) (:font-family inherited))
@@ -4369,7 +4460,7 @@
                           (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
                color (or (:color st) (:color inherited))
                font-size (parse-int (:font-size st) (:font-size inherited))
-               line-height (resolve-line-height (:line-height st) font-size (:line-height inherited))
+               line-height (resolve-line-height (:line-height st) font-size (or (:line-height inherited) (:line-height theme)))
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
                font-family (or (:font-family st) (:font-family inherited))

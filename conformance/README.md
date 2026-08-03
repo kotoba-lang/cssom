@@ -31,9 +31,24 @@ whitespace-normalized and case-folded (`text-transform` genuinely rewrites
 what this engine emits, while a browser upper-cases at paint time — both
 are correct).
 
+## Two axes
+
+**Line structure** — what text landed on which line, in what order. This is
+what the harness measured first, and it saturated at 93%.
+
+**Geometry** (added 2026-08-04) — every element's own box, matched between
+the two sides by tag and occurrence order and compared within 2px on all of
+x/y/w/h. It exists because the line axis is blind to whole classes of
+divergence: a `colspan` cell is alone on its row either way, a button's
+label sits in the same line box whether it is centered vertically or not,
+and an `<h1>` that renders at body size still lands on its own line. The
+first geometry run scored **47%** on a corpus the line axis scored 93% on,
+and its per-tag breakdown pointed straight at the causes.
+
 ## Result — 2026-08-04
 
-**91/98 = 93%** (4 cases unscorable, see below) on a corpus that has grown
+**Line structure: 91/98 = 93%. Geometry: 183/325 element boxes (56%), 37/102
+cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
@@ -63,7 +78,41 @@ point inside a nested inline, and CSS-driven `white-space: pre-wrap`/
 `pre-line` (the parser collapses newlines before layout ever sees them —
 it cannot see CSS).
 
-### Known divergence this metric no longer sees
+### What the geometry axis found in its first hour
+
+- A table filled its container instead of shrink-wrapping to its columns
+  (`width: auto` on a table is shrink-to-fit in real CSS). One decision put
+  every `<table>`, `<tr>` and row-group box in the wrong place: table 0/9,
+  tr 0/15.
+- Row groups had no box at all — `<thead>`/`<tbody>`/`<tfoot>` were
+  flattened away, so `tbody` scored 0/9 against a browser that has a box
+  there.
+- No UA stylesheet whatsoever: `<b>` was not bold, `<em>` was not italic,
+  every heading rendered at body size. Authors never write those rules.
+- `border-spacing: 2px` and `td { padding: 1px }` — Chrome UA defaults —
+  were absent, which is exactly why a two-cell table measured 49x20 here
+  against the browser's 59x26.
+- `line-height: normal` was a flat theme constant rather than ~1.2x the
+  font size, so an `<h1>` at 28px got a 20px line box and the next block
+  painted on top of it. This one only became visible once headings had
+  their UA size.
+
+After fixing those: geometry 47% → 56%, td 6/29 → 21/29, tr 0/15 → 9/15,
+table 0/9 → 5/9, tbody out of the worst-tag list entirely.
+
+### Still open on the geometry axis
+
+`p` 40/54 and `li` 0/8 are one shared cause: this engine's box model has a
+single uniform `:margin`/`:padding`, so the UA stylesheet's vertical-only
+`p { margin: 1em 0 }` and horizontal-only `ul { padding-left: 40px }`
+cannot be expressed at all — applying them uniformly would indent
+horizontally too. Per-side box model is the next structural gap.
+
+`span`/`a`/`b` (7/22, 3/12, 6/11) are the inline box's own height: this
+engine reports the LINE box height for an inline element, where a browser
+reports the font's content area (~1.15em).
+
+### Known divergence the LINE axis does not see
 
 A control's INNER text (a `<button>`'s label, an `<input>`'s value) is
 excluded from the line comparison on both sides, because it belongs to that
