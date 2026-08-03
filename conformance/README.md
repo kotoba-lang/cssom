@@ -47,7 +47,7 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 92/98 = 94%. Geometry: 249/325 element boxes (77%), 63/102
+**Line structure: 92/98 = 94%. Geometry: 278/325 element boxes (86%), 71/102
 cases with every box in agreement.** The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
@@ -207,6 +207,29 @@ With per-dimension deltas attributed to case ids, three more fell out:
   boxes**, so a larger inline inside a declared `line-height: 20px` grew
   the line box to 1.2 × its own size instead of overflowing it the way a
   browser does.
+
+### Round four
+
+- **`justify-content` had no free space to distribute.** The main-axis size
+  it centres within was the sum of the items, not the container's content
+  width, so `justify-content: center` pinned every row hard against the
+  left edge (items at x=0,7 where the browser centres them at 393,400).
+- **An absolutely positioned box with `width: auto` is shrink-to-fit**, not
+  fill-the-container: a corner-pinned label measured 800px against the
+  browser's 21, covering the whole row it was pinned over.
+- **Mixed inline content has a max-content width.** `go <b>now</b>` in a
+  table cell fell back to the container width, so a two-cell table filled
+  800px where a browser shrink-wraps to 72. Computed by reusing the inline
+  fragments and tokenizer, so whitespace collapses exactly as it will when
+  the run is really laid out.
+- Harness: **italic is a third face.** This system's `monospace` is
+  fixed-pitch in regular but proportional in BOTH bold and italic, so an
+  `<em>` measured 7.0px/char here against the browser's 10.28.
+- Harness: **boxes are matched by nearest, not by index.** The browser
+  lists elements in document order while this engine emits draw-ops in
+  PAINT order, so an absolutely positioned box (painted last) lined up
+  against the wrong sibling and reported two mismatches where the boxes
+  were identical.
 
 ### Still open on the geometry axis
 

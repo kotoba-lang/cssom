@@ -1343,12 +1343,15 @@
     (is (<= (:w button-rect) 200)
         "a long label must still clamp to the actually-available main-axis space, not overflow un-shrunk")))
 
-(deftest flex-item-with-nested-element-content-falls-back-to-filling-available-width
-  ;; Honest scope-cut (documented on flex-item-main-width): only a leaf
-  ;; element wrapping EXACTLY one text child gets real shrink-to-fit
-  ;; sizing -- a flex item with more complex nested content (here, an
-  ;; <i> icon plus a text sibling) falls back to the pre-existing fill-
-  ;; available-width behavior rather than a half-correct guess.
+(deftest flex-item-with-mixed-inline-content-shrink-wraps-to-its-max-content
+  ;; This test used to pin the OPPOSITE ("falls back to filling available
+  ;; width"), a scope-cut that only leaf-single-text items got real
+  ;; shrink-to-fit. Mixed inline content has a real max-content width too --
+  ;; everything on one line -- computed by reusing the inline fragments and
+  ;; tokenizer, so whitespace collapses exactly as it will when the run is
+  ;; really laid out. The geometry axis made the cut untenable: a table
+  ;; column holding one `<b>` filled 800px where a browser shrink-wraps to
+  ;; 72.
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
         doc (dom/set-style doc div {:display "flex"})
@@ -1362,8 +1365,9 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         span-rect (first (filter #(= :span (:tag %)) ops))]
-    (is (> (:w span-rect) 400)
-        "nested (non-leaf-text) flex-item content is an honest, disclosed scope-cut -- still fills the available width")))
+    (is (< (:w span-rect) 200)
+        "the item is as wide as its icon plus its label on one line, not
+         the whole 480px container")))
 
 (deftest column-direction-flex-items-are-unaffected-by-row-direction-shrink-to-fit
   ;; column direction's main axis is height, which this file's :height

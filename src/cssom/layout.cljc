@@ -3049,6 +3049,35 @@
               content-w)))]
     (max 0 (min content-w natural))))
 
+(declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited)
+
+(defn- inline-max-content-width
+  "The width an inline run would occupy on ONE line -- real CSS's
+   max-content size for a box whose children are all inline-level.
+
+   Reuses the inline machinery rather than approximating: the same
+   fragments, the same tokenizer (so whitespace collapses exactly as it
+   will when the run is really laid out), and the same per-character
+   measurement the line breaker uses."
+  [theme content-w opacity inherited st children]
+  (let [inherited (inline-inherited inherited st)
+        tokens (inline-tokens (inline-fragments theme inherited opacity content-w children))
+        measure-text (:measure-text theme)
+        w-of (fn [text style]
+               (if measure-text
+                 (measure-text text (:font-size style) (:font-weight style)
+                               (:font-style style) (:font-family style))
+                 (* (count text) (long (* 0.6 (:font-size style 14))))))]
+    (reduce (fn [total t]
+              (case (:kind t)
+                :break total
+                :atomic (+ total (:w t))
+                (+ total
+                   (w-of (:text t) (:style t))
+                   (if (:space-before? t) (w-of " " (or (:space-style t) (:style t))) 0))))
+            (* 2 (content-inset st))
+            tokens)))
+
 (defn- flex-item-main-width
   "Real CSS flex-basis:auto (the default) falls back to an item's own
    explicit width if set, else shrink-wraps to its own preferred
@@ -3086,6 +3115,15 @@
 
                   (and (= 1 (count cs)) (string? (first cs)))
                   (flex-item-natural-text-width theme opacity inherited st (first cs))
+
+                  ;; MIXED inline content (`go <b>now</b>`) has a real
+                  ;; max-content width too: everything on one line. Falling
+                  ;; back to the container width made every table column
+                  ;; holding a formatted cell as wide as the whole table --
+                  ;; measured, a two-cell table with one `<b>` in it filled
+                  ;; 800px where the browser shrink-wraps to 72.
+                  (and (seq cs) (every? #(inline-flow-candidate? theme %) cs))
+                  (inline-max-content-width theme content-w opacity inherited st cs)
 
                   :else content-w)]
     (min content-w (clamp-width st natural))))
@@ -3192,7 +3230,17 @@
             auto-cross (if (seq cross-sizes) (apply max 0 cross-sizes) 0)
             cross-content (or (explicit-length (if column? (:width st) (:height st))) auto-cross)
             auto-main (+ (reduce + 0 main-sizes) (* gap (max 0 (dec (count main-sizes)))))
-            main-content (or (explicit-length (if column? (:height st) (:width st))) auto-main)
+            ;; The main-axis size justify-content distributes free space
+            ;; WITHIN. For a row that is the container's content width --
+            ;; which, now that a flex container is block-level, is the full
+            ;; containing block -- not the sum of the items, which would
+            ;; leave no free space to distribute at all and pin every
+            ;; `justify-content: center` row hard against the left edge
+            ;; (measured: items at x=0,7 where the browser centres them at
+            ;; 393,400). A COLUMN's main axis is its height, which still
+            ;; comes from the content unless declared.
+            main-content (or (explicit-length (if column? (:height st) (:width st)))
+                             (if column? auto-main cw))
             ;; align-items:stretch pass -- see stretch-eligible-child?/
             ;; force-cross-size. Deliberately AFTER cross-content is
             ;; determined from the ORIGINAL (unstretched) measurements,
@@ -4408,7 +4456,14 @@
   [theme content-x content-y content-w content-h opacity inherited children]
   (let [placed (mapv (fn [child]
                         (let [cst (node-style child theme)
-                              m (layout-node theme 0 0 content-w opacity inherited child)
+                              ;; An absolutely positioned box with
+                              ;; `width: auto` is SHRINK-TO-FIT, not
+                              ;; fill-the-container: real CSS sizes it to
+                              ;; its own content. Measured against the
+                              ;; browser, a corner-pinned label reported 800
+                              ;; here against its 21 -- so it also covered
+                              ;; the entire row it was pinned over.
+                              m (measure-child theme content-w opacity inherited child true)
                               {:keys [w h]} (:box m)
                               left (explicit-length (:left cst))
                               right (explicit-length (:right cst))

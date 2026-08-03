@@ -156,13 +156,21 @@
     var probe = document.createElement('span');
     probe.style.cssText = 'font-family:monospace;font-size:14px;white-space:pre';
     document.body.appendChild(probe);
-    var advances = { normal: {}, bold: {} };
-    ['normal', 'bold'].forEach(function (weight) {
-      probe.style.fontWeight = weight;
+    // normal / bold / italic each get their own table: measured here, this
+    // system's `monospace` is fixed-pitch at 7.00px in regular but BOTH its
+    // bold and its italic faces are proportional, so one table cannot
+    // stand in for the others (an <em> measured 7.0/char here against the
+    // browser's 10.28).
+    var advances = { normal: {}, bold: {}, italic: {} };
+    [['normal', 'normal', 'normal'],
+     ['bold', 'bold', 'normal'],
+     ['italic', 'normal', 'italic']].forEach(function (spec) {
+      probe.style.fontWeight = spec[1];
+      probe.style.fontStyle = spec[2];
       for (var code = 32; code <= 126; code++) {
         var ch = String.fromCharCode(code);
         probe.textContent = new Array(21).join(ch);
-        advances[weight][code] = probe.getBoundingClientRect().width / 20;
+        advances[spec[0]][code] = probe.getBoundingClientRect().width / 20;
       }
     });
     probe.remove();
@@ -345,8 +353,10 @@
                      {:width width
                       :theme {:padding 0
                               :gap 0
-                              :measure-text (fn [text font-size weight & _]
-                                              (let [advance (if (= "bold" weight) (:bold char-w) (:normal char-w))]
+                              :measure-text (fn [text font-size weight style & _]
+                                              (let [advance (cond (= "bold" weight) (:bold char-w)
+                                                                  (= "italic" style) (:italic char-w)
+                                                                  :else (:normal char-w))]
                                                 (* (/ (or font-size 14) 14)
                                                    (reduce + 0 (map advance (str text))))))}})))
 
@@ -387,8 +397,10 @@
         text-ops (->> ops
                       (filter #(= :text (:draw/op %)))
                       (remove inside-atomic?))
-        word-w (fn [text fs weight]
-                 (let [advance (if (= "bold" weight) (:bold char-w) (:normal char-w))]
+        word-w (fn [text fs weight style]
+                 (let [advance (cond (= "bold" weight) (:bold char-w)
+                                     (= "italic" style) (:italic char-w)
+                                     :else (:normal char-w))]
                    (* (/ (or fs 14) 14) (reduce + 0 (map advance (str text))))))]
     (->> text-ops
          (mapcat (fn [op]
@@ -397,7 +409,7 @@
                             x (:x op)
                             out []]
                        (if-let [w (first words)]
-                         (recur (rest words) (+ x (word-w w fs (:font-weight op)))
+                         (recur (rest words) (+ x (word-w w fs (:font-weight op) (:font-style op)))
                                 (if (str/blank? w)
                                   out
                                   (conj out {:text w :left x
@@ -431,10 +443,27 @@
         o (by-tag oracle-boxes)
         e (by-tag engine-boxes)
         tags (distinct (concat (keys o) (keys e)))
-        close? (fn [a b] (<= (abs (- (or a 0) (or b 0))) geometry-tolerance-px))]
+        close? (fn [a b] (<= (abs (- (or a 0) (or b 0))) geometry-tolerance-px))
+        dist (fn [a b] (reduce + (map (fn [k] (abs (- (or (get a k) 0) (or (get b k) 0))))
+                                      [:x :y :w :h])))
+        ;; Greedy NEAREST matching within a tag, not index-by-index: the
+        ;; browser lists elements in document order while this engine emits
+        ;; draw-ops in PAINT order, so an absolutely positioned box (painted
+        ;; last, above its siblings) lined up against the wrong sibling and
+        ;; reported two mismatches where the boxes were in fact identical.
+        pair-up (fn [os es]
+                  (loop [os os es (vec es) pairs []]
+                    (if-let [ob (first os)]
+                      (if (seq es)
+                        (let [best (apply min-key #(dist ob (nth es %)) (range (count es)))]
+                          (recur (rest os)
+                                 (vec (concat (subvec es 0 best) (subvec es (inc best))))
+                                 (conj pairs [ob (nth es best)])))
+                        (recur (rest os) es pairs))
+                      pairs)))]
     (reduce (fn [acc tag]
               (let [os (get o tag []) es (get e tag [])
-                    pairs (map vector os es)
+                    pairs (pair-up os es)
                     agree (count (filter (fn [[ob eb]]
                                            (and (close? (:x ob) (:x eb))
                                                 (close? (:y ob) (:y eb))
@@ -534,10 +563,13 @@
             (or r (recur more (conj failures b))))))
       _ (println (str "\noracle:  " browser "\nwidth:   " width "px\ncases:   " (count cases) "\n"))
       advances (:__advances__ oracle)
-      char-w {:normal (fn [ch] (get-in advances [:normal (keyword (str (.charCodeAt ch 0)))] 8.4))
-              :bold (fn [ch] (get-in advances [:bold (keyword (str (.charCodeAt ch 0)))] 8.4))}
+      advance-for (fn [face]
+                    (fn [ch] (get-in advances [face (keyword (str (.charCodeAt ch 0)))] 8.4)))
+      char-w {:normal (advance-for :normal)
+              :bold (advance-for :bold)
+              :italic (advance-for :italic)}
       _ (println (str "metrics: per-character advance table measured in the oracle ("
-                      (count (:normal advances)) " chars x normal/bold)\n"))
+                      (count (:normal advances)) " chars x normal/bold/italic)\n"))
       results (vec (map-indexed (fn [i c]
                                   (compare-case (get oracle (keyword (str "case-" i)) []) width char-w c))
                                 cases))
