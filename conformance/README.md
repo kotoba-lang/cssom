@@ -231,6 +231,27 @@ With per-dimension deltas attributed to case ids, three more fell out:
   against the wrong sibling and reported two mismatches where the boxes
   were identical.
 
+### Round five, and where the line-box story stops
+
+- **A line box's height comes from the line-heights on it, not the font
+  sizes.** Real CSS lets a larger run OVERFLOW a line box its declared
+  `line-height` made too small; this engine grew the box instead. An atomic
+  inline is the exception — a replaced box cannot overflow its line, and a
+  browser does grow the line to fit it.
+- **A trailing `<br>` leaves no empty line box.** `<p>line<br></p>` is 20px
+  tall in the browser; this engine produced a second, empty 20px line.
+
+What this axis can no longer decide without new machinery: the browser
+positions each inline box by the font's REAL ascent and descent and takes
+their union, so `small <span style="font-size:24px">big</span>` gets a 24px
+line box where the line-height rule alone says 20. Same for `<sub>`/`<sup>`,
+whose vertical shifts are font-relative. This engine models no ascent or
+descent at all — every inline box is approximated as 1.2em centred by
+half-leading. Closing those cases means adding a font-metrics model (real
+ascent/descent per face, measurable by the same probe that already measures
+advances), not tuning constants until one browser on one machine agrees.
+That is a deliberate stopping point, recorded rather than fitted.
+
 ### Still open on the geometry axis
 
 `input` w is now within ~7px rather than ~650: the remainder is that a

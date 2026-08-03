@@ -4082,9 +4082,14 @@
                                        :opacity (:opacity t) :x (+ x sep) :w ww}))
                        lines))))
           )
-        (if (and (empty? pieces) (empty? lines))
-          []
-          (flush lines pieces x nil))))))
+        (cond
+          (and (empty? pieces) (empty? lines)) []
+          ;; A trailing <br> at the very end of a block does not leave an
+          ;; empty line box behind it: measured, `<p>line<br></p>` is 20px
+          ;; tall in the browser where this engine produced a second, empty
+          ;; 20px line.
+          (and (empty? pieces) (seq lines)) lines
+          :else (flush lines pieces x nil))))))
 
 (defn- inline-line-metrics
   "One line box's own height and baseline offset. Height is the tallest
@@ -4118,8 +4123,18 @@
                         (keep #(when (= :atomic (:kind %)) (:h %)) pieces))
         line-heights (keep #(:line-height (:style %)) pieces)
         max-ascent (if (seq ascents) (apply max ascents) fallback-fs)
-        max-lh (if (seq line-heights) (apply max line-heights) fallback-lh)]
-    {:h (max max-lh max-ascent) :baseline max-ascent}))
+        max-lh (if (seq line-heights) (apply max line-heights) fallback-lh)
+        ;; The line box's HEIGHT comes from the line-heights on the line,
+        ;; not from the font sizes: real CSS lets text OVERFLOW a line box
+        ;; that its declared line-height made too small, rather than growing
+        ;; the box. Measured: a 24px run inside a declared `line-height:
+        ;; 20px` container reports a 20px box in the browser (with the text
+        ;; spilling out of it), where this engine reported 24. An ATOMIC
+        ;; inline is different -- a replaced box cannot overflow its line,
+        ;; and a browser does grow the line to fit it.
+        atomic-h (keep #(when (= :atomic (:kind %)) (:h %)) pieces)]
+    {:h (max max-lh (if (seq atomic-h) (apply max atomic-h) 0))
+     :baseline max-ascent}))
 
 (defn- inline-owner-ops
   "Background + `:node` draw-ops for the inline ELEMENTS a laid-out run
