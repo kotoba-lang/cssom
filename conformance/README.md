@@ -798,19 +798,50 @@ this engine synthesizes it as real text. Those cases are marked
 `:oracle/blind true`, excluded from the score, and printed, rather than
 silently counted as failures. Their correctness is covered by unit tests.
 
-## Oracle caveat (measured, not assumed)
+## How the oracle is driven (measured, not assumed)
 
-Brave is the intended oracle and is tried first. On **Brave 151.1.93.129**
-in this environment its headless mode produces *nothing*:
-`--headless=new --dump-dom` exits 0 with zero bytes, `--headless=old` writes
-zero bytes and never exits, and disabling Brave-specific features
-(`BraveRewards`/`BraveAds`/`BraveVPN`/`BraveSync`/`SpeedReader`) does not
-change that. The run therefore falls through to Chrome, which writes its
-dump and *then* hangs — handled by `timeout -s KILL` plus reading the output
-file rather than a pipe (Chromium's children keep stdout open, so a pipe
-never reaches EOF).
+Brave is the intended oracle, and as of 2026-08-04 it is again the one that
+actually runs — over **CDP**, not `--dump-dom`.
 
-This fallback measures the **same engine**: Brave is Chromium plus
-network/privacy shields, and shields do not change layout. The oracle that
-actually produced a number is printed and recorded in every ledger entry, so
-the substitution is never silent.
+`--dump-dom` is a *headless-shell* facility, and on **Brave 151.1.93.129**
+it is simply dead: zero bytes and no stderr on a 200-case page, on
+`<p>hello</p>`, in `--headless=old`, `--headless=new` and plain
+`--headless`; `--screenshot` writes no file either. Chrome 150 on the same
+machine dumps fine. For a while the harness therefore fell through to
+Chrome on every run — the same engine, so the numbers were sound, but the
+named comparison target had quietly stopped being measured.
+
+What Brave does still answer is the DevTools protocol. `conformance/
+cdp_dump.cljs` launches it with `--headless=new --remote-debugging-port=0`,
+reads the port back out of `DevToolsActivePort` (so parallel runs cannot
+collide), navigates, polls `Runtime.evaluate` for the measurement block and
+kills the browser. `run.cljs` tries CDP first and `--dump-dom` second, and
+prints which transport produced the numbers — `oracle: … (cdp)` — because
+"the oracle was Brave" and "the oracle was Brave over CDP because its
+`--dump-dom` is dead" are different facts about a measurement.
+
+Two things fell out of this that were worth the change on their own:
+
+- **It is ~6x faster** (12s vs 79s for the full corpus), because the
+  `--dump-dom` path depends on a headless Chromium exiting, which it never
+  does — every run burned its whole SIGKILL timeout.
+- **Brave and Chrome were verified byte-identical over CDP** on all 202
+  measured blocks, which is the concrete version of "same engine, shields
+  do not change layout" that was previously only asserted.
+
+Getting 124 KB out of the child process needed a file, not a pipe: `println`
+loses the tail (Node buffers pipe writes; `process.exit` drops the rest), a
+single `writeSync` to a non-blocking pipe writes 65536 bytes and reports it,
+and looping on that count throws `EAGAIN`. The `--dump-dom` path already
+wrote to a file for an unrelated reason (Chromium's children hold stdout
+open, so a pipe never reaches EOF); both paths now do.
+
+## An axis that measured nothing says so
+
+If any axis compares zero values, the run prints `UNMEASURED:` with the
+oracle and transport, appends nothing to the ledger, and exits 3. Measured
+2026-08-04: two runs of the same checkout minutes apart printed
+`COMPUTED STYLE 0/0 (0%)` and `8501/9982 (85%)` — the oracle had returned no
+styles once, and only the implausibility of the number gave it away. A
+silent zero is worse than a crash: it enters the ledger as a data point and
+reads as a regression forever after.

@@ -374,7 +374,33 @@
             (str/join "\n"))
        "<script>" measure-script "</script></body></html>"))
 
-(defn- run-browser!
+(defn- run-cdp!
+  "Reads the measurement block by driving the browser over the DevTools
+   protocol (see conformance/cdp_dump.cljs for why, and for what Brave 151
+   does to `--dump-dom`). Run as a child nbb process on purpose: CDP is
+   inherently async and this script is synchronous end to end, so the
+   alternative was making the whole harness promise-shaped to accommodate
+   one I/O detail.
+
+   This is the PRIMARY transport, not a fallback, on two measurements:
+   Brave 151 produces nothing at all from `--dump-dom` while answering CDP
+   normally, and CDP is ~10x faster (3-6s vs 60s) because it does not
+   depend on a headless Chromium ever exiting -- which it does not, so the
+   `--dump-dom` path always burns its full SIGKILL timeout. Brave and
+   Chrome over CDP were verified byte-identical on the 200-case corpus
+   (202/202 blocks), as they should be: same engine."
+  [browser file]
+  (let [out-file (path/join (fs/mkdtempSync (path/join (os/tmpdir) "kotoba-cdp-out-")) "block.html")
+        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljs" browser file out-file]
+                          #js {:encoding "utf8" :timeout 240000})
+        out (if (fs/existsSync out-file) (fs/readFileSync out-file "utf8") "")]
+    (when-not (str/includes? out "kotoba-conformance-out")
+      (throw (ex-info "browser produced no measurement block over CDP"
+                      {:status (.-status res)
+                       :stderr (str/trim (or (.-stderr res) ""))})))
+    out))
+
+(defn- run-dump-dom!
   "Runs the corpus page in a real Blink browser and returns its measurement
    block.
 
@@ -414,15 +440,40 @@
       (fs/rmSync profile #js {:recursive true :force true})
       (throw (ex-info "browser produced no measurement block"
                       {:status (.-status res) :bytes (count stdout)})))
-    (let [start (str/index-of stdout "kotoba-conformance-out\">")
-          from (+ start (count "kotoba-conformance-out\">"))
-          end (str/index-of stdout "</pre>" from)
-          parsed (-> (js/Buffer.from (subs stdout from end) "base64")
-                     (.toString "utf8")
-                     js/JSON.parse
-                     (js->clj :keywordize-keys true))]
-      (fs/rmSync profile #js {:recursive true :force true})
-      parsed)))
+    (fs/rmSync profile #js {:recursive true :force true})
+    stdout))
+
+(defn- parse-block
+  "Both transports hand back the same `<pre id=\"kotoba-conformance-out\">`
+   shape, so there is exactly one parser for exactly one format."
+  [raw]
+  (let [start (str/index-of raw "kotoba-conformance-out\">")
+        from (+ start (count "kotoba-conformance-out\">"))
+        end (str/index-of raw "</pre>" from)]
+    (-> (js/Buffer.from (subs raw from end) "base64")
+        (.toString "utf8")
+        js/JSON.parse
+        (js->clj :keywordize-keys true))))
+
+(defn- run-browser!
+  "CDP first, `--dump-dom` second. Both are tried before a candidate
+   browser is declared unusable, because the two fail independently: Brave
+   151 answers CDP and produces nothing from --dump-dom, and a future
+   browser that locks down the debugging port would do the reverse. Which
+   transport actually produced the numbers is returned alongside them and
+   printed, because 'the oracle was Brave' and 'the oracle was Brave, over
+   CDP, because its --dump-dom is dead' are different facts about the
+   measurement."
+  [browser file]
+  (try
+    {:transport :cdp :data (parse-block (run-cdp! browser file))}
+    (catch :default cdp-err
+      (try
+        {:transport :dump-dom :data (parse-block (run-dump-dom! browser file))}
+        (catch :default dump-err
+          (throw (ex-info (str "no measurement block: CDP -- " (ex-message cdp-err)
+                               "; --dump-dom -- " (ex-message dump-err))
+                          {:cdp (ex-data cdp-err) :dump-dom (ex-data dump-err)})))))))
 
 (defn- normalize [s]
   ;; Case-folded on purpose: `text-transform: uppercase` genuinely rewrites
@@ -1079,14 +1130,20 @@
       ;; the score, and printed, rather than silently counted as a failure.
       (:oracle/blind c)
       {:id (:id c) :group (:group c) :status :unscorable :geo geo :sty sty
+       :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)
        :detail "oracle cannot see generated content" :expected lines :actual mine}
 
       (= lines mine)
       {:id (:id c) :group (:group c) :status :pass :geo geo :sty sty
        :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)}
 
+      ;; The boxes travel with EVERY outcome, not just :pass. They used to
+      ;; be attached only on :pass, which meant `--debug-geometry` printed
+      ;; nothing for exactly the cases anyone would run it on -- a failing
+      ;; case and a blind case both came back with no boxes to look at.
       :else
       {:id (:id c) :group (:group c) :status :fail :geo geo :sty sty
+       :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)
        :expected lines :actual mine})))
 
 ;; ---- report ----
@@ -1103,15 +1160,17 @@
               only (filter #(str/includes? (str (:id %)) only)))
       page (path/join (os/tmpdir) "kotoba-conformance-corpus.html")
       _ (fs/writeFileSync page (corpus-page cases width))
-      [browser oracle]
+      [browser transport oracle]
       (loop [[b & more] candidates failures []]
         (if (nil? b)
           (throw (ex-info "no candidate browser produced a measurement block"
                           {:tried failures}))
-          (let [r (try [b (run-browser! b page)]
+          (let [r (try (let [{:keys [transport data]} (run-browser! b page)]
+                         [b transport data])
                        (catch :default e (println (str "oracle unusable: " b " -- " (ex-message e))) nil))]
             (or r (recur more (conj failures b))))))
-      _ (println (str "\noracle:  " browser "\nwidth:   " width "px\ncases:   " (count cases) "\n"))
+      _ (println (str "\noracle:  " browser " (" (name transport) ")"
+                      "\nwidth:   " width "px\ncases:   " (count cases) "\n"))
       advances (:__advances__ oracle)
       advance-for (fn [face]
                     (fn [ch] (get-in advances [face (keyword (str (.charCodeAt ch 0)))] 8.4)))
@@ -1270,6 +1329,30 @@
   (println (str "TOTAL " (count passed) "/" (count scorable) " = " (pct (count passed) (count scorable)) "%"
                 (let [u (count (filter #(= :unscorable (:status %)) results))]
                   (when (pos? u) (str "   (" u " unscorable, excluded)")))))
+
+  ;; An axis that compared NOTHING is not an axis that scored zero, and the
+  ;; harness used to report it as `0/0 ... (0%)` in the same shape as a real
+  ;; measurement. Measured 2026-08-04: two runs of the same checkout minutes
+  ;; apart printed `COMPUTED STYLE 0/0 (0%)` and `8501/9982 (85%)` -- the
+  ;; oracle had returned no styles once, and only the implausibility of the
+  ;; number gave it away. A silent zero is worse than a crash: it goes into
+  ;; the ledger as a data point and reads as a regression forever after.
+  (let [unmeasured (cond-> []
+                     (zero? (reduce + 0 (map :total (keep :geo results))))
+                     (conj "GEOMETRY")
+                     (zero? (reduce + 0 (map :total (keep :sty results))))
+                     (conj "COMPUTED STYLE")
+                     (zero? (count scorable))
+                     (conj "LINE STRUCTURE"))]
+    (when (seq unmeasured)
+      (println (str "\nUNMEASURED: " (str/join ", " unmeasured)
+                    " compared zero values across " (count cases) " cases."
+                    (if (zero? (count cases))
+                      "\n  No case matched the filter -- widen --only."
+                      (str "\n  This is NOT a score of 0% -- the oracle returned nothing for that axis."
+                           "\n  Oracle: " browser " (" (name transport) ")."))
+                    "\n  Nothing was appended to the ledger; re-run before trusting any number above."))
+      (js/process.exit 3)))
   (when ledger
     (let [entry {:conformance/oracle (last (str/split browser #"/"))
                  :conformance/width width
