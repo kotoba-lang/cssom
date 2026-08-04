@@ -1,15 +1,16 @@
-# Layout conformance: cssom.layout vs a real Blink browser
+# Conformance: cssom vs a real Blink browser
 
 Differential testing against a real browser, because unit tests can only
 check what someone thought to assert. This renders the same markup through
 `htmldom` → `cssom.core` → `cssom.layout` and through a real headless
-Brave/Chrome, and compares **line structure**: the ordered list of lines,
-each line being the text that landed on it, left to right.
+Brave/Chrome, and compares three axes: **line structure**, **geometry**,
+and **computed style**.
 
 ```bash
 nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljs \
   [--browser "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"] \
-  [--width 800] [--only inline/] [--ledger path/to/ledger.edn]
+  [--width 800] [--only inline/] [--ledger path/to/ledger.edn] \
+  [--debug-geometry] [--debug-style]
 ```
 
 ## Why line structure and not pixels
@@ -31,7 +32,7 @@ whitespace-normalized and case-folded (`text-transform` genuinely rewrites
 what this engine emits, while a browser upper-cases at paint time — both
 are correct).
 
-## Two axes
+## Three axes
 
 **Line structure** — what text landed on which line, in what order. This is
 what the harness measured first, and it saturated at 93%.
@@ -45,10 +46,21 @@ and an `<h1>` that renders at body size still lands on its own line. The
 first geometry run scored **47%** on a corpus the line axis scored 93% on,
 and its per-tag breakdown pointed straight at the causes.
 
+**Computed style** (added 2026-08-04) — what `cssom.core`'s CASCADE
+resolved for each element, against the browser's own `getComputedStyle`.
+Both layout axes read only the *result* of the cascade through
+`cssom.layout`, so selector matching, specificity, `!important`, layers,
+custom properties and shorthand expansion were an entire unmeasured
+subsystem: a cascade that silently dropped a declaration still lays out
+*something*, and both older axes score the something. See "The
+computed-style axis" below for its first run.
+
 ## Result — 2026-08-04
 
 **Line structure: 184/190 = 97%. Geometry: 609/719 element boxes (85%),
-160/200 cases with every box in agreement**, on a corpus of 200.
+160/200 cases with every box in agreement. Computed style: 8501/9982
+cascade-resolved values (85%), 190/200 cases with no mismatch attributable
+to the cascade itself**, on a corpus of 200.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -80,6 +92,148 @@ auto-placement not resuming after an explicitly placed item, one wrap
 point inside a nested inline, and CSS-driven `white-space: pre-wrap`/
 `pre-line` (the parser collapses newlines before layout ever sees them —
 it cannot see CSS).
+
+## The computed-style axis
+
+### What it compares, and against what
+
+Fourteen properties, chosen because each one has a normal form both sides
+can be reduced to without guessing: `color`, `font-size`, `font-weight`,
+`font-style`, `display`, `text-align`, and the four sides each of `margin`
+and `padding`.
+
+`getComputedStyle` returns the browser's **computed** value — cascade, then
+inheritance, then defaulting from the UA stylesheet, collapsed into one
+absolute normal form (`rgb(255, 0, 0)`, `"14px"`, `"700"`). This engine's
+`:style/*` attrs hold only the FIRST of those three stages, in author-ish
+form (`"red"`, `14`, `"bold"`). So each side is normalised per property
+kind — colours parsed to `[r g b a]`, lengths to bare pixels (0.5px
+tolerance, for the browser's fractional device pixels), `bold`/`normal` to
+700/400 — and the two later stages are supplied on the engine's behalf,
+**labelled** so every value's provenance is in the report:
+
+| source | meaning | count, first run |
+|---|---|---|
+| `:direct` | the cascade wrote a value for this element. The only source this axis genuinely MEASURES. | 68 |
+| `:inherited` | no value here, but an ancestor had one and the property inherits. Supplied by the harness walking up the engine's own document — exactly the `(or (:prop st) (:prop inherited))` fallback `cssom.layout` applies at paint time. | 709 |
+| `:initial` | nobody in the ancestor chain declared it, so CSS's own INITIAL value stands. **Not** the browser's UA value. | 9205 |
+
+That `:initial` row is the whole story of the number, and it is a real
+architectural fact rather than nine thousand bugs: **this engine's UA
+stylesheet lives in `cssom.layout`** (`node-style`'s `(or (style node :x)
+<ua default>)` chains), so nothing reading the cascade's output —
+`cssom.core/computed-style`, a devtools panel, a live page's
+`getComputedStyle` — can see that a `<b>` is bold or a `<div>` is a block.
+
+The axis reads the cascaded document directly and **never touches
+`cssom.layout`**, so it shares no machinery with the geometry axis: a
+layout bug cannot resurface here as a cascade bug. That is also why
+elements are matched by tag + occurrence order rather than by the geometry
+axis's nearest-box pairing.
+
+### Every mismatch is attributed, not just counted
+
+An 85% headline made of one repeated architectural fact would be unreadable
+and would hide the handful of real divergences underneath it. So each
+mismatch is classified against a **UA baseline measured in the oracle
+itself** — a bare element of each tag, in the same font context, with no
+author CSS anywhere near it:
+
+| cause | first run | meaning |
+|---|---|---|
+| `ua-default` | 1407 | the engine declared nothing and the browser's value is exactly what its UA sheet gives that tag bare |
+| `cascade` | 41 | the two sides disagree about a value the cascade is responsible for. **This is the bucket worth reading** |
+| `blockified` | 23 | a `display` mismatch on a flex/grid item, a float, or an absolutely positioned box — real CSS blockifies all three at computed-value time |
+| `ua-inherited` | 10 | the browser's value here is simply its parent's. Whatever diverged happened at an ancestor and is already scored there; charging it again at every descendant would multiply one cause by the depth of the tree |
+
+The probe is measured rather than assumed for a reason: a bare `<a>` is
+**not** a link, so probing without an `href` reported plain black and
+charged all 19 link-colour divergences to the cascade. An `<input>` is
+probed per `type`, because a checkbox's UA `margin: 3px 3px 3px 4px` is not
+a text field's. `<td>`, `<li>`, `<option>` and friends are probed inside
+the minimal legal ancestor chain they need to get their real UA style at
+all.
+
+`--debug-style` prints the whole cascade-attributed residual rather than
+its head.
+
+### The 41 that are actually the cascade's
+
+Two bugs, both invisible to 502 unit tests and to both layout axes, both
+reproduced directly through the real pipeline:
+
+- **An inline `style="..."` shorthand is not expanded into longhands.**
+  `htmldom.core`'s inline-style declaration splitter expands `border`,
+  `text-shadow`, `box-shadow` and `outline` — but not `margin`/`padding`,
+  which `cssom.core`'s stylesheet path *does* expand
+  (`expand-box-side-shorthand`). Two independent copies of the same idea,
+  drifted. Measured: `.a { padding: 12px }` yields
+  `{:style/padding 12, :style/padding-top 12, …}` (all five), while
+  `style="padding: 12px"` yields `{:style/padding 12}` alone. Worse,
+  `style="margin: 4px 8px"` is stored as the raw **string** `"4px 8px"`,
+  which the per-side box model cannot read at all. 34 of the 41.
+- **Shorthand expansion runs BEFORE `var()` substitution.**
+  `padding: var(--pad)` is not a length at declaration-parse time, so
+  `expand-box-side-shorthand` correctly declines to expand it — and nothing
+  re-expands it after `style-element` resolves the custom property. Result:
+  `:style/padding 20` with no longhands. 4 of the 41.
+
+The remaining 3 are the probe's own honest limits, listed under exclusions
+below rather than left to look like engine errors.
+
+### Excluded from comparison, explicitly
+
+Nothing is dropped silently; every exclusion is counted, reasoned and
+printed with its case ids.
+
+- **`:element-count-mismatch` (70 values, 2 cases)** — the two sides
+  disagree on how many elements of a tag exist, so there is nothing to zip
+  the surplus against. Both cases are the same htmldom divergence:
+  `<p>text <span>a <div>b</div> c</span> end</p>` nests the `<div>` inside
+  the `<p>`, where HTML5's "in body" insertion mode auto-closes an open
+  `<p>` on a block-level start tag. Not a cssom bug — recorded here because
+  this axis is where it became visible.
+- **Non-absolute lengths** (`1em`, `50%`, `auto`, a relative `calc()`) —
+  the cascade legitimately holds the SPECIFIED value and resolves it at
+  paint time against a font size and containing block it does not have
+  here, while `getComputedStyle` reports the already-resolved used value.
+  Comparing them would compare two *stages*, not two answers.
+- **`lighter`/`bolder`** — relative to the parent's computed weight, a
+  resolution step the cascade does not perform.
+- **Colours neither side's parser recognises** — reported with the raw text
+  rather than scored as a mismatch, because a value nobody parsed says
+  nothing about who is wrong.
+
+And three limits of the UA probe itself, which land in the `cascade` bucket
+and are named here rather than tuned away:
+
+- A UA value expressed in `em` (`p { margin: 1em 0 }`) scales with the
+  element's own font size, so the bare-tag baseline only matches at the
+  corpus's default 14px. 4 values, in the two cases that change the
+  inherited font size.
+- State-conditioned UA rules (`:disabled`, `:checked`) are not probed — the
+  probe sets attributes, not states. 1 value (`form/disabled-input`, where
+  Chrome greys a disabled field to `rgb(84, 84, 84)`).
+- `ua-default` cannot distinguish "the engine's cascade has no UA sheet"
+  from "the cascade dropped a declaration that happened to restate the UA
+  value". Both look like *engine declared nothing, browser matches its own
+  default*.
+
+### Why the score is where it is, and why that is fine
+
+85% on contact, with **0/200 cases fully clean** — no case in the corpus
+avoids the UA-stylesheet divergence, because every case contains at least
+one `<div>` or `<p>`. The actionable number beside it is **190/200 cases
+with no cascade-attributed mismatch**, and the per-property table says the
+same thing from the other direction: `display` is 134/713 = 19% (almost
+entirely `inline` where the browser says `block`/`table-cell`/`list-item`),
+while `font-style` and `text-align` are at 98%.
+
+The number was not tuned to look better. Making it look better means either
+moving the UA stylesheet up into the cascade — a real change to `src/`,
+with real consequences for `getComputedStyle` consumers, and not this
+harness's decision — or quietly excluding `display` and the margins, which
+would be exactly the kind of measurement this corpus exists to prevent.
 
 ### What the geometry axis found in its first hour
 
