@@ -3575,19 +3575,31 @@
         ops (layout/draw-ops tree {:width 480})
         div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
     (is (= "10%" (get-in doc [:nodes div :attrs :style/left])))
-    ;; root :main's own default padding (4, its content inset) + a REAL
-    ;; percentage: 10% of the 472px content width = 47.
+    ;; 10% of the containing block's width. The containing block is now the
+    ;; ancestor's PADDING box (480 wide, origin 0, since :main has no
+    ;; border), so 48 -- not the content box's 472 offset by its 4px
+    ;; padding, and certainly not the 10px this engine used to read out of
+    ;; the string "10%".
     ;;
-    ;; Both numbers used to be 14 and 9, pinning the engine's old
-    ;; approximation where parse-int's digit run made "10%"/"5%" into
-    ;; 10px/5px. The test's subject -- that a percentage offset does not
-    ;; crash -- is unchanged.
-    (is (= (+ 4 47) (:x div-op)))
-    ;; `top: 5%` resolves against the containing block's HEIGHT, which is
-    ;; auto here. Real CSS treats a percentage against an indefinite basis
-    ;; as auto, so the offset is 0 and the box stays at the content origin
-    ;; -- it does not fall back to 5px.
-    (is (= 4 (:y div-op)))))
+    ;; The numbers here have moved twice for two separate reasons, both
+    ;; recorded rather than silently re-pinned: percentages stopped being
+    ;; read as pixels, then the containing block stopped being the content
+    ;; box. The test's subject -- that a percentage offset does not crash
+    ;; -- is unchanged by either.
+    (is (= 48 (:x div-op)))
+    ;; 5% of the containing block's HEIGHT, which is 8 here: :main holds
+    ;; only its own 4px padding top and bottom, because its single child is
+    ;; out of flow. 5% of 8 rounds to 0.
+    ;;
+    ;; KNOWN SIMPLIFICATION, worth stating where it is visible: a real
+    ;; browser resolves this box against the INITIAL containing block (the
+    ;; viewport), because none of its ancestors is positioned -- so it would
+    ;; use 5% of the viewport height, not of :main. This engine uses the
+    ;; nearest ancestor either way. The conformance corpus's own
+    ;; `:position/*` cases all give the abs box a positioned ancestor, so
+    ;; nothing there distinguishes the two; this unit test is the only place
+    ;; the difference is currently visible.
+    (is (= 0 (:y div-op)))))
 
 ;; ---- position:absolute right/bottom (layout-absolute-children previously
 ;;      read ONLY left/top; right/bottom -- extremely common for
@@ -3613,6 +3625,47 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})]
     (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)))
+
+(deftest absolute-left-and-right-together-size-the-box
+  ;; With `width: auto`, setting BOTH left and right is not over-constrained
+  ;; -- real CSS solves the equation by giving the box whatever is left of
+  ;; the containing block. Measured in Brave: `left:20;right:20` inside a
+  ;; 300px box is 260 wide there; this engine shrink-wrapped it around its
+  ;; text and reported 63.
+  (let [div-op (absolute-child-op "left: 20; right: 20; height: 20")]
+    (is (= 20 (:x div-op)))
+    (is (= 160 (:w div-op)) "200 container - 20 left - 20 right")))
+
+(deftest absolute-top-and-bottom-together-size-the-box
+  ;; The block-axis counterpart. A box's height normally comes from its
+  ;; content, so the resolved height is written onto the child as its USED
+  ;; value -- which is exactly what CSS says it is.
+  (let [div-op (absolute-child-op "top: 30; bottom: 50; width: 40")]
+    (is (= 30 (:y div-op)))
+    (is (= 120 (:h div-op)) "200 container - 30 top - 50 bottom")))
+
+(deftest absolute-child-with-no-offset-keeps-its-static-position
+  ;; The containing block for an absolute child is the ancestor's PADDING
+  ;; box -- but only for an axis that actually HAS an offset. With no offset
+  ;; the box stays where it would have been in flow, and this engine
+  ;; approximates that static position with the ancestor's content origin.
+  ;;
+  ;; Conflating the two is a real regression, not a hypothetical: making the
+  ;; padding box the origin on every axis moved every offsetless absolute
+  ;; and fixed box by the ancestor's padding.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules ".box { position: absolute; width: 40; height: 10 }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
+    ;; :main's own default 4px padding: the static position, not 0.
+    (is (= 4 (:x div-op)))
+    (is (= 4 (:y div-op)))))
 
 (deftest absolute-child-right-anchors-to-container-right-edge
   ;; 200 (container content-w) - 40 (child width) - 10 (right) = 150.
