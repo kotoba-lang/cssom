@@ -5803,6 +5803,54 @@
     (is (= 60 (nth bfc 3)) "`overflow: hidden` contains it")
     (is (= 60 (nth root-flow 3)) "and so does `display: flow-root`")))
 
+(deftest an-escaping-float-keeps-rising-until-something-contains-it
+  ;; The clearfix idiom does not require the `overflow: hidden` box to be
+  ;; the float's own parent, and a first cut of the containment rule that
+  ;; only looked at a container's DIRECT float children got this wrong: the
+  ;; float stopped at the plain inner div, which does not contain it, and
+  ;; then existed for nobody. Brave leaves the outer box 60px tall.
+  ;;
+  ;; Caught by the paint-order axis rather than by geometry: with the outer
+  ;; box 0px tall, all 25 of that case's sample points landed on nothing at
+  ;; all, which is the question "what would a user click" answering `none`
+  ;; for a page that visibly has a float in it.
+  (let [ops (float-ops 400 {:overflow "hidden"}
+                       [[:div {:width 200}
+                         [:div {:float "left" :width 50 :height 60} "F"]]])
+        [outer inner f] (div-boxes ops)]
+    (is (= 60 (nth outer 3))
+        "the outer box establishes the formatting context, so it grows to
+         hold a float two levels down")
+    (is (= 0 (nth inner 3))
+        "while the plain div in between still does not contain it")
+    (is (= [0 0 50 60] f)))
+
+  ;; ...and an escaped float is a full member of the band it rises into,
+  ;; not merely a height contribution: it is there to be cleared, exactly
+  ;; like one written at that level.
+  (let [ops (float-ops 300 {:overflow "hidden"}
+                       [[:div {} [:div {:float "left" :width 80 :height 40} "F"]]
+                        "beside the escaped float"
+                        [:div {:clear "left"} "below"]])
+        beside (first (filter #(= "beside the escaped float" (:text %)) (text-draw-ops ops)))
+        below (last (div-boxes ops))]
+    (is (= 40 (second below)) "`clear` at the level it rose to sees it")
+    ;; The one thing it does not get, and why. Whether a LONE inline child
+    ;; flows as a run (and so consults the band) or takes a full-width
+    ;; block row of its own is decided ONCE, before the loop, from whether
+    ;; this container has a float CHILD -- and an escaped float is not a
+    ;; child, it appears partway through the loop that is already running.
+    ;; Deciding it correctly means asking "does any descendant hold a float
+    ;; that will escape into me", which is a recursive re-derivation of the
+    ;; formatting-context rule over the whole subtree, for a shape the
+    ;; corpus does not contain. A float written at THIS level narrows a
+    ;; lone text child correctly (see
+    ;; a-float-is-placed-and-measured-by-its-margin-box); so does an
+    ;; escaped one as soon as there are two inline children to flow.
+    (is (= 0 (:x beside))
+        "a LONE text child beside a RISEN float is not narrowed by it.
+         Known cut; see this comment")))
+
 (deftest a-float-does-not-split-the-inline-run-it-sits-inside
   ;; A float is blockified, so it never JOINS a line box -- but it must not
   ;; SPLIT one either. Grouping with the float still in the sequence would

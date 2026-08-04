@@ -5528,7 +5528,21 @@
    code did it unconditionally, which is the easy half of the rule and the
    wrong one for the common case: an ordinary `<div>` wrapping only a
    float is 0px tall in every browser, and that is exactly why authors
-   reach for `overflow: hidden` / `display: flow-root` at all."
+   reach for `overflow: hidden` / `display: flow-root` at all.
+
+   A float that its own container does not contain does not stop there: it
+   keeps rising until it reaches a box that DOES, which is what makes the
+   `overflow: hidden` clearfix work on a wrapper two levels up from the
+   float. So a float that escapes is returned as `:float/escaped` and
+   `layout-block` hands it to ITS parent, exactly the way
+   `:margin/collapsed-top`/`-bottom` already travel. The escaped boxes
+   join the parent's own float list, so they narrow its line boxes, push
+   its later floats down, and answer its `clear`s too -- one mechanism,
+   not a special case for height. (This is why they are kept in ABSOLUTE
+   coordinates throughout: the same numbers are meaningful at every level
+   they pass through.)
+
+   Returns `:float/escaped` as well as the four keys above."
   ([theme content-x content-y content-w opacity inherited children]
    (layout-children-block theme content-x content-y content-w opacity inherited children false false false))
   ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom? contains-floats?]
@@ -5642,6 +5656,12 @@
                           (max 0 (- c (+ y gap-before)))
                           0)
               gap-before (+ gap-before clearance)
+              ;; Floats this child did not contain rise into THIS
+              ;; container's band. Shifted by the same `gap-before` the
+              ;; child's own draw-ops are, and by nothing else -- a
+              ;; `position: relative` offset is paint-only, so it must not
+              ;; move a float, which is layout.
+              escaped (mapv #(update % :y + gap-before) (:float/escaped laid []))
               child-h (:h (:box laid))
               advance (+ gap-before child-h (:gap theme))
               shifted (if (zero? gap-before)
@@ -5651,7 +5671,8 @@
                      (let [[dx dy] (relative-offset cst content-w nil)]
                        (translate-ops dx dy shifted))
                      shifted)]
-          (recur (rest remaining) (+ y advance) (into draws draw) floats (+ height advance) mb* false
+          (recur (rest remaining) (+ y advance) (into draws draw) (into floats escaped)
+                 (+ height advance) mb* false
                  (if (and first? collapse-top?) mt* out-mt))))
       ;; ^ closes: if / recur / let / cond
       {:draw draws
@@ -5667,7 +5688,10 @@
                (+ (- height (:gap theme))
                   (if collapse-bottom? 0 prev-mb)))
        :margin/collapsed-top out-mt
-       :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)})))))
+       :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)
+       ;; the floats this box did NOT contain, for its parent to keep
+       ;; carrying up until something does
+       :float/escaped (if contains-floats? [] floats)})))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing
@@ -6128,7 +6152,8 @@
                                         (:display st))
                              (contains? #{"left" "right"} (:float st))
                              (contains? #{"absolute" "fixed"} (:position st)))
-        {:keys [draw h] :margin/keys [collapsed-top collapsed-bottom]}
+        {:keys [draw h] :margin/keys [collapsed-top collapsed-bottom]
+         escaped-floats :float/escaped}
         (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
                                content-w opacity inherited in-flow
                                collapse-top? collapse-bottom? contains-floats?)
@@ -6183,6 +6208,16 @@
                                                  0 (* 2 (:border-width st)))))
                                 collapsed-bottom
                                 0)
+     ;; A float this box did not contain keeps rising: handed to the
+     ;; PARENT's layout-children-block, which adds it to its own band, the
+     ;; same journey a collapsed-out margin makes just above. This is what
+     ;; makes the `overflow: hidden` clearfix work on a wrapper that is not
+     ;; the float's own parent -- measured, a 50x60 float two levels down
+     ;; inside `<div overflow:hidden><div width:200px>` leaves the outer box
+     ;; 60px tall in Brave, and without this it came out 0 and the paint-
+     ;; order axis (which asks what a user would CLICK) reported all 25 of
+     ;; that case's sample points landing on nothing.
+     :float/escaped (or escaped-floats [])
      ;; rect (background) BEFORE border-draws, not after: the real
      ;; painter (kotoba-lang/dom-gpu's webgl.cljs/webgpu.cljs) draws
      ;; :rect ops strictly in array order with no z-index reordering of

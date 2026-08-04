@@ -513,8 +513,10 @@ real headless Brave 151 over CDP first — one isolating shape per behaviour,
 each wrapped in its own `overflow: hidden` box, because floats leaking
 between probe cases moved a float from x=0 to x=80 and another from y=0 to
 y=28 before the wrappers went on. Line **249 → 257 / 280**, geometry
-**952 → 963 / 1142** (207 → 212 cases fully clean), float group **9/13 →
-13/13**, page **24/28 → 27/28**.
+**952 → 966 / 1142** (207 → 215 cases fully clean), paint order **6968 →
+6996 / 7285** (237 → 242 cases fully clean), float group **9/13 → 13/13**,
+page **24/28 → 27/28**. Computed style is unchanged, as it should be: the
+only cascade-facing part of this is that `clear` is now read at all.
 
 The v1 band was one `{:h :left :right}` rectangle pinned to the container's
 top. It is now a list of placed float MARGIN boxes and three pure functions
@@ -534,7 +536,7 @@ rule in the file is now stated in terms of those three.
 | plain `<div>` holding only a float | 200×0 | **200×60** | 200×0 |
 | the same div, `overflow:hidden` | 200×60 | 200×60 | 200×60 |
 
-Three findings worth keeping:
+Four findings worth keeping:
 
 - **Containment and margin-collapsing are different questions.** The engine
   had one `fc-free?` flag doing both. `border-width` stops a margin
@@ -551,6 +553,22 @@ Three findings worth keeping:
   grouped, and each float is put back in front of the entry its following
   sibling landed in. That re-insertion is also what lets a float be placed at
   the flow position it was WRITTEN at rather than hoisted to the top.
+- **A float that escapes keeps rising, and only the paint-order axis
+  noticed it did not.** The first cut of the containment rule asked each
+  container about its own direct float children, which gets the clearfix
+  wrong the moment the `overflow: hidden` box is not the float's own
+  parent — `<div overflow:hidden><div width:200px><div float>` left the
+  outer box 0px tall instead of 60. Floats a box does not contain are now
+  returned as `:float/escaped` and carried up by `layout-block`, the same
+  journey `:margin/collapsed-top`/`-bottom` already make, and they join
+  the receiving container's band rather than being a height contribution
+  bolted on the side — so they narrow its lines, push its later floats
+  down and answer its `clear`s. Worth recording HOW this was caught: the
+  geometry axis was happy (it compares each box against the browser and
+  those boxes are the ones the corpus samples), while the paint-order axis
+  landed all 25 of that case's sample points on nothing at all. "What
+  would a user click" answering `none` for a page that visibly contains a
+  float is a failure the other three axes had no way to express.
 - **`page/hero-with-floated-image` was the harness, not the engine.** It
   reported `got []` — an empty line structure for a page that rendered
   correctly. `engine-lines` skips text inside a replaced box geometrically
@@ -570,11 +588,19 @@ where a browser narrows them. Border boxes — what the geometry axis compares �
 are unaffected either way; what this costs is a wrap point in text long enough
 to break. Pinned by
 `a-float-narrows-its-own-containers-lines-and-not-a-descendants` so it stays a
-recorded cut rather than a silent wrong answer. Also unimplemented: clearance
-does not suppress the cleared box's own margin collapsing, and `float-band` is
-queried at a line's top scanline rather than over its full height (a run gets
-one content width from `layout-inline-run`, so a paragraph that starts beside
-a float keeps the narrow width for the lines continuing below it).
+recorded cut rather than a silent wrong answer.
+
+Three smaller ones, all pinned by tests too: clearance does not suppress the
+cleared box's own margin collapsing; `float-band` is queried at a line's top
+scanline rather than over its full height (a run gets ONE content width from
+`layout-inline-run`, so a paragraph that starts beside a float keeps the
+narrow width for the lines continuing below it); and whether a LONE inline
+child flows as a run — and so consults the band at all — is decided before
+the loop from whether the container has a float CHILD, so a lone text child
+beside a float that ROSE from a descendant is not narrowed. Deciding that one
+correctly means re-deriving the formatting-context rule recursively over the
+whole subtree before laying anything out, for a shape the corpus does not
+contain.
 
 ### Round twenty-one: the corpus grows 200 → 292
 
