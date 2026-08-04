@@ -16,6 +16,28 @@
 ;; known, documented scope-cuts (floats, tables, <img>/form controls as
 ;; inline-level). They are in the corpus precisely so the coverage number
 ;; tells the truth about them.
+;;
+;; TWO HAZARDS OF THE SHARED PAGE, both found by causing them (round 21):
+;;
+;; 1. Every case is a `<div class="kotoba-case">` in ONE document, so an
+;;    UNBALANCED case swallows the ones after it -- 16 `<div>`s against 15
+;;    `</div>`s put the harness's own `<script>` inside that case's root.
+;;    Keep tags balanced; there is a corpus-wide balance check.
+;; 2. A FLOAT that extends past its own container intrudes on the NEXT
+;;    case: measured, one pushed the following case's BFC box 50px right,
+;;    one moved the following case's float from x=10 to x=130, and one
+;;    turned a one-line paragraph into two. A case that deliberately leaves
+;;    a float uncontained must wrap it in an `overflow: hidden` box and say
+;;    in a comment that the wrapper is not the subject.
+;;
+;; Keys: :id :group :html :css, plus
+;;   :oracle/blind true -- the oracle structurally CANNOT see this case's
+;;     text (generated content: no Range reaches a ::before or a list
+;;     marker). Excluded from the LINE score; geometry and computed style
+;;     are still compared.
+;;   :composite true -- deliberately exercises several mechanisms at once,
+;;     so a failure attributes nothing on its own. Read the isolating cases
+;;     for the cause.
 
 [{:id :inline/text-plus-bold
   :group :inline
@@ -915,4 +937,506 @@
  {:id :page/definition-list-with-inline-code
   :group :page
   :html "<dl style=\"width: 300px\"><dt><code>opt</code></dt><dd>An option with <em>emphasis</em> inside.</dd></dl>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; Round twenty-one: the corpus grows 200 -> 292.
+ ;;
+ ;; Every case below is in territory the 200-case corpus did not reach.
+ ;; They were chosen by INVENTORYING what was covered and picking what was
+ ;; absent or thin -- not by picking markup the engine handles. Several are
+ ;; expected to fail, and the aggregate percentages fall as a result; that
+ ;; is the corpus doing its job rather than a regression.
+ ;; ---------------------------------------------------------------------
+
+ ;; --- containing blocks -------------------------------------------------
+ ;; Every pre-existing `position: absolute` case gave the box a
+ ;; `position: relative` PARENT, so the containing-block rules themselves
+ ;; -- which ancestor, which box of it, what `auto` means on each side --
+ ;; were never measured.
+
+ {:id :position/absolute-with-no-positioned-ancestor
+  :group :position
+  ;; No positioned ancestor at all, so the containing block is the initial
+  ;; one. Only `left` is set: `top: auto` keeps the STATIC position, which
+  ;; is the part that stays well-defined however the case page is stacked.
+  :html "<div><p>flow</p><span style=\"position: absolute; left: 40px\">abs</span></div>"}
+
+ {:id :position/absolute-static-position-no-offsets
+  :group :position
+  ;; All four offsets `auto`: the box stays exactly where flow would have
+  ;; put it, but is out of flow, so the sibling after it moves up.
+  :html "<div style=\"position: relative\"><p>one</p><p style=\"position: absolute\">abs</p><p>two</p></div>"}
+
+ {:id :position/absolute-left-and-right-set-width
+  :group :position
+  :html "<div style=\"position: relative; width: 300px; height: 40px\"><div style=\"position: absolute; left: 20px; right: 20px; top: 0\">stretched</div></div>"}
+
+ {:id :position/absolute-top-and-bottom-set-height
+  :group :position
+  :html "<div style=\"position: relative; width: 200px; height: 100px\"><div style=\"position: absolute; top: 10px; bottom: 10px; left: 0\">tall</div></div>"}
+
+ {:id :position/absolute-percentage-offsets
+  :group :position
+  :html "<div style=\"position: relative; width: 200px; height: 60px\"><div style=\"position: absolute; left: 50%; top: 50%\">half</div></div>"}
+
+ {:id :position/absolute-percentage-width
+  :group :position
+  :html "<div style=\"position: relative; width: 200px; height: 40px\"><div style=\"position: absolute; left: 0; top: 0; width: 50%\">w</div></div>"}
+
+ {:id :position/absolute-containing-block-is-the-padding-box
+  :group :position
+  ;; An absolutely positioned box resolves against its ancestor's PADDING
+  ;; box, not its content box: `left: 0` sits just inside the border, with
+  ;; the ancestor's 20px padding OUTSIDE it rather than indenting it.
+  :html "<div style=\"position: relative; padding: 20px; border: 5px solid #000; width: 200px\"><div style=\"position: absolute; left: 0; top: 0\">corner</div><p>flow</p></div>"}
+
+ {:id :position/absolute-nested-in-absolute
+  :group :position
+  ;; An absolutely positioned box is itself a containing block.
+  :html "<div style=\"position: relative; width: 300px; height: 80px\"><div style=\"position: absolute; left: 40px; top: 10px; width: 200px; height: 60px\"><div style=\"position: absolute; left: 10px; top: 10px\">inner</div></div></div>"}
+
+ {:id :position/relative-bottom-and-right
+  :group :position
+  ;; `bottom`/`right` shift in the opposite direction from `top`/`left`.
+  :html "<div><div style=\"position: relative; bottom: 6px; right: 10px\">moved</div><div>after</div></div>"}
+
+ {:id :position/relative-percentage-offset
+  :group :position
+  :html "<div style=\"width: 200px\"><div style=\"position: relative; left: 25%\">quarter</div></div>"}
+
+ {:id :position/absolute-inside-a-flex-item
+  :group :position
+  :html "<div style=\"display: flex\"><div style=\"position: relative; width: 120px; height: 40px\"><div style=\"position: absolute; right: 0; top: 0\">tag</div></div><div>next</div></div>"}
+
+ {:id :position/absolute-child-of-a-relative-inline
+  :group :position
+  ;; A relatively positioned INLINE is a containing block too.
+  :html "<p>text <span style=\"position: relative\">anchor<span style=\"position: absolute; left: 0; top: 20px\">pop</span></span> tail</p>"}
+
+ ;; --- paint order -------------------------------------------------------
+
+ {:id :stacking/z-index-tie-keeps-dom-order
+  :group :stacking
+  :html "<div style=\"position: relative; height: 40px\"><div style=\"position: absolute; left: 0; top: 0; z-index: 1\">first</div><div style=\"position: absolute; left: 60px; top: 0; z-index: 1\">second</div></div>"}
+
+ {:id :stacking/positioned-box-overlaps-flow
+  :group :stacking
+  ;; The positioned box and the flow paragraph occupy the same band, which
+  ;; is what the nearest-box matcher has to survive.
+  :html "<div style=\"position: relative; height: 60px\"><p>flow text</p><div style=\"position: absolute; left: 0; top: 0\">over</div></div>"}
+
+ ;; --- floats beyond the simplest ----------------------------------------
+ ;; The float round explicitly named three unimplemented things: floats
+ ;; that appear AFTER content, floats that stack when they do not fit, and
+ ;; `clear`. None of them had a case. They do now.
+
+ {:id :float/clear-left
+  :group :float
+  :html "<div style=\"width: 300px\"><div style=\"float: left; width: 80px; height: 40px\">F</div><div>beside</div><div style=\"clear: left\">below</div></div>"}
+
+ {:id :float/clear-both
+  :group :float
+  :html "<div style=\"width: 300px\"><div style=\"float: left; width: 60px; height: 30px\">L</div><div style=\"float: right; width: 60px; height: 50px\">R</div><div style=\"clear: both\">after</div></div>"}
+
+ {:id :float/float-after-text-in-its-container
+  :group :float
+  ;; The documented v1 boundary: this engine places every float at the
+  ;; container's top, so a float declared after a paragraph moves up past
+  ;; it. A browser places it on the line it appears on.
+  :html "<div style=\"width: 300px\"><p>leading text</p><div style=\"float: left; width: 60px; height: 30px\">F</div><p>beside the float</p></div>"}
+
+ {:id :float/floats-that-do-not-fit-stack
+  :group :float
+  ;; The `overflow: hidden` wrapper is NOT the thing under test: it is there
+  ;; because these floats extend BELOW their own container, and every case
+  ;; on this page shares one document. Measured without it, the leaked float
+  ;; pushed the next case's float from x=10 to x=130 -- a divergence charged
+  ;; to the engine that the corpus itself had created.
+  :html "<div style=\"overflow: hidden\"><div style=\"width: 200px\"><div style=\"float: left; width: 120px; height: 20px\">A</div><div style=\"float: left; width: 120px; height: 20px\">B</div><div>tail</div></div></div>"}
+
+ {:id :float/float-with-margin
+  :group :float
+  ;; The `overflow: hidden` wrapper is containment, not the subject: the
+  ;; float's 10px bottom MARGIN extends past its container, and measured
+  ;; without the wrapper it narrowed the next case's first line and turned
+  ;; a one-line paragraph into two.
+  :html "<div style=\"overflow: hidden\"><div style=\"width: 300px\"><div style=\"float: left; width: 60px; height: 30px; margin: 10px\">F</div><div>text beside the float</div></div></div>"}
+
+ {:id :float/float-right-block-with-width
+  :group :float
+  :html "<div style=\"width: 300px\"><div style=\"float: right; width: 80px; height: 30px\">R</div><p>alpha beta gamma delta</p></div>"}
+
+ {:id :float/parent-does-not-contain-its-float
+  :group :float
+  ;; A float does not contribute to its parent's height: the browser
+  ;; reports the inner 200px wrapper as 0 tall. The OUTER `overflow: hidden`
+  ;; box is not under test -- it keeps the escaping float inside this case,
+  ;; because every case shares one document. Measured without it, the next
+  ;; case's BFC box was shifted 50px right by this float.
+  :html "<div style=\"overflow: hidden\"><div style=\"width: 200px\"><div style=\"float: left; width: 50px; height: 60px\">F</div></div></div>"}
+
+ {:id :float/overflow-hidden-contains-its-float
+  :group :float
+  ;; ...unless the parent establishes a block formatting context, which is
+  ;; the entire reason authors write `overflow: hidden` on a wrapper.
+  :html "<div style=\"width: 200px; overflow: hidden\"><div style=\"float: left; width: 50px; height: 60px\">F</div></div>"}
+
+ ;; --- flexbox beyond the defaults ---------------------------------------
+
+ {:id :flex/align-self-overrides-align-items
+  :group :flex
+  :html "<div style=\"display: flex; align-items: flex-start; height: 60px\"><div>a</div><div style=\"align-self: flex-end\">b</div><div style=\"align-self: center\">c</div></div>"}
+
+ {:id :flex/order-reorders-items
+  :group :flex
+  :html "<div style=\"display: flex\"><div style=\"order: 2\">first</div><div style=\"order: 1\">second</div></div>"}
+
+ {:id :flex/row-reverse
+  :group :flex
+  :html "<div style=\"display: flex; flex-direction: row-reverse; width: 300px\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :flex/column-reverse
+  :group :flex
+  :html "<div style=\"display: flex; flex-direction: column-reverse; height: 90px\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :flex/wrap-reverse
+  :group :flex
+  :html "<div style=\"display: flex; flex-wrap: wrap-reverse; width: 200px; height: 80px\"><div style=\"width: 120px\">a</div><div style=\"width: 120px\">b</div></div>"}
+
+ {:id :flex/align-content-space-between
+  :group :flex
+  :html "<div style=\"display: flex; flex-wrap: wrap; align-content: space-between; width: 200px; height: 120px\"><div style=\"width: 120px\">a</div><div style=\"width: 120px\">b</div></div>"}
+
+ {:id :flex/flex-shorthand-one
+  :group :flex
+  ;; `flex: 1` is `1 1 0%`, NOT `flex-grow: 1` -- the basis is zero, so the
+  ;; items split the container evenly regardless of their content.
+  :html "<div style=\"display: flex; width: 300px\"><div style=\"flex: 1\">a</div><div style=\"flex: 1\">bbbbbbbbbb</div></div>"}
+
+ {:id :flex/inline-flex-in-a-sentence
+  :group :flex
+  :html "<p>before <span style=\"display: inline-flex; gap: 6px\"><span>a</span><span>b</span></span> after</p>"}
+
+ {:id :flex/align-items-baseline
+  :group :flex
+  :html "<div style=\"display: flex; align-items: baseline\"><div style=\"font-size: 24px\">big</div><div>small</div></div>"}
+
+ {:id :flex/auto-margin-pushes-item-right
+  :group :flex
+  :html "<div style=\"display: flex; width: 300px\"><div>left</div><div style=\"margin-left: auto\">right</div></div>"}
+
+ {:id :flex/column-align-items-center
+  :group :flex
+  ;; In a column container the CROSS axis is horizontal.
+  :html "<div style=\"display: flex; flex-direction: column; align-items: center; width: 200px\"><div>a</div><div>bbbb</div></div>"}
+
+ {:id :flex/min-content-floor-on-an-item
+  :group :flex
+  ;; A flex item's automatic minimum size is its min-content width, so it
+  ;; refuses to shrink below its longest unbreakable word.
+  :html "<div style=\"display: flex; width: 120px\"><div style=\"flex: 1\">averylongunbrokenword</div><div style=\"flex: 1\">b</div></div>"}
+
+ ;; --- grid flow and alignment -------------------------------------------
+
+ {:id :grid/implicit-rows-from-overflow
+  :group :grid
+  ;; Four items in a 2-column grid with ONE explicit row: the second row is
+  ;; implicit and auto-sized.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; grid-template-rows: 30px\"><div>a</div><div>b</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/auto-rows
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 60px; grid-auto-rows: 40px\"><div>a</div><div>b</div></div>"}
+
+ {:id :grid/auto-flow-column
+  :group :grid
+  :html "<div style=\"display: grid; grid-auto-flow: column; grid-auto-columns: 70px\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :grid/row-span-two
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 70px 70px; grid-template-rows: 30px 30px\"><div style=\"grid-row: span 2\">tall</div><div>b</div><div>c</div></div>"}
+
+ {:id :grid/explicit-row-placement
+  :group :grid
+  ;; `grid-row: 2` alone: the item is placed in row 2 and column
+  ;; auto-placement still runs, so the two items are NOT on the same row.
+  :html "<div style=\"display: grid; grid-template-columns: 70px 70px; grid-template-rows: 30px 30px\"><div style=\"grid-row: 2\">t</div><div>b</div></div>"}
+
+ {:id :grid/line-number-placement
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px 60px\"><div style=\"grid-column: 1 / 3\">wide</div><div>b</div></div>"}
+
+ {:id :grid/justify-items-center
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 120px 120px; justify-items: center\"><div>a</div><div>bb</div></div>"}
+
+ {:id :grid/align-items-center-in-a-tall-row
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 80px; grid-template-rows: 60px; align-items: center\"><div>mid</div></div>"}
+
+ {:id :grid/separate-row-and-column-gap
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; row-gap: 24px; column-gap: 8px\"><div>a</div><div>b</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/inline-grid-in-a-sentence
+  :group :grid
+  :html "<p>before <span style=\"display: inline-grid; grid-template-columns: 30px 30px\"><span>a</span><span>b</span></span> after</p>"}
+
+ {:id :grid/auto-columns-size-to-content
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: auto auto; width: 400px\"><div>short</div><div>a much longer cell</div></div>"}
+
+ ;; --- overflow and scroll containers ------------------------------------
+
+ {:id :overflow/scroll-container-reserves-a-scrollbar
+  :group :overflow
+  ;; A classic (non-overlay) scrollbar takes width away from the content
+  ;; box, so the child of a 200px scroll container is NOT 200px wide.
+  :html "<div style=\"overflow-y: scroll; width: 200px; height: 50px\"><div>child</div></div>"}
+
+ {:id :overflow/x-hidden-y-scroll
+  :group :overflow
+  :html "<div style=\"overflow-x: hidden; overflow-y: scroll; width: 200px; height: 40px\"><p>alpha beta gamma delta epsilon</p></div>"}
+
+ {:id :overflow/child-taller-than-a-clipped-parent
+  :group :overflow
+  ;; Clipping does not resize either box: the parent stays 30, the child
+  ;; still reports 80.
+  :html "<div style=\"overflow: hidden; height: 30px; width: 150px\"><div style=\"height: 80px\">tall child</div></div>"}
+
+ {:id :overflow/nested-scroll-containers
+  :group :overflow
+  :html "<div style=\"overflow: auto; width: 200px; height: 80px\"><div style=\"overflow: auto; width: 120px; height: 40px\"><p>alpha beta gamma</p></div></div>"}
+
+ ;; --- percentages, auto margins and clamping ----------------------------
+
+ {:id :box/percentage-width
+  :group :box
+  :html "<div style=\"width: 400px\"><div style=\"width: 50%\">half</div></div>"}
+
+ {:id :box/percentage-height-of-a-fixed-parent
+  :group :box
+  :html "<div style=\"height: 100px; width: 120px\"><div style=\"height: 50%\">half</div></div>"}
+
+ {:id :box/percentage-height-of-an-auto-parent
+  :group :box
+  ;; A percentage height against an `auto` height resolves to `auto`, not
+  ;; to half of nothing.
+  :html "<div style=\"width: 120px\"><div style=\"height: 50%\">auto</div></div>"}
+
+ {:id :box/margin-auto-centers-a-block
+  :group :box
+  :html "<div style=\"width: 400px\"><div style=\"width: 100px; margin: 0 auto\">mid</div></div>"}
+
+ {:id :box/negative-margin-pulls-up
+  :group :box
+  :html "<div><div>first</div><div style=\"margin-top: -8px\">pulled</div></div>"}
+
+ {:id :box/border-box-with-padding-and-border
+  :group :box
+  :html "<div style=\"box-sizing: border-box; width: 200px; padding: 10px; border: 4px solid #000\">bb</div>"}
+
+ {:id :box/min-height-loses-to-content
+  :group :box
+  :html "<div style=\"min-height: 10px; width: 120px\"><p>alpha</p><p>beta</p></div>"}
+
+ {:id :box/max-width-percentage
+  :group :box
+  :html "<div style=\"width: 300px\"><div style=\"max-width: 50%; width: 280px\">clamped</div></div>"}
+
+ {:id :box/calc-width
+  :group :box
+  :html "<div style=\"width: 300px\"><div style=\"width: calc(100% - 40px)\">calc</div></div>"}
+
+ {:id :box/width-auto-with-side-margins
+  :group :box
+  ;; `width: auto` on a block absorbs the margins rather than overflowing.
+  :html "<div style=\"width: 300px\"><div style=\"margin-left: 30px; margin-right: 50px\">fills</div></div>"}
+
+ ;; --- text: direction, breaking, inherited line-height -------------------
+
+ {:id :text/rtl-with-inline-elements
+  :group :text
+  :html "<p style=\"direction: rtl; width: 300px\">alpha <b>beta</b> gamma</p>"}
+
+ {:id :text/rtl-block-alignment
+  :group :text
+  ;; In an rtl containing block a narrower block sits against the RIGHT
+  ;; edge, because it is the `margin-right: auto` side that resolves.
+  :html "<div style=\"direction: rtl; width: 200px\"><div style=\"width: 60px\">box</div></div>"}
+
+ {:id :text/word-break-break-all
+  :group :text
+  :html "<div style=\"width: 90px; word-break: break-all\">abcdefghijklmnopqrstuvwxyz</div>"}
+
+ {:id :text/tab-in-pre
+  :group :text
+  :html "<pre>a\tb</pre>"}
+
+ {:id :text/unitless-line-height-inherits-the-factor
+  :group :text
+  ;; A UNITLESS line-height inherits the NUMBER, so the 24px child gets
+  ;; 36px...
+  :html "<div style=\"line-height: 1.5\"><p style=\"font-size: 24px\">big</p></div>"}
+
+ {:id :text/em-line-height-inherits-the-computed-value
+  :group :text
+  ;; ...while an `em` line-height inherits the RESOLVED length, so the same
+  ;; child gets 21px (1.5 x the PARENT's 14px). The pair isolates one rule.
+  :html "<div style=\"line-height: 1.5em\"><p style=\"font-size: 24px\">big</p></div>"}
+
+ {:id :text/font-size-em-chain
+  :group :text
+  :html "<div style=\"font-size: 1.5em\"><div style=\"font-size: 1.5em\">nested</div></div>"}
+
+ {:id :text/negative-text-indent
+  :group :text
+  :html "<p style=\"width: 200px; text-indent: -20px; padding-left: 20px\">alpha beta gamma delta</p>"}
+
+ ;; --- display types the corpus never exercised --------------------------
+
+ {:id :display/table-cells-from-divs
+  :group :display
+  :html "<div style=\"display: table; width: 300px\"><div style=\"display: table-row\"><div style=\"display: table-cell\">a</div><div style=\"display: table-cell\">bb</div></div></div>"}
+
+ {:id :display/table-with-anonymous-rows
+  :group :display
+  ;; Two `table-cell` children of a `table` with no row between them: CSS
+  ;; generates the anonymous row box.
+  :html "<div style=\"display: table; width: 200px\"><div style=\"display: table-cell\">a</div><div style=\"display: table-cell\">b</div></div>"}
+
+ {:id :display/contents-is-transparent
+  :group :display
+  ;; `display: contents` generates NO box of its own -- the browser reports
+  ;; a 0x0 rect for it -- and its children become the flex items.
+  ;; ONE of this case's four boxes is not comparable by construction: an
+  ;; empty `getBoundingClientRect` is 0,0,0,0 in VIEWPORT coordinates, so
+  ;; once the harness subtracts the case root's offset it reads as a large
+  ;; negative y that depends on where the case sits on the page. The other
+  ;; three carry the signal.
+  :html "<div style=\"display: flex; width: 300px\"><div style=\"display: contents\"><div>a</div><div>b</div></div></div>"}
+
+ {:id :display/list-item-on-a-div
+  :group :display
+  ;; :oracle/blind -- the generated marker is not DOM text, so no Range can
+  ;; reach it while this engine synthesizes it as real text. Geometry and
+  ;; computed style are still scored.
+  :oracle/blind true
+  :html "<div style=\"display: list-item; margin-left: 20px\">item</div>"}
+
+ {:id :display/flow-root-establishes-a-context
+  :group :display
+  ;; `display: flow-root` is what `overflow: hidden` gets used for without
+  ;; the clipping: it contains the float AND stops the first child's margin
+  ;; collapsing through the parent.
+  :html "<div style=\"display: flow-root; width: 200px\"><div style=\"float: left; width: 50px; height: 60px\">F</div><p>text</p></div>"}
+
+ ;; --- tables: layout algorithms and cell alignment ----------------------
+
+ {:id :table/layout-fixed
+  :group :table
+  ;; `table-layout: fixed` sizes columns from the FIRST row only and
+  ;; ignores the rest of the content, so both columns are 150px.
+  :html "<table style=\"table-layout: fixed; width: 300px\"><tr><td>a</td><td>a much longer cell here</td></tr></table>"}
+
+ {:id :table/border-collapse
+  :group :table
+  ;; Collapsed borders remove border-spacing and halve the shared edge.
+  :html "<table style=\"border-collapse: collapse\"><tr><td style=\"border: 2px solid #000\">a</td><td style=\"border: 2px solid #000\">b</td></tr></table>"}
+
+ {:id :table/width-percentage
+  :group :table
+  :html "<div style=\"width: 400px\"><table style=\"width: 50%\"><tr><td>a</td><td>b</td></tr></table></div>"}
+
+ {:id :table/colgroup-widths
+  :group :table
+  :html "<table><colgroup><col style=\"width: 120px\"><col style=\"width: 60px\"></colgroup><tr><td>a</td><td>b</td></tr></table>"}
+
+ {:id :table/cell-vertical-align
+  :group :table
+  :html "<table><tr><td style=\"height: 60px; vertical-align: top\">top</td><td style=\"height: 60px; vertical-align: bottom\">bot</td></tr></table>"}
+
+ {:id :table/th-is-centered-and-bold
+  :group :table
+  :html "<table style=\"width: 200px\"><tr><th>Header</th></tr><tr><td>cell</td></tr></table>"}
+
+ ;; --- documents at scale ------------------------------------------------
+ ;; Every case in the corpus so far fits in a handful of boxes. A layout
+ ;; error that only shows up after N repetitions -- an accumulating offset,
+ ;; a margin collapsed once too often, a depth-dependent inset -- has never
+ ;; had anywhere to appear.
+
+ {:id :doc/many-sibling-blocks
+  :group :doc
+  :html "<div style=\"width: 200px\"><div>01</div><div>02</div><div>03</div><div>04</div><div>05</div><div>06</div><div>07</div><div>08</div><div>09</div><div>10</div><div>11</div><div>12</div><div>13</div><div>14</div><div>15</div><div>16</div><div>17</div><div>18</div><div>19</div><div>20</div><div>21</div><div>22</div><div>23</div><div>24</div></div>"}
+
+ {:id :doc/many-paragraphs-collapse-margins
+  :group :doc
+  ;; Twelve adjacent `<p>`s: the UA `margin: 1em 0` collapses between every
+  ;; pair, so the run is 12 x 20 + 13 x 14 rather than 12 x 20 + 24 x 14.
+  :html "<div style=\"width: 240px\"><p>one</p><p>two</p><p>three</p><p>four</p><p>five</p><p>six</p><p>seven</p><p>eight</p><p>nine</p><p>ten</p><p>eleven</p><p>twelve</p></div>"}
+
+ {:id :doc/deeply-nested-blocks
+  :group :doc
+  :html "<div style=\"width: 200px\"><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div>deep</div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div>"}
+
+ {:id :doc/deeply-nested-blocks-with-padding
+  :group :doc
+  ;; The same depth with 4px of padding at every level: a per-level inset
+  ;; that is off by one compounds into a visible number.
+  :html "<div style=\"width: 300px\"><div style=\"padding: 4px\"><div style=\"padding: 4px\"><div style=\"padding: 4px\"><div style=\"padding: 4px\"><div style=\"padding: 4px\"><div style=\"padding: 4px\"><div style=\"padding: 4px\"><div style=\"padding: 4px\">deep</div></div></div></div></div></div></div></div></div>"}
+
+ {:id :doc/long-list-of-items
+  :group :doc
+  :oracle/blind true
+  :html "<ul style=\"width: 240px\"><li>one</li><li>two</li><li>three</li><li>four</li><li>five</li><li>six</li><li>seven</li><li>eight</li><li>nine</li><li>ten</li><li>eleven</li><li>twelve</li><li>thirteen</li><li>fourteen</li><li>fifteen</li><li>sixteen</li></ul>"}
+
+ {:id :doc/many-inline-siblings-wrap
+  :group :doc
+  :html "<p style=\"width: 300px\"><span>aa</span> <span>bb</span> <span>cc</span> <span>dd</span> <span>ee</span> <span>ff</span> <span>gg</span> <span>hh</span> <span>ii</span> <span>jj</span> <span>kk</span> <span>ll</span> <span>mm</span> <span>nn</span> <span>oo</span> <span>pp</span> <span>qq</span> <span>rr</span> <span>ss</span> <span>tt</span></p>"}
+
+ {:id :doc/long-table
+  :group :doc
+  :html "<table><tr><td>r01</td><td>1</td></tr><tr><td>r02</td><td>2</td></tr><tr><td>r03</td><td>3</td></tr><tr><td>r04</td><td>4</td></tr><tr><td>r05</td><td>5</td></tr><tr><td>r06</td><td>6</td></tr><tr><td>r07</td><td>7</td></tr><tr><td>r08</td><td>8</td></tr><tr><td>r09</td><td>9</td></tr><tr><td>r10</td><td>10</td></tr><tr><td>r11</td><td>11</td></tr><tr><td>r12</td><td>12</td></tr></table>"}
+
+ ;; --- composites --------------------------------------------------------
+ ;; DELIBERATELY not isolating one mechanism: these are page shapes real
+ ;; sites are made of, and each one exercises several rules at once. When
+ ;; one fails, read the isolating cases above for the cause -- a composite
+ ;; failure on its own attributes nothing.
+
+ {:id :page/dashboard-stat-row
+  :group :page
+  :composite true
+  :html "<div style=\"display: flex; gap: 12px; width: 600px\"><div style=\"flex: 1; border: 1px solid #ccc; padding: 8px\"><h3>Users</h3><p>1,204</p></div><div style=\"flex: 1; border: 1px solid #ccc; padding: 8px\"><h3>Revenue</h3><p>$8,930</p></div><div style=\"flex: 1; border: 1px solid #ccc; padding: 8px\"><h3>Churn</h3><p>2.1%</p></div></div>"}
+
+ {:id :page/login-form
+  :group :page
+  :composite true
+  :html "<form style=\"width: 260px\"><h2>Sign in</h2><label>Email <input type=\"email\"></label><label>Password <input type=\"password\"></label><button>Log in</button></form>"}
+
+ {:id :page/media-object
+  :group :page
+  :composite true
+  :html "<div style=\"width: 320px\"><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"48\" height=\"48\" style=\"float: left; margin-right: 8px\"><h3>Title</h3><p>Body text that wraps beside the image and continues under it.</p></div>"}
+
+ {:id :page/card-with-absolute-badge
+  :group :page
+  :composite true
+  :html "<div style=\"position: relative; width: 240px; border: 1px solid #ccc; padding: 12px\"><span style=\"position: absolute; top: 0; right: 0\">NEW</span><h3>Plan</h3><p>Details here.</p></div>"}
+
+ {:id :page/sticky-header-over-a-list
+  :group :page
+  :composite true
+  :html "<div style=\"height: 100px; overflow: auto; width: 240px\"><div style=\"position: sticky; top: 0\">Header</div><p>one</p><p>two</p><p>three</p></div>"}
+
+ {:id :page/three-column-grid-page
+  :group :page
+  :composite true
+  :html "<div style=\"display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 16px; width: 600px\"><nav><a href=\"/\">Home</a></nav><main><h2>Title</h2><p>Body copy.</p></main><aside><p>Aside</p></aside></div>"}
+
+ {:id :page/toolbar-with-auto-margin
+  :group :page
+  :composite true
+  :html "<div style=\"display: flex; align-items: center; gap: 8px; width: 480px; padding: 6px; border: 1px solid #ccc\"><strong>App</strong><a href=\"/a\">One</a><a href=\"/b\">Two</a><button style=\"margin-left: auto\">Save</button></div>"}
 ]
