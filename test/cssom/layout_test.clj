@@ -5603,3 +5603,34 @@
     (is (< (:w inner) (:w outer)))
     (is (> (:w inner) 20)
         "and the inner one keeps its own columns plus its border-spacing")))
+
+(deftest a-bare-grid-span-keeps-auto-placement
+  ;; `grid-column: span 2` declares only a WIDTH: the item stays
+  ;; auto-placed and occupies two tracks, and the cursor resumes after it.
+  (let [[g doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc g)
+        doc (dom/set-style doc g {:display "grid" :grid-template-columns "80px 80px 80px"})
+        doc (build-inline-children doc g [[:div {:grid-column "span 2"} "wide"] [:div {} "c"] [:div {} "d"]])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        items (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)
+        [_ wide c d] items]
+    (is (= 160 (:w wide)) "two 80px tracks")
+    (is (= 160 (:x c)) "the next item resumes after it, in the third track")
+    (is (= 0 (:x d)) "and the one after that wraps to the next row")
+    (is (< (:y c) (:y d)))))
+
+(deftest position-relative-moves-a-flex-item
+  ;; A paint-time shift from the item's own normal position, exactly as for
+  ;; a block child. This engine applied it only in block flow -- a
+  ;; scope-cut documented since relative positioning landed.
+  (let [[row doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc row)
+        doc (dom/set-style doc row {:display "flex"})
+        doc (build-inline-children doc row [[:div {:position "relative" :top 8} "moved"] [:div {} "still"]])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        items (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)
+        [_ moved still] items]
+    (is (= 8 (:y moved)))
+    (is (= 0 (:y still)) "and its sibling does not move with it")))

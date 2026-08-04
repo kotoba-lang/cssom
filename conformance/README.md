@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 183/190 = 96%. Geometry: 599/719 element boxes (83%),
-156/200 cases with every box in agreement**, on a corpus of 200.
+**Line structure: 185/190 = 97%. Geometry: 603/719 element boxes (84%),
+158/200 cases with every box in agreement**, on a corpus of 200.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -286,6 +286,19 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round nineteen: grid span, and relative on a flex/grid item
+
+Both named by the round-17 corpus expansion, both small once measured.
+
+`grid-column: span 2` declares only a WIDTH — the item stays auto-placed
+and occupies N tracks, and the shared cursor resumes after it. It was
+previously parsed as a placement request and would have been treated as an
+explicit one.
+
+`position: relative` on a FLEX or GRID item was never applied: the shift
+existed only in block flow, a scope-cut documented since relative
+positioning landed. Both cases now agree with the browser on every box.
 
 ### Round eighteen: flex-grow and flex-shrink
 

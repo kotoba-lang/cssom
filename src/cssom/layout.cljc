@@ -2080,8 +2080,15 @@
       (let [parts (str/split v #"/")]
         (cond
           (= 1 (count parts))
-          (when-let [line (parse-grid-line-token (str/trim (first parts)))]
-            (single line))
+          (let [tok (str/trim (first parts))]
+            (if-let [[_ n] (re-matches #"(?i)span\s+([0-9]+)" tok)]
+              ;; `grid-column: span 2` with no start line: the item keeps
+              ;; auto placement but occupies N tracks. Only the SPAN is
+              ;; declared, so the returned range is relative -- the cursor
+              ;; decides where it starts (see item-grid-placement).
+              {:span (max 1 (parse-int n 1))}
+              (when-let [line (parse-grid-line-token tok)]
+                (single line))))
 
           (= 2 (count parts))
           (let [start-tok (str/trim (first parts))
@@ -2332,7 +2339,11 @@
   (let [n (count children)
         requests (mapv #(item-grid-placement theme % n-cols n-row-tracks areas) children)
         idx-range (range n)
-        explicit? (fn [i] (let [{:keys [col row]} (nth requests i)] (boolean (or col row))))
+        ;; a bare `span N` (no start line) is NOT an explicit placement: the
+        ;; item stays auto-placed and only its WIDTH is declared
+        span-only? (fn [r] (and (map? (:col r)) (:span (:col r))))
+        explicit? (fn [i] (let [{:keys [col row] :as r} (nth requests i)]
+                            (and (not (span-only? r)) (boolean (or col row)))))
         explicit-idxs (filter explicit? idx-range)
         resolve-explicit
         (fn [occupied {:keys [col row]}]
@@ -2374,19 +2385,21 @@
                     (assoc state
                            :cursor-row (:row-start p)
                            :cursor-col (:col-end p))
-                    (loop [r cursor-row c cursor-col]
-                      (cond
-                        (>= c n-cols) (recur (inc r) 0)
-                        (contains? occupied [r c])
-                        (if (< (inc c) n-cols) (recur r (inc c)) (recur (inc r) 0))
-                        :else
-                        (let [wrap? (>= (inc c) n-cols)]
-                          (assoc state
-                                 :occupied (conj occupied [r c])
-                                 :placements (assoc placements i {:col-start c :col-end (inc c)
-                                                                  :row-start r :row-end (inc r)})
-                                 :cursor-row (if wrap? (inc r) r)
-                                 :cursor-col (if wrap? 0 (inc c))))))))
+                    (let [span (min (max 1 (or (:span (:col (nth requests i))) 1)) n-cols)]
+                      (loop [r cursor-row c cursor-col]
+                        (cond
+                          (> (+ c span) n-cols) (recur (inc r) 0)
+                          (some #(contains? occupied [r %]) (range c (+ c span)))
+                          (if (< (inc c) n-cols) (recur r (inc c)) (recur (inc r) 0))
+                          :else
+                          (let [end (+ c span)
+                                wrap? (>= end n-cols)]
+                            (assoc state
+                                   :occupied (into occupied (for [cc (range c end)] [r cc]))
+                                   :placements (assoc placements i {:col-start c :col-end end
+                                                                    :row-start r :row-end (inc r)})
+                                   :cursor-row (if wrap? (inc r) r)
+                                   :cursor-col (if wrap? 0 end))))))))
                 (assoc phase1 :cursor-row 0 :cursor-col 0)
                 idx-range)]
     (:placements phase2)))
@@ -3310,6 +3323,20 @@
                        content-w)]
     (layout-node theme 0 0 child-avail opacity inherited child)))
 
+(declare relative-offset)
+
+(defn- relative-item-offset
+  "`position: relative` on a FLEX or GRID item -- a paint-time shift from
+   the item's own normal position, exactly as for a block child. This
+   engine applied it only in block flow, a scope-cut documented since
+   relative positioning landed and measured by the conformance corpus as a
+   flex item that never moved."
+  [theme child]
+  (if (and (map? child) (= :element (:node/type child)))
+    (let [cst (node-style child theme)]
+      (if (= "relative" (:position cst)) (relative-offset cst) [0 0]))
+    [0 0]))
+
 (defn- layout-flex-wrap-row
   [theme cx cy cw opacity inherited st in-flow measured]
   (let [gap (:gap st)
@@ -3475,13 +3502,14 @@
                            in-flow measured base-sizes main-sizes)
             offsets (place-main-axis (:justify-content st) main-sizes gap main-content)
             draws (mapcat
-                   (fn [m off]
+                   (fn [m off child]
                      (let [child-cross (if column? (:w (:box m)) (:h (:box m)))
                            c-off (cross-offset (:align-items st) child-cross cross-content)
-                           dx (if column? (+ cx c-off) (+ cx off))
-                           dy (if column? (+ cy off) (+ cy c-off))]
+                           [rdx rdy] (relative-item-offset theme child)
+                           dx (+ (if column? (+ cx c-off) (+ cx off)) rdx)
+                           dy (+ (if column? (+ cy off) (+ cy c-off)) rdy)]
                        (translate-ops dx dy (:draw m))))
-                   measured offsets)
+                   measured offsets in-flow)
             node-h (if column? (+ main-content (* 2 inset)) (+ cross-content (* 2 inset)))
             ;; A `display: flex` box is a BLOCK-level flex container: it
             ;; fills its containing block's width exactly like any other
@@ -3982,11 +4010,12 @@
                                        (if (seq hs) (apply max 0 hs) 0)))))
                                (range total-rows)))
         row-offsets (place-main-axis "flex-start" row-heights gap 0)
-        draws (vec (mapcat (fn [pl m]
-                              (translate-ops (+ cx (nth col-offsets (:col-start pl)))
-                                             (+ cy (nth row-offsets (:row-start pl)))
-                                             (:draw m)))
-                            placements measured))
+        draws (vec (mapcat (fn [pl m child]
+                              (let [[rdx rdy] (relative-item-offset theme child)]
+                                (translate-ops (+ cx (nth col-offsets (:col-start pl)) rdx)
+                                               (+ cy (nth row-offsets (:row-start pl)) rdy)
+                                               (:draw m))))
+                            placements measured in-flow))
         content-h (+ (reduce + 0 row-heights) (* gap (max 0 (dec (count row-heights)))))
         node-h (or explicit-h (+ content-h (* 2 inset)))]
     {:box-w w :box-h node-h :draws draws}))
