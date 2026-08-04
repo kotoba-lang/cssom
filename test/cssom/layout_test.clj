@@ -5752,14 +5752,24 @@
         input-op (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
     (is (= 8 (:y input-op))
         "the control sits at the top of the line box it made taller")
-    (is (= 13 (:y (first t)))
+    (is (= 10 (:y (first t)))
         "and the label text is pushed down so both sit on one baseline:
          the control's own INTERNAL baseline (its text's, not its bottom
          edge -- see inline-fragments' baseline-offset) and the label's
-         baseline (9 + 14) coincide -- real CSS `vertical-align: baseline`.
-         The control is 24 tall rather than 28 because it now carries the
-         UA box a browser gives it (13px Arial, 2px padding, 2px border)
-         instead of inheriting the page font")
+         baseline coincide -- real CSS `vertical-align: baseline`.
+
+         This was 13, i.e. a baseline 19px below the line top, back when
+         the control's internal baseline was `2px padding + 2px border +
+         half of the PAGE's 20px leading + ascent`. Two of those three
+         terms were wrong and have been re-derived against Brave: the UA
+         block padding on an <input> is 1px, not 2 (`padding: 1px 2px`),
+         and a control's UA `font:` shorthand resets its line-height to
+         `normal`, so the page's leading never reaches it -- there is no
+         half-leading inside a control at all. The baseline is now
+         `1 + 2 + ascent` = 16, and the label text sits one font-size
+         above it. Measured in Brave, `<p>text <input> tail</p>` puts the
+         text at y=3 in a 21px line box, i.e. a baseline 15px down against
+         the 19 this used to produce")
     (is (< (:x (first t)) (:x input-op))
         "label first, control after it, on that one line")
     (is (< (:w input-op) 200)
@@ -7256,3 +7266,137 @@
     (is (apply = (map :y sentence)) "and the words either side of it share it")
     (is (< (:x (first sentence)) (:x grid) (:x (second sentence)))
         "with the grid between them rather than above or below")))
+
+;; ---- the inline VERTICAL model: strut + leading + one shared baseline ----
+;;
+;; These run with a `:font-metrics` theme hook carrying the faces measured
+;; in Brave (14px monospace 12/3, its bold 14/4, 24px 21/5, 10px 9/2,
+;; 13.3333px Arial 12/3), because the whole point of the model is that a
+;; line box is built from a font's REAL ascent and descent. Without the hook
+;; cssom.layout keeps its documented `ascent = font-size, descent = 0.2em`
+;; approximation and there is nothing to check against a browser.
+
+(def ^:private brave-faces
+  {:normal {:ascent 12 :descent 3 :ref 14}
+   :bold {:ascent 14 :descent 4 :ref 14}
+   :italic {:ascent 14 :descent 4 :ref 14}
+   :control {:ascent 12 :descent 3 :ref 13.3333}})
+
+(def ^:private brave-theme
+  {:padding 0 :gap 0 :font-size 14 :line-height 20
+   :font-metrics (fn [font-size weight style family]
+                   (let [f (get brave-faces (cond (= "Arial" family) :control
+                                                  (= "bold" weight) :bold
+                                                  (= "italic" style) :italic
+                                                  :else :normal))
+                         k (/ (or font-size (:ref f)) (:ref f))]
+                     {:ascent (* k (:ascent f)) :descent (* k (:descent f))}))})
+
+(defn- metric-ops
+  "draw-ops for an inline run laid out with the measured faces, in a
+   container carrying an EXPLICIT `line-height: 20px` -- the same shape the
+   conformance harness's own wrapper uses, and the reason it does: without
+   an explicit declaration `resolve-line-height` gives a 24px run its own
+   1.2em normal leading (28) instead of the block's 20, which is correct
+   CSS and a different test."
+  [specs]
+  (inline-ops specs {:line-height 20} {:width 800 :theme brave-theme}))
+
+(defn- metric-boxes
+  "Every element `:node` box, as [tag y h] -- the two numbers the vertical
+   model decides."
+  [specs]
+  (->> (metric-ops specs)
+       (filterv #(= :node (:draw/op %)))
+       (mapv (juxt :tag :y :h))))
+
+(defn- container-height [specs]
+  (->> (metric-ops specs)
+       (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))))
+       first
+       :h))
+
+(deftest a-line-box-is-the-union-of-its-participants-not-the-tallest-line-height
+  ;; Measured in Brave: `<p>text <span style="font-size:24px">big</span>
+  ;; tail</p>` in a 14px/20px block is TWENTY-FOUR px tall, and the 24px
+  ;; span's own box starts 3px ABOVE the line's top edge. The line box is
+  ;; the union of every participant's [ascent + halfLeading, descent +
+  ;; halfLeading] span (leading-ascent), not a max over line-heights: the
+  ;; 24px face's half-leading is NEGATIVE (-3), so it overflows the 20px
+  ;; line upward while the strut still holds the bottom at 6.
+  (is (= 23 (container-height ["text " [:span {:font-size 24} "big"] " tail"]))
+      "23, not Brave's 24, because these faces are SCALED linearly from the
+       14px measurement (24px comes out 20.57/5.14 against the browser's
+       21/5) exactly as the conformance harness's own host hook does -- the
+       RULE is exact here, the face is approximated. Feeding it the real
+       21/5 gives 24 on the nose: floor(21 + (20-26)/2) = 18 above,
+       max(6, 20-18) = 6 below")
+  ;; ...and a SMALLER face grows the line downward for the mirror reason:
+  ;; a 10px run inside a 20px line has 4.5px of half-leading, so its
+  ;; descent side reaches 7 where the strut only asked for 6.
+  (is (= 21 (container-height ["text " [:span {:font-size 10} "sm"] " tail"]))
+      "Brave reports 21 here too"))
+
+(deftest an-inline-box-sits-one-of-its-own-ascents-above-the-shared-baseline
+  ;; Measured in Brave, all on one 20px line: a same-size <span> is
+  ;; (y=2, h=15) -- its own 14px content area -- while a <b> on that same
+  ;; line is (y=1, h=18) from the bold face's taller 14/4 metrics, and the
+  ;; line grows to 21 to hold it. The floor in leading-ascent is what puts
+  ;; the baseline at 14 rather than 14.5; without it every one of these was
+  ;; a pixel low.
+  (is (= [[:div 0 20] [:span 2 15]]
+         (metric-boxes ["text " [:span {} "mid"] " tail"])))
+  (is (= [[:div 0 21] [:b 1 18]]
+         (metric-boxes ["text " [:b {} "bold"] " tail"]))))
+
+(deftest an-inline-box-is-measured-in-the-face-it-inherited
+  ;; `<code>` inside `<em>` is drawn in the italic face, so its box is the
+  ;; italic 14/4 = 18px content area, not the upright 15 its own (empty)
+  ;; declarations alone would give. Measured in Brave at (y=1, h=18) for
+  ;; both. Reading only the owner's own `:font-*` made every inheriting
+  ;; inline box report the wrong face.
+  (is (= [[:div 0 21] [:em 1 18] [:code 1 18]]
+         (metric-boxes ["a " [:em {} "c " [:code {} "d"]] " e"]))))
+
+(deftest an-inline-box-around-an-atomic-reports-its-own-content-area
+  ;; A `<label>` wrapping an `<input>` is 15px tall and sits at y=3 in
+  ;; Brave -- its OWN font's content area on the line's baseline -- not the
+  ;; 21px box of the control inside it. This is the same rule as the two
+  ;; tests above; the atomic branch of layout-inline-run used to hand its
+  ;; owners the ATOMIC's box instead, which is what made every <label>
+  ;; around a control 6px too tall and 3px too high.
+  (let [boxes (metric-boxes [[:label {} "Name " [:input {}]] " after"])]
+    (is (= [:label 2 15] (second boxes))
+        "y=2 rather than Brave's 3 for the one reason left in the control
+         box: ua-control-font charges 13px where the browser computes
+         13.3333, so the control's internal baseline lands at 14 instead of
+         15. That 0.33px is deliberately still there -- it cancels an
+         opposite error in the intrinsic WIDTH model, and fixing either
+         alone makes the result worse (see ua-control-font)")
+    (is (= 21 (last (first boxes)))
+        "and the line box is the input's 21, since the control's own
+         internal baseline (15) reaches further down than the strut's")))
+
+(deftest sub-and-sup-shift-against-the-parents-font-not-their-own
+  ;; Measured in Brave, `H<sub>2</sub>O X<sup>2</sup>` in a 14px paragraph
+  ;; puts the two boxes exactly 9.453px apart: (0.404 + 0.271) x 14. The UA
+  ;; `font-size: smaller` makes those boxes 11.67px, and charging the shift
+  ;; against THAT (7.88px apart) made the line box 1.5px short and put the
+  ;; subscript ~2.5px high.
+  (let [[_ sub sup] (metric-boxes ["H" [:sub {} "2"] "O X" [:sup {} "2"]])]
+    (is (< 9.4 (- (second sub) (second sup)) 9.5)
+        "the gap between the two boxes is the parent's em, not the child's")))
+
+(deftest a-lone-inline-element-still-gets-a-real-inline-box
+  ;; `<td><a href="/x">link</a></td>` reports the <a> at (0, 2, 28, 15) in
+  ;; Brave -- its own content area on the cell's baseline. The two-or-more
+  ;; run threshold used to send a lone element down the block-row path,
+  ;; which made it a full-width 20px row: wrong on all four numbers. A lone
+  ;; TEXT child still stays on layout-text's path (see inline-runs).
+  (is (= [[:div 0 20] [:a 2 15]] (metric-boxes [[:a {:href "/x"} "link"]])))
+  ;; ...but an EMPTY one does not, because inline-fragments records an
+  ;; owner only when it emits a piece, so a run would drop its `:node` op
+  ;; entirely and take the element out of hit-testing (inline-fragment-
+  ;; bearing?).
+  (is (some #(= :span (first %)) (metric-boxes [[:span {} ]]))
+      "an empty inline element keeps a box of its own"))

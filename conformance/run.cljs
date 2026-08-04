@@ -673,7 +673,38 @@
                       :theme {:padding 0
                               :gap 0
                               ;; the vertical counterpart of :measure-text,
-                              ;; scaled from the measured 14px faces
+                              ;; scaled LINEARLY from the measured 14px
+                              ;; faces (13.3333px for the control face).
+                              ;;
+                              ;; The oracle's own values are INTEGERS at
+                              ;; every size -- measured 2026-08-04 across
+                              ;; ten faces/sizes, `fontBoundingBoxAscent`/
+                              ;; `Descent` came back 9/2, 12/3, 14/3, 17/4,
+                              ;; 21/5 for monospace at 10/14/16/20/24 and
+                              ;; 12/3, 22/5 for Arial at 13.3333/24, i.e.
+                              ;; round(size x em-ratio) every time. This
+                              ;; hook does NOT round, so it hands the engine
+                              ;; fractional metrics no real font has (20.57
+                              ;; where the browser says 21), which is where
+                              ;; the residual +-1px on every large-font line
+                              ;; box comes from.
+                              ;;
+                              ;; Rounding it was measured rather than
+                              ;; argued, and is deliberately NOT applied:
+                              ;; it moved the geometry axis 1150 -> 1150
+                              ;; boxes (clean cases 283 -> 284, line
+                              ;; structure 297 -> 298, paint order
+                              ;; 7600 -> 7599) and pushed
+                              ;; :form/textarea-with-rows OUT of tolerance,
+                              ;; because rounding a control's ascent+descent
+                              ;; UP to 15 compounds over three rows against
+                              ;; a real textarea whose face is 13.3333px
+                              ;; MONOSPACE (14 per row), not the 13px Arial
+                              ;; ua-control-font charges. That is one half
+                              ;; of a pair of cancelling errors (see
+                              ;; ua-control-font in cssom.layout); fixing it
+                              ;; alone makes the result worse, so it waits
+                              ;; for the other half.
                               :font-metrics (fn [font-size weight style family]
                                               (let [face (cond (= "Arial" family) :control
                                                                (= "bold" weight) :bold
