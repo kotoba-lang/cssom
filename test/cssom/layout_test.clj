@@ -5132,10 +5132,11 @@
         input-op (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
     (is (= 8 (:y input-op))
         "the control sits at the top of the line box it made taller")
-    (is (= 15 (:y (first t)))
-        "and the label text is pushed down so BOTH sit on one baseline:
-         the control's bottom edge (8 + 21) and the text's own baseline
-         (15 + 14) are both y=29 -- real CSS `vertical-align: baseline`.
+    (is (= 9 (:y (first t)))
+        "and the label text is pushed down so both sit on one baseline:
+         the control's own INTERNAL baseline (its text's, not its bottom
+         edge -- see inline-fragments' baseline-offset) and the label's
+         baseline (9 + 14) coincide -- real CSS `vertical-align: baseline`.
          The control is 24 tall rather than 28 because it now carries the
          UA box a browser gives it (13px Arial, 2px padding, 2px border)
          instead of inheriting the page font")

@@ -196,6 +196,20 @@
     }
     probe.remove();
     out['__advances__'] = advances;
+    // The vertical half: a font's real ASCENT and DESCENT, which is what a
+    // line box is actually built from. Measured with canvas TextMetrics --
+    // 14px monospace is 12/3 here (a 15px content area, not the 16.8 a
+    // 1.2em approximation assumes), its bold face 14/4, and 24px 21/5.
+    var ctx = document.createElement('canvas').getContext('2d');
+    function fm(font) {
+      ctx.font = font;
+      var t = ctx.measureText('Hxg');
+      return { ascent: t.fontBoundingBoxAscent, descent: t.fontBoundingBoxDescent };
+    }
+    out['__metrics__'] = {
+      normal: fm('14px monospace'), bold: fm('bold 14px monospace'),
+      italic: fm('italic 14px monospace'), control: fm('13.3333px Arial')
+    };
     var pre = document.createElement('pre');
     pre.id = 'kotoba-conformance-out';
     pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(out))));
@@ -374,6 +388,18 @@
                      {:width width
                       :theme {:padding 0
                               :gap 0
+                              ;; the vertical counterpart of :measure-text,
+                              ;; scaled from the measured 14px faces
+                              :font-metrics (fn [font-size weight style family]
+                                              (let [face (cond (= "Arial" family) :control
+                                                               (= "bold" weight) :bold
+                                                               (= "italic" style) :italic
+                                                               :else :normal)
+                                                    base (get (:metrics char-w) face)
+                                                    ref (if (= :control face) 13.3333 14)
+                                                    k (/ (or font-size ref) ref)]
+                                                {:ascent (* k (:ascent base))
+                                                 :descent (* k (:descent base))}))
                               :measure-text (fn [text font-size weight style family]
                                               (let [control? (= "Arial" family)
                                                     advance (cond control? (:control char-w)
@@ -437,8 +463,27 @@
                          (recur (rest words) (+ x (word-w w fs (:font-weight op) (:font-style op)))
                                 (if (str/blank? w)
                                   out
-                                  (conj out {:text w :left x
-                                             :top (:y op) :bottom (+ (:y op) fs)})))
+                                  ;; The engine reports a text op in EM-BOX
+                                  ;; coordinates (its `:y` is one font-size
+                                  ;; above the baseline, where dom-gpu's
+                                  ;; hosts paint). The oracle reports the
+                                  ;; font's CONTENT AREA. Converting here
+                                  ;; compares the same box in the same
+                                  ;; coordinates rather than penalising a
+                                  ;; convention difference.
+                                  (let [face (cond (= "Arial" (:font-family op)) :control
+                                                   (= "bold" (:font-weight op)) :bold
+                                                   (= "italic" (:font-style op)) :italic
+                                                   :else :normal)
+                                        base (get (:metrics char-w) face)
+                                        ref (if (= :control face) 13.3333 14)
+                                        k (/ fs ref)
+                                        asc (* k (:ascent base))
+                                        desc (* k (:descent base))
+                                        baseline (+ (:y op) fs)]
+                                    (conj out {:text w :left x
+                                               :top (- baseline asc)
+                                               :bottom (+ baseline desc)}))))
                          out)))))
          cluster-lines)))
 
@@ -590,10 +635,13 @@
       advances (:__advances__ oracle)
       advance-for (fn [face]
                     (fn [ch] (get-in advances [face (keyword (str (.charCodeAt ch 0)))] 8.4)))
+      ;; both halves of the host's font knowledge travel together: the
+      ;; per-character advances and the per-face ascent/descent
       char-w {:normal (advance-for :normal)
               :bold (advance-for :bold)
               :italic (advance-for :italic)
-              :control (advance-for :control)}
+              :control (advance-for :control)
+              :metrics (:__metrics__ oracle)}
       _ (println (str "metrics: per-character advance table measured in the oracle ("
                       (count (:normal advances)) " chars x normal/bold/italic)\n"))
       results (vec (map-indexed (fn [i c]

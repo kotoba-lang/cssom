@@ -3076,7 +3076,7 @@
   20)
 
 (declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited
-         inline-max-content-width)
+         inline-max-content-width font-metrics)
 
 (defn- atomic-intrinsic-width
   "The available width an atomic inline is laid out at — its intrinsic
@@ -4128,9 +4128,26 @@
                          ;; checkbox at x=4 y=3 where this engine had 0,1.
                          ml (margin-side st :left)
                          mr (margin-side st :right)
-                         mt (margin-side st :top)]
+                         mt (margin-side st :top)
+                         h (+ (:h box) mt (margin-side st :bottom))
+                         ;; An atomic inline's BASELINE is not always its
+                         ;; bottom edge. A replaced box (an <img>) does sit
+                         ;; on the baseline, but a form control's baseline
+                         ;; is the baseline of its own internal text --
+                         ;; which is why a browser reports a line holding an
+                         ;; <input> as exactly the input's height (21px),
+                         ;; where treating the bottom edge as the baseline
+                         ;; adds the strut's descent under it and gives 27.
+                         baseline-offset
+                         (if (contains? form-control-tags (:tag child))
+                           (let [{:keys [descent]} (font-metrics theme (parse-int (:font-size st) nil)
+                                                                 (:font-weight st) (:font-style st)
+                                                                 (:font-family st))]
+                             (max 0 (- h (or (:padding-bottom st) (:padding st) 0)
+                                       (:border-width st) descent (margin-side st :bottom))))
+                           h)]
                      (conj acc {:kind :atomic
-                                :w (+ (:w box) ml mr) :h (+ (:h box) mt (margin-side st :bottom))
+                                :w (+ (:w box) ml mr) :h h :baseline-offset baseline-offset
                                 :ml ml :mt mt :draw draw
                                 :owners owners :opacity opacity}))
 
@@ -4292,7 +4309,7 @@
                       (w-of " " (or (:space-style t)
                                     {:font-size (or (:font-size (:style (peek pieces))) 14)}))
                       0)
-                piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h :ml :mt])
+                piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h :ml :mt :baseline-offset])
                                      :kind :atomic :x x :w (:w t)))]
             (if (and (seq pieces) (> (+ x sep (:w t)) content-w))
               (recur (rest ts) (:w t) [(piece 0)] (flush lines pieces x nil))
@@ -4334,6 +4351,28 @@
           (and (empty? pieces) (seq lines)) lines
           :else (flush lines pieces x nil))))))
 
+(defn- font-metrics
+  "The font's ascent and descent in pixels, from the host's optional
+   `:font-metrics` theme hook -- the vertical counterpart of
+   `:measure-text`, and the same bargain: this is a pure engine with no
+   glyph tables, so a host that HAS real metrics can supply them and a host
+   that does not gets a documented approximation.
+
+   The default keeps this file's long-standing behaviour exactly: ascent =
+   the font size (which is where dom-gpu's hosts paint the baseline, at
+   `y + font-size`) and descent = 0.2em, so the content area stays the 1.2em
+   this engine has always used.
+
+   Real metrics matter because a line box is built from them: measured in
+   Chrome, 14px monospace is ascent 12 / descent 3 (content 15, not 16.8),
+   its BOLD face is 14 / 4 (content 18), and 24px is 21 / 5 (content 26).
+   Those are the numbers that decide how tall a line is and where each
+   inline box sits inside it."
+  [theme font-size weight style family]
+  (let [fs (or font-size (:font-size theme) 14)]
+    (or (when-let [f (:font-metrics theme)] (f fs weight style family))
+        {:ascent fs :descent (long (* 0.2 fs))})))
+
 (defn- inline-line-metrics
   "One line box's own height and baseline offset. Height is the tallest
    `line-height` among the line's own pieces (real CSS's own
@@ -4362,8 +4401,33 @@
   (let [pieces (:pieces line)
         fallback-fs (or (:font-size (:style line)) (:font-size inherited) (:font-size theme))
         fallback-lh (or (:line-height (:style line)) (:line-height inherited) (:line-height theme))
-        ascents (concat (keep #(:font-size (:style %)) pieces)
-                        (keep #(when (= :atomic (:kind %)) (:h %)) pieces))
+        ;; Each inline box occupies [baseline - ascent - halfLeading,
+        ;; baseline + descent + halfLeading], where halfLeading is
+        ;; (line-height - (ascent + descent)) / 2 and CAN BE NEGATIVE -- a
+        ;; declared line-height smaller than the font's own content area
+        ;; makes the box overflow the line rather than grow it. The line box
+        ;; is the union of those spans, which is what makes a 24px run
+        ;; inside a `line-height: 20px` container report 24 in a browser
+        ;; while the line-height rule alone says 20.
+        spans (for [p pieces
+                    :when (not= :atomic (:kind p))
+                    :let [st (:style p)
+                          fs (or (:font-size st) fallback-fs)
+                          lh (or (:line-height st) fallback-lh fs)
+                          {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
+                                                                 (:font-style st) (:font-family st))
+                          half (/ (- lh (+ ascent descent)) 2)]]
+                [(+ ascent half) (+ descent half)])
+        atomic-hs (keep #(when (= :atomic (:kind %)) (or (:baseline-offset %) (:h %))) pieces)
+        atomic-below (keep #(when (= :atomic (:kind %))
+                              (- (:h %) (or (:baseline-offset %) (:h %))))
+                           pieces)
+        strut (let [{:keys [ascent descent]} (font-metrics theme fallback-fs nil nil nil)
+                    half (/ (- (or fallback-lh fallback-fs) (+ ascent descent)) 2)]
+                [(+ ascent half) (+ descent half)])
+        above (apply max (concat (map first spans) atomic-hs [(first strut)]))
+        below (apply max (concat (map second spans) atomic-below [(second strut)]))
+        ascents (concat (keep #(:font-size (:style %)) pieces) atomic-hs)
         line-heights (keep #(:line-height (:style %)) pieces)
         max-ascent (if (seq ascents) (apply max ascents) fallback-fs)
         max-lh (if (seq line-heights) (apply max line-heights) fallback-lh)
@@ -4375,9 +4439,18 @@
         ;; spilling out of it), where this engine reported 24. An ATOMIC
         ;; inline is different -- a replaced box cannot overflow its line,
         ;; and a browser does grow the line to fit it.
-        atomic-h (keep #(when (= :atomic (:kind %)) (:h %)) pieces)]
-    {:h (max max-lh (if (seq atomic-h) (apply max atomic-h) 0))
-     :baseline max-ascent}))
+        ]
+    ;; With a host's real metrics, the line box is the UNION of the inline
+    ;; boxes positioned by their own ascent/descent -- the real rule.
+    ;; Without them this engine keeps its long-standing approximation
+    ;; (line box = the tallest line-height, baseline one font-size down),
+    ;; byte for byte: the same bargain `:measure-text` makes, since
+    ;; inventing metrics would be worse than admitting there are none.
+    (if (:font-metrics theme)
+      {:h (long (Math/ceil (+ above below)))
+       :baseline (long (Math/ceil above))}
+      {:h (max max-lh (if (seq atomic-hs) (apply max atomic-hs) 0))
+       :baseline max-ascent})))
 
 (defn- inline-owner-ops
   "Background + `:node` draw-ops for the inline ELEMENTS a laid-out run
@@ -4482,7 +4555,8 @@
                      ;; translate -- its bottom edge onto the baseline, the
                      ;; real CSS `vertical-align: baseline` default.
                      (let [px (+ base-x (:x piece) (:ml piece 0))
-                           py (+ (- baseline (:h piece)) (:mt piece 0))
+                           py (+ (- baseline (or (:baseline-offset piece) (:h piece)))
+                                 (:mt piece 0))
                            rects (reduce (fn [rects owner]
                                            (update rects (:idx owner)
                                                    (fn [entry]
@@ -4515,8 +4589,16 @@
                            ;; on a 20px line reports y=1 h=18, where this
                            ;; engine reported y=0 h=20, so every inline
                            ;; element's box missed on both axes at once.
-                           content-h (long (* 1.2 (:font-size st)))
-                           half-leading (max 0 (quot (- line-h content-h) 2))
+                           {:keys [ascent descent]} (font-metrics theme (:font-size st)
+                                                                   (:font-weight st) (:font-style st)
+                                                                   (:font-family st))
+                           content-h (if (:font-metrics theme)
+                                       (+ ascent descent)
+                                       (long (* 1.2 (:font-size st))))
+                           ;; the box sits ON the baseline, ascent above it
+                           half-leading (if (:font-metrics theme)
+                                          (max 0 (- baseline y ascent))
+                                          (max 0 (quot (- line-h content-h) 2)))
                            rects (reduce (fn [rects owner]
                                            (update rects (:idx owner)
                                                    (fn [entry]

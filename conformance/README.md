@@ -47,8 +47,11 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 140/142 = 99%. Geometry: 427/493 element boxes (87%),
-123/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
+**Line structure: 139/142 = 98%. Geometry: 422/493 element boxes (86%),
+117/150 cases with every box in agreement**, on a corpus of 150.
+
+That geometry number is one point BELOW the previous round's 87%, and it is
+the right trade: see "the font-metrics model" below. The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
@@ -283,6 +286,56 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round thirteen: the font-metrics model
+
+Round eleven stopped at a named prerequisite rather than fitting constants:
+a browser positions each inline box by the font's REAL ascent and descent
+and takes their union, and this engine modelled neither. That prerequisite
+now exists.
+
+Measured first, as the stopping note asked for. Chrome on this machine:
+
+| face | ascent | descent | content area |
+|---|---|---|---|
+| 14px monospace | 12 | 3 | 15 (not the 16.8 a 1.2em guess assumes) |
+| bold 14px monospace | 14 | 4 | 18 |
+| 24px monospace | 21 | 5 | 26 |
+| 13.33px Arial (controls) | 12 | 3 | 15 |
+
+Working the CSS line-box rule by hand with those numbers reproduces the
+browser exactly: for `small <span style="font-size:24px">big</span>` in a
+`line-height: 20px` container, the strut contributes
+`[baseline−14.5, baseline+5.5]` and the 24px run `[baseline−18,
+baseline+2]` (its half-leading is NEGATIVE, which is why it overflows
+rather than growing the line), union 23.5 ≈ the browser's 24.
+
+So the engine gained a `:font-metrics` theme hook — the vertical
+counterpart of `:measure-text`, with the same bargain: a host that HAS real
+metrics supplies them, a host that does not keeps this file's documented
+1.2em approximation BYTE FOR BYTE. The harness supplies them (canvas
+`TextMetrics`), and its own text boxes are converted from the engine's
+em-box convention to the content-area one the oracle reports, so the two
+sides describe the same box in the same coordinates.
+
+It also forced a rule that only becomes visible once the vertical model is
+real: **an atomic inline's baseline is not always its bottom edge.** A
+replaced box sits ON the baseline, but a form control's baseline is its own
+internal text's — which is why a browser reports a line holding an
+`<input>` as exactly 21px, where treating the bottom edge as the baseline
+adds the strut's descent underneath and gives 27.
+
+Cases that are now exact where they never were: `<b>` inline boxes
+(63,1,47.63,18 against the browser's 63,1,47.64,18), the mixed-font-size
+line box (24, previously 20), the input line (21).
+
+And the honest part: the aggregate went 87% → 86%. The remaining vertical
+rules — `vertical-align` for `<sub>`/`<sup>`, and a `<textarea>`'s own
+baseline — are still missing, and with a REAL vertical model they now show
+up as mismatches instead of being averaged away by an approximation that
+was wrong in a compensating direction. The model is the foundation those
+rules need; the point of this axis is to measure the engine, not to protect
+a number.
 
 ### Round twelve: form controls do not inherit the page font
 
