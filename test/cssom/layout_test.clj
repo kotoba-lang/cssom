@@ -3672,18 +3672,28 @@
     ;; layout-children-block's sibling-stacking `+`.
     (let [ops (layout/draw-ops tree {:width 480})
           [a b] (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
-      ;; cssom.layout's own permissive digit-run parse-int (the SAME
-      ;; leading-digit-run extraction resolve-width already applies to a raw
-      ;; :width -- e.g. "50%" -> 50, see the calc()-with-a-percentage test's
-      ;; own docstring above) reads "40%"/"60%" as 40px/60px.
-      (is (= 40 (:h a)))
-      (is (= 60 (:h b)))
-      ;; The second sibling's y REFLECTS the first's real (coerced) height
-      ;; -- not a crash, and not stacked at some bogus/zero offset: default
-      ;; theme padding (4, root's own content inset) + div a's own 40px
-      ;; height + default gap (4).
+      ;; UPDATED 2026-08-04, and the reason matters more than the numbers.
+      ;; This used to assert 40 and 60 -- cssom.layout's own permissive
+      ;; digit-run parse-int reading "40%"/"60%" as 40px/60px -- which was
+      ;; never CSS, only the coercion that stopped the crash. A percentage
+      ;; height resolves against the CONTAINING BLOCK's height, and this
+      ;; `<main>` has no declared height at all, so the basis is indefinite
+      ;; and real CSS makes both percentages `auto`. Measured in Brave, on
+      ;; the corpus case written for exactly this
+      ;; (`box/percentage-height-of-an-auto-parent`): the browser reports a
+      ;; content-sized 20px box where this engine reported 50 for a
+      ;; `height: 50%` child of an auto-height parent.
+      ;;
+      ;; Content-sized here means each empty div is just its own theme inset
+      ;; (4px top + 4px bottom) tall.
+      (is (= 8 (:h a)))
+      (is (= 8 (:h b)))
+      ;; The regression this test exists for is unchanged: the second
+      ;; sibling still stacks on the first's REAL height rather than
+      ;; crashing or piling up at zero -- default theme padding (4, root's
+      ;; own content inset) + div a's height + default gap (4).
       (is (= 4 (:y a)))
-      (is (= (+ 4 40 4) (:y b))))))
+      (is (= (+ 4 8 4) (:y b))))))
 
 (deftest explicit-percentage-min-width-does-not-crash-resolve-width
   ;; resolve-width's own :min-width clamp used to call `max` directly on the
@@ -7400,3 +7410,176 @@
   ;; bearing?).
   (is (some #(= :span (first %)) (metric-boxes [[:span {} ]]))
       "an empty inline element keeps a box of its own"))
+
+;; ---- block-level sizing and inline-axis alignment (round twenty-five) ----
+;;
+;; Every number asserted below that names a corpus case was measured in a
+;; real headless Brave 151 over CDP before the code that produces it was
+;; written, and the case ids are the conformance corpus's own. The handful
+;; that name no case are controls derived from a measured one (an auto-width
+;; block has no leftover space, so an auto margin on it is 0) or pins of a
+;; documented scope cut, and each says which it is. These go through the REAL cascade
+;; (`css/parse-rules` + `css/apply-cascade`) rather than `dom/set-style`,
+;; because half of what they pin lives in cssom.core: `margin: 0 auto` is a
+;; shorthand the cascade has to expand before layout can read `auto` at all.
+
+(defn- cascaded-boxes
+  "Every element `:node` box laid out from real HTML-shaped DOM building
+   plus a real stylesheet, at 800px with this engine's own theme padding/gap
+   removed -- the same two theme settings the conformance harness uses, for
+   the same reason (they are a host styling choice, not CSS)."
+  [css-text build]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build doc root)
+        doc (css/apply-cascade doc (css/parse-rules css-text))
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})]
+    (mapv #(select-keys % [:tag :x :y :w :h])
+          (filterv #(= :node (:draw/op %)) ops))))
+
+(defn- nest
+  "A `.outer` div holding one `.inner` div holding one text node."
+  [doc root]
+  (let [[outer doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root outer)
+        doc (dom/set-attribute doc outer :class "outer")
+        [inner doc] (dom/create-element doc :div)
+        doc (dom/append-child doc outer inner)
+        doc (dom/set-attribute doc inner :class "inner")
+        [t doc] (dom/create-text-node doc "x")]
+    (dom/append-child doc inner t)))
+
+(deftest auto-inline-margins-distribute-the-leftover-space
+  ;; `box/margin-auto-centers-a-block` and its three companions. Brave, in
+  ;; a 400px container holding a 100px block: `margin: 0 auto` -> x=150,
+  ;; `margin-left: auto` -> x=300, `margin-right: auto` -> x=0.
+  (let [x-of (fn [decl]
+               (:x (last (cascaded-boxes (str ".outer{width:400px} .inner{width:100px;" decl "}")
+                                         nest))))]
+    (is (= 150 (x-of "margin: 0 auto")) "both auto margins share it: centred")
+    (is (= 300 (x-of "margin-left: auto")) "one auto margin takes all of it")
+    (is (= 0 (x-of "margin-right: auto")) "...and this one leaves the box put")
+    (is (= 150 (x-of "margin: 10px auto"))
+        "the shorthand's VERTICAL value must not leak into the auto inline
+         sides through margin-side's uniform-margin fallback")))
+
+(deftest an-auto-margin-with-nothing-left-over-is-zero
+  ;; `box/margin-auto-with-no-room-does-not-centre`. Measured in Brave: a
+  ;; 300px block with `margin: 0 auto` in a 200px container is at x=0 and
+  ;; 300 wide -- NOT centred at x=-50.
+  (let [[_root _outer inner] (cascaded-boxes
+                              ".outer{width:200px} .inner{width:300px;margin:0 auto}" nest)]
+    (is (= 0 (:x inner)))
+    (is (= 300 (:w inner)))))
+
+(deftest an-auto-width-block-absorbs-its-own-margins-leaving-nothing-to-centre
+  ;; The rule that makes the case above fall out for free: with `width:
+  ;; auto` there is no leftover space at all, so an auto margin is 0 and the
+  ;; box still fills its container.
+  (let [[_root _outer inner] (cascaded-boxes ".outer{width:400px} .inner{margin:0 auto}" nest)]
+    (is (= 0 (:x inner)))
+    (is (= 400 (:w inner)))))
+
+(deftest rtl-puts-the-leftover-space-on-the-left
+  ;; `text/rtl-block-alignment`: a 60px block in a 200px rtl container is at
+  ;; x=140 in Brave (CSS 2.1 SS10.3.3 resolves margin-LEFT under rtl), and
+  ;; an explicit auto margin still overrides the direction's own side.
+  ;; Nothing here asserts anything about INLINE content: there is no bidi
+  ;; algorithm in this engine and none is claimed.
+  (let [x-of (fn [decl]
+               (:x (last (cascaded-boxes (str ".outer{direction:rtl;width:200px} .inner{" decl "}")
+                                         nest))))]
+    (is (= 140 (x-of "width:60px")))
+    (is (= 0 (x-of "width:60px;margin-right:auto"))
+        "an explicit auto margin wins over the direction's default side")
+    (is (= 0 (x-of ""))
+        "an auto-width block fills an rtl container exactly as it does an
+         ltr one -- there is no leftover space to place")))
+
+(deftest a-negative-margin-collapses-instead-of-being-dropped
+  ;; `box/negative-margin-pulls-up` and its bottom-side twin
+  ;; `box/negative-margin-bottom-pulls-the-next-sibling-up` -- the SAME two
+  ;; shapes the corpus measures, so both numbers below came out of Brave
+  ;; rather than out of an argument. Brave puts the second block at y=12 in
+  ;; a 32px-tall parent, from either side; `max`-only collapsing left it at
+  ;; y=20 in a 40px one, because a negative never wins a max against the 0
+  ;; that stands in for "no margin here".
+  (let [two (fn [which decl]
+              (cascaded-boxes (str ".m{" decl "}")
+                              (fn [doc root]
+                                (let [[a doc] (dom/create-element doc :div)
+                                      doc (dom/append-child doc root a)
+                                      doc (if (= :first which)
+                                            (dom/set-attribute doc a :class "m") doc)
+                                      [ta doc] (dom/create-text-node doc "first")
+                                      doc (dom/append-child doc a ta)
+                                      [b doc] (dom/create-element doc :div)
+                                      doc (dom/append-child doc root b)
+                                      doc (if (= :second which)
+                                            (dom/set-attribute doc b :class "m") doc)
+                                      [tb doc] (dom/create-text-node doc "second")]
+                                  (dom/append-child doc b tb)))))]
+    (let [[root _a b] (two :second "margin-top: -8px")]
+      (is (= 12 (:y b)))
+      (is (= 32 (:h root))))
+    (let [[root _a b] (two :first "margin-bottom: -8px")]
+      (is (= 12 (:y b)))
+      (is (= 32 (:h root))))))
+
+(deftest a-percentage-height-needs-a-definite-parent
+  ;; `box/percentage-height-of-an-auto-parent` vs its deliberate pair
+  ;; `box/percentage-height-of-a-fixed-parent`. The second passed
+  ;; throughout, because 50% of a 100px parent is 50 either way -- which is
+  ;; how reading "50%" as 50 PIXELS hid in a corpus with a case pointed
+  ;; straight at it.
+  (let [h-of (fn [outer]
+               (:h (last (cascaded-boxes (str ".outer{" outer "} .inner{height:50%}") nest))))]
+    (is (= 50 (h-of "height:100px;width:120px")))
+    (is (= 20 (h-of "width:120px"))
+        "an indefinite basis makes the percentage `auto`, so the box is
+         content-sized -- one line tall")))
+
+(deftest a-declared-height-is-a-content-height
+  ;; `box/percentage-height-of-a-padded-parent`. Measured in Brave,
+  ;; `div{height:100px;padding:10px}` is 120 tall and lays its children out
+  ;; in 100; this engine used the declared height AS the border box, exactly
+  ;; the bug resolve-width had already been corrected for in the inline
+  ;; axis.
+  (let [[_root outer inner] (cascaded-boxes
+                             ".outer{height:100px;padding:10px;width:120px} .inner{height:50%}"
+                             nest)]
+    (is (= 120 (:h outer)) "100 of content + 10 of padding on each edge")
+    (is (= 50 (:h inner)) "and the percentage resolves against the 100, not the 120"))
+  (let [[_root outer] (cascaded-boxes
+                       ".outer{box-sizing:border-box;height:100px;padding:10px;width:120px} .inner{}"
+                       nest)]
+    (is (= 100 (:h outer)) "...which is exactly what border-box opts out of")))
+
+(deftest calc-resolves-a-percentage-against-the-containing-block
+  ;; `box/calc-width` and `box/calc-width-mixed-units`. cssom.core collapses
+  ;; a CONSTANT calc() during the cascade, so a calc() still wearing its own
+  ;; text in layout contains something only layout can resolve.
+  (let [w-of (fn [decl]
+               (:w (last (cascaded-boxes (str ".outer{width:300px} .inner{" decl "}") nest))))]
+    (is (= 260 (w-of "width: calc(100% - 40px)")))
+    (is (= 160 (w-of "width: calc(50% + 10px)")))
+    ;; Not a browser number and not claimed as one: Brave resolves this to
+    ;; 164 (150 + the 14px font size). `em` is outside this engine's calc
+    ;; subset, and the behaviour being pinned is that an unresolvable
+    ;; calc() DEGRADES to the avail-width fallback rather than having its
+    ;; leading digit run read as pixels -- a wrong answer that says so,
+    ;; instead of a wrong answer that looks like a measurement.
+    (is (= 300 (w-of "width: calc(50% + 1em)")))))
+
+(deftest a-percentage-width-on-an-absolute-box-resolves-exactly-once
+  ;; `position/absolute-percentage-width`: 50% of a 200px containing block
+  ;; is 100 in Brave. It was 50 here -- measure-child resolved the
+  ;; percentage against the containing block and handed the RESULT down as
+  ;; the child's available width, where the child resolved the same
+  ;; percentage a second time.
+  (let [boxes (cascaded-boxes
+               ".outer{position:relative;width:200px;height:40px} .inner{position:absolute;left:0;top:0;width:50%}"
+               nest)
+        inner (last boxes)]
+    (is (= 100 (:w inner)))))

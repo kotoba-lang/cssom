@@ -1300,10 +1300,59 @@
   :group :box
   :html "<div style=\"width: 300px\"><div style=\"width: calc(100% - 40px)\">calc</div></div>"}
 
+ {:id :box/calc-width-mixed-units
+  :group :box
+  ;; The other half of calc(): a percentage and a length ADDED, so a
+  ;; resolver that quietly dropped the percentage term would still be
+  ;; caught (260 and 160 are not the same wrong answer).
+  :html "<div style=\"width: 300px\"><div style=\"width: calc(50% + 10px)\">calc</div></div>"}
+
  {:id :box/width-auto-with-side-margins
   :group :box
   ;; `width: auto` on a block absorbs the margins rather than overflowing.
   :html "<div style=\"width: 300px\"><div style=\"margin-left: 30px; margin-right: 50px\">fills</div></div>"}
+
+ {:id :box/margin-left-auto-pushes-a-block-right
+  :group :box
+  ;; ONE auto margin takes all the leftover space, so the box ends up
+  ;; against the far edge rather than centred.
+  :html "<div style=\"width: 400px\"><div style=\"width: 100px; margin-left: auto\">right</div></div>"}
+
+ {:id :box/margin-auto-with-a-vertical-length
+  :group :box
+  ;; The shorthand's vertical value must not leak into the `auto` inline
+  ;; sides: 10px top and bottom, CENTRED left and right.
+  :html "<div style=\"width: 400px\"><div style=\"width: 100px; margin: 10px auto\">mid</div></div>"}
+
+ {:id :box/margin-right-auto-leaves-a-block-left
+  :group :box
+  ;; The mirror of box/margin-left-auto-pushes-a-block-right, and the one
+  ;; that says a naive "any auto margin centres it" rule is wrong.
+  :html "<div style=\"width: 400px\"><div style=\"width: 100px; margin-right: auto\">left</div></div>"}
+
+ {:id :box/margin-auto-with-no-room-does-not-centre
+  :group :box
+  ;; Over-constrained: the declared width is WIDER than the containing
+  ;; block, so there is nothing to share and both auto margins are 0.
+  :html "<div style=\"width: 200px\"><div style=\"width: 300px; margin: 0 auto\">wide</div></div>"}
+
+ {:id :box/negative-margin-left-widens-an-auto-width-block
+  :group :box
+  ;; A negative margin on an `auto` width block does not move it, it makes
+  ;; it WIDER -- the width is what absorbs the margin.
+  :html "<div style=\"width: 200px\"><div style=\"margin-left: -20px\">wide</div></div>"}
+
+ {:id :box/negative-margin-bottom-pulls-the-next-sibling-up
+  :group :box
+  ;; The bottom-side twin of box/negative-margin-pulls-up: collapsing a
+  ;; positive and a negative margin ADDS them, it does not take the larger.
+  :html "<div><div style=\"margin-bottom: -8px\">first</div><div>second</div></div>"}
+
+ {:id :box/percentage-height-of-a-padded-parent
+  :group :box
+  ;; Which basis a percentage height resolves against: the parent's CONTENT
+  ;; height (100 here, padding excluded), not its border box.
+  :html "<div style=\"height: 100px; padding: 10px; width: 120px\"><div style=\"height: 50%\">half</div></div>"}
 
  ;; --- text: direction, breaking, inherited line-height -------------------
 
@@ -1316,6 +1365,20 @@
   ;; In an rtl containing block a narrower block sits against the RIGHT
   ;; edge, because it is the `margin-right: auto` side that resolves.
   :html "<div style=\"direction: rtl; width: 200px\"><div style=\"width: 60px\">box</div></div>"}
+
+ {:id :text/rtl-margin-right-auto-flips-the-block
+  :group :text
+  ;; An EXPLICIT auto margin still wins over the direction's own default
+  ;; side, so this rtl block sits LEFT: it is the `margin-right: auto` that
+  ;; resolves, not the `margin-left: 0`.
+  :html "<div style=\"direction: rtl; width: 200px\"><div style=\"width: 60px; margin-right: auto\">box</div></div>"}
+
+ {:id :text/rtl-block-with-an-auto-width-child
+  :group :text
+  ;; An `auto` width block fills its rtl containing block exactly as it
+  ;; does an ltr one -- there is no leftover space for the direction to
+  ;; place, so nothing should move.
+  :html "<div style=\"direction: rtl; width: 200px\"><div>fills</div></div>"}
 
  {:id :text/word-break-break-all
   :group :text
