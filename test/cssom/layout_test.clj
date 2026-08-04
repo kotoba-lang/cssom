@@ -5058,7 +5058,7 @@
   (let [ops (inline-ops ["click " [:a {} "here"]])
         a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %))) ops))]
     (is (some? a-op) "the inline <a> still gets its own :node draw-op")
-    (is (= {:x 56 :y 10 :w 32 :h 16} (select-keys a-op [:x :y :w :h]))
+    (is (= {:x 56 :y 8 :w 32 :h 16} (select-keys a-op [:x :y :w :h]))
         "box spans exactly the fragment it painted, and its HEIGHT is the
          font's content area (1.2em) centred in the line box by
          half-leading -- not the line box itself. Measured against Chrome,
@@ -5072,10 +5072,10 @@
     (is (= 2 (count rects))
         "the wrapped inline box's background follows BOTH line boxes
          rather than filling one rectangle around them")
-    (is (= [10 30] (mapv :y rects))
+    (is (= [8 28] (mapv :y rects))
         "each line's background sits at that line's content area, not its
          full line box")
-    (is (= {:x 8 :y 10 :h 36} (select-keys a-op [:x :y :h]))
+    (is (= {:x 8 :y 8 :h 36} (select-keys a-op [:x :y :h]))
         "one union :node op covering both fragments -- the documented
          over-covering approximation of real CSS's per-fragment box list")))
 

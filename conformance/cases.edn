@@ -699,4 +699,213 @@
  {:id :page/definition-heavy
   :group :page
   :html "<dl style=\"width: 260px\"><dt>alpha</dt><dd>first definition</dd><dt>beta</dt><dd>second definition</dd></dl>"}
+
+ ;; ================= corpus round 3 =================
+ ;; 98% line / 89% geometry on 150 cases is saturation again. 50 more, in
+ ;; territory still unmeasured: flex sizing beyond the defaults, grid flow
+ ;; and spans, sticky/overflow variants, min/max constraints, deeper
+ ;; nesting, semantic sectioning, and page shapes with several mechanisms
+ ;; interacting at once.
+
+ {:id :flex/grow-fills-the-row
+  :group :flex
+  :html "<div style=\"display: flex; width: 300px\"><div style=\"flex-grow: 1\">a</div><div>b</div></div>"}
+
+ {:id :flex/basis-and-shrink
+  :group :flex
+  :html "<div style=\"display: flex; width: 200px\"><div style=\"width: 150px\">a</div><div style=\"width: 150px\">b</div></div>"}
+
+ {:id :flex/align-items-flex-end
+  :group :flex
+  :html "<div style=\"display: flex; align-items: flex-end; height: 60px\"><div>a</div><div style=\"height: 40px\">b</div></div>"}
+
+ {:id :flex/column-with-gap
+  :group :flex
+  :html "<div style=\"display: flex; flex-direction: column; gap: 12px\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :flex/nested-row-in-column
+  :group :flex
+  :html "<div style=\"display: flex; flex-direction: column\"><div style=\"display: flex; gap: 6px\"><span>a</span><span>b</span></div><div>c</div></div>"}
+
+ {:id :flex/space-around
+  :group :flex
+  :html "<div style=\"display: flex; justify-content: space-around; width: 300px\"><div>a</div><div>b</div></div>"}
+
+ {:id :flex/wrap-with-gap
+  :group :flex
+  :html "<div style=\"display: flex; flex-wrap: wrap; gap: 8px; width: 200px\"><div style=\"width: 90px\">a</div><div style=\"width: 90px\">b</div><div style=\"width: 90px\">c</div></div>"}
+
+ {:id :grid/span-two-columns
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 80px 80px 80px\"><div style=\"grid-column: span 2\">wide</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/rows-and-columns
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 80px 80px; grid-template-rows: 40px 40px\"><div>a</div><div>b</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/minmax-tracks
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: minmax(60px, 120px) minmax(60px, 120px)\"><div>a</div><div>b</div></div>"}
+
+ {:id :grid/nested-grid
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 160px 160px\"><div style=\"display: grid; grid-template-columns: 60px 60px\"><div>a</div><div>b</div></div><div>c</div></div>"}
+
+ {:id :grid/text-content-in-cells
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 120px 120px; gap: 10px\"><div>alpha beta gamma</div><div>delta epsilon</div></div>"}
+
+ {:id :box/min-height
+  :group :box
+  :html "<div style=\"min-height: 80px\">short</div><div>after</div>"}
+
+ {:id :box/max-height
+  :group :box
+  :html "<div style=\"max-height: 30px\">alpha beta gamma delta epsilon zeta</div><div>after</div>"}
+
+ {:id :box/nested-padding
+  :group :box
+  :html "<div style=\"padding: 12px\"><div style=\"padding: 8px\"><div style=\"padding: 4px\">deep</div></div></div>"}
+
+ {:id :box/border-and-padding-together
+  :group :box
+  :html "<div style=\"border-width: 4px; border-color: #333333; padding: 10px; width: 200px\">boxed</div>"}
+
+ {:id :box/margin-collapse-between-siblings
+  :group :box
+  :html "<div><p>one</p><p>two</p><p>three</p></div>"}
+
+ {:id :box/margin-does-not-collapse-through-border
+  :group :box
+  :html "<div style=\"border-width: 1px; border-color: #999999\"><p>inside</p></div><div>after</div>"}
+
+ {:id :overflow/hidden-with-explicit-height
+  :group :overflow
+  :html "<div style=\"overflow: hidden; height: 30px; width: 200px\"><p>alpha beta gamma delta epsilon zeta eta</p></div>"}
+
+ {:id :overflow/auto-container
+  :group :overflow
+  :html "<div style=\"overflow: auto; width: 150px; height: 50px\"><p>alpha beta gamma delta</p></div>"}
+
+ {:id :position/sticky-with-offset
+  :group :position
+  :html "<div style=\"height: 80px\"><p>before</p><div style=\"position: sticky; top: 10px\">sticky</div><p>after</p></div>"}
+
+ {:id :position/relative-inside-flex
+  :group :position
+  :html "<div style=\"display: flex\"><div style=\"position: relative; top: 8px\">moved</div><div>still</div></div>"}
+
+ {:id :position/absolute-inside-table-cell
+  :group :position
+  :html "<table><tr><td style=\"position: relative\"><span style=\"position: absolute; left: 20px; top: 0\">abs</span>cell</td><td>b</td></tr></table>"}
+
+ {:id :inline/deep-nesting-four-levels
+  :group :inline
+  :html "<p>a <span>b <em>c <b>d <code>e</code> f</b> g</em> h</span> i</p>"}
+
+ {:id :inline/anchor-around-block-is-split
+  :group :block
+  :html "<p>see <a href=\"/x\">intro <div>block</div> outro</a> end</p>"}
+
+ {:id :inline/two-inline-blocks-with-text
+  :group :inline-block
+  :html "<p>a <span style=\"display: inline-block\">one</span> b <span style=\"display: inline-block\">two</span> c</p>"}
+
+ {:id :inline/inline-block-containing-a-block
+  :group :inline-block
+  :html "<p>a <span style=\"display: inline-block\"><div>inner</div></span> b</p>"}
+
+ {:id :text/line-height-on-a-child
+  :group :text
+  :html "<div style=\"line-height: 2\"><p style=\"line-height: 1\">tight</p><p>loose</p></div>"}
+
+ {:id :text/font-size-percentless-inheritance
+  :group :text
+  :html "<div style=\"font-size: 18px\"><p>eighteen <span style=\"font-size: 12px\">twelve</span> back</p></div>"}
+
+ {:id :text/align-justify
+  :group :text
+  :html "<p style=\"text-align: justify; width: 200px\">alpha beta gamma delta epsilon zeta</p>"}
+
+ {:id :text/white-space-pre-in-a-narrow-box
+  :group :text
+  :html "<div style=\"width: 80px\"><pre>alpha beta gamma</pre></div>"}
+
+ {:id :table/three-rows-mixed-spans
+  :group :table
+  :html "<table><tr><td rowspan=\"2\">tall</td><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td><td>e</td></tr></table>"}
+
+ {:id :table/header-and-footer-groups
+  :group :table
+  :html "<table><thead><tr><th>h</th><th>i</th></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody><tfoot><tr><td>f</td><td>g</td></tr></tfoot></table>"}
+
+ {:id :table/cell-with-a-list
+  :group :table
+  :oracle/blind true
+  :html "<table><tr><td><ul><li>one</li><li>two</li></ul></td><td>next</td></tr></table>"}
+
+ {:id :table/table-inside-flex
+  :group :table
+  :html "<div style=\"display: flex; gap: 10px\"><table><tr><td>a</td><td>b</td></tr></table><div>beside</div></div>"}
+
+ {:id :form/label-wrapping-a-control
+  :group :inline-replaced
+  :html "<p><label>Name <input value=\"v\"></label> after</p>"}
+
+ {:id :form/two-buttons
+  :group :inline-replaced
+  :html "<p><button>save</button> <button>cancel</button></p>"}
+
+ {:id :form/select-with-long-option
+  :group :inline-replaced
+  :html "<p>pick <select><option>a very long option label</option><option>b</option></select></p>"}
+
+ {:id :form/textarea-with-rows
+  :group :inline-replaced
+  :html "<p>note <textarea rows=\"3\">body</textarea> end</p>"}
+
+ {:id :form/input-inside-a-table-cell
+  :group :inline-replaced
+  :html "<table><tr><td><input value=\"v\"></td><td>next</td></tr></table>"}
+
+ {:id :page/sidebar-and-main
+  :group :page
+  :html "<div style=\"display: flex; gap: 16px\"><nav style=\"width: 120px\"><p>Nav</p><p>Links</p></nav><main style=\"width: 320px\"><h2>Title</h2><p>Body text that runs on a bit.</p></main></div>"}
+
+ {:id :page/card-grid-with-images
+  :group :page
+  :html "<div style=\"display: grid; grid-template-columns: 140px 140px; gap: 10px\"><div><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"40\" height=\"30\"><p>One</p></div><div><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"40\" height=\"30\"><p>Two</p></div></div>"}
+
+ {:id :page/article-with-figure
+  :group :page
+  :html "<article style=\"width: 300px\"><h2>Head</h2><figure><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"60\" height=\"40\"><figcaption>A caption</figcaption></figure><p>After the figure.</p></article>"}
+
+ {:id :page/data-table-with-header
+  :group :page
+  :html "<table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td>alpha</td><td>1</td></tr><tr><td>beta</td><td>22</td></tr></tbody></table>"}
+
+ {:id :page/inline-form-in-paragraph
+  :group :page
+  :html "<p style=\"width: 400px\">Enter your <label>email <input type=\"email\" value=\"a@b.c\"></label> and press <button>Send</button> to continue.</p>"}
+
+ {:id :page/nested-lists-in-nav
+  :group :page
+  :oracle/blind true
+  :html "<nav><ul><li>One<ul><li>One A</li><li>One B</li></ul></li><li>Two</li></ul></nav>"}
+
+ {:id :page/blockquote-with-attribution
+  :group :page
+  :html "<blockquote style=\"width: 260px\"><p>A quoted sentence that wraps.</p><footer>— Someone</footer></blockquote>"}
+
+ {:id :page/two-column-text
+  :group :page
+  :html "<div style=\"display: flex; gap: 20px\"><p style=\"width: 180px\">alpha beta gamma delta epsilon</p><p style=\"width: 180px\">zeta eta theta iota kappa</p></div>"}
+
+ {:id :page/header-nav-main
+  :group :page
+  :html "<div style=\"width: 400px\"><header><h1>Site</h1><nav><a href=\"/\">Home</a> <a href=\"/a\">About</a></nav></header><main><p>Main content here.</p></main><footer><small>Footer</small></footer></div>"}
+
+ {:id :page/definition-list-with-inline-code
+  :group :page
+  :html "<dl style=\"width: 300px\"><dt><code>opt</code></dt><dd>An option with <em>emphasis</em> inside.</dd></dl>"}
 ]

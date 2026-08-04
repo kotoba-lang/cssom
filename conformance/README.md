@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 139/142 = 98%. Geometry: 439/493 element boxes (89%),
-122/150 cases with every box in agreement**, on a corpus of 150.
+**Line structure: 183/190 = 96%. Geometry: 597/719 element boxes (83%),
+155/200 cases with every box in agreement**, on a corpus grown 150 → 200.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -286,6 +286,37 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round seventeen: an inline box is its OWN font's height
+
+A `<span>` wrapping a `<b>` is 15px tall in the browser — its own 14px face —
+while the bold run inside it is 18. This engine sized every nesting parent
+by its tallest child, because the box rect was accumulated from each
+fragment's metrics rather than the owner's. One rule, +22 boxes: geometry
+89% → 90% on the 150-case corpus, cases fully clean 122 → 127.
+
+### Round seventeen (b): the corpus grows again, 150 → 200
+
+98% line / 90% geometry was saturation for the third time. 50 more cases in
+territory still unmeasured: flex sizing beyond the defaults (`flex-grow`,
+shrink, `align-items: flex-end`, `space-around`, wrap with gap), grid flow
+and spans (`span 2`, explicit rows, `minmax`, nested grids), sticky with an
+offset, overflow with explicit heights, min/max-height, margin collapsing
+through a border, deeper inline nesting, mixed row/col spans in one table,
+table inside flex, label wrapping a control, and ten larger page shapes
+(sidebar + main, card grid with images, article with a figure, data table,
+inline form in a paragraph, two-column text, header/nav/main, blockquote
+with attribution).
+
+Scores on contact: line 98% → 96%, geometry 90% → 83%. What the new cases
+name, all now measured rather than assumed:
+
+- `grid-column: span 2` is not implemented.
+- `position: relative` is still not applied to a FLEX item (a scope-cut
+  documented since the relative-positioning round).
+- an `inline-block` wrapping a block box took the container width — the
+  empty/single-element natural-width rules added last round lived only in
+  the flex path, not the atomic one. Fixed here.
 
 ### Round sixteen: one baseline rule for every atomic inline
 

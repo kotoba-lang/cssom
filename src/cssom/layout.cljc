@@ -3181,6 +3181,17 @@
               (and (seq cs) (every? #(inline-flow-candidate? theme %) cs))
               (inline-max-content-width theme content-w opacity inherited st cs)
 
+              ;; the same two rules flex-item-main-width already applies --
+              ;; an empty box is its own insets, and a single element child
+              ;; is measured rather than given up on. Without them an
+              ;; `inline-block` wrapping a block took the whole container
+              ;; width and dropped out of its line.
+              (empty? cs) inset-x
+
+              (and (= 1 (count cs)) (map? (first cs)))
+              (+ (:w (:box (measure-child theme content-w opacity inherited (first cs) true)))
+                 inset-x)
+
               :else content-w)))]
     (max 0 (min content-w natural))))
 
@@ -4671,18 +4682,19 @@
                            ;; on a 20px line reports y=1 h=18, where this
                            ;; engine reported y=0 h=20, so every inline
                            ;; element's box missed on both axes at once.
-                           {:keys [ascent descent]} (font-metrics theme (:font-size st)
-                                                                   (:font-weight st) (:font-style st)
-                                                                   (:font-family st))
-                           content-h (if (:font-metrics theme)
-                                       (+ ascent descent)
-                                       (long (* 1.2 (:font-size st))))
-                           ;; the box sits ON the baseline, ascent above it
-                           half-leading (if (:font-metrics theme)
-                                          (max 0 (- baseline y ascent))
-                                          (max 0 (quot (- line-h content-h) 2)))
                            rects (reduce (fn [rects owner]
-                                           (update rects (:idx owner)
+                                           ;; An inline box's own height is ITS OWN font's
+                                           ;; content area, not its children's: a <span>
+                                           ;; wrapping a <b> is 15px tall in the browser
+                                           ;; (its own 14px face) while the bold run inside
+                                           ;; it is 18. Using the piece's metrics made every
+                                           ;; nesting parent as tall as its tallest child.
+                                           (let [ost (:st owner)
+                                                 ofs (parse-int (:font-size ost) (:font-size st))
+                                                 om (font-metrics theme ofs (:font-weight ost)
+                                                                  (:font-style ost) (:font-family ost))
+                                                 oh (+ (:ascent om) (:descent om))]
+                                             (update rects (:idx owner)
                                                    (fn [entry]
                                                      (-> (or entry {:node (:node owner) :st (:st owner)
                                                                     :opacity (:opacity piece) :fragments []})
@@ -4690,9 +4702,9 @@
                                                          ;; vertical-align shift, exactly
                                                          ;; like the text inside it
                                                          (update :fragments conj
-                                                                 {:x px :y (- (+ y half-leading)
+                                                                 {:x px :y (- (+ y (max 0 (- baseline y (:ascent om))))
                                                                               (:shift piece 0))
-                                                                  :w (:w piece) :h content-h})))))
+                                                                  :w (:w piece) :h oh}))))))
                                          rects
                                          (:owners piece))]
                        [(cond-> draws
