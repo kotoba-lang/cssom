@@ -742,6 +742,12 @@
   {:p 1.0 :blockquote 1.0 :ul 1.0 :ol 1.0 :dl 1.0 :pre 1.0 :figure 1.0
    :h1 0.67 :h2 0.83 :h3 1.0 :h4 1.33 :h5 1.67 :h6 2.33})
 
+(def ^:private list-container-tags
+  "The elements a browser's UA stylesheet treats as a list container -- the
+   left half of its `:is(ul, ol) ul` nested-list rules. `<menu>`/`<dir>`
+   are in Chrome's own rule and cost nothing to honour here."
+  #{:ul :ol :menu :dir})
+
 (def ^:private ua-box-sides
   "Horizontal UA-stylesheet box values -- the list indent every browser
    applies (`ul, ol { padding-left: 40px }`) and a blockquote's own side
@@ -763,14 +769,52 @@
 
    The family is named here for the same reason a UA stylesheet names it:
    it is the platform default, not a guess, and a host that measures text
-   (see draw-ops' `:measure-text`) needs a family it can actually measure."
+   (see draw-ops' `:measure-text`) needs a family it can actually measure.
+
+   The size is the browser's 13.3333 TRUNCATED to 13, and that 0.33px is
+   load-bearing in a way worth writing down, because it is the only reason
+   any control box still disagrees with the browser. Measured 2026-08-04:
+
+   - Chrome sizes a text `<input>` at `7 * size + 5` px of content in this
+     face -- exactly 7 per character across size=1/2/5/10/20/40 (12, 19,
+     40, 75, 145, 285), i.e. the font's OS/2 average advance plus one
+     `maxCharWidth - avgCharWidth` slack. This engine has no average-advance
+     hook: `:measure-text` measures a STRING, and the closest proxy it can
+     ask for is the `0` glyph, which is 7.4219 at 13.3333. Charged at 13
+     that proxy becomes 7.2364, and `20 * 7.2364 + 8` is 152.7 against the
+     browser's 153 -- the two errors cancel almost exactly at the default
+     size=20, and diverge at other sizes (size=40 gives 297.5 against 293).
+   - So raising the size to the true 13.3333 WITHOUT an average-advance
+     hook makes inputs worse (156.3 against 153), while leaving it at 13
+     leaves long control text ~2.5% narrow -- which is why
+     `:form/select-with-long-option` still reports a 24-character option
+     label as 156px against the browser's 160.
+
+   Fixing that honestly needs the font's average advance, i.e. a new host
+   hook alongside `:measure-text`/`:font-metrics`, and a re-derivation of
+   the `size`-based input width against it. Deliberately NOT faked here by
+   scaling the `0` advance by a fudge factor: that would fit these two
+   measurements and mislead the next one."
   {:family "Arial" :size 13})
 
 (def ^:private ua-control-box
   "UA padding and border for form controls, measured in Chrome: an
    `<input>` is `padding: 2px; border: 2px`, a `<button>` `padding: 6px;
    border: 2px`, a `<select>` `border: 1px`. Without them a control's box
-   was its content width exactly, where a browser reports 8px more."
+   was its content width exactly, where a browser reports 8px more.
+
+   NOT here, and measured so the next reader does not have to: `<fieldset>`
+   and `<legend>`. Chrome gives a fieldset `margin-inline: 2px`, a 2px
+   groove border, and per-side em padding (`0.35em` top, `0.625em` bottom,
+   `0.75em` inline), and then lifts the `<legend>` OUT of flow into the top
+   border band -- measured at width 800/font 14, fieldset (2, 0, 796,
+   83.64), legend (14.5, 0, 39, 20), inner `<p>` (14.5, 38.89, 771, 20)
+   against this engine's (0, 0, 800, 54) / (0, 0, 800, 20) / (0, 34, 800,
+   20). The box constants would fit in this map, but the legend's
+   out-of-flow placement in the border band is real new layout machinery,
+   not a UA-constant, so `:form/fieldset-and-legend` is left failing rather
+   than half-fixed. It is NOT a margin-collapsing failure, which is what
+   its residual looks like from the outside."
   {:input {:padding 2 :border 2}
    :textarea {:padding 2 :border 2}
    ;; a button's padding is NOT uniform: 6px each side, 1px top and bottom.
@@ -778,7 +822,80 @@
    ;; expressible at all since the box model gained per-side values.
    :button {:padding 1 :padding-left 6 :padding-right 6 :border 2
             :line-height :font-size}
-   :select {:padding 0 :border 1 :line-height :font-size}})
+   ;; a <select>'s 1px block padding is Chrome's own internal button
+   ;; padding: it reports `padding: 0px` in getComputedStyle yet a select
+   ;; measures 4px taller than its font's content area at EVERY size
+   ;; (measured: 10px->15, 12px->18, 13.3333px->19, 16px->21, 24px->31,
+   ;; against font ascent+descent of 11/14/15/17/27 -- a constant +4, i.e.
+   ;; 1px of padding and 1px of border on each side). Inline padding stays
+   ;; 0; the horizontal slack is the dropdown arrow, see
+   ;; select-arrow-width.
+   :select {:padding 0 :padding-top 1 :padding-bottom 1 :border 1
+            :line-height :font-size}})
+
+(defn- select-multiple?
+  "A `<select multiple>` is a completely different box from a closed
+   dropdown: an open, scrollable LIST of option rows with no dropdown
+   arrow.
+
+   Keyed on `multiple` alone. Real HTML also opens the list for a
+   single-select with `size` > 1, which is NOT handled here -- an
+   honest, documented scope-cut: `multiple` is the form that appears in
+   the conformance corpus and in real markup, and adding the `size` case
+   without measuring how a browser sizes a one-choice open list would be
+   guessing at a second set of constants."
+  [node]
+  (and (= :select (:tag node)) (truthy-attr? (get-in node [:attrs :multiple]))))
+
+(defn- select-rows
+  "How many option ROWS an open `<select multiple>` reserves: its `size`
+   attribute, defaulting to HTML's own 4. Measured in Chrome, the reserved
+   height is `size` rows REGARDLESS of how many options exist -- a
+   `size=\"5\"` select holding one option is still 5 rows (87px) tall, and a
+   `multiple` select with three options and no `size` is 4 rows (70px)."
+  [node]
+  (max 1 (parse-int (get-in node [:attrs :size]) 4)))
+
+(defn- select-option-labels
+  "Each `<option>`'s own text, in document order. Read straight off the
+   option's text children rather than through `option-label`, which answers
+   a different question (the label for one selected VALUE)."
+  [node]
+  (->> (:children node)
+       (filter #(and (map? %) (= :option (:tag %))))
+       (mapv #(->> (:children %) (filter string?) (str/join "")))))
+
+(def ^:private select-option-side-padding
+  "An `<option>`'s UA inline padding, 2px per side. Measured: a listbox row
+   holding `MM` is exactly 4px wider than that text at every font size
+   tried (10/13.3333/16/24px), and Chrome reports `padding: 0px 2px 1px`."
+  2)
+
+(defn- select-option-height
+  "One `<option>` row's height in an open listbox, for a control font of
+   `font-size`. Measured in Chrome at four sizes with `size=\"3\"`: 10px ->
+   13, 13.3333px -> 17, 16px -> 20.1875, 24px -> 29.7969. Every one of
+   those is `1.2 * font-size + 1` to within 0.02px (12+1, 16+1, 19.2+1,
+   28.8+1) -- 1.2em of row plus the option's own 1px bottom padding.
+
+   Expressed as a ratio rather than through `font-metrics` on purpose: the
+   font's real ascent+descent (11/15/17/27 at those sizes) does NOT
+   reproduce the measurements, so this row height is Chrome's own
+   normal-line-height rule for the listbox rather than the face's content
+   area, and pretending otherwise would fit the numbers by accident."
+  [font-size]
+  (+ (* 1.2 font-size) 1))
+
+(def ^:private select-arrow-width
+  "The fixed horizontal slack a closed `<select>` reserves for its dropdown
+   arrow, INSIDE its borders. Measured in Chrome: an EMPTY select is 22px
+   wide at every font size tried (10/13.3333/16/24px), and each option
+   label then adds exactly `ceil` of its own rendered text width -- 22+33
+   for `alpha` (32.63), 22+138 for `a very long option label` (137.11),
+   22+112 for `MMMMMMMMMM` (111.05). 22 minus the two 1px borders is this
+   20. Font-size-independent, which is why it is a constant and not a
+   multiple of the em: it is a fixed-size platform widget, not text."
+  20)
 
 (defn- ua-control-box-for
   "The UA box for one control, by tag AND -- for `<input>` -- by type: a
@@ -786,15 +903,24 @@
    at all, where a text input has 2px of each. Measured in Chrome."
   [node]
   (let [tag (:tag node)]
-    (if (and (= :input tag)
-             (contains? #{"checkbox" "radio"}
-                        (str/lower-case (str (or (get-in node [:attrs :type]) "text")))))
+    (cond
+      (and (= :input tag)
+           (contains? #{"checkbox" "radio"}
+                      (str/lower-case (str (or (get-in node [:attrs :type]) "text")))))
       ;; ...and its own margins: Chrome's UA sheet gives a checkbox/radio
       ;; `margin: 3px 3px 3px 4px`, which is the gap a reader sees between
       ;; the box and the label beside it.
       {:padding 0 :border 0 :margin-top 3 :margin-right 3
        :margin-bottom 3 :margin-left 4}
-      (get ua-control-box tag))))
+
+      ;; An OPEN listbox has none of the closed dropdown's 1px internal
+      ;; block padding: measured, a `size="3"` multiple select is exactly
+      ;; `2 (border) + 3 rows` tall at every font size (41/53/62.5625/
+      ;; 91.3906 for rows of 13/17/20.1875/29.7969), with nothing left over.
+      (select-multiple? node)
+      {:padding 0 :border 1 :line-height :font-size}
+
+      :else (get ua-control-box tag))))
 
 (def ^:private ua-padding
   "UA-stylesheet padding defaults, in the uniform form this engine's box
@@ -824,14 +950,25 @@
 (defn- ua-margin-y
   "The UA vertical margin for `node`, in pixels, resolved against the
    element's own (possibly UA-scaled) font size the way real `em` margins
-   are."
+   are.
+
+   A NESTED list has none: Chrome's UA stylesheet cancels it outright
+   (`:is(ul,ol) ul, :is(ul,ol) ol { margin-block-start: 0;
+   margin-block-end: 0 }`), so a sublist sits flush against the line above
+   it. Measured on `<ul><li>a<ul><li>b</li></ul></li></ul>`: Chrome reports
+   the inner `<ul>` at `margin-block: 0px` and its `<li>` at y=20, where
+   this engine gave the sublist a full 1em top margin and put the same
+   `<li>` at y=34 -- the whole of the harness's `li y +14` residual. The
+   `:ua/list-descendant` mark is written by with-nested-list-margins."
   [node theme]
-  (when-let [scale (get ua-margin-scale (:tag node))]
-    (let [fs (or (parse-int (get-in node [:attrs :style/font-size]) nil)
-                 (when-let [heading-scale (get ua-font-scale (:tag node))]
-                   (long (* heading-scale (:font-size theme))))
-                 (:font-size theme))]
-      (long (* scale fs)))))
+  (when-not (and (contains? list-container-tags (:tag node))
+                 (attr node :ua/list-descendant))
+    (when-let [scale (get ua-margin-scale (:tag node))]
+      (let [fs (or (parse-int (get-in node [:attrs :style/font-size]) nil)
+                   (when-let [heading-scale (get ua-font-scale (:tag node))]
+                     (long (* heading-scale (:font-size theme))))
+                   (:font-size theme))]
+        (long (* scale fs))))))
 
 (defn- node-style [node theme]
   ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
@@ -861,10 +998,12 @@
    ;; widen a content-box `width` would make `div{width:50px}` occupy 58px
    ;; because of a styling choice the author never made.
    :padding/declared (parse-int (style node :padding) (get ua-padding (:tag node)))
-   :padding-top (parse-int (style node :padding-top) nil)
+   :padding-top (parse-int (style node :padding-top)
+                           (:padding-top (ua-control-box-for node)))
    :padding-right (parse-int (style node :padding-right)
                              (:padding-right (ua-control-box-for node)))
-   :padding-bottom (parse-int (style node :padding-bottom) nil)
+   :padding-bottom (parse-int (style node :padding-bottom)
+                              (:padding-bottom (ua-control-box-for node)))
    :padding-left (parse-int (style node :padding-left)
                             (or (:padding-left (ua-control-box-for node))
                                 (get-in ua-box-sides [(:tag node) :padding-left])))
@@ -888,6 +1027,35 @@
    ;; padding above.
    :border-spacing (parse-int (style node :border-spacing) 2)
    :margin (parse-int (style node :margin) 0)
+   ;; KNOWN DIVERGENCE, measured 2026-08-04 and deliberately NOT fixed
+   ;; here. Real CSS resolves the USED border width through `border-style`,
+   ;; whose initial value is `none`: a `none`/`hidden` border is 0px wide
+   ;; however many pixels `border-width` declares. This engine honours a
+   ;; bare `border-width` on its own. Measured in Chrome,
+   ;; `<div style="border-width: 1px">` reports `border-top-width: 0px` /
+   ;; `border-top-style: none`, so a div wrapping one `<p>` is 20px tall
+   ;; there and 50 here (the phantom border also stops margins collapsing
+   ;; through the box, moving three boxes at once), and
+   ;; `border-width: 4px; padding: 10px; width: 200px` is 220x40 there
+   ;; against 228x48 here. Two conformance cases
+   ;; (`:box/margin-does-not-collapse-through-border`, whose NAME assumes a
+   ;; border the browser does not draw, and
+   ;; `:box/border-and-padding-together`) fail for exactly this reason and
+   ;; for no other -- 4 element boxes.
+   ;;
+   ;; The fix itself is three lines (gate on `(or (style node
+   ;; :border-style) (when ua-border "solid"))`, since a UA control border
+   ;; IS written `1px solid` and must survive) and was verified to make
+   ;; both cases pass with the engine's own suite green. It is not landed
+   ;; because it changes a contract this repo's consumers already depend
+   ;; on: `kotoba-lang/browser`'s suite goes 0 -> 5 failures on it
+   ;; (`css-box-and-text-styles-project-into-draw-ops`,
+   ;; `css-sizing-projects-min-max-width-and-border-box-into-draw-ops`,
+   ;; `script-document-state-recomputes-css-and-clears-stale-style` and
+   ;; friends all declare a bare `border-width` and assert the border), and
+   ;; those tests are in another repository. Landing the rule means landing
+   ;; it together with that update, which is a cross-repo change, not a
+   ;; side effect of a layout fix.
    :border-width (parse-int (style node :border-width)
                             (get (ua-control-box-for node) :border 0))
    :border-color (or (style node :border-color) "#000000")
@@ -3031,6 +3199,34 @@
             children))
     children))
 
+(defn- with-nested-list-margins
+  "Returns `children` with every ELEMENT child carrying a synthetic
+   `:ua/list-descendant` attr -- but only when `node` is itself a list
+   container (`list-container-tags`) or already carries the mark itself.
+   `ua-margin-y` reads it to cancel a nested list's vertical margins, the
+   way Chrome's own UA stylesheet does.
+
+   The mark propagates through EVERY element rather than only through
+   `<li>` because the UA rule is a DESCENDANT selector (`:is(ul, ol) ul`),
+   not a child selector: `<ul><li><div><ul>` gets the zero margin in a real
+   browser too, and marking only direct children would miss it. Written
+   from the PARENT's perspective and re-applied at every level, exactly the
+   technique with-implicit-list-markers already uses -- a node has no
+   parent pointer here, and threading one just for this would be a far
+   larger change than the rule is worth.
+
+   Text children are left alone: they have no `:attrs` map, and nothing
+   reads the mark off a text node."
+  [node children]
+  (if (or (contains? list-container-tags (:tag node))
+          (attr node :ua/list-descendant))
+    (mapv (fn [child]
+            (if (map? child)
+              (assoc-in child [:attrs :ua/list-descendant] true)
+              child))
+          children)
+    children))
+
 ;; ---- non-rendered (metadata) elements ----
 ;;
 ;; <head>, <title>, <script>, <style>, <meta>, <link> are never part of a
@@ -3191,13 +3387,36 @@
 
           (= :select tag)
           ;; Widest option label -- a <select> is as wide as the longest
-          ;; thing it can display. Read straight off each <option>'s own
-          ;; text children rather than through option-label, which answers
-          ;; a different question (the label for one selected VALUE).
-          (let [labels (->> (:children child)
-                            (filter #(and (map? %) (= :option (:tag %))))
-                            (map #(->> (:children %) (filter string?) (str/join ""))))]
-            (+ (* char-w (apply max 1 (map count labels))) inset-x))
+          ;; thing it can display -- plus the fixed dropdown-arrow slack
+          ;; (select-arrow-width) that made an empty select 22px wide in
+          ;; every browser measurement.
+          ;;
+          ;; Measured per LABEL rather than as `char-w * longest-count`:
+          ;; a control's font is proportional Arial (see ua-control-font),
+          ;; where the old count-based estimate charged `alpha` and `beta`
+          ;; the same width per character as `MMMM`. Chrome's own number is
+          ;; `ceil` of the rendered text width, which is why the ceil is
+          ;; here and not a rounding accident: an empty select is 22, and
+          ;; `alpha` (32.63px) makes it 55, not 54.63.
+          ;;
+          ;; Read straight off each <option>'s own text children rather
+          ;; than through option-label, which answers a different question
+          ;; (the label for one selected VALUE).
+          (let [labels (select-option-labels child)
+                label-w (fn [s] (if measure-text
+                                  (measure-text s font-size (:font-weight st)
+                                                (:font-style st) (:font-family st))
+                                  (* char-w (count s))))
+                widest (apply max 0 (map label-w labels))]
+            (if (select-multiple? child)
+              ;; An open listbox has no arrow: it is exactly its widest
+              ;; option ROW (label + 2px of padding per side) inside its
+              ;; borders, and NOT rounded up -- measured, a listbox holding
+              ;; `a` is 13.4219 wide (2 border + 4 padding + 7.4219 text),
+              ;; fraction and all, where the closed dropdown's width is a
+              ;; whole number.
+              (+ widest (* 2 select-option-side-padding) inset-x)
+              (+ (Math/ceil widest) select-arrow-width inset-x)))
 
           ;; A <button> and any other atomic element with no intrinsic
           ;; rule of its own shrink-wraps to its content, exactly as a flex
@@ -4320,9 +4539,30 @@
                          ;; where treating the bottom edge as the baseline
                          ;; adds the strut's descent under it and gives 27.
                          baseline-offset
-                         (if (= :img (:tag child))
+                         (cond
+                           (= :img (:tag child))
                            ;; a REPLACED box sits ON the baseline
                            h
+
+                           ;; An OPEN listbox is the one control a browser
+                           ;; does NOT baseline-align: Chrome's UA sheet
+                           ;; gives `select[multiple]` `vertical-align:
+                           ;; text-bottom` (read straight off
+                           ;; getComputedStyle, where every other control
+                           ;; reports `baseline`), i.e. its BOTTOM edge
+                           ;; meets the bottom of the surrounding text's
+                           ;; content area -- one descent below the
+                           ;; baseline. Measured: a 70px listbox in a 14px
+                           ;; monospace paragraph sits at y=0 in a 73px
+                           ;; line, which baseline-aligning its first row
+                           ;; cannot produce (it puts the box 2.3px down
+                           ;; and the line 4px short).
+                           (select-multiple? child)
+                           (let [{:keys [descent]} (font-metrics theme (:font-size inherited)
+                                                                 nil nil nil)]
+                             (max 0 (- h descent)))
+
+                           :else
                            ;; ...everything else -- an inline-block, a form
                            ;; control -- aligns by its own last line's
                            ;; baseline: top inset, then half-leading, then
@@ -4385,11 +4625,13 @@
                                owners (conj owners {:idx (swap! counter inc) :node child :st st})]
                            (if (= :br (:tag child))
                              (conj acc {:kind :break :style inherited :owners owners :opacity opacity})
-                             (walk (with-generated-content
+                             (walk (with-nested-list-margins
                                      child
-                                     (with-implicit-list-markers
+                                     (with-generated-content
                                        child
-                                       (with-details-visibility child (:children child))))
+                                       (with-implicit-list-markers
+                                         child
+                                         (with-details-visibility child (:children child)))))
                                    inherited opacity owners acc))))))
 
                    :else acc))
@@ -4991,10 +5233,22 @@
    scoped to this plain block-flow case only -- a `position: relative`
    flex/grid item would need the identical treatment applied inside
    `layout-flex`/`layout-grid`'s own placement functions instead, an
-   honest, documented scope-cut left for a future cycle."
+   honest, documented scope-cut left for a future cycle.
+
+   Returns `{:draw :h :margin/collapsed-top :margin/collapsed-bottom}`.
+   The two margin keys are the margins that collapsed OUT of this box --
+   see the `mt*`/`mb*` comments below and `layout-block`, which forwards
+   them to its own parent so a collapsed-out margin still separates
+   siblings instead of vanishing.
+
+   `collapse-top?`/`collapse-bottom?` are decided PER SIDE by the caller
+   (`layout-block`) because real CSS decides them per side: a container
+   with `padding-bottom` still lets its FIRST child's top margin collapse
+   through its top edge. They used to be one combined flag requiring both
+   edges to be free, which was strictly more conservative than CSS."
   ([theme content-x content-y content-w opacity inherited children]
-   (layout-children-block theme content-x content-y content-w opacity inherited children false))
-  ([theme content-x content-y content-w opacity inherited children collapse-through?]
+   (layout-children-block theme content-x content-y content-w opacity inherited children false false))
+  ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom?]
   (let [;; ---- floats ----
         ;; A `float: left|right` box is taken out of normal flow, placed
         ;; against its container's corresponding edge, and NARROWS the
@@ -5042,7 +5296,7 @@
                                 ;; the browser's x=7 w=70).
                                 (if (pos? (:h band)) 1 2))
          y content-y draws float-draws
-         height 0 prev-mb 0 first? true]
+         height 0 prev-mb 0 first? true out-mt 0]
     (if-let [child (first remaining)]
       (if-let [run (and (map? child) (:inline/run child))]
         (let [in-band? (< (- y content-y) (:h band))
@@ -5052,11 +5306,26 @@
                                                   (- content-w (if in-band? (+ (:left band) (:right band)) 0))
                                                   opacity inherited run)
               advance (+ h (:gap theme))]
-          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) 0 false))
+          ;; a line box is real content: nothing collapses through it, so
+          ;; `prev-mb` resets to 0 and (when it is the FIRST entry) no top
+          ;; margin escapes this container either.
+          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) 0 false out-mt))
         (let [cst (when (map? child) (node-style child theme))
               mt (if cst (margin-side cst :top) 0)
               mb (if cst (margin-side cst :bottom) 0)
               ml (if cst (margin-side cst :left) 0)
+              mr (if cst (margin-side cst :right) 0)
+              ;; The child is laid out at the running `y` FIRST and shifted
+              ;; down by `gap-before` afterwards, because the gap cannot be
+              ;; known until the child has been laid out: a margin that
+              ;; collapsed out of the CHILD's own top edge takes part in it
+              ;; (see `mt*`). Laying a box out at one origin and translating
+              ;; it is equivalent here for the reason layout-absolute-
+              ;; children's docstring already establishes -- layout-node
+              ;; only ever ADDS its x/y params as an offset.
+              laid (layout-node theme (+ content-x ml) y
+                                (max 0 (- content-w ml mr))
+                                opacity inherited child)
               ;; Real CSS collapses ADJACENT vertical margins: the gap
               ;; between two siblings is the LARGER of the first's bottom
               ;; and the second's top, not their sum. Without this, UA
@@ -5069,29 +5338,44 @@
               ;; container at the container's own top edge, not 1em below
               ;; it. Measured directly against Chrome, where an unstyled
               ;; wrapper's first paragraph sits at y=0.
+              ;;
+              ;; A collapsed-out margin does NOT disappear, though: it ends
+              ;; up OUTSIDE the box and still separates it from its
+              ;; siblings, which is the half this engine used to drop on
+              ;; the floor. `mt*`/`mb*` are the child's EFFECTIVE outer
+              ;; margins -- its own, or whatever collapsed out through its
+              ;; edge, whichever is larger. Measured in Chrome on
+              ;; `<div>x</div><div><p>y</p></div><div>z</div>`: the browser
+              ;; reports the middle div at y=34 and the last at y=68, i.e.
+              ;; the inner `<p>`'s 14px margins separating divs that have
+              ;; no margins of their own. This engine stacked them flush at
+              ;; 20/40.
+              mt* (max mt (:margin/collapsed-top laid 0))
+              mb* (max mb (:margin/collapsed-bottom laid 0))
               gap-before (cond
-                           (and first? collapse-through?) 0
-                           first? mt
-                           :else (max prev-mb mt))
-              mr (if cst (margin-side cst :right) 0)
-              child-y (+ y gap-before)
-              {:keys [box draw]} (layout-node theme (+ content-x ml) child-y
-                                              (max 0 (- content-w ml mr))
-                                              opacity inherited child)
-              child-h (:h box)
+                           (and first? collapse-top?) 0
+                           first? mt*
+                           :else (max prev-mb mt*))
+              child-h (:h (:box laid))
               advance (+ gap-before child-h (:gap theme))
+              shifted (if (zero? gap-before)
+                        (:draw laid)
+                        (translate-ops 0 gap-before (:draw laid)))
               draw (if (and cst (= "relative" (:position cst)))
                      (let [[dx dy] (relative-offset cst)]
-                       (translate-ops dx dy draw))
-                     draw)]
-          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) mb false)))
+                       (translate-ops dx dy shifted))
+                     shifted)]
+          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) mb* false
+                 (if (and first? collapse-top?) mt* out-mt))))
       {:draw draws
        ;; the container is at least as tall as its floats -- real CSS only
        ;; does this for a container that establishes a formatting context,
        ;; another documented simplification
        :h (max (:h band)
                (max 0 (+ (- height (:gap theme))
-                         (if collapse-through? 0 prev-mb))))})))))
+                         (if collapse-bottom? 0 prev-mb))))
+       :margin/collapsed-top out-mt
+       :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)})))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing
@@ -5261,13 +5545,48 @@
         control-rows (if (= :textarea tag)
                        (max 1 (parse-int (get-in node [:attrs :rows]) 2))
                        1)
-        control-line-height (* control-rows control-font-size)
+        control-line-height
+        (cond
+          ;; An open listbox is `size` option rows tall (default 4) --
+          ;; measured, `size="3"` gives 3 rows and nothing else, and a
+          ;; `size="5"` select holding ONE option still reserves 5.
+          (select-multiple? node)
+          (* (select-rows node) (select-option-height control-font-size))
+
+          (= :select tag)
+          ;; A <select>'s content box is the FONT's real content area
+          ;; (ascent + descent), not the font-size proxy every other
+          ;; control uses here. Measured in Chrome across five sizes, a
+          ;; select is exactly ascent+descent+4 tall -- 10px->15 (9+2),
+          ;; 12px->18 (11+3), 13.3333px->19 (12+3), 16px->21 (14+3),
+          ;; 24px->31 (22+5) -- where the font-size proxy gave 15 for the
+          ;; 13.3333px case against the browser's 19.
+          ;;
+          ;; Deliberately NOT applied to <input>/<button>/<textarea> in the
+          ;; same breath: their ua-control-box padding constants were each
+          ;; tuned against the browser ON TOP of the font-size proxy (an
+          ;; input measures 21 = 13+4+4 here and 21 = 15+2+4 in Chrome --
+          ;; same total, different decomposition), so switching the shared
+          ;; term without re-deriving all three paddings would break boxes
+          ;; that currently agree. That re-derivation is a separate,
+          ;; measurable task, not a side effect of this one.
+          (let [{:keys [ascent descent]} (font-metrics theme control-font-size
+                                                       (:font-weight st) (:font-style st)
+                                                       (:font-family st))]
+            (+ ascent descent))
+
+          :else (* control-rows control-font-size))
         ;; content + padding + BORDER: with `box-sizing: content-box` (the
         ;; default) the border sits outside the content box in the vertical
         ;; axis too. Without it the control came out exactly one border
         ;; short on each side -- 17px against the browser's 21.
+        ;; Per-SIDE padding (rather than the uniform `inset`) so a control
+        ;; whose UA block padding differs from its inline padding -- only
+        ;; <select> today, see ua-control-box -- gets both right; for every
+        ;; other control inset-side reduces to the same uniform value.
         h (clamp-height st (or (resolve-height st)
-                               (+ control-line-height (* 2 inset)
+                               (+ control-line-height
+                                  (inset-side st :top) (inset-side st :bottom)
                                   (if (= "border-box" (:box-sizing st))
                                     0
                                     (* 2 (:border-width st))))))
@@ -5277,7 +5596,9 @@
         has-value? (boolean (seq (str value)))
         placeholder (attr node :placeholder)
         control-text (case tag
-                       :select (option-label node value)
+                       ;; an OPEN listbox shows every option on its own row
+                       ;; (option-ops below), not one selected label
+                       :select (when-not (select-multiple? node) (option-label node value))
                        :input (if (= "checkbox" input-type)
                                 (if checked "[x]" "[ ]")
                                 (if has-value? (str value) (str placeholder)))
@@ -5286,6 +5607,39 @@
                                   (not= :select tag)
                                   (not= "checkbox" input-type)
                                   (some? placeholder))
+        ;; An open `<select multiple>` genuinely paints its `<option>`
+        ;; children as boxes, and a browser reports a real box for each --
+        ;; measured, the two options of `<select multiple>` sit at
+        ;; (36, 1, 11.4219, 17) and (36, 18, ...) inside a select at
+        ;; (35, 0, 13.4219, 70), i.e. inset by the 1px border and stacked by
+        ;; the row height. This engine emitted NO option box at all, which
+        ;; is what the harness reported as `option 0/6`.
+        ;;
+        ;; A CLOSED select's options are deliberately still absent: the
+        ;; browser puts them in a detached popup, where it reports them as
+        ;; zero-sized boxes at a y that changes from run to run (-14, -482
+        ;; and -3958 were all observed for the SAME markup, since it tracks
+        ;; the popup's scroll offset). There is no geometry there to agree
+        ;; with -- emitting a box to chase those numbers would be fitting
+        ;; the oracle's popup internals, not implementing CSS.
+        option-ops
+        (when (select-multiple? node)
+          (let [bw (:border-width st)
+                row-h (select-option-height control-font-size)
+                options (filterv #(and (map? %) (= :option (:tag %))) (:children node))]
+            (vec (mapcat
+                  (fn [i option]
+                    (let [oy (+ y bw (* i row-h))
+                          ox (+ x bw)
+                          label (->> (:children option) (filter string?) (str/join ""))]
+                      (cond-> [{:draw/op :node :id (:node/id option) :tag :option
+                                :x ox :y oy :w (max 0 (- w (* 2 bw))) :h row-h
+                                :class (attr option :class) :opacity opacity}]
+                        (seq label)
+                        (conj {:draw/op :text :control? true :node/id (:node/id option)
+                               :x (+ ox select-option-side-padding) :y oy
+                               :text label :opacity opacity}))))
+                  (range) options))))
         box-shadow-draws (or (box-shadow-ops st x y w h opacity) [])
         border-draws (or (border-ops st x y w h opacity) [])
         outline-draws (or (outline-ops st x y w h opacity) [])
@@ -5356,7 +5710,10 @@
      ;; OUTSIDE the box, on top of everything else this element paints.
      :draw (cond-> (vec (concat box-shadow-draws rect border-draws outline-draws [semantic]))
              text-op (conj text-op)
-             sel-ops (into sel-ops))}))
+             sel-ops (into sel-ops)
+             ;; after the control's own :node op, so the option rows paint
+             ;; on top of its background exactly as a real listbox does
+             option-ops (into option-ops))}))
 
 (defn- layout-block
   [theme x y avail-width opacity inherited st node]
@@ -5379,24 +5736,31 @@
         scroll-x (:scroll-left st)
         scroll-y (:scroll-top st)
         {:keys [in-flow out-of-flow]} (partition-flow theme (:children node))
-        {:keys [draw h]} (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
-                                               content-w opacity inherited in-flow
-                                               (and (zero? inset-t) (zero? inset-b)
-                                                    (zero? (:border-width st))
-                                                    ;; A box that establishes its own
-                                                    ;; formatting context does NOT collapse
-                                                    ;; margins with its children -- which is
-                                                    ;; exactly why authors reach for
-                                                    ;; `overflow: hidden` to contain them.
-                                                    ;; Measured: a `<p>` inside an
-                                                    ;; `overflow: hidden` div starts at y=14
-                                                    ;; in the browser (its own margin intact)
-                                                    ;; where this engine collapsed it out to
-                                                    ;; y=0, and the container came out 28px
-                                                    ;; short.
-                                                    (contains? #{nil "visible"} (:overflow st))
-                                                    (not (:independent-fc? st))))
         explicit-h (resolve-height st)
+        ;; Margins collapse THROUGH this box's own edge only when nothing
+        ;; separates the edge from the child: no padding on that side, no
+        ;; border, and no formatting context of its own -- which is exactly
+        ;; why authors reach for `overflow: hidden` to contain a child's
+        ;; margins. Measured: a `<p>` inside an `overflow: hidden` div
+        ;; starts at y=14 in the browser (its own margin intact) where this
+        ;; engine collapsed it out to y=0, and the container came out 28px
+        ;; short.
+        ;;
+        ;; Decided PER SIDE (this used to be a single flag requiring BOTH
+        ;; edges free): real CSS lets a first child's top margin collapse
+        ;; through a container that only has `padding-bottom`, and vice
+        ;; versa. The bottom side additionally requires an AUTO height --
+        ;; with an explicit height the box's bottom edge is fixed, so
+        ;; nothing collapses across it.
+        fc-free? (and (zero? (:border-width st))
+                      (contains? #{nil "visible"} (:overflow st))
+                      (not (:independent-fc? st)))
+        collapse-top? (and fc-free? (zero? inset-t))
+        collapse-bottom? (and fc-free? (zero? inset-b) (nil? explicit-h))
+        {:keys [draw h] :margin/keys [collapsed-top collapsed-bottom]}
+        (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
+                               content-w opacity inherited in-flow
+                               collapse-top? collapse-bottom?)
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
         ;; sits outside the content box in both axes. Without it every
@@ -5424,6 +5788,18 @@
         clip-pop (when clip? [{:draw/op :clip :clip/op :pop :node/id (:node/id node)
                                :x x :y y :w node-w :h node-h}])]
     {:box {:x x :y y :w node-w :h node-h}
+     ;; The margins that collapsed out through this box's own edges,
+     ;; handed back to the PARENT's layout-children-block so they still
+     ;; separate this box from its siblings (real CSS: a collapsed margin
+     ;; moves outside the box, it does not evaporate). Suppressed when the
+     ;; height was not content-driven after all -- an explicit or clamped
+     ;; height re-fixes the bottom edge, so nothing crosses it.
+     :margin/collapsed-top collapsed-top
+     :margin/collapsed-bottom (if (= node-h (+ h inset-t inset-b
+                                               (if (= "border-box" (:box-sizing st))
+                                                 0 (* 2 (:border-width st)))))
+                                collapsed-bottom
+                                0)
      ;; rect (background) BEFORE border-draws, not after: the real
      ;; painter (kotoba-lang/dom-gpu's webgl.cljs/webgpu.cljs) draws
      ;; :rect ops strictly in array order with no z-index reordering of
@@ -5545,7 +5921,9 @@
                                 :text-overflow text-overflow
                                 :overflow-wrap overflow-wrap)
                tag (:tag node)
-               children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
+               children (with-nested-list-margins
+                         node
+                         (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node)))))]
            (cond
              (contains? #{:input :select :textarea} tag)
              (layout-form-control theme x y avail-width opacity st node)

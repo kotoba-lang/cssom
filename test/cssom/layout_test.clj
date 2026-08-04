@@ -4971,7 +4971,7 @@
               (let [[tag style & kids] spec
                     ;; a few keys are real ATTRIBUTES, not style: the table
                     ;; spans and the form-control ones layout reads directly
-                    attr-keys #{:colspan :rowspan :type :value :size :href :alt :name}
+                    attr-keys #{:colspan :rowspan :type :value :size :href :alt :name :multiple}
                     attrs (select-keys style attr-keys)
                     style (apply dissoc style attr-keys)
                     [el doc] (dom/create-element doc tag)
@@ -5665,3 +5665,141 @@
     (is (every? #(= 40 (:h %)) items)
         "`align-items: stretch` is the default, so an item in a 40px track
          is 40px tall whatever its content needs")))
+
+;; ---- margin collapsing: a collapsed-out margin still separates siblings ----
+
+(defn- block-boxes
+  "Every element :node box in `specs` (see build-inline-children), laid out
+   as children of a root <div> with the engine's own theme padding/gap
+   turned off so the numbers are pure CSS."
+  [specs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build-inline-children doc root specs)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})]
+    (mapv #(select-keys % [:tag :x :y :w :h])
+          (rest (filterv #(= :node (:draw/op %)) ops)))))
+
+(deftest a-margin-that-collapses-out-of-a-box-still-separates-it-from-its-siblings
+  ;; Measured in Chrome on this exact markup: the middle <div> is at y=34
+  ;; and the last at y=68, i.e. the inner <p>'s 1em (14px at the harness's
+  ;; 14px font) margins separating three divs that have no margin of their
+  ;; own. A collapsed margin MOVES outside its box in real CSS; this engine
+  ;; used to drop it, stacking the divs flush at 20 and 40.
+  (let [[a b p c] (block-boxes [[:div {} "x"] [:div {} [:p {} "y"]] [:div {} "z"]])]
+    (is (= 0 (:y a)))
+    (is (= 20 (:h a)))
+    (is (= 34 (:y b))
+        "the inner <p>'s top margin collapses THROUGH its parent and pushes
+         that parent 14px away from the sibling above it (20 + 14), which
+         is the browser's own number for this markup")
+    (is (= (:y b) (:y p))
+        "...and the <p> itself still sits at its parent's own top edge")
+    (is (= 68 (:y c))
+        "the same <p>'s BOTTOM margin collapses out the other side and
+         separates its parent from the sibling below (34 + 20 + 14)")))
+
+(deftest a-margin-does-not-collapse-out-through-padding-or-a-border
+  (let [[wrapper p] (block-boxes [[:div {:padding-top 5} [:p {} "y"]]])]
+    (is (= 0 (:y wrapper)))
+    (is (= 19 (:y p))
+        "5px of padding separates the edges, so the <p>'s own margin stays
+         INSIDE its parent instead of collapsing through it"))
+  ;; ...and the two sides are decided independently: padding on the BOTTOM
+  ;; does not stop the top margin collapsing through the top edge, which is
+  ;; what the single combined flag this replaced used to do.
+  (let [[wrapper p] (block-boxes [[:div {:padding-bottom 5} [:p {} "y"]]])]
+    (is (= 0 (:y wrapper)))
+    (is (= 0 (:y p))
+        "padding-BOTTOM has nothing to do with the top edge")))
+
+;; ---- UA stylesheet: a nested list has no vertical margin ----
+
+(deftest a-nested-list-has-no-vertical-margin-of-its-own
+
+  ;; Chrome's UA sheet cancels it (`:is(ul,ol) ul { margin-block: 0 }`).
+  ;; Measured on <ul><li>a<ul><li>b</li></ul></li></ul>: the inner <li>
+  ;; sits at y=20, directly under the "a" line, where this engine put it at
+  ;; y=34 -- a full 1em margin the browser does not have.
+  (let [boxes (block-boxes [[:ul {} [:li {} "a" [:ul {} [:li {} "b"]]]]])
+        inner-ul (nth boxes 2)
+        inner-li (nth boxes 3)]
+    (is (= :ul (:tag inner-ul)))
+    (is (= 20 (:y inner-ul)) "the sublist starts directly under its own <li>'s text")
+    (is (= 20 (:y inner-li)))))
+
+(deftest the-nested-list-rule-is-a-descendant-rule-not-a-child-rule
+
+  ;; `:is(ul,ol) ul` matches through ANY intervening element, so a sublist
+  ;; wrapped in a <div> inside the <li> is zeroed too -- which is why the
+  ;; mark is inherited down rather than written onto direct children only.
+  (let [boxes (block-boxes [[:ul {} [:li {} "a" [:div {} [:ul {} [:li {} "b"]]]]]])
+        inner-ul (first (filter #(and (= :ul (:tag %)) (pos? (:y %))) boxes))]
+    (is (= 20 (:y inner-ul))))
+  ;; ...while a TOP-LEVEL list keeps its 1em margins, which is what makes
+  ;; the rule a rule and not a blanket removal.
+  (let [[ul _li] (block-boxes [[:ul {} [:li {} "a"]]])]
+    (is (= 0 (:y ul)) "its own top margin collapses out to the root")
+    (is (= 20 (:h ul)))))
+
+;; ---- <select>: the UA box a real browser gives it ----
+
+(defn- select-boxes
+  "Element boxes for a `<select>` laid out as an INLINE atomic, which is
+   what gives it its intrinsic size -- a block-level form control still
+   fills its container (documented in atomic-intrinsic-width), so the
+   surrounding text is load-bearing, not decoration."
+  [attrs option-labels]
+  (rest (block-boxes [[:div {} "a "
+                       (into [:select attrs] (map (fn [l] [:option {} l]) option-labels))
+                       " b"]])))
+
+(deftest a-closed-select-is-its-widest-option-plus-a-fixed-dropdown-arrow
+
+  ;; Measured in Chrome: an EMPTY select is 22px wide at every font size,
+  ;; and each option label adds ceil() of its own rendered width -- 22+33
+  ;; for `alpha` (32.63px in the control font). 22 = 2 borders + a 20px
+  ;; arrow. This engine used to charge a per-character estimate with no
+  ;; arrow at all, which made every select several px too narrow.
+  (let [[empty-select] (select-boxes {} [])
+        [one-option] (select-boxes {} ["abcd"])]
+    (is (== 22 (:w empty-select))
+        "border + arrow with no text at all")
+    (is (> (:w one-option) 22)
+        "and an option label adds its own measured width on top")))
+
+(deftest an-open-listbox-is-size-rows-tall-and-paints-a-box-per-option
+
+  ;; Measured in Chrome, a `<select multiple>` is a completely different
+  ;; box: no dropdown arrow, `size` option ROWS tall (HTML's default 4 --
+  ;; a `size="5"` listbox holding ONE option still reserves 5), and every
+  ;; <option> gets a real box inset by the 1px border. This engine reported
+  ;; no option box at all.
+  (let [boxes (select-boxes {:multiple true :size "2"} ["a" "b"])
+        [sel o1 o2] boxes]
+    (is (= :select (:tag sel)))
+    (is (= :option (:tag o1)))
+    (is (= :option (:tag o2)))
+    (is (= 2 (count (filter #(= :option (:tag %)) boxes))))
+    (is (= (+ (:y sel) 1) (:y o1)) "first row sits just inside the border")
+    (is (= (- (:y o2) (:y o1)) (:h o1)) "rows stack by exactly one row height")
+    (is (= (:h sel) (+ 2 (* 2 (:h o1))))
+        "size=\"2\" reserves exactly two rows plus the two 1px borders"))
+  (let [[sel] (select-boxes {:multiple true :size "5"} ["a"])
+        [two-row] (select-boxes {:multiple true :size "2"} ["a"])]
+    (is (> (:h sel) (:h two-row))
+        "the reserved height follows `size`, not the number of options")))
+
+;; ---- a control keeps its own UA border/box ----
+
+(deftest a-control-keeps-the-ua-border-and-box-a-browser-gives-it
+
+  ;; The UA control box is what makes these agree with a browser at all --
+  ;; an empty <select> is 22px wide (2 borders + a 20px arrow) and an
+  ;; <input> 21px tall, both measured in Chrome.
+  (let [[empty-select] (select-boxes {} [])
+        [_div input] (block-boxes [[:div {} "a " [:input {:value "hi"}] " b"]])]
+    (is (== 22 (:w empty-select)))
+    (is (= :input (:tag input)))
+    (is (= 21 (:h input)))))
