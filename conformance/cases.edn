@@ -1539,6 +1539,19 @@
  {:id :stacking/positioned-covers-later-flow-content
   :group :stacking
   ;; Position alone is enough to paint above in-flow content that follows.
+  ;;
+  ;; Its LINE-axis failure (`want ["over under"] got ["under over"]`) is
+  ;; not an engine gap and was measured as such on 2026-08-04: every box
+  ;; in this case agrees with the oracle, and both words sit at exactly
+  ;; (0,0) -- they overlap, so there is no left-to-right order between
+  ;; them to get right. cluster-lines sorts a line by `:left`, and with
+  ;; the lefts equal each side keeps its own input order: DOM order for
+  ;; the browser, draw-op (PAINT) order for the engine, where an
+  ;; out-of-flow box correctly paints after the in-flow content it was
+  ;; written before. Breaking the tie by the text itself was tried and
+  ;; reverted -- it fixes this case and breaks :float/clear-left and
+  ;; :float/float-after-text-in-its-container, whose float and the text
+  ;; beside it also share a left and DO have a real order.
   :html "<div style=\"position: relative; height: 60px\"><div style=\"position: absolute; left: 0; top: 0; width: 200px; height: 30px; background: #f00\">over</div><p>under</p></div>"}
 
  {:id :stacking/nested-positioned-child-over-parents-sibling
