@@ -789,6 +789,99 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round twenty-seven: `transform`, which changes what a box reports without changing where it is
+
+`transform` matched nothing in `src/` but `text-transform`, an unrelated
+property. Round twenty-six added six `:transform/*` cases to find out how
+big the gap was; all six failed. All six pass now, plus four more added
+from the twenty-three further shapes measured in Brave while implementing
+it.
+
+**The two properties the cases exist to pin, and what each cost.** A
+transform is a **paint-time** operation: the box still occupies its
+untransformed space in flow, so a following sibling does not move and the
+parent is not resized. That fell out of *where* the code went rather than
+from any care taken with it — `apply-element-transform` wraps
+`layout-node`'s whole element dispatch and rewrites the `:draw` half of the
+result, handing `:box`, the collapsed margins, the escaped floats and the
+out-of-flow list back untouched. Wrapping the dispatch rather than each
+branch is also why the same nine lines cover a block, a flex or grid
+container, a table, a form control and an atomic inline: every one of them
+returns the same `{:box :draw}` shape there. The second property — a
+**percentage in `translate` resolves against the element's own border
+box**, the one place in CSS a percentage looks inward — is the reason
+`transform-length` takes the element's own `w`/`h` as its basis where every
+other percentage in the file takes the containing block's.
+
+**Where the transform applies: both, or it would be worse than nothing.** A
+transform that moved the `:node` box the geometry axis reads while leaving
+the background and the text where they were would score six cases and
+render worse than no transform at all. `transform-ops` maps the whole
+subtree: a rect-shaped op becomes the axis-aligned bounding box of its
+transformed corners, a text op is placed at its transformed origin with its
+font size scaled by `sqrt(|det|)`. For the `:node` op the bounding box is
+not an approximation — `getBoundingClientRect` reports exactly that box,
+which is why `rotate(45deg)` on a 100×20 box reports 84.85 square in both
+engines. For a background fill under a rotation it is an over-covering
+approximation, and for glyphs it is a stated cut: there is no rotated-quad
+or rotated-text primitive in this engine or its hosts.
+
+**One shape that had to *not* move.** CSS applies `transform` to
+transformable elements, which excludes a non-replaced inline box. Measured:
+`<span style="transform: translateX(30px)">` in a sentence *computes*
+`matrix(1, 0, 0, 1, 30, 0)` and sits at exactly the x an untransformed span
+sits at. `:transform/not-on-a-non-replaced-inline` is the corpus case for
+it, and `transformable?` is the predicate — without it, applying the
+transform there would have moved a box every browser leaves alone.
+
+**Scope cuts, stated rather than discovered.** `matrix()` is implemented
+(six numbers is the canonical form the others reduce to, and Brave reports
+the same box for `matrix(2,0,0,2,10,10)` as for `translate(10px,10px)
+scale(2)`). The Z-only 3D functions are accepted as their 2D projections,
+because without a `perspective` that projection *is* what a browser
+reports. `matrix3d`, `perspective`, `rotate3d`, `rotateX`, `rotateY`,
+`transform-style` and `backface-visibility` are **not** modelled, and a
+list containing any of them — or a length in a unit outside `px`/`%` — is
+dropped **whole**: a list is one composed transform, and applying three of
+its four functions puts the box confidently in the wrong place, where
+reporting the untransformed box says truthfully that it was not modelled.
+A transformed element also establishes a **stacking context** in real CSS
+and this engine does not model that. It establishes a **containing block**
+for absolutely positioned descendants too, and this engine gets that right
+— measured, a `left: 5px; top: 5px` child of a static
+`transform: translate(20px, 10px)` box lands at (25, 15) in both — but for
+an unrelated reason: every block box here anchors its own out-of-flow
+children with no positioned-ancestor check at all, so the containing-block
+question never reaches a `position` test. The right answer by the wrong
+route, named in `apply-element-transform` so that fixing the broader
+simplification does not silently take this with it.
+
+Corpus-wide, same harness both sides, on the corpus as it grew 337 → 341:
+line structure 322/324 → **326/328**, geometry 1224/1272 → **1241/1283**
+(308/337 → **318/341** clean), paint order 8321/8409 → **8424/8509**
+(312/337 → **318/341** clean), computed style 15535/17795 →
+**15678/17949** (the axis compares no transform property; the delta is the
+four new cases' own elements). Ten cases' boxes changed, all ten are the
+`:transform/*` group, and **none regressed** — every other case's box list
+and line-axis status is byte-identical either side.
+
+| case | before | after |
+|---|---|---|
+| `:transform/translate-moves-the-box` | 1/2 | **2/2** |
+| `:transform/translate-does-not-affect-siblings` | 2/3 | **3/3** |
+| `:transform/scale-changes-the-reported-box` | 1/2 | **2/2** |
+| `:transform/percentage-translate-is-of-the-box` | 1/2 | **2/2** |
+| `:transform/rotate-grows-the-reported-box` | 1/2 | **2/2** |
+| `:transform/on-an-inline-block` | 1/2 | **2/2** |
+| `:transform/not-on-a-non-replaced-inline` | new | **2/2** |
+| `:transform/functions-compose-in-order` | new | **3/3** |
+| `:transform/origin-moves-the-fixed-point` | new | **2/2** |
+| `:transform/on-a-flex-item` | new | **4/4** |
+
+No existing test changed answer, because nothing in this file had an answer
+for `transform` before. Eleven new tests, 654 → 665 tests / 1407 → 1455
+assertions, 0 failures; lint unchanged at 0 errors.
+
 ### Round twenty-six: the legend that is not in the flow, the button that wrapped its own label
 
 Five things, each measured in a real headless Brave 151 over CDP **before**

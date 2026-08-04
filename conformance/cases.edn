@@ -1689,12 +1689,20 @@
 
  ;; ---- CSS transforms, and other properties with no case at all ---------
  ;;
- ;; `transform` appears nowhere in this engine (the only match in the
- ;; source is `text-transform`, an unrelated property) and nowhere in this
+ ;; `transform` appeared nowhere in this engine (the only match in the
+ ;; source was `text-transform`, an unrelated property) and nowhere in this
  ;; corpus, so the size of the gap was unknown. A transform changes what
  ;; `getBoundingClientRect` reports, so it IS measurable on the geometry
- ;; axis -- these cases are here to find out how much is missing, and are
- ;; expected to fail until it is implemented.
+ ;; axis -- these six cases were added to find out how much was missing,
+ ;; and all six failed.
+ ;;
+ ;; All six PASS as of 2026-08-04 (see cssom.layout's `---- CSS transforms
+ ;; ----` section): the six of them are the whole of the geometry axis's
+ ;; 1224 -> 1230 boxes and 308 -> 314 clean cases that round. The four
+ ;; cases below them were added at the same time, from the twenty-three
+ ;; further shapes measured in Brave while implementing it -- composition
+ ;; order, `transform-origin`, a flex item, and the one shape that must NOT
+ ;; move.
 
  {:id :transform/translate-moves-the-box
   :group :transform
@@ -1727,6 +1735,38 @@
  {:id :transform/on-an-inline-block
   :group :transform
   :html "<p style=\"width: 400px\">before <span style=\"display: inline-block; width: 60px; transform: translateY(-4px)\">up</span> after</p>"}
+
+ {:id :transform/not-on-a-non-replaced-inline
+  :group :transform
+  ;; The companion to the case above, and the only one here that measures
+  ;; a transform NOT happening. CSS applies `transform` to transformable
+  ;; elements, which excludes a non-replaced inline box: this span
+  ;; COMPUTES matrix(1, 0, 0, 1, 30, 0) and sits at exactly the x an
+  ;; untransformed span sits at.
+  :html "<p style=\"width: 400px\">before <span style=\"transform: translateX(30px)\">span</span> after</p>"}
+
+ {:id :transform/functions-compose-in-order
+  :group :transform
+  ;; A transform list is one composed matrix, and the leftmost function is
+  ;; the outermost: `translate(...) scale(2)` leaves the translation alone
+  ;; where `scale(2) translate(...)` doubles it. Same two functions, two
+  ;; different boxes.
+  :html "<div style=\"width: 400px; height: 120px\"><div style=\"width: 100px; height: 20px; transform: translate(10px, 10px) scale(2)\">a</div><div style=\"width: 100px; height: 20px; transform: scale(2) translate(10px, 10px)\">b</div></div>"}
+
+ {:id :transform/origin-moves-the-fixed-point
+  :group :transform
+  ;; `transform-origin` is the point the transform holds still. The
+  ;; initial value is the box's own centre, which is why
+  ;; `scale-changes-the-reported-box` above grows in both directions;
+  ;; `0 0` pins the top-left corner instead and it grows only right/down.
+  :html "<div style=\"width: 400px; height: 120px\"><div style=\"width: 100px; height: 20px; transform: scale(2); transform-origin: 0 0\">o</div></div>"}
+
+ {:id :transform/on-a-flex-item
+  :group :transform
+  ;; A transform is paint-time in a flex container too: the middle item
+  ;; paints 20px right of where flex placed it, and the third item stays
+  ;; exactly where the middle item's UNtransformed box left it.
+  :html "<div style=\"width: 400px; display: flex\"><div style=\"width: 50px; height: 20px\">a</div><div style=\"width: 50px; height: 20px; transform: translateX(20px)\">b</div><div style=\"width: 50px; height: 20px\">c</div></div>"}
 
  ;; Properties that likewise have no case. Each is common enough in real
  ;; pages that not knowing whether this engine handles it is itself a gap.

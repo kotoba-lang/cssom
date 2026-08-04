@@ -7788,3 +7788,298 @@
                nest)
         inner (last boxes)]
     (is (= 100 (:w inner)))))
+
+;; ---- CSS transforms (round twenty-seven) ---------------------------------
+;;
+;; Every number below was measured in a real headless Brave 151 over CDP
+;; BEFORE the code that produces it was written -- the six `:transform/*`
+;; corpus cases and twenty-three further probe shapes (composition order,
+;; `transform-origin` in all its spellings, a flex item, a grid item, a
+;; nested transform, a table cell, a float, an absolutely positioned
+;; descendant, `matrix()`, `translate3d()`, `skewX()`, `turn`/`rad` angles).
+;; The probes that are not corpus cases are named as such where they are
+;; asserted.
+
+(defn- transform-ops-for
+  "Every draw op (not just the `:node` boxes cascaded-boxes returns) for a
+   `.outer`/`.inner` nest, so the tests can check that a transform moved the
+   PAINT -- the background rect and the text -- and not only the box the
+   conformance harness reads."
+  [css-text]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (nest doc root)
+        doc (css/apply-cascade doc (css/parse-rules css-text))
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})))
+
+(defn- xywh [b] [(:x b) (:y b) (:w b) (:h b)])
+
+(deftest a-transform-moves-the-painted-box-but-never-the-layout
+  ;; `:transform/translate-moves-the-box`: Brave reports (30, 10, 100, 20)
+  ;; for a 100x20 box with `transform: translate(30px, 10px)`, where this
+  ;; engine reported (0, 0, 100, 20) -- `transform` matched nothing in this
+  ;; file but `text-transform`, an unrelated property.
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px;height:40px} .inner{width:100px;height:20px;transform:translate(30px,10px)}"
+                        nest)]
+    (is (= [30.0 10.0 100.0 20.0] (xywh inner))))
+  ;; `:transform/translate-does-not-affect-siblings`. The whole point of the
+  ;; case: a transform is a PAINT-time operation, so the box still occupies
+  ;; its untransformed space in flow and the next sibling does not move.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [a doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root a)
+        doc (dom/set-attribute doc a :class "moved")
+        [b doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root b)
+        doc (dom/set-attribute doc b :class "still")
+        doc (css/apply-cascade doc (css/parse-rules
+                                    ".moved{height:20px;transform:translateX(50px)} .still{height:20px}"))
+        [_ doc] (dom/consume-ops doc)
+        boxes (->> (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+                   (filterv #(= :node (:draw/op %))))
+        [_root moved still] boxes]
+    (is (= 50.0 (:x moved)) "the transformed box paints 50px to the right")
+    (is (= 0 (:x still)) "and the sibling does not move with it")
+    (is (= 20 (:y still)) "nor does it move UP into the space the transform vacated")))
+
+(deftest the-transformed-box-is-the-visual-one-not-the-layout-one
+  ;; `:transform/scale-changes-the-reported-box`: `getBoundingClientRect`,
+  ;; which is what the conformance harness compares, reports the VISUAL box.
+  ;; Brave: (-50, -10, 200, 40) for `scale(2)` on a 100x20 box -- twice the
+  ;; size, centred on the same point, because the initial
+  ;; `transform-origin` is the box's own centre.
+  (let [[_root outer inner]
+        (cascaded-boxes ".outer{width:400px;height:60px} .inner{width:100px;height:20px;transform:scale(2)}"
+                        nest)]
+    (is (= [-50.0 -10.0 200.0 40.0] (xywh inner)))
+    (is (= [0 0 400 60] (xywh outer))
+        "and the parent is exactly as big as it was: a scale is not layout")))
+
+(deftest a-translate-percentage-resolves-against-the-element-itself
+  ;; `:transform/percentage-translate-is-of-the-box`. This is the one place
+  ;; in CSS where a percentage looks INWARD, and the case exists to pin it:
+  ;; Brave puts the box at x=50, which is 50% of the element's own 100px
+  ;; width. Resolving it the way every other percentage in this file
+  ;; resolves -- against the 400px containing block -- would give 200.
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px;height:40px} .inner{width:100px;height:20px;transform:translateX(50%)}"
+                        nest)]
+    (is (= 50.0 (:x inner)))
+    (is (not= 200.0 (:x inner)) "not 50% of the 400px containing block"))
+  ;; Probe (not a corpus case): `translate(50%, -50%)`, the centring idiom,
+  ;; measured at (50, -10) -- the vertical half resolves against the
+  ;; element's own HEIGHT, not its width and not the container's.
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px;height:60px} .inner{width:100px;height:20px;transform:translate(50%,-50%)}"
+                        nest)]
+    (is (= [50.0 -10.0] [(:x inner) (:y inner)]))))
+
+(deftest a-rotation-reports-its-axis-aligned-bounding-box
+  ;; `:transform/rotate-grows-the-reported-box`: Brave reports
+  ;; (7.5736, -32.4264, 84.8528, 84.8528) for a 45deg rotation of a 100x20
+  ;; box -- LARGER than the element, because getBoundingClientRect reports
+  ;; the axis-aligned bounding box of the rotated rectangle.
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px;height:120px} .inner{width:100px;height:20px;transform:rotate(45deg)}"
+                        nest)]
+    (is (= [7.5736 -32.4264 84.8528 84.8528] (xywh inner))))
+  ;; Probes: the other two angle units Brave accepts resolve to the same
+  ;; rotation (0.125turn and 0.7853981634rad are both 45 degrees).
+  (doseq [angle ["0.125turn" "0.7853981634rad" "50grad"]]
+    (let [[_root _outer inner]
+          (cascaded-boxes (str ".outer{width:400px;height:120px} "
+                               ".inner{width:100px;height:20px;transform:rotate(" angle ")}")
+                          nest)]
+      (is (= [7.5736 -32.4264 84.8528 84.8528] (xywh inner)) angle))))
+
+(deftest a-transform-list-composes-left-to-right
+  ;; Probe, and the reason matrix* exists in that order. Measured in Brave:
+  ;; `translate(10px, 10px) scale(2)` computes to matrix(2, 0, 0, 2, 10, 10)
+  ;; and reports (-40, 0, 200, 40), while the SAME two functions the other
+  ;; way round compute to matrix(2, 0, 0, 2, 20, 20) and report
+  ;; (-30, 10, 200, 40) -- the scale multiplies the translation that
+  ;; follows it, not the one that precedes it.
+  (let [box (fn [decl]
+              (xywh (nth (cascaded-boxes
+                          (str ".outer{width:400px;height:120px} "
+                               ".inner{width:100px;height:20px;transform:" decl "}")
+                          nest)
+                         2)))]
+    (is (= [-40.0 0.0 200.0 40.0] (box "translate(10px,10px) scale(2)")))
+    (is (= [-30.0 10.0 200.0 40.0] (box "scale(2) translate(10px,10px)")))
+    ;; `matrix()` is supported -- six numbers is the canonical form the
+    ;; others reduce to. Brave reports the identical box for it.
+    (is (= [-40.0 0.0 200.0 40.0] (box "matrix(2,0,0,2,10,10)")))
+    ;; the Z-only 3D functions project to their 2D selves, which is exactly
+    ;; what a browser reports with no `perspective` in play: measured,
+    ;; translate3d(10px, 20px, 30px) puts the box at (10, 20).
+    (is (= [10.0 20.0 100.0 20.0] (box "translate3d(10px,20px,30px)")))
+    ;; and the per-axis spellings, each measured
+    (is (= [-50.0 -20.0 200.0 60.0] (box "scale(2,3)")))
+    (is (= [-50.0 0.0 200.0 20.0] (box "scaleX(2)")))
+    (is (= [-3.6397 0.0 107.2794 20.0] (box "skewX(20deg)")))))
+
+(deftest transform-origin-moves-the-point-the-transform-is-about
+  ;; Probes, all four spellings measured in Brave on the same 100x20 box
+  ;; with `scale(2)`. The initial value is the box's own centre (50% 50%),
+  ;; which the scale case above already pins.
+  (let [box (fn [origin]
+              (xywh (nth (cascaded-boxes
+                          (str ".outer{width:400px;height:120px} "
+                               ".inner{width:100px;height:20px;transform:scale(2);"
+                               "transform-origin:" origin "}")
+                          nest)
+                         2)))]
+    (is (= [0.0 0.0 200.0 40.0] (box "0 0")))
+    (is (= [-10.0 -5.0 200.0 40.0] (box "10px 5px")))
+    (is (= [-25.0 -20.0 200.0 40.0] (box "25% 100%")))
+    (is (= [-100.0 -20.0 200.0 40.0] (box "right bottom")))
+    ;; keywords may be written in either order; a browser accepts both and
+    ;; reports the same computed `100px 20px`
+    (is (= [-100.0 -20.0 200.0 40.0] (box "bottom right")))
+    ;; a single component leaves the other at the centre
+    (is (= [0.0 -10.0 200.0 40.0] (box "left"))))
+  ;; The origin is a point in the BORDER box, not the content box: measured
+  ;; in Brave, a 100x20 content box with 5px padding and a 2px border
+  ;; computes `transform-origin: 57px 17px` (half of 114x34) and reports
+  ;; (-47, -17, 228, 68) under scale(2), relative to the container.
+  (let [[_root _outer inner]
+        (cascaded-boxes (str ".outer{width:400px;height:80px} "
+                             ".inner{width:100px;height:20px;margin:10px;padding:5px;"
+                             "border:2px solid #000;transform:scale(2)}")
+                        nest)]
+    (is (= [-47.0 -17.0 228.0 68.0] (xywh inner)))))
+
+(deftest a-transform-does-not-apply-to-a-non-replaced-inline
+  ;; Probe, and the reason `transformable?` exists rather than being
+  ;; assumed. CSS applies `transform` to transformable elements only, which
+  ;; excludes a non-replaced inline box. Measured in Brave: a
+  ;; `<span style="transform: translateX(30px)">` in a sentence COMPUTES
+  ;; matrix(1, 0, 0, 1, 30, 0) and does not move one pixel -- its box sits
+  ;; at exactly the x an untransformed span sits at.
+  (let [sentence (fn [decl]
+                   (let [[root doc] (dom/create-element dom/empty-document :div)
+                         doc (dom/set-root doc root)
+                         [t0 doc] (dom/create-text-node doc "before ")
+                         doc (dom/append-child doc root t0)
+                         [s doc] (dom/create-element doc :span)
+                         doc (dom/append-child doc root s)
+                         doc (dom/set-attribute doc s :class "x")
+                         [t1 doc] (dom/create-text-node doc "span")
+                         doc (dom/append-child doc s t1)
+                         doc (css/apply-cascade doc (css/parse-rules (str ".x{" decl "}")))
+                         [_ doc] (dom/consume-ops doc)]
+                     (->> (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+                          (filter #(and (= :node (:draw/op %)) (= :span (:tag %))))
+                          first)))]
+    (is (= (:x (sentence "")) (:x (sentence "transform:translateX(30px)")))
+        "a plain inline span is not a transformable element"))
+  ;; ...but `:transform/on-an-inline-block` IS one. Brave puts the span at
+  ;; y=-4 for `display: inline-block; transform: translateY(-4px)`.
+  (let [[root doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc root)
+        [t0 doc] (dom/create-text-node doc "before ")
+        doc (dom/append-child doc root t0)
+        [s doc] (dom/create-element doc :span)
+        doc (dom/append-child doc root s)
+        doc (dom/set-attribute doc s :class "x")
+        [t1 doc] (dom/create-text-node doc "up")
+        doc (dom/append-child doc s t1)
+        doc (css/apply-cascade doc (css/parse-rules
+                                    ".x{display:inline-block;width:60px;transform:translateY(-4px)}"))
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        span (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))
+        p (first (filter #(and (= :node (:draw/op %)) (= :p (:tag %))) ops))]
+    (is (= -4.0 (:y span)))
+    (is (= 20 (:h p)) "and the line box is not made taller by a paint-time shift")))
+
+(deftest an-unmodelled-transform-drops-the-whole-declaration
+  ;; A deliberate scope cut, pinned so it cannot rot into a silent partial
+  ;; application. A list is ONE composed transform; applying the functions
+  ;; this engine recognizes and dropping the rest would put the box
+  ;; confidently in the wrong place, where reporting the untransformed box
+  ;; says truthfully that the transform was not modelled.
+  (let [box (fn [decl]
+              (xywh (nth (cascaded-boxes
+                          (str ".outer{width:400px;height:60px} "
+                               ".inner{width:100px;height:20px;transform:" decl "}")
+                          nest)
+                         2)))
+        untransformed [0 0 100 20]]
+    (is (= untransformed (box "rotateY(45deg)")) "a real 3D rotation: no honest 2D matrix")
+    (is (= untransformed (box "matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,10,20,30,1)")))
+    (is (= untransformed (box "perspective(400px)")))
+    (is (= untransformed (box "translateX(2em)"))
+        "em is outside this file's transform length subset -- reading its
+         leading digit run as 2 PIXELS is the silently-wrong answer this
+         avoids")
+    (is (= untransformed (box "translateX(10px) rotateY(45deg)"))
+        "one unmodelled function drops the list it is in, translate and all")
+    (is (= untransformed (box "none")))
+    (is (= untransformed (box "translateX(10px) garbage")))))
+
+(deftest a-transform-carries-the-painted-content-with-the-box
+  ;; The failure mode this test exists to prevent: a transform that moves
+  ;; the `:node` box the conformance harness reads while leaving the
+  ;; background and the text where they were would score better than no
+  ;; transform at all and render worse.
+  (let [ops (transform-ops-for
+             ".outer{width:400px;height:40px} .inner{width:100px;height:20px;background:#eee;transform:translate(30px,10px)}")
+        rect (first (filter #(and (= :rect (:draw/op %)) (= "#eee" (:color %))) ops))
+        text (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= [30.0 10.0] [(:x rect) (:y rect)]) "the background moved with the box")
+    (is (= [30.0 10.0] [(:x text) (:y text)]) "and so did the text"))
+  ;; A scale is the case where "moved with it" is not enough: the glyphs
+  ;; have to grow too, or a doubled box paints 14px text in it.
+  (let [ops (transform-ops-for
+             ".outer{width:400px;height:60px} .inner{width:100px;height:20px;transform:scale(2)}")
+        text (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= [-50.0 -10.0] [(:x text) (:y text)]))
+    (is (= 28.0 (:font-size text)) "sqrt(|det|), the matrix's uniform scale factor"))
+  ;; ...and a rotation is the documented cut: the origin is the true
+  ;; transformed one, the font size is unchanged (a rotation scales
+  ;; nothing), and the glyphs are simply not rotated -- there is no
+  ;; rotated-text primitive in this engine or its hosts.
+  (let [ops (transform-ops-for
+             ".outer{width:400px;height:120px} .inner{width:100px;height:20px;transform:rotate(45deg)}")
+        text (first (filter #(= :text (:draw/op %)) ops))]
+    (is (= 14.0 (:font-size text)))
+    (is (= [21.7157 -32.4264] [(:x text) (:y text)])
+        "the box's own top-left corner, rotated 45deg about its centre --
+         and note it is the box's top-left, not the bounding box's
+         (7.5736, -32.4264): the text goes where the corner went")))
+
+(deftest nested-transforms-compose-the-way-css-composes-them
+  ;; Probe. An ancestor's transform applies to the whole subtree, including
+  ;; a descendant's own already-transformed box. Measured in Brave: a
+  ;; `translateX(10px)` box inside a `scale(2)` box reports
+  ;; (-80, -30, 100, 40) -- the inner 10px translation doubled by the outer
+  ;; scale, and the inner box doubled in size by it too.
+  (let [[_root outer inner]
+        (cascaded-boxes (str ".outer{width:200px;height:60px;transform:scale(2)} "
+                             ".inner{width:50px;height:20px;transform:translateX(10px)}")
+                        nest)]
+    (is (= [-100.0 -30.0 400.0 120.0] (xywh outer)))
+    (is (= [-80.0 -30.0 100.0 40.0] (xywh inner))))
+  ;; and two translations simply add
+  (let [[_root outer inner]
+        (cascaded-boxes (str ".outer{width:200px;height:60px;transform:translate(20px,10px)} "
+                             ".inner{width:50px;height:20px;transform:translate(5px,5px)}")
+                        nest)]
+    (is (= [20.0 10.0 200.0 60.0] (xywh outer)))
+    (is (= [25.0 15.0 50.0 20.0] (xywh inner)))))
+
+(deftest a-transform-composes-with-the-other-paint-time-offset
+  ;; Probe. `position: relative` is this file's other paint-only shift, and
+  ;; the two are independent: Brave reports x=15 for a box with both
+  ;; `left: 10px` and `translateX(5px)`.
+  (let [[_root _outer inner]
+        (cascaded-boxes (str ".outer{width:400px;height:60px} "
+                             ".inner{width:100px;height:20px;position:relative;left:10px;"
+                             "transform:translateX(5px)}")
+                        nest)]
+    (is (= 15.0 (:x inner)))))
