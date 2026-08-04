@@ -1249,6 +1249,71 @@
             {}
             tokens)))
 
+(defn- flex-shorthand-number-token?
+  "A `<number>` in the `flex` shorthand's grow/shrink slots. Deliberately
+   NOT a length: `flex: 1` is a grow factor, `flex: 10px` is a basis, and
+   the difference is exactly the presence of a unit."
+  [tok]
+  (boolean (re-matches #"\d+(\.\d+)?" (str tok))))
+
+(defn- expand-flex-shorthand
+  "Expands the `flex` shorthand into `:flex-grow`/`:flex-shrink`/
+   `:flex-basis`, per CSS Flexible Box Layout §7.1
+   (`none | [ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ]`).
+
+   This is the whole of `flex: 1`, which is the single most-used flex
+   declaration on the real web -- and it is NOT `flex-grow: 1`. The
+   one-number form resets the BASIS to zero, so the items split the
+   container evenly regardless of their content; `flex-grow: 1` alone
+   leaves the basis at `auto` and only distributes the leftover. Nothing
+   here expanded it at all before, so `flex: 1` reached
+   `cssom.layout/node-style` as an unread `:flex` key and every item kept
+   its content width: measured against a real browser, two `flex: 1`
+   items in a 300px row came out 7px and 70px where the browser gives
+   150 and 150.
+
+   Zero is emitted for the `0%` basis the spec names, rather than the
+   percentage string: this engine resolves a flex basis as a length, and
+   `0%` of any containing block is 0 either way. The distinction real CSS
+   keeps (`0%` behaves as `content` when the container's main size is
+   indefinite) is not modelled -- see `cssom.layout/flex-item-base-size`
+   for the corresponding scope cut on the reading side.
+
+   Anything outside this grammar is left completely unexpanded for the
+   generic path to store raw, the same degrade-don't-guess posture
+   `expand-box-side-shorthand` takes: a value this cannot parse must not
+   become a guessed grow factor."
+  [v]
+  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))
+        n (count tokens)
+        numbers (filterv flex-shorthand-number-token? tokens)
+        bases (filterv (complement flex-shorthand-number-token?) tokens)
+        ;; `initial`/`auto`/`none` are the three named forms, and each is
+        ;; defined by the spec as an exact grow/shrink/basis triple.
+        named (when (= 1 n) (get {"none" [0 0 "auto"] "auto" [1 1 "auto"]
+                                  "initial" [0 1 "auto"]}
+                                 (str/lower-case (first tokens))))]
+    (cond
+      named {:flex-grow (named 0) :flex-shrink (named 1) :flex-basis (named 2)}
+
+      ;; At most two numbers (grow, then shrink) and at most one basis, and
+      ;; nothing left over -- `flex: 1 solid` parses as neither.
+      (and (pos? n) (<= n 3) (<= (count numbers) 2) (<= (count bases) 1)
+           (= n (+ (count numbers) (count bases)))
+           ;; A lone token that is neither a number nor a resolvable length
+           ;; (`flex: содержимое`) is not a basis this engine can use.
+           (every? #(or (re-matches #"-?\d+(\.\d+)?(px)?" %)
+                        (= "auto" (str/lower-case %))
+                        (re-matches calc-pattern %)
+                        (str/ends-with? % "%"))
+                   bases))
+      {:flex-grow (if (seq numbers) (parse-style-value (numbers 0)) 1)
+       :flex-shrink (if (> (count numbers) 1) (parse-style-value (numbers 1)) 1)
+       :flex-basis (if (seq bases)
+                     (parse-style-value (bases 0))
+                     ;; the `<number>`-only form's own `0%`
+                     0)})))
+
 (def ^:private font-shorthand-style-keywords
   #{"italic" "oblique"})
 
@@ -1384,6 +1449,12 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-font-shorthand value))
+
+                         (and (= "flex" (str/lower-case k))
+                              (some? (expand-flex-shorthand value)))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-flex-shorthand value))
 
                          :else
                          (let [parsed (parse-property-value k value)]

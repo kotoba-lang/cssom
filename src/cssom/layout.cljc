@@ -1141,8 +1141,30 @@
    :visibility (style node :visibility)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
+   ;; How a MULTI-LINE flex container distributes its lines along the
+   ;; cross axis. `stretch` is the initial value (`normal` computes to it
+   ;; for a flex container), and it is a SIZE change: the lines grow to
+   ;; fill a definite cross size rather than moving within it -- see
+   ;; layout-flex-wrap-row.
+   :align-content (or (style node :align-content) "stretch")
    :flex-grow (parse-dbl (style node :flex-grow) 0.0)
    :flex-shrink (parse-dbl (style node :flex-shrink) 1.0)
+   ;; Left as the RAW cascade value (a length, `auto`, a percentage, or
+   ;; nil when unauthored) rather than coerced here: `auto` -- the initial
+   ;; value and the overwhelmingly common one -- means "use the item's own
+   ;; main size", which is a different answer from any number, and
+   ;; flex-item-base-size is the one place that distinction is decided.
+   :flex-basis (style node :flex-basis)
+   ;; A flex/grid item's own cross-axis alignment, overriding the
+   ;; container's :align-items. `auto` (the initial value) explicitly means
+   ;; "defer to the container", so it is kept verbatim rather than
+   ;; normalised away -- see item-cross-align.
+   :align-self (style node :align-self)
+   ;; A flex item's ORDER-modified document position. The initial value is
+   ;; 0 and negative values are legal (an `order: -1` item sorts BEFORE
+   ;; every unauthored sibling), which is why this is parse-int'd with a 0
+   ;; default rather than read raw.
+   :order (parse-int (style node :order) 0)
    :flex-direction (or (style node :flex-direction) "row")
    :flex-wrap (or (style node :flex-wrap) "nowrap")
    :grid-template-columns (style node :grid-template-columns)
@@ -1662,21 +1684,148 @@
           offsets
           (recur (inc i) (+ pos (nth sizes i) gap) (conj offsets pos)))))))
 
+(defn- mirror-main-offsets
+  "Turns the main-axis offsets `place-main-axis` produced into the offsets
+   a REVERSED direction (`row-reverse`/`column-reverse`) puts the same
+   items at: each item is reflected about the centre of the container's
+   main size, so the first item lands at the main-END edge and the line
+   runs back towards the start.
+
+   Reflecting the finished offsets, rather than reversing the item vector
+   before placing it, is what keeps `justify-content` correct at the same
+   time -- real CSS's `flex-start`/`flex-end` are defined against the
+   FLEX-relative axis, so a reversed row packed `flex-end` packs against
+   the physical LEFT. Both come out of one reflection. Measured in Brave
+   at 800px: three 7px items in a 300px `row-reverse` sit at 293/286/279
+   (this reflection of 0/7/14), the same row under `justify-content:
+   flex-end` at 14/7/0 (the reflection of 279/286/293), and with a 10px
+   gap at 293/276/259.
+
+   `gap` needs no separate treatment: it is already inside the offsets
+   being reflected."
+  [offsets sizes container-main]
+  (mapv (fn [off sz] (- container-main off sz)) offsets sizes))
+
+(defn- auto-main-margins
+  "A flex item's MAIN-axis `auto` margins, as `[leading trailing]` 0/1
+   flags. Read from the RAW cascade value rather than node-style, whose
+   `:margin-left`/`:margin-top` are parse-int'd and so report `auto` as
+   the same 0 an undeclared margin gets."
+  [column? child]
+  (if (map? child)
+    [(if (= "auto" (style child (if column? :margin-top :margin-left))) 1 0)
+     (if (= "auto" (style child (if column? :margin-bottom :margin-right))) 1 0)]
+    [0 0]))
+
+(defn- place-main-axis-auto-margins
+  "place-main-axis's replacement for a line that has `auto` main-axis
+   margins on it: every bit of positive free space goes to those margins,
+   split equally, and the items pack flush otherwise.
+
+   `margin-left: auto` is how the real web pushes one item of a toolbar to
+   the far end, and it OUTRANKS justify-content -- real CSS gives the auto
+   margins the free space first and leaves justify-content nothing to
+   distribute, which is why this replaces that call rather than adding to
+   it. Measured in Brave, `left` and a `margin-left: auto` `right` in a
+   300px row sit at x=0 and x=265; this engine packed them flush at 0 and
+   28, because a margin of `auto` parse-int'd to zero and disappeared.
+
+   Only the MAIN axis: a cross-axis `auto` margin centres the item within
+   its line, which is not implemented -- such an item keeps its
+   align-items/align-self placement."
+  [auto-margins sizes gap container-main]
+  (let [total (+ (reduce + 0 sizes) (* gap (max 0 (dec (count sizes)))))
+        n-auto (reduce + 0 (apply concat auto-margins))
+        share (if (pos? n-auto) (/ (max 0 (- container-main total)) n-auto) 0)]
+    (first (reduce (fn [[offs pos] [[lead trail] sz]]
+                     (let [pos (+ pos (* lead share))]
+                       [(conj offs pos) (+ pos sz (* trail share) gap)]))
+                   [[] 0]
+                   (map vector auto-margins sizes)))))
+
+(defn- item-cross-align
+  "The cross-axis alignment that governs ONE flex item: its own
+   `align-self` when it names one, otherwise the container's
+   `align-items`.
+
+   Real CSS's `align-self: auto` -- the initial value -- means exactly
+   'defer to the container', which is why an authored `auto` falls through
+   here rather than being treated as a value of its own. A bare text-string
+   flex item has no style at all and always takes the container's.
+
+   Nothing read `align-self` before this: measured in Brave, a row with
+   `align-items: flex-start` and two items overriding it (`flex-end`,
+   `center`) put them at y=40 and y=20 in a 60px container, where this
+   engine left all three at y=0 -- the conformance corpus scored it as one
+   line where the browser has three."
+  [theme st child]
+  (let [self (when (map? child) (:align-self (node-style child theme)))]
+    (if (and self (not= "auto" self)) self (:align-items st))))
+
+(defn- flex-order
+  "A flex item's `order`, which is the position it takes in the flex
+   line rather than its document position (CSS Flexible Box Layout §5.4).
+   A bare text-string item, and any element that never declares one, is 0."
+  [theme child]
+  (if (map? child) (:order (node-style child theme)) 0))
+
+(defn- order-flex-items
+  "Re-sorts a flex container's in-flow children into `order`-modified
+   document order: ascending `order`, ties broken by the original document
+   position, which is real CSS's own rule.
+
+   Sorted on the pair rather than relying on a stable sort, so the tie
+   rule is stated by the code instead of by a host's sort implementation
+   (Clojure's is stable, ClojureScript's delegates to the platform).
+
+   This reorders the children ONCE, before anything is measured, so the
+   new order flows through placement AND paint order together -- which is
+   also what real CSS does (`order` changes the painting order of flex
+   items too, not only their positions). Nothing read `order` before:
+   measured in Brave, `order: 2` and `order: 1` on two items swapped them
+   to `second first`, where this engine kept document order."
+  [theme children]
+  (->> children
+       (map-indexed vector)
+       (sort-by (fn [[i child]] [(flex-order theme child) i]))
+       (mapv second)))
+
+(defn- flip-cross-align
+  "The cross-axis alignment `wrap-reverse` turns `align` into: that keyword
+   flips the cross axis end-for-end, so `flex-start` means the far edge and
+   `flex-end` the near one, while `center` and `stretch` are symmetric and
+   unaffected.
+
+   `baseline` is deliberately NOT flipped: real CSS answers a reversed
+   cross axis with `last baseline` alignment, which needs each item's LAST
+   line box rather than its first, and flex-item-baseline only knows the
+   first. Left as first-baseline (the unflipped behaviour) rather than
+   guessed at."
+  [align]
+  (case align
+    "flex-start" "flex-end"
+    "start" "end"
+    "flex-end" "flex-start"
+    "end" "start"
+    align))
+
 (defn- cross-offset
   [align child-cross container-cross]
   (case align
-    "center" (quot (- container-cross child-cross) 2)
-    "flex-end" (- container-cross child-cross)
+    ("center" "safe center" "unsafe center") (quot (- container-cross child-cross) 2)
+    ("flex-end" "end" "self-end") (- container-cross child-cross)
     0))
 
 (defn- stretch-eligible-child?
   "True when `child` is a real element (not a bare text-string flex item --
    see measure-child's own identical map? check) with no explicit cross-
    dimension of its own (`:height` for a row container, `:width` for a
-   column container) under a container whose `:align-items` resolves to
-   `\"stretch\"` (node-style's own real-CSS default when unauthored -- see
-   node-style). Real CSS's align-items default -- stretch -- was never
-   actually implemented as a SIZE change here; cross-offset above only ever
+   column container) whose EFFECTIVE cross alignment (its own `align-self`,
+   falling back to the container's `align-items` -- see item-cross-align)
+   resolves to `\"stretch\"` (node-style's own real-CSS default when
+   unauthored -- see node-style). Real CSS's align-items default -- stretch
+   -- was never actually implemented as a SIZE change here; cross-offset
+   above only ever
    REPOSITIONS a child within the cross axis, so `\"stretch\"` (not handled
    by cross-offset's own case) silently fell through to the same zero-
    offset, zero-resize behavior as `\"flex-start\"`, confirmed via a direct
@@ -1685,9 +1834,9 @@
    declared (real CSS's own default is stretch) -- the auto-height item
    stayed at its own tiny 8px content height instead of stretching to match
    its 40px sibling, exactly like Chrome/Firefox never would."
-  [column? st child]
+  [theme column? st child]
   (and (map? child)
-       (= "stretch" (:align-items st))
+       (= "stretch" (item-cross-align theme st child))
        (nil? (style child (if column? :width :height)))))
 
 (defn- force-cross-size
@@ -1715,6 +1864,31 @@
    here too."
   [column? px child]
   (assoc-in child [:attrs (keyword "style" (if column? "width" "height"))] px))
+
+(defn- force-main-width
+  "force-cross-size's MAIN-axis counterpart, for a ROW container: injects
+   the main size flex-grow/flex-shrink actually resolved for this item as
+   a synthetic explicit `:width`, plus `box-sizing: border-box` so that
+   value is read as the BORDER box -- which is what the flex algorithm
+   resolved, since every base size here is a measured `(:w (:box m))`.
+
+   Re-laying the item out against a narrower AVAILABLE width is not enough
+   on its own and was the bug this closes: an item that declares its own
+   `width` resolves to that width no matter how little room it is given,
+   so `flex-shrink` moved the following items but left the shrunk one at
+   its declared size, overlapping its neighbour. Measured in Brave, two
+   150px items in a 200px row are 100px each; this engine drew both at
+   150 while placing the second at x=100.
+
+   Only rows: a COLUMN container's main axis is height, and this engine
+   still places column items at their grown/shrunk offsets without
+   resizing them (pre-existing, and unreachable for shrink -- an
+   auto-height column has `avail-main` 0, which disables distribution
+   entirely)."
+  [child px]
+  (-> child
+      (assoc-in [:attrs :style/width] px)
+      (assoc-in [:attrs :style/box-sizing] "border-box")))
 
 (defn- pack-rows
   "Greedily packs measured children (indices) into rows that fit within
@@ -3465,6 +3639,17 @@
         (cond
           (:width st) (resolve-width st content-w)
 
+          ;; An `inline-flex` box sizes ITSELF from its flex items
+          ;; (layout-flex's `inline?` branch shrink-wraps to `auto-main`,
+          ;; gaps and blockified items and all), so the only useful answer
+          ;; here is the upper bound it may not exceed. Measuring its
+          ;; children as an inline run instead -- what the `:else` branch
+          ;; below would do -- gets the items' text but not the `gap`
+          ;; between them: measured in Brave, a `gap: 6px` inline-flex
+          ;; holding `a` and `b` is 20px wide, and the inline run says 14.
+          (= "inline-flex" (:display st))
+          content-w
+
           (contains? #{:input :textarea} tag)
           (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
             (if (contains? #{"checkbox" "radio"} input-type)
@@ -3641,6 +3826,175 @@
                   :else content-w)]
     (min content-w (clamp-width st natural))))
 
+(defn- flex-item-base-size
+  "One flex item's FLEX BASE SIZE -- the main-axis size flex-grow and
+   flex-shrink distribute the line's free space around, before either has
+   run.
+
+   `flex-basis: auto` (the initial value, and what an item that never
+   declares one has) means 'use the item's own main size', which is
+   exactly the size it was already measured at -- so `measured-main` is
+   the answer and this only has work to do for a declared basis. A
+   percentage resolves against the container's own main size, and is nil
+   (hence `auto`) when that size is not definite, the same rule
+   percentage-of applies everywhere else.
+
+   Scope cut, deliberately: `flex-basis: content` -- max-content sizing
+   independent of a declared width -- is treated as `auto` here. This
+   engine's measured main size for an item with no width IS its
+   max-content size (flex-item-main-width), so the two coincide for every
+   item that does not ALSO declare a width; where they differ (`width:
+   50px; flex-basis: content`) this reports 50 rather than the content
+   size. `content` is rare enough on the real web that inventing a second
+   measuring pass for it would be machinery in search of a case."
+  [st measured-main avail-main]
+  (let [basis (:flex-basis st)]
+    (if (or (nil? basis) (= "auto" basis) (= "content" basis))
+      measured-main
+      (or (percentage-of basis avail-main)
+          (when-not (percentage? basis) (explicit-length basis))
+          measured-main))))
+
+(defn- flex-item-min-content-width
+  "A flex item's automatic minimum main size in a ROW container: the width
+   of its longest unbreakable word, which is what a `min-width: auto` item
+   refuses to shrink below (CSS Flexible Box Layout §4.5).
+
+   Measured in Brave: two `flex: 1` items in a 120px row hold
+   `averylongunbrokenword` and `b`, and come out 147px and 7px -- 154px of
+   content overflowing a 120px container -- where an engine that only
+   divides the free space gives 60 and 60. The floor is why a flex row
+   full of long words overflows in a browser instead of crushing every
+   word to nothing.
+
+   Returns nil when the floor does not apply or cannot be measured, which
+   is a real answer and not a failure: an explicit `min-width` replaces
+   the automatic one outright, a scroll container (`overflow` other than
+   visible) has an automatic minimum of zero, and an item whose subtree
+   holds no text at all has no word to measure. Text is collected from the
+   whole subtree, so `<div><span>word</span></div>` still has a floor;
+   what is NOT modelled is an item whose min-content size comes from
+   something other than text (a nested table's columns, a replaced
+   element's intrinsic width), which reports nil rather than a guess."
+  [theme inherited child st]
+  (when (and (map? child)
+             (nil? (:min-width st))
+             (contains? #{nil "visible"} (:overflow st)))
+    (let [measure-text (:measure-text theme)
+          fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
+          words (->> (tree-seq map? :children child)
+                     (keep real-text-child)
+                     (mapcat #(str/split (str %) #"\s+"))
+                     (remove str/blank?))]
+      (when (seq words)
+        (+ (* 2 (content-inset st))
+           (apply max 0
+                  (map (fn [w]
+                         (if measure-text
+                           (measure-text w fs (:font-weight st) (:font-style st) (:font-family st))
+                           (* (count w) (long (* 0.6 fs)))))
+                       words)))))))
+
+(defn- resolve-flexible-lengths
+  "CSS Flexible Box Layout §9.7's own loop: distribute the line's free
+   space across the items by `flex-grow` (when there is room) or by
+   scaled `flex-shrink` (when there is not), clamp each result to the
+   item's automatic minimum, FREEZE whatever the clamp had to change, and
+   run again with what is left.
+
+   The loop is the point. Distributing once and clamping afterwards leaves
+   the space a floored item refused to give up sitting in nobody's hands:
+   measured in Brave, `averylongunbrokenword` and `b` as two `flex: 1`
+   items in a 120px row come out 147 and 7, because once the long word
+   refuses to go below its 147px min-content the OTHER item is left with
+   -27px of room and falls to its own 7px floor. A single pass gives 147
+   and 60 -- the first item right and the second one holding space that
+   was already spent.
+
+   `mins` is one automatic minimum per item, nil where there is none (see
+   flex-item-min-content-width, which declines to guess for an item whose
+   min-content size does not come from text). A zero `flex-grow` (growing)
+   or a zero scaled `flex-shrink` (shrinking) freezes an item before the
+   first pass, which is also what keeps `flex-shrink: 0` items at their
+   declared size while their siblings absorb the whole overflow.
+
+   Not implemented: `max-width`/`flex-basis` upper clamps, which would
+   freeze on MAX violations in the same loop (the sign of `violation`
+   already distinguishes them; there is simply no max fed in yet)."
+  [base-sizes grows shrinks mins avail-main gaps-main]
+  (let [n (count base-sizes)
+        base (vec base-sizes)
+        grow? (> avail-main (+ (reduce + 0 base) gaps-main))
+        weight (fn [i] (if grow?
+                         (nth grows i)
+                         (* (nth shrinks i) (nth base i))))
+        floor (fn [i v] (max (or (nth mins i) 0) v))
+        ;; An item the loop did not actually move keeps its ORIGINAL
+        ;; number, not an arithmetically-equal double. `flex-shrink`
+        ;; arrives as a double (parse-dbl's own contract), so a line with
+        ;; exactly zero free space -- extremely common, since that is what
+        ;; a container sized to its own items has -- would otherwise turn
+        ;; every integer size into 84.0 and every offset downstream with
+        ;; it, and re-lay out each item for a size it already had.
+        settle (fn [sizes] (mapv (fn [b s] (if (== b s) b s)) base sizes))]
+    (loop [sizes base
+           frozen (mapv #(not (pos? (weight %))) (range n))
+           guard n]
+      (if (or (every? true? frozen) (neg? guard))
+        (settle sizes)
+        (let [used (reduce + 0 (map-indexed (fn [i s] (if (nth frozen i) s (nth base i))) sizes))
+              remaining (- avail-main gaps-main used)
+              total-w (reduce + 0 (keep-indexed (fn [i _] (when-not (nth frozen i) (weight i))) sizes))
+              proposed (vec (map-indexed
+                             (fn [i s]
+                               (if (nth frozen i)
+                                 s
+                                 (max 0 (+ (nth base i) (* remaining (/ (weight i) total-w))))))
+                             sizes))
+              clamped (vec (map-indexed (fn [i s] (floor i s)) proposed))
+              violation (reduce + 0 (map - clamped proposed))]
+          (if (zero? violation)
+            (settle clamped)
+            (recur clamped
+                   (vec (map-indexed (fn [i f] (or f (> (nth clamped i) (nth proposed i)))) frozen))
+                   (dec guard))))))))
+
+(defn- flex-item-baseline
+  "The distance from a flex item's own top border edge down to the
+   baseline of its FIRST line of text -- what `align-items: baseline`
+   lines items up on.
+
+   Built the same way line-metrics builds a line box: top border and
+   padding, then the half-leading `(line-height - (ascent + descent)) / 2`,
+   then the font's ascent. The half-leading is deliberately NOT clamped at
+   zero -- a declared line-height smaller than the font's own content area
+   makes it negative, and that is exactly the case baseline alignment
+   exists to handle. Measured in Brave, a 24px item and a 14px item in a
+   `line-height: 20px` container: the big item's baseline sits 18px down
+   (-3 half-leading + 21 ascent) and the small one's 14px (+2 + 12), so
+   the small item is pushed down by 4 and the line is 24 tall rather than
+   20. Clamping the half-leading at zero gives 21 and 14, an offset of 7.
+
+   Scope cut: this reads the item's OWN font, i.e. it assumes the item's
+   first line is text laid out in the item's own inherited style. An item
+   whose first line box comes from a nested block, a replaced element or
+   an atomic inline has a different baseline, and this will report the
+   font-derived one. Real CSS also falls back to the item's bottom MARGIN
+   edge for an item with no baseline at all (a `display: flex` item with
+   no text); that fallback is not implemented -- such an item aligns on
+   its font's first-line baseline here, which for the common case (an
+   empty or single-line box) is the same place."
+  [theme inherited st]
+  (let [fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
+        {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
+                                               (:font-style st) (:font-family st))
+        lh (or (parse-int (:line-height st) nil) (:line-height inherited) fs)
+        half (/ (- lh (+ ascent descent)) 2)]
+    (+ (or (:padding-top st) (:padding st) 0)
+       (:border-width st)
+       half
+       ascent)))
+
 (defn- measure-child
   [theme content-w opacity inherited child shrink-to-fit?]
   (let [child (if (map? child)
@@ -3676,15 +4030,55 @@
     [0 0]))
 
 (defn- layout-flex-wrap-row
-  [theme cx cy cw opacity inherited st in-flow measured]
+  [theme cx cy cw cross-avail opacity inherited st in-flow measured wrap-reverse?]
   (let [gap (:gap st)
         main-sizes (mapv #(:w (:box %)) measured)
         rows-idx (pack-rows main-sizes gap cw)
-        row-cross-sizes (mapv (fn [idxs] (apply max 0 (mapv #(:h (:box (nth measured %))) idxs))) rows-idx)
-        row-cross-offsets (loop [i 0 pos 0 offsets []]
-                             (if (= i (count rows-idx))
-                               offsets
-                               (recur (inc i) (+ pos (nth row-cross-sizes i) gap) (conj offsets pos))))
+        natural-cross (mapv (fn [idxs] (apply max 0 (mapv #(:h (:box (nth measured %))) idxs))) rows-idx)
+        n-rows (count rows-idx)
+        align-content (:align-content st)
+        ;; ---- align-content ----
+        ;; The cross-axis counterpart of justify-content, and the property
+        ;; that decides what a multi-line flex container does with cross-
+        ;; axis room its lines do not fill. It only has anything to
+        ;; distribute when the container's own cross size is DEFINITE
+        ;; (`cross-avail`, an explicit height); an auto-height container is
+        ;; sized BY its lines and has no free space by construction, which
+        ;; is why every existing auto-height wrap case is untouched by
+        ;; this.
+        ;;
+        ;; `stretch` -- the initial value -- is the odd one out: it grows
+        ;; the LINES rather than moving them, so it is a size change
+        ;; applied here and the placement below then sees no free space
+        ;; left. Every other keyword is placement, which is exactly what
+        ;; place-main-axis already does (including reserving `gap` as a
+        ;; minimum), so it is reused on the cross axis rather than
+        ;; reimplemented. Measured in Brave: two 20px lines in a 120px
+        ;; `align-content: space-between` container sit at y=0 and y=100
+        ;; (this engine stacked them at 0 and 20), and two lines in an
+        ;; 80px `wrap-reverse` container are 40px tall each rather than 20.
+        stretch-lines? (and cross-avail (pos? n-rows)
+                            (contains? #{"stretch" "normal"} align-content))
+        row-cross-sizes (if stretch-lines?
+                          (let [total (+ (reduce + 0 natural-cross) (* gap (max 0 (dec n-rows))))
+                                extra (max 0 (quot (- cross-avail total) n-rows))]
+                            (mapv #(+ % extra) natural-cross))
+                          natural-cross)
+        total-cross (+ (reduce + 0 row-cross-sizes) (* gap (max 0 (dec n-rows))))
+        ;; `flex-wrap: wrap-reverse` reverses the CROSS axis: the first
+        ;; line is laid at the far edge and each subsequent one above it,
+        ;; and (see flip-cross-align at each item below) `flex-start`
+        ;; within a line now means that line's far edge too. Measured in
+        ;; Brave, three 120px items wrapping in a 200px container sit at
+        ;; y=40/20/0 rather than 0/20/40; without this the corpus scored
+        ;; two-item `wrap-reverse` as the lines in the wrong order.
+        ;; Reflecting the FINISHED offsets about the container's cross size
+        ;; is the same move mirror-main-offsets makes on the main axis.
+        cross-span (max total-cross (or cross-avail 0))
+        row-cross-offsets (let [forward (place-main-axis align-content row-cross-sizes gap cross-span)]
+                            (if wrap-reverse?
+                              (mapv (fn [off sz] (- cross-span off sz)) forward row-cross-sizes)
+                              forward))
         ;; align-items (including stretch) pass, per ROW -- see layout-
         ;; flex's own identical non-wrap pass and cross-offset/stretch-
         ;; eligible-child?/force-cross-size for the full rationale. This
@@ -3709,7 +4103,7 @@
                   (fn [acc [idxs row-cross-size]]
                     (reduce (fn [acc2 idx]
                               (let [child (nth in-flow idx)]
-                                (if (stretch-eligible-child? false st child)
+                                (if (stretch-eligible-child? theme false st child)
                                   (assoc acc2 idx
                                          (measure-child theme cw opacity inherited
                                                         (force-cross-size false row-cross-size child)
@@ -3737,32 +4131,75 @@
                        offs (place-main-axis (:justify-content st) sizes gap cw)]
                    (mapcat (fn [child-idx off]
                              (let [m (nth measured child-idx)
+                                   child (nth in-flow child-idx)
                                    child-cross (:h (:box m))
-                                   c-off (cross-offset (:align-items st) child-cross row-cross-size)
+                                   ;; per-item align-self, and the cross-axis
+                                   ;; flip wrap-reverse applies on top of it
+                                   ;; -- see item-cross-align/flip-cross-align.
+                                   align (cond-> (item-cross-align theme st child)
+                                           wrap-reverse? flip-cross-align)
+                                   c-off (cross-offset align child-cross row-cross-size)
                                    dx (+ cx off)
                                    dy (+ cy row-y c-off)]
                                (translate-ops dx dy (:draw m))))
                            idxs offs)))
-               rows-idx row-cross-offsets row-cross-sizes)
-        total-cross (+ (reduce + 0 row-cross-sizes) (* gap (max 0 (dec (count rows-idx)))))]
+               rows-idx row-cross-offsets row-cross-sizes)]
     {:draws (vec draws) :main-total cw :cross-total total-cross}))
 
 (defn- layout-flex
   [theme x y avail-width opacity inherited st node in-flow]
-  (let [column? (= "column" (:flex-direction st))
-        wrap? (and (not column?) (= "wrap" (:flex-wrap st)))
+  (let [direction (:flex-direction st)
+        column? (contains? #{"column" "column-reverse"} direction)
+        ;; `row-reverse`/`column-reverse` lay the SAME line out from the
+        ;; main-END edge (see mirror-main-offsets, which is where the whole
+        ;; of it lives). `column-reverse` in particular was not even
+        ;; recognised as a column before this -- it fell through to the
+        ;; row branch, so a reversed column laid its items out side by side
+        ;; and stretched each to the container's height.
+        reverse? (contains? #{"row-reverse" "column-reverse"} direction)
+        wrap-reverse? (= "wrap-reverse" (:flex-wrap st))
+        wrap? (and (not column?) (contains? #{"wrap" "wrap-reverse"} (:flex-wrap st)))
+        ;; `display: inline-flex` is a flex container that is INLINE-level:
+        ;; it sits in its parent's line box (the inline path admits it, see
+        ;; inline-atomic-element?) and shrink-wraps to its items instead of
+        ;; filling its containing block.
+        inline? (= "inline-flex" (:display st))
+        ;; `order` before anything is measured, so the new order flows
+        ;; through placement AND paint order together -- see
+        ;; order-flex-items.
+        in-flow (order-flex-items theme in-flow)
         w (resolve-width st avail-width)
         inset (content-inset st)
         cx (+ x (:margin st) inset)
         cy (+ y (:margin st) inset)
         cw (max 0 (- w (* 2 inset)))
         gap (:gap st)
-        measured (mapv #(measure-child theme cw opacity inherited % (not column?)) in-flow)]
+        ;; A COLUMN item's cross axis is its WIDTH, and a cross axis is
+        ;; only filled when it stretches: under any other alignment the
+        ;; item is fit-content, exactly like a row item's main size. Both
+        ;; are the same shrink-to-fit measurement, which is why the flag
+        ;; is `(or row? (not stretching))` rather than two paths. Measured
+        ;; in Brave, a 200px `flex-direction: column; align-items: center`
+        ;; container puts a one-character item at x=96.5 with a 7px box;
+        ;; measuring every column item at the container width instead gave
+        ;; a 200px box at x=0, so `align-items` looked unimplemented for
+        ;; columns even though the offset arithmetic was right.
+        measured (mapv (fn [child]
+                         (measure-child theme cw opacity inherited child
+                                        (or (not column?)
+                                            (not= "stretch" (item-cross-align theme st child)))))
+                       in-flow)]
     (if wrap?
-      (let [{:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw opacity inherited st in-flow measured)
+      ;; A DEFINITE cross size is what align-content has to distribute (see
+      ;; layout-flex-wrap-row); nil means auto-height, where the container
+      ;; is sized by its lines and there is nothing to distribute.
+      (let [cross-avail (when-let [h (resolve-height st)] (max 0 (- h (* 2 inset))))
+            {:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw cross-avail opacity
+                                                              inherited st in-flow measured
+                                                              wrap-reverse?)
             node-h (or (resolve-height st) (+ cross-total (* 2 inset)))]
         {:box-w w :box-h node-h :draws draws})
-      (let [base-sizes (mapv (fn [m] (if column? (:h (:box m)) (:w (:box m)))) measured)
+      (let [main-of (fn [m] (if column? (:h (:box m)) (:w (:box m))))
             ;; ---- flex-grow / flex-shrink ----
             ;; Real flexbox distributes the line's FREE SPACE across the
             ;; items: positive free space by `flex-grow`, negative by
@@ -3772,30 +4209,95 @@
             ;; web) and over-wide items overflowed instead of shrinking --
             ;; measured against the browser as `div w +8` and `div x +50`
             ;; across ten boxes.
-            avail-main (if column? (or (explicit-length (:height st)) 0) cw)
-            gaps-main (* gap (max 0 (dec (count base-sizes))))
-            free (- avail-main (reduce + 0 base-sizes) gaps-main)
+            ;; An INLINE-level flex container with no declared main size is
+            ;; sized BY its items, so there is no free space for either
+            ;; factor to distribute -- `flex: 1` inside one changes
+            ;; nothing. A zero here disables distribution through the
+            ;; `(pos? avail-main)` guards below, which is exactly that.
+            avail-main (cond
+                         column? (or (explicit-length (:height st)) 0)
+                         (and inline? (nil? (explicit-length (:width st)))) 0
+                         :else cw)
             item-sts (mapv #(when (map? %) (node-style % theme)) in-flow)
+            ;; The item's FLEX BASE SIZE, which is its measured main size
+            ;; unless it declares a `flex-basis` -- and `flex: 1` declares
+            ;; one (`1 1 0%`, expanded in cssom.core), which is the whole
+            ;; reason two `flex: 1` items split a row evenly regardless of
+            ;; what is in them. See flex-item-base-size.
+            base-sizes (mapv (fn [cst m]
+                               (if cst
+                                 (flex-item-base-size cst (main-of m) avail-main)
+                                 (main-of m)))
+                             item-sts measured)
+            gaps-main (* gap (max 0 (dec (count base-sizes))))
             grows (mapv #(or (:flex-grow %) 0.0) item-sts)
             shrinks (mapv #(or (:flex-shrink %) 1.0) item-sts)
-            main-sizes
-            (cond
-              (and (pos? free) (pos? (reduce + 0 grows)) (pos? avail-main))
-              (let [total (reduce + 0 grows)]
-                (mapv (fn [sz g] (+ sz (* free (/ g total)))) base-sizes grows))
-
-              (and (neg? free) (pos? avail-main))
-              (let [weights (mapv * shrinks base-sizes)
-                    total (reduce + 0 weights)]
-                (if (pos? total)
-                  (mapv (fn [sz w] (max 0 (+ sz (* free (/ w total))))) base-sizes weights)
-                  base-sizes))
-
-              :else base-sizes)
-
+            ;; A flex item's AUTOMATIC MINIMUM main size -- the min-content
+            ;; floor it refuses to shrink below, which is why a row of long
+            ;; words overflows a narrow container in a browser instead of
+            ;; crushing each word (see flex-item-min-content-width). Only
+            ;; on the row axis: a column item's automatic minimum is its
+            ;; min-content HEIGHT, which this engine has no measurement
+            ;; for, so a column feeds nil floors rather than a wrong one.
+            mins (if column?
+                   (vec (repeat (count in-flow) nil))
+                   (mapv (fn [child cst]
+                           (when cst (flex-item-min-content-width theme inherited child cst)))
+                         in-flow item-sts))
+            main-sizes (if (pos? avail-main)
+                         (resolve-flexible-lengths base-sizes grows shrinks mins
+                                                   avail-main gaps-main)
+                         base-sizes)
+            ;; An item resized on the main axis is laid out AGAIN at that
+            ;; size, so its own content wraps against the real width -- and
+            ;; through force-main-width, so an item that declares its own
+            ;; width actually takes the resolved one. Carried on the child
+            ;; NODE (rather than as a one-off re-measure) so the stretch
+            ;; pass further down re-measures from the already-main-sized
+            ;; child instead of undoing it.
+            sized (mapv (fn [child m sz]
+                          (if (and (map? child) (not column?) (not (== (main-of m) sz)))
+                            (force-main-width child (long sz))
+                            child))
+                        in-flow measured main-sizes)
+            measured (mapv (fn [child0 child m]
+                             (if (identical? child0 child)
+                               m
+                               (measure-child theme cw opacity inherited child false)))
+                           in-flow sized measured)
+            ;; ---- align-items / align-self: baseline ----
+            ;; Baseline-aligned items line their FIRST text baselines up
+            ;; with each other, so the line's cross size is the deepest
+            ;; baseline plus the deepest thing hanging below one -- which
+            ;; is how a 24px item next to a 14px one makes a 24px-tall line
+            ;; out of two 20px boxes (measured in Brave). cross-offset has
+            ;; no case for `baseline` and silently treated it as
+            ;; flex-start. Only meaningful on the main axis being a row:
+            ;; in a column, baseline alignment is along the INLINE axis,
+            ;; which this does not model, so a column falls back to the
+            ;; flex-start behaviour it already had.
+            aligns (mapv #(item-cross-align theme st %) in-flow)
+            baseline-align? (fn [align]
+                              (and (not column?)
+                                   (contains? #{"baseline" "first baseline"} align)))
+            baselines (mapv (fn [cst align]
+                              (when (and cst (baseline-align? align))
+                                (flex-item-baseline theme inherited cst)))
+                            item-sts aligns)
+            max-baseline (apply max 0 (keep identity baselines))
+            baseline-shifts (mapv #(if % (- max-baseline %) 0) baselines)
             cross-sizes (mapv (fn [m] (if column? (:w (:box m)) (:h (:box m)))) measured)
-            auto-cross (if (seq cross-sizes) (apply max 0 cross-sizes) 0)
-            cross-content (or (explicit-length (if column? (:width st) (:height st))) auto-cross)
+            auto-cross (if (seq cross-sizes)
+                         (apply max 0 (map + baseline-shifts cross-sizes))
+                         0)
+            ;; A COLUMN container's cross axis is its WIDTH, and a
+            ;; block-level flex container fills its containing block --
+            ;; the same rule the `node-w` comment at the end of this
+            ;; function states for rows. Sizing the cross axis from the
+            ;; widest item instead would centre `align-items: center`
+            ;; inside the widest item rather than inside the container.
+            cross-content (or (explicit-length (if column? (:width st) (:height st)))
+                              (if (and column? (not inline?)) cw auto-cross))
             auto-main (+ (reduce + 0 main-sizes) (* gap (max 0 (dec (count main-sizes)))))
             ;; The main-axis size justify-content distributes free space
             ;; WITHIN. For a row that is the container's content width --
@@ -3807,47 +4309,45 @@
             ;; 393,400). A COLUMN's main axis is its height, which still
             ;; comes from the content unless declared.
             main-content (or (explicit-length (if column? (:height st) (:width st)))
-                             (if column? auto-main cw))
-            ;; align-items:stretch pass -- see stretch-eligible-child?/
-            ;; force-cross-size. Deliberately AFTER cross-content is
-            ;; determined from the ORIGINAL (unstretched) measurements,
-            ;; matching real flexbox's own algorithm order (the flex line's
-            ;; cross size is settled first, from the tallest natural item or
-            ;; the container's own explicit size; only THEN do stretch-
-            ;; eligible items get resized to fill it -- a stretched item
-            ;; never feeds back into cross-content's own computation). Main-
-            ;; axis sizes (main-sizes/offsets, already computed above) are
-            ;; unaffected by this: injecting a cross-dimension never touches
-            ;; resolve-width/flex-item-main-width, confirmed via direct REPL
-            ;; check.
+                             (if (or column? inline?) auto-main cw))
+            ;; align-items/align-self:stretch pass -- see
+            ;; stretch-eligible-child?/force-cross-size. Deliberately AFTER
+            ;; cross-content is determined from the UNSTRETCHED
+            ;; measurements, matching real flexbox's own algorithm order
+            ;; (the flex line's cross size is settled first, from the
+            ;; tallest natural item or the container's own explicit size;
+            ;; only THEN do stretch-eligible items get resized to fill it
+            ;; -- a stretched item never feeds back into cross-content's
+            ;; own computation). Re-measures from `sized`, the children
+            ;; that already carry their resolved MAIN size, so stretching
+            ;; an item cannot undo its grow/shrink -- the bug that made
+            ;; `flex-grow: 1` look unimplemented even once the
+            ;; distribution was right.
             measured (mapv (fn [child m]
-                              (if (stretch-eligible-child? column? st child)
+                              (if (stretch-eligible-child? theme column? st child)
                                 (measure-child theme cw opacity inherited
                                                (force-cross-size column? cross-content child)
                                                (not column?))
                                 m))
-                            in-flow measured)
-            ;; An item resized on the main axis is laid out again at that
-            ;; size, so its own content wraps against the real width. This
-            ;; runs AFTER the align-items:stretch pass, which re-measures at
-            ;; the container width and would otherwise undo it -- the bug
-            ;; that made `flex-grow: 1` look unimplemented even once the
-            ;; distribution was right.
-            measured (mapv (fn [child m base sz]
-                             (if (or (= base sz) column?)
-                               m
-                               (measure-child theme (long sz) opacity inherited child false)))
-                           in-flow measured base-sizes main-sizes)
-            offsets (place-main-axis (:justify-content st) main-sizes gap main-content)
+                            sized measured)
+            auto-margins (mapv #(auto-main-margins column? %) in-flow)
+            offsets (let [offs (if (pos? (reduce + 0 (apply concat auto-margins)))
+                                 (place-main-axis-auto-margins auto-margins main-sizes gap main-content)
+                                 (place-main-axis (:justify-content st) main-sizes gap main-content))]
+                      (if reverse?
+                        (mirror-main-offsets offs main-sizes main-content)
+                        offs))
             draws (mapcat
-                   (fn [m off child]
+                   (fn [m off child align shift]
                      (let [child-cross (if column? (:w (:box m)) (:h (:box m)))
-                           c-off (cross-offset (:align-items st) child-cross cross-content)
+                           c-off (if (baseline-align? align)
+                                   shift
+                                   (cross-offset align child-cross cross-content))
                            [rdx rdy] (relative-item-offset theme child)
                            dx (+ (if column? (+ cx c-off) (+ cx off)) rdx)
                            dy (+ (if column? (+ cy off) (+ cy c-off)) rdy)]
                        (translate-ops dx dy (:draw m))))
-                   measured offsets in-flow)
+                   measured offsets in-flow aligns baseline-shifts)
             node-h (if column? (+ main-content (* 2 inset)) (+ cross-content (* 2 inset)))
             ;; A `display: flex` box is a BLOCK-level flex container: it
             ;; fills its containing block's width exactly like any other
@@ -3858,7 +4358,17 @@
             ;; distributed space inside that 21px box. Found by the geometry
             ;; axis (div w -750 across ten boxes); the line-structure axis
             ;; scored all of those cases as passes.
-            node-w w]
+            ;;
+            ;; `display: inline-flex` is the exception the same sentence
+            ;; implies: an INLINE-level flex container shrink-wraps to its
+            ;; own items, exactly like the `inline-block` it is the flex
+            ;; spelling of. Measured in Brave, `<span style="display:
+            ;; inline-flex; gap: 6px"><span>a</span><span>b</span></span>`
+            ;; in a sentence is 20px wide (7 + 6 + 7); this engine gave it
+            ;; the full 800 and broke the sentence into three lines.
+            node-w (if (and inline? (nil? (explicit-length (:width st))))
+                     (+ (if column? cross-content main-content) (* 2 inset))
+                     w)]
         {:box-w node-w :box-h node-h :draws (vec draws)}))))
 
 ;; ---- grid layout ----
@@ -4429,21 +4939,39 @@
     :label :mark :meter :output :progress :q :ruby :rt :rp :s :samp :small
     :span :strong :sub :sup :time :u :var :wbr})
 
+(def ^:private inline-atomic-displays
+  "The `display` values that make an ordinary element an ATOMIC inline: a
+   box that lays its own children out internally by its own rules, but
+   sits in its parent's line box like a word.
+
+   `inline-block` is the original spelling of that concept;
+   `inline-flex` is the same box with a flex formatting context inside
+   it, and takes the identical path -- shrink-wrap to content
+   (layout-flex's own `inline?` branch), then sit in the line. Measured
+   in Brave, an `inline-flex` span between two words keeps all of it on
+   one line (`before a b after`); this engine gave the span a block row
+   of its own and produced three lines.
+
+   `inline-grid` is deliberately NOT here: `layout-grid` has no
+   shrink-to-fit branch of its own, so admitting it would put a
+   full-container-width box in the middle of a sentence -- a different
+   answer, not a better one, than the block row it gets today. That is
+   the grid side of this same gap, and it is measured by the corpus as
+   `grid/inline-grid-in-a-sentence`."
+  #{"inline-block" "inline-flex"})
+
 (defn- inline-atomic-element?
   "True for an element that participates in a line as one unbreakable box:
    a replaced/form-control tag (inline-atomic-tags), or ANY element an
-   author gives `display: inline-block`.
+   author gives one of the inline-atomic-displays.
 
-   `inline-block` is exactly this concept in CSS — a box that lays its own
-   children out internally as a block, but sits in its parent's line like a
-   word — so it needs no separate machinery here, only admission to the
-   same atomic path. Before this, an `inline-block` span fell through to a
-   block row and broke the sentence around it in two."
+   Before this, an `inline-block` span fell through to a block row and
+   broke the sentence around it in two."
   [theme child]
   (and (map? child)
        (= :element (:node/type child))
        (or (contains? inline-atomic-tags (:tag child))
-           (= "inline-block" (:display (node-style child theme))))))
+           (contains? inline-atomic-displays (:display (node-style child theme))))))
 
 (defn- inline-level-element?
   "True when `child` is an element this file will flow into a line box:
@@ -4525,7 +5053,9 @@
     (let [st (node-style child theme)]
       (and (= "static" (:position st))
            (not= "none" (:display st))
-           (contains? #{nil "inline" "inline-block"} (:display st))))
+           (or (nil? (:display st))
+               (= "inline" (:display st))
+               (contains? inline-atomic-displays (:display st)))))
 
     (inline-level-element? theme child)
     (let [st (node-style child theme)]
@@ -6350,7 +6880,13 @@
                  (and (nil? (:display st)) (= :table tag)))
              (layout-table theme x y avail-width opacity inherited st (assoc node :children children))
 
-             (= "flex" (:display st))
+             ;; `inline-flex` is the same formatting context as `flex` --
+             ;; the difference is entirely OUTSIDE the box (it is
+             ;; inline-level in its parent, and shrink-wraps rather than
+             ;; filling), which layout-flex's own `inline?` branch and
+             ;; inline-atomic-displays handle between them. There is no
+             ;; second layout algorithm.
+             (contains? #{"flex" "inline-flex"} (:display st))
              (let [{:keys [box-w box-h draws]} (layout-flex theme x y avail-width opacity inherited st node children)
                    box-h (clamp-height st box-h)]
                {:box {:x x :y y :w box-w :h box-h}
