@@ -1027,8 +1027,7 @@
    ;; padding above.
    :border-spacing (parse-int (style node :border-spacing) 2)
    :margin (parse-int (style node :margin) 0)
-   ;; KNOWN DIVERGENCE, measured 2026-08-04 and deliberately NOT fixed
-   ;; here. Real CSS resolves the USED border width through `border-style`,
+   ;; Real CSS resolves the USED border width through `border-style`,
    ;; whose initial value is `none`: a `none`/`hidden` border is 0px wide
    ;; however many pixels `border-width` declares. This engine honours a
    ;; bare `border-width` on its own. Measured in Chrome,
@@ -1037,27 +1036,28 @@
    ;; there and 50 here (the phantom border also stops margins collapsing
    ;; through the box, moving three boxes at once), and
    ;; `border-width: 4px; padding: 10px; width: 200px` is 220x40 there
-   ;; against 228x48 here. Two conformance cases
-   ;; (`:box/margin-does-not-collapse-through-border`, whose NAME assumes a
-   ;; border the browser does not draw, and
-   ;; `:box/border-and-padding-together`) fail for exactly this reason and
-   ;; for no other -- 4 element boxes.
+   ;; against 228x48 here. The phantom border also stopped margins
+   ;; collapsing through the box, moving three boxes at once.
    ;;
-   ;; The fix itself is three lines (gate on `(or (style node
-   ;; :border-style) (when ua-border "solid"))`, since a UA control border
-   ;; IS written `1px solid` and must survive) and was verified to make
-   ;; both cases pass with the engine's own suite green. It is not landed
-   ;; because it changes a contract this repo's consumers already depend
-   ;; on: `kotoba-lang/browser`'s suite goes 0 -> 5 failures on it
-   ;; (`css-box-and-text-styles-project-into-draw-ops`,
-   ;; `css-sizing-projects-min-max-width-and-border-box-into-draw-ops`,
-   ;; `script-document-state-recomputes-css-and-clears-stale-style` and
-   ;; friends all declare a bare `border-width` and assert the border), and
-   ;; those tests are in another repository. Landing the rule means landing
-   ;; it together with that update, which is a cross-repo change, not a
-   ;; side effect of a layout fix.
-   :border-width (parse-int (style node :border-width)
-                            (get (ua-control-box-for node) :border 0))
+   ;; A UA control border survives, because it IS written with a style
+   ;; (`1px solid`), which is why the gate consults `ua-border` rather than
+   ;; only the author's `border-style`.
+   ;;
+   ;; This was measured on 2026-08-04 and left unlanded for one day, not
+   ;; because the rule was in doubt but because it changes a contract this
+   ;; repo's consumers depend on: `kotoba-lang/browser`'s suite went 0 -> 5
+   ;; failures on it, and those tests live in another repository. It landed
+   ;; together with that repo's update -- the fixtures there declared a
+   ;; bare `border-width` and asserted a border, so they were asking for
+   ;; something no browser draws; they now declare `border-style` and go on
+   ;; testing borders.
+   :border-width (let [ua-border (get (ua-control-box-for node) :border 0)
+                       border-style (or (some-> (style node :border-style) str/lower-case)
+                                        (when (pos? ua-border) "solid"))]
+                   (if (or (nil? border-style)
+                           (contains? #{"none" "hidden"} border-style))
+                     0
+                     (parse-int (style node :border-width) ua-border)))
    :border-color (or (style node :border-color) "#000000")
    ;; parse-int'd (unlike :left/:top/:width/etc a few lines up, which
    ;; stay raw strings because real CSS auto/% are legitimate non-numeric

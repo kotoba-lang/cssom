@@ -702,6 +702,47 @@
         ops (filter #(= :text (:draw/op %)) (layout/draw-ops tree {:width 800}))]
     (is (= ["x y" "z"] (map :text ops)))))
 
+(deftest border-width-without-border-style-draws-and-occupies-nothing
+  ;; Real CSS resolves the USED border width through `border-style`, whose
+  ;; initial value is `none` -- and a `none`/`hidden` border is 0px wide
+  ;; however many pixels `border-width` declares. Measured in Chrome:
+  ;; `<div style="border-width: 1px">` reports `border-top-width: 0px` and
+  ;; `border-top-style: none`, so such a div wrapping one <p> is 20px tall
+  ;; there; this engine made it 50px, because the phantom border also
+  ;; stopped margins collapsing through the box.
+  ;;
+  ;; Two things are asserted together on purpose: that nothing is PAINTED,
+  ;; and that nothing is OCCUPIED. A border that paints nothing but still
+  ;; takes up space is the harder half of the bug and the one that moved
+  ;; boxes that had no border anywhere near them.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:border-width 4 :border-color "#00ff00"
+                                    :padding 10 :width 200})
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400})
+        borders (filter #(and (= :rect (:draw/op %)) (:border? %)) ops)
+        box (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))]
+    (is (empty? borders) "a border with no border-style paints nothing")
+    ;; 200 content + 10 padding per side, and no border: Chrome reports
+    ;; 220x40 for exactly this markup.
+    (is (= 220 (:w box)))))
+
+(deftest border-width-with-border-style-still-draws-and-occupies
+  ;; The other side of the same rule -- the gate must not have turned
+  ;; borders off in general.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:border-style "solid" :border-width 4
+                                    :border-color "#00ff00"
+                                    :padding 10 :width 200})
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400})
+        borders (filter #(and (= :rect (:draw/op %)) (:border? %)) ops)
+        box (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))]
+    (is (= 4 (count borders)) "one rect per edge")
+    (is (= 228 (:w box)) "200 content + 10 padding + 4 border, per side")))
+
 (deftest block-background-paints-before-border-not-hidden-under-it
   ;; The confirmed repro from the bug report: a background rect spans an
   ;; element's FULL box, including the thin edge strips border-ops paints
@@ -714,7 +755,7 @@
   ;; actually showed any border pixels at all.
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
-        doc (dom/set-style doc div {:border-width 3 :border-color "#00ff00"
+        doc (dom/set-style doc div {:border-style "solid" :border-width 3 :border-color "#00ff00"
                                      :background "#ff0000"})
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
@@ -729,7 +770,7 @@
 (deftest flex-container-background-paints-before-border-not-hidden-under-it
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
-        doc (dom/set-style doc div {:display "flex" :border-width 3 :border-color "#00ff00"
+        doc (dom/set-style doc div {:display "flex" :border-style "solid" :border-width 3 :border-color "#00ff00"
                                      :background "#ff0000"})
         [span doc] (dom/create-element doc :span)
         doc (dom/append-child doc div span)
@@ -753,7 +794,7 @@
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
         doc (dom/set-style doc div {:box-shadow-x 4 :box-shadow-y 4 :box-shadow-color "#000000"
-                                     :border-width 3 :border-color "#00ff00" :background "#ff0000"})
+                                     :border-style "solid" :border-width 3 :border-color "#00ff00" :background "#ff0000"})
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 100})
@@ -967,7 +1008,7 @@
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
         doc (dom/set-style doc div {:outline-width 2 :outline-color "#ff0000"
-                                     :border-width 3 :border-color "#00ff00" :background "#0000ff"})
+                                     :border-style "solid" :border-width 3 :border-color "#00ff00" :background "#0000ff"})
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 100})
@@ -1148,7 +1189,7 @@
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
         doc (dom/set-style doc div {:display "flex" :outline-width 2 :outline-color "#ff0000"
-                                     :border-width 3 :border-color "#00ff00"})
+                                     :border-style "solid" :border-width 3 :border-color "#00ff00"})
         [span doc] (dom/create-element doc :span)
         doc (dom/append-child doc div span)
         [_ doc] (dom/consume-ops doc)
@@ -1592,7 +1633,7 @@
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
         doc (dom/set-style doc div {:display "grid" :outline-width 2 :outline-color "#ff0000"
-                                     :border-width 3 :border-color "#00ff00"})
+                                     :border-style "solid" :border-width 3 :border-color "#00ff00"})
         [span doc] (dom/create-element doc :span)
         doc (dom/append-child doc div span)
         [_ doc] (dom/consume-ops doc)
@@ -1608,7 +1649,7 @@
   (let [[input doc] (dom/create-element dom/empty-document :input)
         doc (dom/set-root doc input)
         doc (dom/set-style doc input {:outline-width 2 :outline-color "#ff0000"
-                                       :border-width 3 :border-color "#00ff00"})
+                                       :border-style "solid" :border-width 3 :border-color "#00ff00"})
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 100})
@@ -1946,7 +1987,7 @@
   ;; from the container's OUTER box (x/y/w/h) ahead of its own semantic
   ;; :node op -- not something grid skips just because it's "extra".
   (let [tree (grid-tree {:grid-template-columns "50px" :gap 0 :padding 4
-                          :border-width 2 :border-color "#112233"
+                          :border-style "solid" :border-width 2 :border-color "#112233"
                           :background "#445566"}
                          [[nil 10]])
         ops (layout/draw-ops tree {:width 100})
@@ -4268,7 +4309,7 @@
   (let [[input doc] (dom/create-element dom/empty-document :input)
         doc (dom/set-root doc input)
         doc (dom/set-attribute doc input :value "hi")
-        doc (dom/set-style doc input {:border-width 2 :border-color "#112233"
+        doc (dom/set-style doc input {:border-style "solid" :border-width 2 :border-color "#112233"
                                        :background "#445566"})
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
@@ -4306,7 +4347,7 @@
   (doseq [tag [:select :textarea]]
     (let [[el doc] (dom/create-element dom/empty-document tag)
           doc (dom/set-root doc el)
-          doc (dom/set-style doc el {:border-width 1 :border-color "#000000" :background "#ffffff"})
+          doc (dom/set-style doc el {:border-style "solid" :border-width 1 :border-color "#000000" :background "#ffffff"})
           [_ doc] (dom/consume-ops doc)
           tree (dom/tree doc)
           ops (layout/draw-ops tree {:width 100})
