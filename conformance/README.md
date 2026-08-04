@@ -57,10 +57,31 @@ computed-style axis" below for its first run.
 
 ## Result — 2026-08-04
 
-**Line structure: 184/190 = 97%. Geometry: 638/719 element boxes (89%),
-166/200 cases with every box in agreement. Computed style: 8537/9982
-cascade-resolved values (86%), 197/200 cases with no mismatch attributable
-to the cascade itself**, on a corpus of 200.
+**Line structure: 248/280 = 89%. Geometry: 937/1138 element boxes (82%),
+199/291 cases with every box in agreement. Computed style: 13779/15886
+cascade-resolved values (87%), 285/291 cases with no mismatch attributable
+to the cascade itself**, on a corpus of 292.
+
+Two of those three numbers just fell, because the corpus grew 200 → 292 in
+territory it had never entered. The before/after, so the drop is
+attributable to coverage rather than to a regression in `src/`:
+
+| axis | 200 cases | 292 cases |
+|---|---|---|
+| line structure | 184/190 = **97%** | 248/280 = **89%** |
+| geometry (boxes) | 638/719 = **89%** | 937/1138 = **82%** |
+| geometry (clean cases) | 166/200 = **83%** | 199/291 = **68%** |
+| computed style (values) | 8537/9982 = **86%** | 13779/15886 = **87%** |
+| computed style (cases clean of a cascade mismatch) | 197/200 | 285/291 |
+
+The 291 denominators are 292 minus one case that produces no boxes and no
+styles at all: `grid/row-span-two` makes `cssom.layout` **throw**, which is
+its own finding and is described below.
+
+`src/` was not touched between the two columns; 542 unit tests and the
+linter are unchanged and green either side (0 failures, 0 errors; 0 lint
+errors, 22 pre-existing warnings, all in `test/`). See "Round twenty-one"
+below for what the 92 new cases found.
 
 The computed-style figures are after the two shorthand bugs this axis found
 on its first run were fixed — cascade-attributed mismatches 41 → 5, cases
@@ -68,10 +89,14 @@ clean of them 190 → 197. See "The 41 that were actually the cascade's".
 
 That geometry number dipped to 85% on the round the font-metrics model
 landed, which was the right trade at the time — see "the font-metrics
-model" below — and has since come back up past the earlier 87%. The corpus has grown
-34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
-(corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
-falls when the corpus grows is the corpus doing its job. Per group:
+model" below — and has since come back up past the earlier 87%. A
+percentage that falls when the corpus grows is the corpus doing its job:
+the corpus has gone 32 → 98 → 105 → 150 → 200 → 292 cases, and every one of
+those steps cost points that the following rounds earned back.
+
+**The per-group table immediately below is HISTORICAL** — it is the
+98-case run, kept because the prose around it refers to it. The current
+per-group numbers are in the harness's own output.
 
 | group | | |
 |---|---|---|
@@ -480,6 +505,234 @@ container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
 
+### Round twenty-one: the corpus grows 200 → 292
+
+The engine went 47% → 89% on geometry while the corpus stayed at 200 cases.
+A corpus that stops growing stops finding things, so this round inventoried
+what the 200 actually covered — by keyword namespace, case by case — and
+added 92 cases only where the answer was "nothing" or "one case".
+
+Nothing here was chosen to pass. **59 of the 92 diverge**, and the
+aggregate percentages fell accordingly (table above). That is the honest
+number, not a regression: the same `src/` scores 89% on the old 200 and 82%
+on the new 292, because the new 92 ask about things the old 200 never did.
+
+Two corpus bugs were found and fixed before any of it counted, both worth
+recording because they are hazards of a shared-document harness:
+
+- **An unbalanced case leaks into every case after it.** `<div>` × 16 with
+  15 `</div>`s in one new case put the harness's own `<script>` *inside*
+  that case's root, and its element counts went off by one. There is now a
+  tag-balance check over the whole corpus; it is clean.
+- **A float that escapes its container intrudes on the NEXT case.** Three
+  new cases deliberately leave a float uncontained. Measured on the shared
+  page, one pushed the following case's BFC box 50px right, one moved the
+  following case's float from x=10 to x=130, and one turned a one-line
+  paragraph into two. Each is now wrapped in an `overflow: hidden` box that
+  is *not* the subject, with a comment saying so. Every new case was then
+  re-run in isolation and its oracle geometry diffed against its geometry
+  on the full page, to prove no case's numbers depend on its neighbours.
+
+#### What the 92 found, by cause
+
+**Percentage lengths are consumed as bare pixels.** `cssom.layout`'s
+`parse-int`/`parse-dbl` run `js/parseInt`/`js/parseFloat` over the cascaded
+string, so `"50%"` becomes `50` **px** and `calc(…)` fails to parse and
+takes the fallback. One cause, nine cases, four subsystems:
+
+| case | browser | engine |
+|---|---|---|
+| `box/percentage-width` (50% of 400) | 200 | 50 |
+| `box/max-width-percentage` (50% of 300) | 150 | 50 |
+| `box/percentage-height-of-an-auto-parent` | 20 (auto) | 50 |
+| `position/absolute-percentage-offsets` (50%/50% of 200×60) | x=100 y=30 | x=50 y=50 |
+| `position/absolute-percentage-width` (50% of 200) | 100 | 50 |
+| `position/relative-percentage-offset` (25% of 200) | x=50 | x=25 |
+| `table/width-percentage` (50% of 400) | 200 | 50 |
+| `box/calc-width` (`calc(100% - 40px)` of 300) | 260 | 300 |
+
+`box/percentage-height-of-a-fixed-parent` **passes**, and is in the corpus
+as the control that says why: 50% of a 100px parent is 50, which is exactly
+what reading `"50%"` as `50` produces. The pass is a coincidence, and
+without the other eight it would read as coverage.
+
+**`auto` and negative values in the box model.**
+
+- `box/margin-auto-centers-a-block` — a 100px block with `margin: 0 auto`
+  in 400px sits at x=150 in the browser, x=0 here. This one shows on the
+  CASCADE axis too, and is a genuinely new cascade finding: `margin: 0 auto`
+  is stored as the raw string `"0 auto"` and never expanded into longhands
+  (the expander declines because `auto` is not a length), so a
+  `getComputedStyle` consumer reads `margin-left: 0` where the browser
+  reports `150px`. 2 of the 11 cascade-attributed values.
+- `flex/auto-margin-pushes-item-right` — `margin-left: auto` on a flex item:
+  x=265 in the browser, x=28 here.
+- `box/negative-margin-pulls-up` — `margin-top: -8px` is stored correctly by
+  the cascade (`-8`) and dropped by layout: the browser puts the second
+  block at y=12 in a 32px parent, the engine at y=20 in a 40px one.
+
+**Floats: `clear`, containment, and the float's own margins.** The float
+round named three unimplemented things and left them without cases. All
+three now have one, plus two more:
+
+- `float/clear-left`, `float/clear-both` — `clear` is unimplemented.
+  `below` lands at y=40 (container 60) in the browser and y=20 (container
+  40) here; `after` at y=50 (container 70) against y=0 (container 50).
+- `float/parent-does-not-contain-its-float` — a float does not contribute to
+  its parent's height. The browser reports the wrapper **200×0**; the
+  engine **200×60**. The companion `float/overflow-hidden-contains-its-float`
+  agrees with the browser, so the BFC half of the rule is already right and
+  only the non-BFC half is missing.
+- `float/float-with-margin` — a float's own margins are dropped: the browser
+  places it at (10,10) in a 50px-tall container, the engine at (0,0) in a
+  30px one.
+- `float/floats-that-do-not-fit-stack` — two 120px floats in 200px: the
+  browser drops the second to y=20, the engine leaves it beside at x=120.
+- `float/float-after-text-in-its-container` — the documented v1 boundary,
+  now measured: y=34 in the browser, y=0 here.
+
+**Flexbox past the defaults.** Ten cases, ten separate properties, none of
+them implemented:
+
+| case | browser | engine |
+|---|---|---|
+| `flex/align-self-overrides-align-items` | items at y=40, y=20 | both y=0 |
+| `flex/order-reorders-items` | `second` first (x=0) | DOM order |
+| `flex/row-reverse` | x = 279, 286, 293 | x = 0, 7, 14 |
+| `flex/column-reverse` | three 800×20 rows, bottom-up | three 7×90 boxes side by side (laid out as a ROW) |
+| `flex/wrap-reverse` | second line at y=0 | y=0 for line 1, item 2 at x=100 |
+| `flex/align-content-space-between` | line 2 at y=100 | y=20 |
+| `flex/flex-shorthand-one` (`flex: 1`) | 150 / 150 | 70 / 7 (basis not zeroed) |
+| `flex/column-align-items-center` | items centred at x=96.5, x=86 | stretched to 200 at x=0 (cross axis taken as vertical) |
+| `flex/align-items-baseline` | line 24 tall, item 2 at y=4 | 20 tall, y=0 |
+| `flex/min-content-floor-on-an-item` | 147 / 7 | 113 / 6 (shrinks past min-content) |
+
+`flex/inline-flex-in-a-sentence` is a different shape of the same gap:
+`display: inline-flex` is not inline-level, so the paragraph around it goes
+from one 20px line to three.
+
+**Grid: one crash, and flow/gap/alignment.**
+
+- **`grid-row: span 2` throws.** `:grid/row-span-two` is the only case in
+  292 that makes `cssom.layout` raise rather than answer:
+  `nth not supported on this type`. Narrowed by probe: `grid-column:
+  span 2` and `grid-row: 1 / 3` both lay out fine, so the defect is
+  specifically the `span` form on the ROW axis.
+- `grid/explicit-row-placement` — `grid-row: 2` places the item but does not
+  leave the column cursor where a browser leaves it: the browser puts the
+  next auto item at (0,0), the engine at (70,30).
+- `grid/auto-rows` — `grid-auto-rows: 40px` ignored (rows 20px, container 40
+  against the browser's 80).
+- `grid/auto-flow-column` — `grid-auto-flow: column` ignored; items stack
+  vertically at the full container width.
+- `grid/separate-row-and-column-gap` — the `row-gap`/`column-gap` LONGHANDS
+  are ignored where the `gap` shorthand works: an 8px column gap and a 24px
+  row gap are both applied as 0 (container 40 against 64).
+- `grid/justify-items-center`, `grid/align-items-center-in-a-tall-row` —
+  neither is implemented; items sit at the track origin and stretch.
+- `grid/auto-columns-size-to-content` — `grid-template-columns: auto auto`
+  produces **zero-width** tracks (browser 154.5 / 245.5), and the container
+  goes 80 tall instead of 20.
+- `grid/inline-grid-in-a-sentence` — same as inline-flex.
+
+**Absolute positioning: the containing-block rules themselves.** Every
+pre-existing `absolute` case gave the box a `position: relative` PARENT, so
+none of this was measured:
+
+- `position/absolute-left-and-right-set-width` — `left` and `right` together
+  do not resolve a width: 260 in the browser, 63 here.
+- `position/absolute-top-and-bottom-set-height` — same on the block axis:
+  80 against 20.
+- `position/absolute-containing-block-is-the-padding-box` — the containing
+  block is taken as the ancestor's CONTENT box. `left: 0; top: 0` lands at
+  (5,5) in the browser (just inside the 5px border) and at (20,20) here —
+  off by exactly the ancestor's 20px padding.
+- `position/absolute-static-position-no-offsets` and
+  `position/absolute-with-no-positioned-ancestor` — when the offsets are
+  `auto` the box should keep its STATIC position; the engine puts it at
+  y=0 (browser y=48 and y=34 respectively).
+- `position/absolute-child-of-a-relative-inline` — a relatively positioned
+  INLINE is a containing block; here the paragraph goes from one line to
+  three.
+
+**Display types with no implementation.**
+
+- `display/table-cells-from-divs`, `display/table-with-anonymous-rows` — the
+  CSS table display types on `<div>`s produce **one** draw-op, tagged
+  `table`, sized 300×2, and no boxes for the divs at all. Two divergences in
+  one: the display types are not laid out, and an element laid out as a
+  table reports the wrong tag to the geometry axis.
+- `display/contents-is-transparent` — the engine gives the box a real
+  300×40 rect and lays its children out as blocks; the browser generates no
+  box for it and promotes the children to flex items (7×20 each). One of
+  this case's four boxes is not comparable by construction and is noted in
+  the case itself.
+- `display/flow-root-establishes-a-context` — `flow-root` does not establish
+  a formatting context, so the first child's margin collapses through: the
+  `<p>` is at y=14 in the browser and y=0 here.
+
+**Table sizing algorithms.**
+
+- `table/layout-fixed` — `table-layout: fixed` ignored: the browser gives
+  147/147 columns in a 46px-tall table, the engine 163/9 in a 26px one.
+- `table/colgroup-widths` — `<colgroup>`/`<col>` widths are ignored AND
+  neither element gets a box: browser 186px table with 120/60 columns,
+  engine 24px with 9/9.
+- `table/th-is-centered-and-bold` — an explicit `width` on a table reaches
+  the table, tbody and tr boxes (all 196) but is not distributed to the
+  CELLS, which shrink-wrap to 49.3.
+- `table/border-collapse` — not implemented; border-spacing is still
+  applied, so the table is 30px tall against the browser's 26 (the widths
+  happen to agree at 24).
+
+**`direction: rtl` is parsed and not applied.**
+`text/rtl-with-inline-elements` puts the `<b>` at x=227.5 in the browser and
+x=42 here; `text/rtl-block-alignment` puts a 60px block at x=140 in the
+browser and x=0 here.
+
+**Inherited `line-height`: unitless is not a length.**
+`text/unitless-line-height-inherits-the-factor` — `line-height: 1.5` on a
+parent with a `font-size: 24px` child gives 36px lines in the browser and 21
+here. Its deliberate pair `text/em-line-height-inherits-the-computed-value`
+(`1.5em`, same markup otherwise) **passes at 21**, which localises the bug
+precisely: the engine resolves the unitless factor against the DECLARING
+element's font size and inherits the result, instead of inheriting the
+factor.
+
+**BFC detection reads `overflow` but not `overflow-x`/`overflow-y`.**
+`overflow/x-hidden-y-scroll` — the round-ten rule that a scroll container
+does not collapse margins with its children fires on the shorthand and not
+on the longhands: the `<p>` is at y=14 in the browser and y=0 here. The
+three shorthand overflow cases all pass.
+
+#### Two things measured rather than assumed
+
+- **`overflow/scroll-container-reserves-a-scrollbar` passes**, which is a
+  fact about the ORACLE, not about the engine: this headless Brave uses
+  overlay scrollbars, so a 200px `overflow-y: scroll` box has a 200px-wide
+  child and there is no gutter to disagree about. The case stays in as a
+  control; if the oracle configuration ever changes it will start failing
+  and the reason will be recorded here.
+- **Documents at scale are fine.** Six of the seven `doc/` cases — 24
+  sibling blocks, 12 margin-collapsing paragraphs, 16 levels of nesting, 16
+  levels of nesting each with 4px of padding, a 16-item list, 20 wrapping
+  inline siblings, a 12-row table — agree with the browser on **every** box.
+  Nothing accumulates. The seventh is unscorable for the list-marker reason
+  below. This was worth measuring precisely because it was assumed.
+
+#### The composites, and why they are not evidence
+
+Seven cases are deliberately NOT isolating: a dashboard stat row, a login
+form, a media object, a card with an absolute badge, a sticky header over a
+list, a three-column grid page, a toolbar with an auto margin. They are page
+shapes real sites are made of, and each one fails for reasons the isolating
+cases above already name — `page/card-with-absolute-badge` is the padding-box
+containing block (x off by 11 = padding 12 − border 1),
+`page/toolbar-with-auto-margin` is `margin-left: auto` on a flex item (x=99
+against 440.6), `page/login-form` is control metrics plus label layout.
+A composite failing tells you the page is wrong; it does not tell you which
+rule. Read them as regression cover, not as attribution.
+
 ### Round twenty: two more from the biggest cluster
 
 `div h −20` (13 boxes) held two unrelated causes:
@@ -829,13 +1082,19 @@ error in the new `<select>` intrinsic-width path that this repo's own 502
 tests never reached — a reminder that cssom's consumers exercise shapes its
 own corpus does not.
 
-## Two cases are unscorable, on purpose
+## Some cases are unscorable on the LINE axis, on purpose
 
 Generated content (`::before`/`::after`, list markers) is not DOM text — a
 real browser paints it from the box tree and no `Range` can reach it, while
 this engine synthesizes it as real text. Those cases are marked
-`:oracle/blind true`, excluded from the score, and printed, rather than
-silently counted as failures. Their correctness is covered by unit tests.
+`:oracle/blind true`, excluded from the LINE score, and printed, rather than
+silently counted as failures. Their geometry and computed style are still
+scored — only the text-per-line comparison is blind. Their line-level
+correctness is covered by unit tests.
+
+12 of the 292 carry the marker as of round twenty-one; the two added that
+round are `display/list-item-on-a-div` (a `<div>` made a list item generates
+a marker) and `doc/long-list-of-items` (16 `<li>`s).
 
 ## How the oracle is driven (measured, not assumed)
 
