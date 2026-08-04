@@ -262,6 +262,62 @@
     (is (= {:font-size 18 :font-family "Georgia"}
            (:rule/declarations (first rules))))))
 
+;; ---- the `flex` shorthand ----
+;;
+;; `flex: 1` is the single most-used flex declaration on the real web, and
+;; it is NOT `flex-grow: 1` -- the one-number form resets the BASIS to
+;; zero, so the items split the container evenly regardless of what is in
+;; them. Nothing expanded it before, so it reached cssom.layout as an
+;; unread `:flex` key: measured against a real headless Brave, two
+;; `flex: 1` items in a 300px row came out 7px and 70px against the
+;; browser's 150 and 150.
+
+(deftest flex-shorthand-one-number-zeroes-the-basis
+  (let [rules (css/parse-rules "#f { flex: 1 }")]
+    (is (= {:flex-grow 1 :flex-shrink 1 :flex-basis 0}
+           (:rule/declarations (first rules)))
+        "`flex: 1` is `1 1 0%`, which is why it splits a row evenly -- not `flex-grow: 1`, which leaves the basis at auto")
+    (is (not (contains? (:rule/declarations (first rules)) :flex))
+        "no bare :flex key should remain -- it's fully expanded")))
+
+(deftest flex-shorthand-two-numbers-are-grow-and-shrink
+  (is (= {:flex-grow 2 :flex-shrink 3 :flex-basis 0}
+         (:rule/declarations (first (css/parse-rules "#f { flex: 2 3 }"))))))
+
+(deftest flex-shorthand-three-values-are-grow-shrink-basis
+  (is (= {:flex-grow 0 :flex-shrink 0 :flex-basis 40}
+         (:rule/declarations (first (css/parse-rules "#f { flex: 0 0 40px }"))))))
+
+(deftest flex-shorthand-a-lone-length-is-the-basis
+  (is (= {:flex-grow 1 :flex-shrink 1 :flex-basis 100}
+         (:rule/declarations (first (css/parse-rules "#f { flex: 100px }"))))
+      "a value with a UNIT lands in the basis slot; the same token without one would be a grow factor"))
+
+(deftest flex-shorthand-named-forms-are-their-spec-defined-triples
+  (is (= {:flex-grow 0 :flex-shrink 0 :flex-basis "auto"}
+         (:rule/declarations (first (css/parse-rules "#f { flex: none }")))))
+  (is (= {:flex-grow 1 :flex-shrink 1 :flex-basis "auto"}
+         (:rule/declarations (first (css/parse-rules "#f { flex: auto }")))))
+  (is (= {:flex-grow 0 :flex-shrink 1 :flex-basis "auto"}
+         (:rule/declarations (first (css/parse-rules "#f { flex: initial }"))))))
+
+(deftest flex-shorthand-outside-the-grammar-degrades-to-no-op
+  (is (= {:flex "1 solid nonsense"}
+         (:rule/declarations (first (css/parse-rules "#f { flex: 1 solid nonsense }"))))
+      "degrade-don't-guess, the same posture the box shorthand takes: a value this cannot parse must not become a guessed grow factor"))
+
+(deftest flex-shorthand-importance-applies-to-every-expanded-longhand
+  (let [rules (css/parse-rules "#f { flex: 1 !important }")]
+    (is (= true (get-in (first rules) [:rule/declaration-meta :flex-grow :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :flex-shrink :important?])))
+    (is (= true (get-in (first rules) [:rule/declaration-meta :flex-basis :important?])))))
+
+(deftest declaration-order-decides-between-the-flex-shorthand-and-its-longhands
+  (is (= 5 (:flex-grow (:rule/declarations (first (css/parse-rules "#f { flex: 1; flex-grow: 5 }")))))
+      "a later longhand wins")
+  (is (= 1 (:flex-grow (:rule/declarations (first (css/parse-rules "#f { flex-grow: 5; flex: 1 }")))))
+      "and a later shorthand resets it -- which only works because expansion happens at declaration-parse time, not after the cascade has merged"))
+
 (deftest parses-attribute-selector-operators
   (let [rules (css/parse-rules "[class~=\"primary\"] { color: red }
                                 [lang|=\"en\"] { font-size: 12px }

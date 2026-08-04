@@ -1629,6 +1629,236 @@
     (is (= [150 4 140 20] b))
     (is (= [80 24 140 20] c) "row 2, alone, centered on ITS OWN 140px content within 292: (292-140)/2=76, plus the 4px inset -- not influenced by row 1's own, different offset")))
 
+;; ---- flexbox beyond the defaults: order / align-self / the reversing
+;; ---- directions / flex-basis / the automatic minimum / align-content
+;;
+;; Every one of the properties below was measured against a real headless
+;; Brave before it was implemented, and every number asserted here is the
+;; engine's own answer for the shape the browser was measured on (the
+;; browser's absolute coordinates cannot be asserted directly -- this
+;; engine approximates glyph advances, see the ns docstring -- but the
+;; STRUCTURE of the answer, which item is where relative to which, is
+;; exactly what the browser was consulted for).
+
+(defn- flex-item-boxes
+  "flex-span-boxes generalised to N children with arbitrary per-child
+   styles: builds a flex container and returns each child's own
+   [x y w h] draw box, in DRAW order (which is the order the items are
+   painted in, and therefore `order`-modified rather than source order --
+   see order-flex-items)."
+  [container-style item-styles]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div (merge {:display "flex"} container-style))
+        doc (reduce (fn [doc s]
+                      (let [[item doc] (dom/create-element doc :span)
+                            doc (dom/append-child doc div item)]
+                        (dom/set-style doc item s)))
+                    doc item-styles)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        spans (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)]
+    (mapv (fn [s] [(:x s) (:y s) (:w s) (:h s)]) spans)))
+
+(deftest flex-order-reorders-items-and-their-paint-order
+  (let [[first-drawn second-drawn]
+        (flex-item-boxes {:width 300} [{:width 50 :height 10 :order 2}
+                                       {:width 60 :height 10 :order 1}])]
+    (is (= [0 0 60 10] first-drawn)
+        "the `order: 1` item comes FIRST in the line even though it is second in the document")
+    (is (= [60 0 50 10] second-drawn)
+        "and the `order: 2` item follows it -- real CSS reorders painting as well as placement, so the draw-op order changes too")))
+
+(deftest flex-order-ties-are-broken-by-document-order
+  (let [boxes (flex-item-boxes {:width 300} [{:width 10 :height 10 :order 3}
+                                             {:width 20 :height 10}
+                                             {:width 30 :height 10 :order -1}
+                                             {:width 40 :height 10 :order 3}])]
+    (is (= [30 20 10 40] (mapv #(nth % 2) boxes))
+        "ascending order (-1, 0, 3, 3) with the two `order: 3` items still in their own document order")))
+
+(deftest flex-align-self-overrides-the-containers-align-items
+  (let [[a b c] (flex-item-boxes {:height 60 :align-items "flex-start"}
+                                 [{:width 10 :height 20}
+                                  {:width 10 :height 20 :align-self "flex-end"}
+                                  {:width 10 :height 20 :align-self "center"}])]
+    (is (= 0 (nth a 1)) "no align-self: the container's flex-start applies")
+    (is (= 40 (nth b 1)) "align-self:flex-end puts it at the bottom of the 60px cross size")
+    (is (= 20 (nth c 1)) "align-self:center puts it in the middle")))
+
+(deftest flex-align-self-stretch-overrides-a-non-stretch-container
+  (let [[a b] (flex-item-boxes {:height 60 :align-items "center"}
+                               [{:width 10 :height 20}
+                                {:width 10 :align-self "stretch"}])]
+    (is (= 20 (nth a 3)) "the container's align-items:center leaves A at its own height")
+    (is (= 60 (nth b 3)) "align-self:stretch is a SIZE change even when the container does not stretch")))
+
+(deftest flex-align-self-auto-defers-to-the-container
+  (let [[a] (flex-item-boxes {:height 60 :align-items "center"}
+                             [{:width 10 :height 20 :align-self "auto"}])]
+    (is (= 20 (nth a 1))
+        "`auto` is the initial value and means 'use align-items', not an alignment of its own")))
+
+(deftest flex-direction-row-reverse-lays-the-line-out-from-the-right
+  (let [boxes (flex-item-boxes {:width 300 :flex-direction "row-reverse"}
+                               [{:width 50 :height 10} {:width 50 :height 10}])]
+    (is (= [250 200] (mapv first boxes))
+        "the FIRST item takes the right edge and the line runs back towards the left")))
+
+(deftest flex-direction-row-reverse-flips-justify-content-too
+  (let [boxes (flex-item-boxes {:width 300 :flex-direction "row-reverse" :justify-content "flex-end"}
+                               [{:width 50 :height 10} {:width 50 :height 10}])]
+    (is (= [50 0] (mapv first boxes))
+        "flex-end is flex-RELATIVE: in a reversed row it packs against the physical left")))
+
+(deftest flex-direction-column-reverse-is-a-column-not-a-row
+  (let [boxes (flex-item-boxes {:height 90 :flex-direction "column-reverse"}
+                               [{:width 50 :height 20} {:width 50 :height 20}])]
+    (is (= [70 50] (mapv second boxes))
+        "items stack vertically from the BOTTOM -- before this, `column-reverse` was not recognised as a column at all and laid its items out side by side")
+    (is (= [0 0] (mapv first boxes)) "and share the same cross-axis start")))
+
+(deftest flex-wrap-reverse-stacks-the-lines-from-the-bottom
+  (let [boxes (flex-item-boxes {:width 200 :flex-wrap "wrap-reverse" :gap 0}
+                               [{:width 120 :height 20} {:width 120 :height 20}
+                                {:width 120 :height 20}])]
+    (is (= [40 20 0] (mapv second boxes))
+        "line 1 goes to the far edge of the cross axis and each later line above it")))
+
+(deftest flex-wrap-reverse-flips-align-items-within-each-line
+  (let [boxes (flex-item-boxes {:width 200 :height 100 :flex-wrap "wrap-reverse"
+                                :align-items "flex-start" :gap 0}
+                               [{:width 120 :height 10} {:width 120 :height 30}])]
+    (is (= [90 30] (mapv second boxes))
+        "a reversed cross axis makes `flex-start` mean each line's own FAR edge -- both items sit at the bottom of their (align-content-stretched) line")))
+
+(deftest flex-basis-length-replaces-the-items-own-measured-size
+  (let [boxes (flex-item-boxes {:width 300}
+                               [{:width 10 :height 10 :flex-basis 100}
+                                {:width 10 :height 10 :flex-basis 50 :flex-grow 1}])]
+    (is (= [100 200] (mapv #(nth % 2) boxes))
+        "the declared basis is what the free space is distributed around: 100 stays, and the 150px of leftover all goes to the growing item")))
+
+(deftest flex-basis-auto-keeps-the-items-own-size
+  (let [boxes (flex-item-boxes {:width 300}
+                               [{:width 40 :height 10 :flex-basis "auto"}
+                                {:width 60 :height 10}])]
+    (is (= [40 60] (mapv #(nth % 2) boxes))
+        "`auto` -- the initial value -- means 'use the item's own main size', which is what an item with no basis at all already did")))
+
+(deftest flex-shrink-actually-resizes-an-item-that-declares-its-own-width
+  (let [boxes (flex-item-boxes {:width 200}
+                               [{:width 150 :height 10} {:width 150 :height 10}])]
+    (is (= [100 100] (mapv #(nth % 2) boxes))
+        "both items shrink to 100 -- re-laying the item out against a narrower AVAILABLE width is not enough on its own, since a declared width resolves to itself no matter how little room it is given")
+    (is (= [0.0 100.0] (mapv (comp double first) boxes))
+        "and the second one starts where the first now ends")))
+
+(deftest flex-shrink-zero-leaves-its-own-item-and-overflows-the-siblings
+  (let [boxes (flex-item-boxes {:width 200}
+                               [{:width 150 :height 10 :flex-shrink 0}
+                                {:width 150 :height 10}])]
+    (is (= [150 50] (mapv #(nth % 2) boxes))
+        "a `flex-shrink: 0` item is frozen before the first pass, so the whole overflow comes off its sibling")))
+
+(deftest flex-align-content-distributes-the-lines-of-a-definite-cross-size
+  (let [boxes (flex-item-boxes {:width 200 :height 120 :flex-wrap "wrap" :gap 0
+                                :align-content "space-between"}
+                               [{:width 120 :height 20} {:width 120 :height 20}])]
+    (is (= [0 100] (mapv second boxes))
+        "two 20px lines in a 120px container: one at each end")))
+
+(deftest flex-align-content-stretch-grows-the-lines-themselves
+  (let [boxes (flex-item-boxes {:width 200 :height 80 :flex-wrap "wrap" :gap 0}
+                               [{:width 120} {:width 120}])]
+    (is (= [40 40] (mapv #(nth % 3) boxes))
+        "the initial align-content is `stretch`, which is a SIZE change: two lines split an 80px container, and align-items:stretch then fills each line")
+    (is (= [0 40] (mapv second boxes)))))
+
+(deftest flex-align-content-does-nothing-without-a-definite-cross-size
+  (let [boxes (flex-item-boxes {:width 200 :flex-wrap "wrap" :gap 0
+                                :align-content "space-between"}
+                               [{:width 120 :height 20} {:width 120 :height 20}])]
+    (is (= [0 20] (mapv second boxes))
+        "an auto-height container is sized BY its lines, so there is no free space for align-content to distribute and the lines stay packed")))
+
+(deftest flex-auto-main-margin-absorbs-the-free-space
+  (let [boxes (flex-item-boxes {:width 300}
+                               [{:width 40 :height 10}
+                                {:width 60 :height 10 :margin-left "auto"}])]
+    (is (= [0 240] (mapv first boxes))
+        "all 200px of free space goes into the one auto margin, which is how a toolbar pushes its last item to the end")))
+
+(deftest flex-auto-margins-on-both-sides-center-the-item
+  (let [boxes (flex-item-boxes {:width 300}
+                               [{:width 100 :height 10 :margin-left "auto" :margin-right "auto"}])]
+    (is (= [100] (mapv first boxes))
+        "two auto margins split the 200px of free space equally")))
+
+(deftest flex-auto-margin-outranks-justify-content
+  (let [boxes (flex-item-boxes {:width 300 :justify-content "center"}
+                               [{:width 40 :height 10}
+                                {:width 60 :height 10 :margin-left "auto"}])]
+    (is (= [0 240] (mapv first boxes))
+        "real CSS gives the auto margins the free space FIRST, leaving justify-content nothing to distribute")))
+
+(deftest a-column-flex-container-shrink-wraps-a-non-stretched-item
+  (let [boxes (flex-item-boxes {:width 200 :flex-direction "column" :align-items "center"}
+                               [{:height 10} {:height 10}])]
+    (is (= [0 0] (mapv #(nth % 2) boxes))
+        "a column item's CROSS axis is its width, and a cross axis is only FILLED when it stretches -- under any other alignment the item is fit-content, which for an empty <span> is nothing. Measuring every column item at the container width instead made align-items look unimplemented for columns")
+    (is (= [100 100] (mapv first boxes))
+        "and the zero-width items are centred in the container's own 200px cross size")))
+
+(deftest a-column-flex-container-centers-against-its-own-width-not-the-widest-item
+  (let [boxes (flex-item-boxes {:width 200 :flex-direction "column" :align-items "center"}
+                               [{:width 40 :height 10} {:width 80 :height 10}])]
+    (is (= [80 60] (mapv first boxes))
+        "(200-40)/2 and (200-80)/2 -- sizing the cross axis from the widest item instead would centre inside the 80px item")))
+
+(deftest inline-flex-is-inline-level
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [before doc] (dom/create-text-node doc "before")
+        doc (dom/append-child doc p before)
+        [box doc] (dom/create-element doc :span)
+        doc (dom/append-child doc p box)
+        doc (dom/set-style doc box {:display "inline-flex"})
+        [inner doc] (dom/create-element doc :span)
+        doc (dom/append-child doc box inner)
+        doc (dom/set-style doc inner {:width 30 :height 10})
+        [after doc] (dom/create-text-node doc "after")
+        doc (dom/append-child doc p after)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        texts (filterv #(= :text (:draw/op %)) ops)
+        outer (first (filterv #(and (= :node (:draw/op %)) (= "inline-flex" (:display %))) ops))]
+    (is (some? outer) "the inline-flex box is laid out as a flex container")
+    (is (= 30 (:w outer))
+        "and shrink-wraps to its items rather than filling the 400px line, which is the whole difference from `display: flex`")
+    (is (= 1 (count (distinct (map :y texts))))
+        "`before` and `after` stay on ONE line with the box between them -- a block-level flex container would have broken the sentence into three")))
+
+(deftest flex-item-does-not-shrink-below-its-min-content-width
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:display "flex" :width 120})
+        mk (fn [doc text]
+             (let [[item doc] (dom/create-element doc :span)
+                   doc (dom/append-child doc div item)
+                   doc (dom/set-style doc item {:flex-grow 1 :flex-shrink 1 :flex-basis 0})
+                   [t doc] (dom/create-text-node doc text)]
+               (dom/append-child doc item t)))
+        doc (mk doc "averylongunbrokenword")
+        doc (mk doc "b")
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        widths (mapv :w (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
+    (is (< 120 (first widths))
+        "the long word's own min-content width is a floor the item refuses to shrink below, so the line OVERFLOWS the 120px container exactly as a browser's does")
+    (is (< (second widths) 20)
+        "and the space the first item refused to give up is taken back off the second, which falls to its own floor -- a single distribute-then-clamp pass would have left it at half the container")))
+
 (deftest grid-container-outline-paints-after-border
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
