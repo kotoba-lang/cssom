@@ -202,7 +202,39 @@
                       cssFloat: cs2.cssFloat, position: cs2.position,
                       style: readStyle(e2) });
       }
-      out[root.id] = { words: words, boxes: boxes, styles: styles };
+      // The PAINT-ORDER axis: at a grid of sample points, which element
+      // does the browser say is on top? This is the only axis that
+      // observes STACKING rather than size -- z-index, later-sibling
+      // overlap, negative z-index behind its parent, pointer-events -- and
+      // nothing measured it before, so a paint-order regression was
+      // invisible to all three existing axes.
+      //
+      // elementFromPoint works in VIEWPORT coordinates and returns null
+      // outside the viewport, so each case is scrolled into view first and
+      // any point still off-screen is counted as skipped rather than
+      // silently scored.
+      var hits = [];
+      var skipped = 0;
+      window.scrollTo(0, Math.max(0, root.getBoundingClientRect().top + window.scrollY - 8));
+      var vr = root.getBoundingClientRect();
+      for (var gy = 0; gy < 5; gy++) {
+        for (var gx = 0; gx < 5; gx++) {
+          // interior points only: an edge point lands on whichever box
+          // rounds in its favour and measures the rounding, not the order.
+          var fx = (gx + 0.5) / 5, fy = (gy + 0.5) / 5;
+          var px = vr.left + vr.width * fx, py = vr.top + vr.height * fy;
+          if (py < 0 || py > window.innerHeight || px < 0 || px > window.innerWidth) { skipped++; continue; }
+          var hit = document.elementFromPoint(px, py);
+          if (!hit) { skipped++; continue; }
+          // Only the case's own subtree is comparable; a point that lands
+          // on the page chrome around it says nothing about the engine.
+          if (hit !== root && !root.contains(hit)) { skipped++; continue; }
+          hits.push({ x: vr.width * fx, y: vr.height * fy,
+                      tag: hit === root ? null : hit.tagName.toLowerCase() });
+        }
+      }
+      out[root.id] = { words: words, boxes: boxes, styles: styles,
+                       hits: hits, hitsSkipped: skipped };
     }
     // The UA baseline, MEASURED rather than assumed: what this browser's
     // own user-agent stylesheet alone gives each tag the corpus uses, with
@@ -1097,14 +1129,69 @@
      {:total 0 :agree 0 :by-prop {} :sources {} :diffs [] :excluded []}
      tags)))
 
+(defn- engine-topmost-at
+  "Which element the ENGINE says is on top at a point, by the same rule it
+   paints with: later ops cover earlier ones, so the last `:node` op whose
+   box contains the point wins.
+
+   This deliberately reads the ops in emitted order rather than re-deriving
+   a stacking context. The draw-op vector IS the engine's paint order --
+   layout-absolute-children already sorts its own children by z-index into
+   the `below`/`above` bands before emitting -- so reading it back is the
+   honest question: `given what this engine told a host to paint, what
+   would a user click?` A separate re-implementation of stacking here would
+   test my model of the engine rather than the engine."
+  [ops x y]
+  (let [;; Both sides wrap the case, and neither wrapper is an answer: the
+        ;; browser page puts the markup in a `.kotoba-case` div and the
+        ;; oracle reports null when a point lands on it, while
+        ;; `cascaded-document` wraps the same markup in `<div id="root">`
+        ;; to carry the container's declarations. Scoring one against the
+        ;; other made every point that lands on bare text -- text nodes are
+        ;; not elements, so the browser returns the containing element,
+        ;; which for a case's own top-level text IS the wrapper -- read as
+        ;; `none -> div`. That single asymmetry was 2246 of 2523
+        ;; disagreements on the first run.
+        wrapper-ids (->> ops
+                         (filter #(= :node (:draw/op %)))
+                         (take 2)
+                         (map :id)
+                         set)]
+    (->> ops
+         (filter #(and (= :node (:draw/op %))
+                       (<= (:x %) x (+ (:x %) (:w %)))
+                       (<= (:y %) y (+ (:y %) (:h %)))
+                       (not= :document (:tag %))
+                       (not (contains? wrapper-ids (:id %)))))
+         last
+         :tag)))
+
+(defn- paint-order-agreement
+  [oracle-hits ops]
+  (reduce (fn [acc {:keys [x y tag]}]
+            (let [mine (engine-topmost-at ops x y)
+                  want (some-> tag keyword)]
+              (if (= want mine)
+                (update acc :agree inc)
+                (-> acc
+                    (update :diffs conj {:x (long x) :y (long y)
+                                         :oracle (or want :none) :engine (or mine :none)})))))
+          {:agree 0 :total (count oracle-hits) :diffs []}
+          oracle-hits))
+
 (defn- engine-render
   "All three axes from one case: the line structure and the element boxes
    (both from cssom.layout), and the cascade-resolved style of every
    element (from cssom.core alone)."
   [c width char-w]
-  {:lines (engine-lines c width char-w)
-   :boxes (engine-boxes (engine-ops c width char-w))
-   :styles (engine-styles c)})
+  (let [ops (engine-ops c width char-w)]
+    {:lines (engine-lines c width char-w)
+     :boxes (engine-boxes ops)
+     ;; the raw op vector, kept for the paint-order axis: `engine-boxes`
+     ;; distils ops into rects and loses the ORDER, which is the whole
+     ;; subject here.
+     :boxes-ops ops
+     :styles (engine-styles c)}))
 
 (defn- compare-case [oracle-data ua width char-w c]
   (let [oracle-words (:words oracle-data)
@@ -1114,6 +1201,8 @@
         mine (if (:error rendered) rendered (:lines rendered))
         geo (when-not (:error rendered)
               (geometry-agreement (:boxes oracle-data) (:boxes rendered)))
+        paint (when-not (:error rendered)
+                (paint-order-agreement (:hits oracle-data) (:boxes-ops rendered)))
         sty (when-not (:error rendered)
               (-> (computed-style-agreement (:styles oracle-data) (:styles rendered) ua)
                   (update :diffs (fn [ds] (mapv #(assoc % :id (:id c)) ds)))
@@ -1129,12 +1218,12 @@
       ;; through no fault of either. Marked in the corpus, excluded from
       ;; the score, and printed, rather than silently counted as a failure.
       (:oracle/blind c)
-      {:id (:id c) :group (:group c) :status :unscorable :geo geo :sty sty
+      {:id (:id c) :group (:group c) :status :unscorable :geo geo :sty sty :paint paint
        :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)
        :detail "oracle cannot see generated content" :expected lines :actual mine}
 
       (= lines mine)
-      {:id (:id c) :group (:group c) :status :pass :geo geo :sty sty
+      {:id (:id c) :group (:group c) :status :pass :geo geo :sty sty :paint paint
        :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)}
 
       ;; The boxes travel with EVERY outcome, not just :pass. They used to
@@ -1142,7 +1231,7 @@
       ;; nothing for exactly the cases anyone would run it on -- a failing
       ;; case and a blind case both came back with no boxes to look at.
       :else
-      {:id (:id c) :group (:group c) :status :fail :geo geo :sty sty
+      {:id (:id c) :group (:group c) :status :fail :geo geo :sty sty :paint paint
        :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)
        :expected lines :actual mine})))
 
@@ -1259,6 +1348,30 @@
       (doseq [[tag [a t]] (->> per-tag (sort-by (fn [[_ [a t]]] (- a t))) (take 10))
               :when (< a t)]
         (println (str "            " (pad-right tag 12) a "/" t))))
+    (println))
+
+  ;; ---- the paint-order axis ----
+  (let [paints (keep :paint results)
+        total (reduce + 0 (map :total paints))
+        agree (reduce + 0 (map :agree paints))
+        diffs (mapcat (fn [r] (map #(assoc % :id (:id r)) (:diffs (:paint r)))) results)
+        by-pair (->> diffs
+                     (map (juxt :oracle :engine))
+                     frequencies
+                     (sort-by (comp - val)))]
+    (println (str "PAINT ORDER  " agree "/" total " sample points hit the same element  ("
+                  (pct agree total) "%)"))
+    (println (str "             " (count (filter #(and (:paint %) (pos? (:total (:paint %)))
+                                                       (= (:total (:paint %)) (:agree (:paint %))))
+                                                 results))
+                  "/" (count (filter #(pos? (:total (:paint % {:total 0}))) results))
+                  " cases where every sampled point agrees"))
+    (when (seq by-pair)
+      (println "             worst (oracle sees -> engine sees, count, cases):")
+      (doseq [[[o e] n] (take 8 by-pair)]
+        (println (str "               " (pad-right (str (name o) " -> " (name e)) 28)
+                      (pad-left n 4) "   "
+                      (str/join ", " (map str (distinct (take 3 (map :id (filter #(and (= o (:oracle %)) (= e (:engine %))) diffs))))))))))
     (println))
 
   ;; ---- the computed-style (cascade) axis ----
