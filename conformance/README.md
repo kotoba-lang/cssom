@@ -789,6 +789,168 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round twenty-six: the legend that is not in the flow, the button that wrapped its own label
+
+Five things, each measured in a real headless Brave 151 over CDP **before**
+the code that produces it was written, and each probed for its *rule*
+rather than for the corpus case's numbers.
+
+**`<fieldset>`/`<legend>` — the largest remaining geometry cluster.** The
+box constants were already written down in `ua-control-box` by an earlier
+round, which deliberately left the case failing rather than half-fixed
+because the legend's placement is not a constant. It is now implemented.
+A fieldset carries `margin-inline: 2px`, a 2px groove border and
+`0.35em 0.75em 0.625em` of padding — **em**, so `ua-em-box` resolves it
+against the element's own font size (14 → 4.9/10.5/8.75, 20 → 7/15/12.5)
+instead of pinning one row of numbers — and its content box establishes an
+independent formatting context (measured on `border:0;padding:0;margin:0`,
+where the inner `<p>`'s margins stay **inside**: 68px tall with the `<p>`
+at y=34, both of which collapse out of an ordinary div).
+
+The legend is lifted out of flow into the block-start border band:
+
+```
+band     = max(border-block-start-width, legend height + its margin-BOTTOM)
+legend y = (band - that margin box) / 2, from the fieldset's border-box top
+content  = band + padding-top
+```
+
+Three of those clauses are readings, not derivations. The legend's
+margin-**top** is ignored outright: `margin-top: 10px` and `margin-top:
+40px` both leave the fieldset **83.641** tall, while `margin-bottom: 10px`
+makes it **93.641**. The legend is *centred* in the band, which only shows
+up when the border is thicker than it (`border-top-width: 40px` puts a 20px
+legend at **y=10**). And its margin-*inline* is honoured normally
+(`margin: 10px` moves it from x=14.5 to **24.5**).
+
+Which legend gets lifted was probed the same way, and three of the four
+answers are surprising:
+
+| shape | Brave |
+|---|---|
+| `<legend>` after two `<p>`s | still lifted; the `<p>`s start below the band |
+| a **second** `<legend>` | ordinary full-width block in the content, (14.5, 24.891, 771, 20) |
+| `<div><legend>` | not a legend at all — no band, 85.641 tall |
+| `display:none` / `position:absolute` | no band; fieldset is 65.641, as with no legend |
+| `float:left` | an ordinary float *inside* the content, with the `<p>`'s text at x=53.5 |
+
+**A `<button>`'s label counts its markup.** `<button>save <b>now</b>
+</button>` was measured through `real-text-child`, which sees a control's
+*direct* text children only, so the label came out `save ` — 36px of
+content where Brave reports 58.5. The consequence was not a 22px box error:
+the button **wrapped its own label**, grew to 34px, and painted the first
+line above its own border box. `atomic-intrinsic-width`'s form-control
+branch had been shadowing the `:else` branch that already knew how to
+measure mixed inline content.
+
+**`box-sizing: border-box` on `<button>`, `<select>` and checkbox/radio.**
+Read off `getComputedStyle`, not inferred: those three report `border-box`
+and `<input>`/`<textarea>`/`<fieldset>`/`<legend>` report `content-box`
+(confirmed on `width: 200px`: button **200**, select **200**, input **208**,
+textarea **206**; this engine said 216 for the button). It matters twice.
+`inset-side` only counts the border for a border-box box, so a button's own
+label was painted at its **border** edge instead of one border plus one
+padding in — and the harness attributes a text op to the atomic inline
+whose box *contains* it, so a label sitting 3px above its own box leaked
+onto the surrounding line. That is the whole of
+`:form/button-with-nested-inline` wanting `["tail"]` and getting
+`["save now tail"]`.
+
+**A float narrows a DESCENDANT block's line boxes.** Round twenty-two left
+this as a named scope cut — "`layout-node` does not carry a float context
+down into a child" — on the grounds that only a wrap point was at stake.
+It was worse than that. `:page/media-object` reported **one** line for a
+three-line page: every line the engine left at x=0 is geometrically inside
+the float's own box, so the harness attributed all of them to the float
+rather than to the paragraph they belong to. `layout-node` now takes the
+band as an optional trailing argument; it is seeded into the child's own
+float list and tagged `:intruding?` so the child neither grows to contain
+it nor re-escapes it to its parent. Verified against Brave on five shapes
+(text in the same block, in a `<p>`, across two `<p>`s, a right float, and
+a doubly nested block) — line content and x-offset agree exactly on all
+five.
+
+One consequence is worth naming: a float breaks `layout-node`'s
+translation-invariance, which every other placement in this file relies on.
+The band a child must avoid depends on where the child really ends up, and
+that is not known until the child has been laid out once (its collapsed top
+margin takes part in the gap). So a block child that has a band **and** a
+non-zero shift is laid out twice — once to learn the gap, once with the
+band moved to match. Bounded by construction, and it does not compound.
+
+**A line box after a block keeps the pending bottom margin.** CSS wraps
+inline content in an *anonymous* block, and the previous sibling's bottom
+margin separates it exactly as it separates a real block. This branch
+dropped it. It hid because a **lone** inline child never becomes a run
+(`inline-runs` needs two), so `<div><p>para</p>bare text</div>` took the
+block path and was right at 54px while `<div><p>para</p><span>a</span>
+<b>b</b></div>` came here and was 41 against Brave's 55. It was the whole
+of `:page/login-form`'s `label y −18.4` / `input y −17.4`: an `<h2>`'s
+17.43px bottom margin vanishing before the first `<label><input>` line.
+
+**One floating-point bug, fixed at its source rather than tolerated.** An
+intrinsic width is `inset + content`; it is handed back as the box's
+*available* width, and `layout-block` then re-derives the content width by
+subtracting the **same** inset. In binary floating point that does not
+return `content` — measured, `save now` is 57.89096472741182 and the round
+trip returns 57.8909647274118, one ulp short — and one ulp short is enough
+for the line breaker to decide the label does not fit the box that was
+sized for it. The content is now rounded **up** to a whole pixel before the
+inset is added, which makes the subtraction exact instead of lucky, and is
+the direction a box may only err in: wider than its content, never
+narrower.
+
+Corpus-wide, on the 337-case corpus, same harness both sides: line
+structure 320/324 → **322/324**, geometry 1215/1272 → **1224/1272**
+(307/337 → **308/337** clean), paint order 8308/8409 → **8321/8409**,
+computed style 15535/17795 unchanged. Nine cases' boxes changed and **none
+regressed**; the six that changed without changing score are all button
+widths landing closer to Brave (43.46 → 44 against 44.17, 29.73 → 30
+against 30.09, and so on).
+
+| case | before | after |
+|---|---|---|
+| `:page/login-form` | 1/7 | **7/7** |
+| `:form/fieldset-and-legend` | 0/3 | **2/3** |
+| `:form/button-with-nested-inline` | 0/3 | **1/3** |
+
+Two closed tests changed answer, both rewritten with the reason rather than
+with a new number: the float scope-cut test now asserts the browser's
+`x=80` instead of its own `x=0`, and the flex-child test asserts a button's
+**200px** border box instead of 216.
+
+Still open, and named rather than left to be rediscovered:
+
+- **`inset-side` omits the border for a content-box element**, in both axes
+  — already named by round twenty-five for
+  `position/absolute-containing-block-is-the-padding-box`, and it is now
+  also the *entire* remaining residual of `:form/fieldset-and-legend`: its
+  inner `<p>` is 4px wide of Brave and 2px left of it, and nothing else
+  about that case disagrees. It is one change to the box model rather than
+  one UA reading, and it moves every bordered box on every page, so it
+  belongs with whoever owns width/height resolution — not folded into a
+  fieldset constant, which would fit this case and mislead the next.
+- **`:page/table-of-contents`' `a x +13.70625`** and
+  `:table/cell-with-a-list`'s `li w +13.70625` are the same number and the
+  same cause round twenty-four already named: this engine paints an
+  `<li>`'s marker *inside* the item's line, as `list-style-position:
+  inside`, where the browser's `outside` default puts it in the list's own
+  40px padding and leaves it out of the item's content entirely. Brave puts
+  the `<a>` at x=**40**, the `<li>`'s content edge, and this engine at
+  53.70625 — exactly one marker advance in. The fix is that property. It is
+  not attempted here partly because a `::marker` produces **no element box
+  in the oracle**, so the marker's own placement cannot be verified by this
+  harness at all — only the content's can.
+- **A `display: flex|grid|table` fieldset gets no band.** The lift lives in
+  `layout-block`, and Brave lifts the legend before the fieldset picks a
+  formatting context at all (measured: `display: flex` leaves the fieldset
+  83.641 tall with the legend still at y=0, and 20 here). Doing it properly
+  means moving the lift above `layout-node`'s display-driven branch.
+- **Per-side border widths.** `border-top-width: 40px` is not read at all —
+  this engine has one uniform `:border-width` — so the band's centring
+  clause, which is correct, can only be reached by a uniform border taller
+  than the legend.
+
 ### Round twenty-five: where the leftover inline space goes, and a height that is a content height
 
 Six gaps, and every number below was read out of a real headless Brave 151
