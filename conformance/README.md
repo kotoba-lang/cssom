@@ -789,6 +789,157 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round twenty-five: where the leftover inline space goes, and a height that is a content height
+
+Six gaps, and every number below was read out of a real headless Brave 151
+first. Three of them turned out to be the same defect wearing three faces:
+**a value that is not a plain px length reached arithmetic that only knows
+plain px lengths**, and the arithmetic won.
+
+**`margin: 0 auto` did not centre a block, in either layer.** The cascade
+declined to expand the shorthand at all (`auto` is not a length, and
+`expand-box-side-shorthand` only expanded lengths), so `margin-left` read
+0 where the browser reports 150px — 4 of the 16 values the computed-style
+axis still charged to the cascade. Then layout had nothing to read even if
+it had been expanded, because node-style's `parse-int` turns `auto` into
+the same nil a missing margin gives. Both halves are fixed: `margin`
+(and only `margin` — `padding: auto` is not CSS) expands with `auto`
+tokens, node-style carries the raw inline margins alongside the coerced
+ones, and `layout-children-block` distributes the leftover space by CSS
+2.1 §10.3.3's own rule.
+
+Which is not "an auto margin centres the box", and the corpus now says so
+in four cases measured before any of it was written:
+
+| case | Brave | this engine, before |
+|---|---|---|
+| `box/margin-auto-centers-a-block` (100 in 400) | x=150 | x=0 |
+| `box/margin-left-auto-pushes-a-block-right` | x=300 | x=0 |
+| `box/margin-right-auto-leaves-a-block-left` | x=0 | x=0 (agreed already) |
+| `box/margin-auto-with-no-room-does-not-centre` (300 in 200) | x=0, w=300 | agreed already |
+| `box/margin-auto-with-a-vertical-length` (`margin: 10px auto`) | x=150 | x=10 |
+
+The last two are the ones worth keeping. The over-constrained case says
+Brave does **not** centre a box wider than its container at x=−50 — an
+auto margin with nothing to absorb is 0 — and the `10px auto` case caught a
+bug the fix introduced on its way in: `margin-side` falls back to the
+uniform `:margin` when a per-side longhand is absent, so the *vertical*
+10px leaked into the `auto` inline sides and indented the box instead of
+centring it.
+
+**`direction: rtl`, exactly as far as it can be verified.** In an rtl
+containing block the over-constrained equation resolves `margin-left`
+instead of `margin-right`, so a 60px block in a 200px container sits at
+**x=140** where this engine had it at 0 (`text/rtl-block-alignment`).
+That is block-level alignment, it is one property threaded through the
+inherited map, and it is all that is implemented. **There is no bidi
+algorithm here** — no embedding levels, no neutral resolution, no run
+reversal — so `text/rtl-with-inline-elements` still fails and is expected
+to. `text-align`'s direction-relative `start`/`end` was deliberately left
+alone for a reason worth writing down: right-aligning that case's line
+would land its `<b>` within 2px of Brave's x purely because the text
+either side of it is the same width, while the words on the line were
+still in the wrong order. A number improved by a coincidence is worse than
+a number that says the gap is still there. The boundary is written at
+`layout-node`, where the property is resolved.
+
+**A negative margin never wins a `max`.** The cascade had the `-8` all
+along; `layout-children-block` collapsed adjacent margins with `max`, and
+`(max 0 -8)` is 0. Real CSS collapses to *the largest positive plus the
+most negative*, which reduces to `max` when everything is positive.
+Measured in Brave, both directions:
+`box/negative-margin-pulls-up` is a 32px-tall parent with its second block
+at y=12 (engine: 40 and 20), and the new
+`box/negative-margin-bottom-pulls-the-next-sibling-up` is the same numbers
+from the other side. The control that says the rule is not "negatives are
+special" is `box/negative-margin-left-widens-an-auto-width-block`:
+`margin-left: -20px` on an auto-width block makes it x=−20, w=220 in
+Brave, which this engine already got right.
+
+**A percentage height against an auto-height parent is `auto`.**
+`resolve-height` read `"50%"` through `explicit-length`'s leading-digit-run
+as 50 **px**, whatever the parent was. `percentage-of` — which already
+returns nil for an indefinite basis, exactly the "size me from content" nil
+every caller spells — was right there and unused on this path. The basis
+now travels down as `:block/containing-height`, set by `layout-block` and
+**dropped** by `layout-flex`/`layout-grid`/`layout-table`, whose items'
+containing block is not the block that set it and whose own definite
+content height this round does not compute; an honest `auto` beats the
+grandparent's height.
+
+`box/percentage-height-of-a-fixed-parent` had been passing throughout
+because 50% of a 100px parent is 50 either way. Adding
+`box/percentage-height-of-a-padded-parent` — asking WHICH height, the
+content box or the border box — found a second bug immediately, and it was
+not in the percentage:
+
+**A declared `height` is the CONTENT height, and was being used as the
+border box.** `resolve-width` had been corrected for this in the inline
+axis and the block axis had not. Measured in Brave,
+`div{height:100px;padding:10px}` is **120** tall and lays its children out
+in **100**; this engine said 100 and 80. Fixing it also moved a case
+nobody had connected to it: `table/cell-vertical-align`'s
+`<td style="height:60px">` cells are 62 tall in Brave (their UA 1px
+padding), and were 60 here.
+
+That fix needed one thing to be kept apart from it, and the corpus caught
+it on the same run. Two places in this engine SOLVE a height and inject it
+back onto the node to be re-read through the ordinary path — a stretched
+flex item's line cross size (`force-cross-size`), and an absolute box's
+`top`+`bottom` (`layout-absolute-children`). Those numbers are already
+border boxes, and box-sizing must not be applied to them twice; routed
+through `style/height` they were, and `page/form-row`'s `<button>` went
+from 20 to 24 against Brave's 21. They now travel as a distinct
+`:kotoba/used-height`, which is what `force-main-width` had already
+concluded for itself in the inline axis (it pins `box-sizing: border-box`
+on its own injection for exactly this reason).
+
+**`calc()` with a percentage in it, and a percentage width resolved
+twice.** `cssom.core` collapses a *constant* `calc()` during the cascade,
+so anything still wearing the `calc(` text in layout contains something
+the cascade could not resolve — which in practice means a percentage.
+`calc(100% - 40px)` in a 300px block is **260** in Brave and was 300 here
+(the value failed to parse outright and the avail-width fallback won);
+`calc(50% + 10px)` is **160**. The `%` is resolved at the calc tokenizer's
+leaf against the containing block, which leaves `eval-calc-node`'s
+same-unit rule for `+`/`-` exactly as it was, and degrades to nil — not to
+zero — when there is no definite basis.
+
+`position/absolute-percentage-width` was a different bug with the same
+symptom: `measure-child` resolved `width: 50%` against the containing
+block (correctly, 100) and handed the result down as the child's
+*available width*, where the child's own `resolve-width` resolved the same
+percentage a second time and got 50. The used width is now written back
+onto the child as a plain length, so the second resolution is a no-op.
+
+Corpus-wide, this round added 10 cases (four of them controls that already
+agreed). Measured on the 337-case corpus as it stands after merging round
+twenty-six's transform cases, same harness both sides: geometry
+1201/1272 → **1215/1272** (296/337 → **307/337** clean), computed style
+15534/17801 → **15535/17795** with the cascade-attributed residual 16 →
+**9**, paint order 8307/8409 → **8308/8409** (311 → **312** clean cases),
+line structure **320/324** unchanged. Twelve cases' boxes changed and
+**none regressed**; every one of the twelve went to exact agreement on
+every box.
+
+The computed-style axis's compared-value count falls by 6 because
+`margin-left`/`margin-right` now hold the string `auto` on the cases that
+declare it, which that axis excludes as a non-absolute-length rather than
+scoring — the same treatment a directly-declared `margin-left: auto`
+already got. The browser reports a *used* value there (150px, or −100px on
+the over-constrained case); this engine's cascade holds the *specified*
+one. Neither is wrong and they are not comparable, which is what the
+exclusion says.
+
+Still open, and named rather than left to be rediscovered: no bidi
+reordering (above); `flex/auto-margin-pushes-item-right` still fails,
+because a flex line distributes its free space through
+`place-main-axis-auto-margins` and not through this round's block-flow
+path; `inset-side` still omits the border for a content-box element, in
+both axes, which is what `position/absolute-containing-block-is-the-
+padding-box` measures; and a percentage height inside a flex or grid item
+resolves to `auto` rather than against the container.
+
 ### Round twenty-one: the corpus grows 200 → 292
 
 The engine went 47% → 89% on geometry while the corpus stayed at 200 cases.
