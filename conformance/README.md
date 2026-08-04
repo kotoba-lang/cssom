@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 185/190 = 97%. Geometry: 603/719 element boxes (84%),
-158/200 cases with every box in agreement**, on a corpus of 200.
+**Line structure: 184/190 = 97%. Geometry: 609/719 element boxes (85%),
+160/200 cases with every box in agreement**, on a corpus of 200.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -286,6 +286,26 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round twenty: two more from the biggest cluster
+
+`div h −20` (13 boxes) held two unrelated causes:
+
+- **A grid item stretches to its track.** `align-items: stretch` is the
+  default, so an item in a `grid-template-rows: 40px` track is 40px tall
+  whatever its content needs; this engine left every item at its content
+  height. That case went from 1/5 boxes to exact.
+- **`overflow-wrap: break-word` was unimplemented.** A long unbroken string
+  — a URL, a hash, a compound word — overflowed its column instead of being
+  split to fit: a 90px column reported 40px of height where the browser
+  needs 60. Now exact on the geometry axis.
+
+The break-word case does, however, now FAIL the line axis, and that is
+recorded rather than papered over: the browser measures one Range per WORD,
+so a word broken across two lines still reports a single union rect and
+clusters as one line, while this engine emits one text op per piece. The
+line axis structurally cannot represent an intra-word break. Making the
+engine stop breaking the word would "fix" the number and unfix the layout.
 
 ### Round nineteen: grid span, and relative on a flex/grid item
 

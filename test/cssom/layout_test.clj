@@ -5634,3 +5634,34 @@
         [_ moved still] items]
     (is (= 8 (:y moved)))
     (is (= 0 (:y still)) "and its sibling does not move with it")))
+
+(deftest overflow-wrap-breaks-a-word-that-cannot-fit
+  ;; A long unbroken string -- a URL, a hash, a compound word -- is made to
+  ;; fit a narrow column instead of overflowing it. Without this the engine
+  ;; put the whole word on one overflowing line: a 90px column reported
+  ;; 40px of height where the browser needs 60.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        doc (dom/set-style doc p {:overflow-wrap "break-word" :width 90})
+        [t doc] (dom/create-text-node doc "short aaaaaaaaaaaaaaaaaaaa")
+        doc (dom/append-child doc p t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        t (text-draw-ops ops)]
+    (is (> (count t) 2)
+        "the long word is split across lines rather than overflowing on one")
+    (is (every? #(<= (count (:text %)) 12) t)
+        "and every piece fits the column")))
+
+(deftest a-grid-item-stretches-to-its-track
+  (let [[g doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc g)
+        doc (dom/set-style doc g {:display "grid" :grid-template-columns "80px 80px"
+                                  :grid-template-rows "40px 40px"})
+        doc (build-inline-children doc g [[:div {} "a"] [:div {} "b"] [:div {} "c"] [:div {} "d"]])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        items (rest (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))]
+    (is (every? #(= 40 (:h %)) items)
+        "`align-items: stretch` is the default, so an item in a 40px track
+         is 40px tall whatever its content needs")))

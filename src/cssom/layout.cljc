@@ -282,6 +282,25 @@
                     :else
                     (recur words nil (conj lines cur))))))))))))
 
+(defn- break-long-word
+  "Splits a word that cannot fit `max-w` into the largest pieces that do --
+   real CSS `overflow-wrap: break-word` / `word-break: break-all`, which is
+   how a long unbroken string (a URL, a hash, a German compound) is made to
+   fit a narrow column instead of overflowing it. Without it this engine
+   put the whole word on one overflowing line: measured against the
+   browser, a 90px column reported 40px of height where the browser needs
+   60."
+  [line-w max-w word]
+  (loop [remaining word out []]
+    (if (or (str/blank? remaining) (<= (line-w remaining) max-w))
+      (if (str/blank? remaining) out (conj out remaining))
+      (let [n (loop [i (count remaining)]
+                (cond
+                  (<= i 1) 1
+                  (<= (line-w (subs remaining 0 i)) max-w) i
+                  :else (recur (dec i))))]
+        (recur (subs remaining n) (conj out (subs remaining 0 n)))))))
+
 (defn- text-lines-measured
   "Word-wraps text exactly like text-lines' greedy word-packing algorithm
    (same whitespace splitting, same 'never split/drop a word', same
@@ -604,7 +623,7 @@
    own truncation intent) rather than a spec-accuracy claim."
   [theme x y avail-width opacity color font-size line-height font-weight font-style font-family
    text-shadow
-   text-decoration text-align text-transform white-space text-overflow text]
+   text-decoration text-align text-transform white-space text-overflow overflow-wrap text]
   (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -621,6 +640,17 @@
         text (apply-text-transform text-transform text)
         measure #(measure-text % font-size font-weight font-style font-family)
         line-w #(if measure-text (measure %) (* (count %) char-w))
+        break? (contains? #{"break-word" "anywhere" "break-all"} overflow-wrap)
+        ;; `overflow-wrap: break-word` splits a word that cannot fit rather
+        ;; than letting it overflow -- applied AFTER the ordinary greedy
+        ;; word packing, on whichever resulting line is still too wide.
+        break-lines (fn [ls]
+                      (if break?
+                        (vec (mapcat #(if (<= (line-w %) content-w)
+                                        [%]
+                                        (break-long-word line-w content-w %))
+                                     ls))
+                        ls))
         lines (cond
                 (= "pre" white-space) (str/split (str text) #"\n" -1)
                 (= "nowrap" white-space)
@@ -637,8 +667,8 @@
                              (text-lines-measured measure content-w collapsed)
                              (text-lines char-w content-w collapsed)))
                         (str/split (str text) #"\n" -1))
-                measure-text (text-lines-measured measure content-w text)
-                :else (text-lines char-w content-w text))
+                measure-text (break-lines (text-lines-measured measure content-w text))
+                :else (break-lines (text-lines char-w content-w text)))
         max-line-w (if measure-text
                      (apply max 0 (map measure lines))
                      (apply max 0 (map #(* (count %) char-w) lines)))
@@ -926,6 +956,8 @@
    :text-transform (style node :text-transform)
    :white-space (or (style node :white-space) (when (= :pre (:tag node)) "pre"))
    :text-overflow (style node :text-overflow)
+   :overflow-wrap (or (style node :overflow-wrap) (style node :word-wrap))
+   :word-break (style node :word-break)
    ;; CSS Color Module Level 4's `opacity`: "Opacity values outside the
    ;; range [0,1]... are clamped to the range [0,1] in computed values."
    ;; Previously read raw via parse-dbl with no clamp -- an author value
@@ -4009,6 +4041,23 @@
                                                placements)]
                                        (if (seq hs) (apply max 0 hs) 0)))))
                                (range total-rows)))
+        ;; A grid item STRETCHES to fill its track (`align-items: stretch`
+        ;; is the default), so an item in a `grid-template-rows: 40px` track
+        ;; is 40px tall whatever its content needs. This engine left every
+        ;; item at its content height -- measured against the browser as
+        ;; four 20px boxes in 40px tracks.
+        measured (mapv (fn [pl m child]
+                         (let [rh (reduce + 0 (map #(nth row-heights % 0)
+                                                   (range (:row-start pl) (:row-end pl))))
+                               own-h (:h (:box m))]
+                           (if (and (map? child) (> rh own-h) (not (:height (node-style child theme))))
+                             (measure-child theme
+                                            (span-width col-widths gap (:col-start pl) (:col-end pl))
+                                            opacity inherited
+                                            (force-cross-size false rh child)
+                                            false)
+                             m)))
+                       placements measured in-flow)
         row-offsets (place-main-axis "flex-start" row-heights gap 0)
         draws (vec (mapcat (fn [pl m child]
                               (let [[rdx rdy] (relative-item-offset theme child)]
@@ -5427,7 +5476,8 @@
            text-overflow (or (:text-overflow gstyle) (:text-overflow inherited))]
        (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family
                     {:x text-shadow-x :y text-shadow-y :blur text-shadow-blur :color text-shadow-color}
-                    text-decoration text-align text-transform white-space text-overflow (:generated/text node)))
+                    text-decoration text-align text-transform white-space text-overflow
+                    (:overflow-wrap inherited) (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) (:line-height inherited)
@@ -5435,7 +5485,8 @@
                   {:x (:text-shadow-x inherited) :y (:text-shadow-y inherited)
                    :blur (:text-shadow-blur inherited) :color (:text-shadow-color inherited)}
                   (:text-decoration inherited)
-                  (:text-align inherited) (:text-transform inherited) (:white-space inherited) (:text-overflow inherited) node)
+                  (:text-align inherited) (:text-transform inherited) (:white-space inherited)
+                  (:text-overflow inherited) (:overflow-wrap inherited) node)
 
      (= :text (:node/type node))
      (recur theme x y avail-width opacity inherited (:text node))
@@ -5481,6 +5532,7 @@
                text-transform (or (:text-transform st) (:text-transform inherited))
                white-space (or (:white-space st) (:white-space inherited))
                text-overflow (or (:text-overflow st) (:text-overflow inherited))
+               overflow-wrap (or (:overflow-wrap st) (:word-break st) (:overflow-wrap inherited))
                inherited (assoc inherited
                                 :line-height/explicit? (boolean (or (:line-height st)
                                                                     (:line-height/explicit? inherited)))
@@ -5490,7 +5542,8 @@
                                 :text-shadow-blur text-shadow-blur :text-shadow-color text-shadow-color
                                 :text-decoration text-decoration :text-align text-align
                                 :text-transform text-transform :white-space white-space
-                                :text-overflow text-overflow)
+                                :text-overflow text-overflow
+                                :overflow-wrap overflow-wrap)
                tag (:tag node)
                children (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))]
            (cond

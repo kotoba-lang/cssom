@@ -579,6 +579,13 @@
   :group :text
   :html "<div style=\"width: 80px\"><p style=\"white-space: nowrap\">alpha beta gamma</p></div>"}
 
+ ;; The LINE axis cannot represent an intra-word break: the browser
+ ;; measures one Range per WORD, so a word broken across two lines still
+ ;; reports a single (union) rect and clusters as one line, while this
+ ;; engine emits one text op per piece. The GEOMETRY axis, which asks the
+ ;; well-defined question, agrees exactly (the 90px column is 60px tall on
+ ;; both sides). Kept as a known line-axis failure rather than "fixed" by
+ ;; making the engine stop breaking the word.
  {:id :text/overflow-wrap-anywhere
   :group :text
   :html "<div style=\"width: 90px\"><p style=\"overflow-wrap: break-word\">short aaaaaaaaaaaaaaaaaaaa</p></div>"}
