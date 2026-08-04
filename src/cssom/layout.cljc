@@ -1664,7 +1664,7 @@
    sibling layout with `position: absolute` on the first correctly
    leaves the second at y=4, unaffected.
 
-   Routing `fixed` through the SAME partition-flow/layout-absolute-
+   Routing `fixed` through the SAME out-of-flow/layout-absolute-
    children machinery `absolute` already uses is an honest, documented
    scope-cut: this engine has no separate scroll-independent viewport
    model (see the namespace docstring), so a `fixed` element is anchored
@@ -1679,12 +1679,6 @@
    engine with no real scroll-position-dependent re-layout."
   [theme child]
   (and (map? child) (contains? #{"absolute" "fixed"} (:position (node-style child theme)))))
-
-(defn- partition-flow
-  [theme children]
-  (let [groups (group-by #(absolute? theme %) children)]
-    {:in-flow (get groups false [])
-     :out-of-flow (get groups true [])}))
 
 ;; ---- flexbox main-axis distribution / cross-axis alignment ----
 
@@ -4066,7 +4060,7 @@
    measurement the line breaker uses."
   [theme content-w opacity inherited st children]
   (let [inherited (inline-inherited inherited st)
-        tokens (inline-tokens (inline-fragments theme inherited opacity content-w children))
+        tokens (inline-tokens (:fragments (inline-fragments theme inherited opacity content-w children)))
         measure-text (:measure-text theme)
         w-of (fn [text style]
                (if measure-text
@@ -5673,9 +5667,9 @@
    one-character item at x=55.4 with a 9.2px box, where filling the track
    gave 0 and 120.
 
-   Absolute-positioned children are NOT extracted via partition-flow here —
-   this matches layout-flex's current behavior (today only layout-block
-   partitions out-of-flow children); a position:absolute child inside a grid
+   Absolute-positioned children are NOT taken out of flow here — this
+   matches layout-flex's current behavior (today only layout-children-block
+   takes out-of-flow children out); a position:absolute child inside a grid
    container is placed as an ordinary grid item, the same limitation flex
    already has.
 
@@ -5946,22 +5940,43 @@
        (or (contains? inline-atomic-tags (:tag child))
            (contains? inline-atomic-displays (:display (node-style child theme))))))
 
+(def ^:private in-flow-positions
+  "The `position` values that leave a box in normal flow, and so let an
+   inline-level one join a line box.
+
+   `relative` is HERE, and used to not be: it was excluded on the grounds
+   that a positioned inline \"would need its own offset treatment inside
+   the line\", which was true and is now implemented (inline-fragments
+   accumulates the offset onto the owner stack, layout-inline-run applies
+   it at paint time -- exactly the paint-only shift
+   layout-children-block already gives a relative BLOCK row). Excluding it
+   did far more damage than a missing offset: it took the element out of
+   the inline path entirely, so an ordinary
+   `<p>text <span style=\"position: relative\">anchor</span> tail</p>`
+   collapsed into three full-width block rows. Measured in Brave that
+   paragraph is ONE 20px line with the span at (35,2); this engine made it
+   60px tall with the span at x=0, 800 wide -- and being the anchor for an
+   absolutely positioned child is the single most common reason anyone
+   writes `position: relative` at all.
+
+   `sticky` is here for the reason `absolute?` already gives: its
+   unscrolled position is legitimately its flow position, and this engine
+   has no scroll-dependent re-layout.
+
+   `absolute`/`fixed` are deliberately absent -- they are out of flow, and
+   layout-children-block's own out-of-flow branch owns them."
+  #{"static" "relative" "sticky"})
+
 (defn- inline-level-element?
   "True when `child` is an element this file will flow into a line box:
    inline-level by author `display: inline` or by inline-level-tags UA
-   default, statically positioned, and actually rendered.
-
-   `position` must be `static`: a `relative`/`absolute`/`fixed` inline box
-   would need its own offset/anchoring treatment inside the line, which
-   layout-children-block/layout-absolute-children already implement for
-   block rows — routing it through the inline path instead would silently
-   drop that, so a positioned element always stays on the existing path."
+   default, in flow (in-flow-positions), and actually rendered."
   [theme child]
   (and (map? child)
        (= :element (:node/type child))
        (not (non-rendered-tag? (:tag child)))
        (let [st (node-style child theme)]
-         (and (= "static" (:position st))
+         (and (contains? in-flow-positions (:position st))
               (not= "none" (:display st))
               (if (:display st)
                 (= "inline" (:display st))
@@ -6021,10 +6036,11 @@
     ;; An atomic inline (an <img>/<input>/<button>/<select>/<textarea>) has
     ;; no subtree requirement: whatever is inside it is laid out by its own
     ;; box, not flattened into this line, so `block-in-inline` cannot arise.
-    ;; It still has to be statically positioned and actually displayed.
+    ;; It still has to be in flow (in-flow-positions) and actually
+    ;; displayed.
     (inline-atomic-element? theme child)
     (let [st (node-style child theme)]
-      (and (= "static" (:position st))
+      (and (contains? in-flow-positions (:position st))
            (not= "none" (:display st))
            (or (nil? (:display st))
                (= "inline" (:display st))
@@ -6038,6 +6054,14 @@
                          (and (map? c)
                               (= :element (:node/type c))
                               (non-rendered-tag? (:tag c)))
+                         ;; an out-of-flow descendant contributes nothing
+                         ;; to the line, so it cannot make its ancestor
+                         ;; unflowable -- and an inline box whose child is
+                         ;; positioned against it is the single most
+                         ;; common reason to write `position: relative`
+                         ;; at all, so refusing to flow it here would take
+                         ;; the whole paragraph off the inline path
+                         (absolute? theme c)
                          (inline-flow-candidate? theme c)))
                    (:children child))))
 
@@ -6104,7 +6128,27 @@
    same reason: layout-node only ever ADDS its `x`/`y` as an offset.
 
    `:owners` is the stack of enclosing inline ELEMENTS (outermost first)
-   the fragment sits inside, each `{:idx <n> :node <element> :st <style>}`.
+   the fragment sits inside, each `{:idx <n> :node <element> :st <style>}`
+   plus, when any of them is `position: relative`, a `:rel [dx dy]`
+   carrying the offsets of every relative box from the outermost down to
+   and including that one. A relative inline shifts ITSELF and everything
+   inside it, and nothing else: the offsets are accumulated here (where
+   the nesting is known) and added at paint time (where the coordinates
+   are), so they never reach the line breaker and a relative inline
+   therefore does not move the words after it -- real CSS's own
+   `relative positioning affects painting only` rule, and the same
+   division layout-children-block already makes for a relative BLOCK row.
+   Absent entirely when nothing on the line is relative, which is the
+   overwhelmingly common case.
+
+   Returns `{:fragments [...] :out-of-flow [...]}`. An out-of-flow
+   descendant contributes NO fragment (it is not on the line at all) but
+   is not discarded either: it comes back as `{:node <element> :cb-idx
+   <owner idx or nil>}`, where `:cb-idx` names the nearest POSITIONED
+   inline box around it -- the containing block real CSS anchors it
+   against. Only layout-inline-run can turn that index into a box, because
+   an inline box has no geometry until its own fragments have been placed.
+
    The `:idx` is a per-run occurrence counter, NOT the element's
    `:node/id`: two sibling `<b>x</b><b>x</b>` elements in a hand-built
    tree can be entirely equal maps with no id at all, and the fragment→
@@ -6122,11 +6166,33 @@
    pipeline layout-node applies, so those features compose with inline
    flow instead of being bypassed by it."
   [theme inherited opacity content-w items]
-  (let [counter (atom 0)]
+  (let [counter (atom 0)
+        oof (atom [])
+        ;; the accumulated `position: relative` offset in force INSIDE the
+        ;; owner stack -- see the docstring. `[0 0]` when nothing above is
+        ;; relative, which is why the key is absent in that case.
+        rel-of (fn [owners] (:rel (peek owners) [0 0]))
+        rel+ (fn [[dx dy] st]
+               (if (= "relative" (:position st))
+                 (let [[ox oy] (relative-offset st content-w nil)]
+                   [(+ dx ox) (+ dy oy)])
+                 [dx dy]))]
     (letfn [(walk [items inherited opacity owners acc]
               (reduce
                (fn [acc child]
                  (cond
+                   ;; out of flow: nothing on the line, but remembered
+                   ;; with the innermost POSITIONED inline box around it,
+                   ;; which is its containing block
+                   (absolute? theme child)
+                   (do (swap! oof conj
+                              {:node child
+                               :cb-idx (->> owners
+                                            (filter #(not= "static" (:position (:st %))))
+                                            last
+                                            :idx)})
+                       acc)
+
                    (inline-atomic-element? theme child)
                    (let [st (node-style child theme)
                          avail (atomic-intrinsic-width theme content-w opacity inherited child st)
@@ -6197,10 +6263,15 @@
                                                  (max 1 (parse-int (get-in child [:attrs :rows]) 2))
                                                  1)))
                                    (+ ascent descent)))))]
-                     (conj acc {:kind :atomic
-                                :w (+ (:w box) ml mr) :h h :baseline-offset baseline-offset
-                                :ml ml :mt mt :draw draw
-                                :owners owners :opacity opacity}))
+                     (conj acc (cond-> {:kind :atomic
+                                        :w (+ (:w box) ml mr) :h h :baseline-offset baseline-offset
+                                        :ml ml :mt mt :draw draw
+                                        :owners owners :opacity opacity}
+                                 ;; an atomic inline is not an owner of
+                                 ;; itself, so its OWN relative offset
+                                 ;; rides on the fragment
+                                 (not= [0 0] (rel+ (rel-of owners) st))
+                                 (assoc :rel (rel+ (rel-of owners) st)))))
 
                    (generated-node? child)
                    (conj acc {:kind :text
@@ -6232,7 +6303,10 @@
                                            (assoc inherited :vertical-align/shift
                                                   (* f (:font-size inherited)))
                                            inherited)
-                               owners (conj owners {:idx (swap! counter inc) :node child :st st})]
+                               rel (rel+ (rel-of owners) st)
+                               owners (conj owners (cond-> {:idx (swap! counter inc)
+                                                            :node child :st st}
+                                                     (not= [0 0] rel) (assoc :rel rel)))]
                            (if (= :br (:tag child))
                              (conj acc {:kind :break :style inherited :owners owners :opacity opacity})
                              (walk (with-nested-list-margins
@@ -6247,7 +6321,8 @@
                    :else acc))
                acc
                items))]
-      (walk items inherited opacity [] []))))
+      {:fragments (walk items inherited opacity [] [])
+       :out-of-flow @oof})))
 
 (defn- inline-tokens
   "Turns inline-fragments' fragments into the word/break token stream the
@@ -6595,11 +6670,50 @@
   [theme content-x content-y content-w opacity inherited items]
   (let [padding (:padding theme)
         inner-w (max 0 (- content-w (* 2 padding)))
-        fragments (inline-fragments theme inherited opacity inner-w items)
+        {fragments :fragments oof :out-of-flow} (inline-fragments theme inherited opacity inner-w items)
         lines (inline-line-breaker theme inner-w (inline-tokens fragments))
-        text-align (:text-align inherited)]
+        text-align (:text-align inherited)
+        ;; An out-of-flow descendant of one of this run's inline boxes,
+        ;; ready for layout-absolute-children -- see inline-fragments for
+        ;; how it got here and layout-children-block's own out-of-flow
+        ;; branch for the block-level counterpart.
+        ;;
+        ;; `:cb` is real CSS's inline containing block: `<p>text <span
+        ;; style="position: relative">anchor<span style="position:
+        ;; absolute; left: 0; top: 20px">pop</span></span> tail</p>` puts
+        ;; the inner span at (35,22) in Brave -- 35 is where the RELATIVE
+        ;; span starts in the line, not the paragraph's content edge,
+        ;; which is where this engine put it (x=0). CSS 2.1 10.1.4.1
+        ;; builds it from the FIRST box's top-left and the LAST box's
+        ;; bottom-right, which for the single-fragment case (by far the
+        ;; common one, and the only one measured) is exactly that box.
+        ;;
+        ;; `:x`/`:y` -- the static position for an axis with no offset --
+        ;; are the honest limit of this half: the run's own origin, not
+        ;; the point IN THE LINE the box was written at (measured in
+        ;; Brave, `text <span style="position:absolute">pop</span> tail`
+        ;; puts it at x=31.38, right after `text `). Resolving that needs
+        ;; the box to travel through the tokenizer and line breaker as a
+        ;; zero-width marker so the line can report where it landed; until
+        ;; it does, an inline out-of-flow box with no offsets lands at the
+        ;; start of its containing block instead of its own place in the
+        ;; line.
+        finish-oof
+        (fn [rects]
+          (mapv (fn [{:keys [node cb-idx]}]
+                  (let [frs (:fragments (get rects cb-idx))
+                        cb (when (seq frs)
+                             (let [f (first frs) l (peek frs)]
+                               {:x (:x f) :y (:y f)
+                                :w (- (+ (:x l) (:w l)) (:x f))
+                                :h (- (+ (:y l) (:h l)) (:y f))}))]
+                    (cond-> {:node node
+                             :x (or (:x cb) content-x)
+                             :y (or (:y cb) content-y)}
+                      cb (assoc :cb cb))))
+                oof))]
     (if (empty? lines)
-      {:draw [] :h 0}
+      {:draw [] :h 0 :out-of-flow (finish-oof {})}
       (loop [ls lines
              y (+ content-y padding)
              text-draws []
@@ -6620,22 +6734,41 @@
                      ;; the origin by inline-fragments, so placing it is a
                      ;; translate -- its bottom edge onto the baseline, the
                      ;; real CSS `vertical-align: baseline` default.
-                     (let [px (+ base-x (:x piece) (:ml piece 0))
-                           py (+ (- baseline (or (:baseline-offset piece) (:h piece)))
-                                 (:mt piece 0))
+                     ;; `position: relative` on this box (`:rel`) or on any
+                     ;; inline box around it (the owner's own `:rel`) is a
+                     ;; PAINT-time shift and nothing else -- the line
+                     ;; breaker never saw it, so the words after this one
+                     ;; do not move. Each owner's box follows the offsets
+                     ;; in force at ITS OWN depth, which is why the
+                     ;; accumulated value is read per owner rather than
+                     ;; taken from the piece.
+                     (let [[rdx rdy] (:rel piece [0 0])
+                           px0 (+ base-x (:x piece) (:ml piece 0))
+                           py0 (+ (- baseline (or (:baseline-offset piece) (:h piece)))
+                                  (:mt piece 0))
+                           px (+ px0 rdx)
+                           py (+ py0 rdy)
                            rects (reduce (fn [rects owner]
-                                           (update rects (:idx owner)
-                                                   (fn [entry]
-                                                     (-> (or entry {:node (:node owner) :st (:st owner)
-                                                                    :opacity (:opacity piece) :fragments []})
-                                                         (update :fragments conj
-                                                                 {:x px :y py :w (:w piece) :h (:h piece)})))))
+                                           (let [[odx ody] (:rel owner [0 0])]
+                                             (update rects (:idx owner)
+                                                     (fn [entry]
+                                                       (-> (or entry {:node (:node owner) :st (:st owner)
+                                                                      :opacity (:opacity piece) :fragments []})
+                                                           (update :fragments conj
+                                                                   {:x (+ px0 odx) :y (+ py0 ody)
+                                                                    :w (:w piece) :h (:h piece)}))))))
                                          rects
                                          (:owners piece))]
                        [(into draws (translate-ops px py (:draw piece))) rects])
                      (let [st (:style piece)
-                           px (+ base-x (:x piece))
-                           py (- baseline (:font-size st) (:shift piece 0))
+                           ;; the `position: relative` shift in force
+                           ;; INSIDE the innermost inline box this text sits
+                           ;; in -- see the atomic branch above
+                           [rdx rdy] (:rel (peek (:owners piece)) [0 0])
+                           px0 (+ base-x (:x piece))
+                           py0 (- baseline (:font-size st) (:shift piece 0))
+                           px (+ px0 rdx)
+                           py (+ py0 rdy)
                            base (cond-> {:text (:text piece) :font-size (:font-size st) :opacity (:opacity piece)}
                                   (:font-weight st) (assoc :font-weight (:font-weight st))
                                   (:font-style st) (assoc :font-style (:font-style st))
@@ -6666,7 +6799,8 @@
                                                  ofs (parse-int (:font-size ost) (:font-size st))
                                                  om (font-metrics theme ofs (:font-weight ost)
                                                                   (:font-style ost) (:font-family ost))
-                                                 oh (+ (:ascent om) (:descent om))]
+                                                 oh (+ (:ascent om) (:descent om))
+                                                 [odx ody] (:rel owner [0 0])]
                                              (update rects (:idx owner)
                                                    (fn [entry]
                                                      (-> (or entry {:node (:node owner) :st (:st owner)
@@ -6675,8 +6809,10 @@
                                                          ;; vertical-align shift, exactly
                                                          ;; like the text inside it
                                                          (update :fragments conj
-                                                                 {:x px :y (- (+ y (max 0 (- baseline y (:ascent om))))
-                                                                              (:shift piece 0))
+                                                                 {:x (+ px0 odx)
+                                                                  :y (+ (- (+ y (max 0 (- baseline y (:ascent om))))
+                                                                           (:shift piece 0))
+                                                                        ody)
                                                                   :w (:w piece) :h oh}))))))
                                          rects
                                          (:owners piece))]
@@ -6690,23 +6826,25 @@
                    ;; the <br>'s own zero-width box, at the end of the line
                    ;; it terminates
                    (reduce (fn [rects owner]
-                             (update rects (:idx owner)
-                                     (fn [entry]
-                                       (-> (or entry {:node (:node owner) :st (:st owner)
-                                                      :opacity opacity :fragments []})
-                                           ;; same content-area box every
-                                           ;; other inline element reports
-                                           (update :fragments conj
-                                                   (let [ch (long (* 1.2 (or (:font-size (:style line))
-                                                                             (:font-size inherited)
-                                                                             (:font-size theme))))]
-                                                     {:x (+ base-x (:w line))
-                                                      :y (+ y (max 0 (quot (- line-h ch) 2)))
-                                                      :w 0 :h ch}))))))
+                             (let [[odx ody] (:rel owner [0 0])]
+                               (update rects (:idx owner)
+                                       (fn [entry]
+                                         (-> (or entry {:node (:node owner) :st (:st owner)
+                                                        :opacity opacity :fragments []})
+                                             ;; same content-area box every
+                                             ;; other inline element reports
+                                             (update :fragments conj
+                                                     (let [ch (long (* 1.2 (or (:font-size (:style line))
+                                                                               (:font-size inherited)
+                                                                               (:font-size theme))))]
+                                                       {:x (+ base-x (:w line) odx)
+                                                        :y (+ y (max 0 (quot (- line-h ch) 2)) ody)
+                                                        :w 0 :h ch})))))))
                            rects
                            (:break-owners line))))
           {:draw (into (inline-owner-ops theme rects) text-draws)
-           :h (+ (- y content-y) padding)})))))
+           :h (+ (- y content-y) padding)
+           :out-of-flow (finish-oof rects)})))))
 
 ;; ---- block-in-inline ----
 
@@ -6729,10 +6867,17 @@
 
    Bounded v1: the block child must be a DIRECT child of the inline
    element. A block nested two inline levels deep (`<span><em><div>`) is
-   left alone and keeps the pre-existing block-row fallback."
+   left alone and keeps the pre-existing block-row fallback.
+
+   An OUT-OF-FLOW child is not a block child for this purpose and does not
+   split anything: it leaves the inline box's content entirely rather than
+   interrupting it, and splitting around it would sever it from the very
+   ancestor it is positioned against (see inline-fragments, which carries
+   it out of the run with the owner stack it needs)."
   [theme children]
   (let [block-child? (fn [c] (and (map? c)
                                   (= :element (:node/type c))
+                                  (not (absolute? theme c))
                                   (not (inline-flow-candidate? theme c))))]
     (vec (mapcat
           (fn [child]
@@ -6803,14 +6948,23 @@
                       (= :element (:node/type child))
                       (or (non-rendered-tag? (:tag child))
                           (= "none" (:display (node-style child theme)))))))
-       ;; Floats are TRANSPARENT to this grouping: a float neither joins a
-       ;; line box nor SPLITS one. Leaving them in the sequence would do
-       ;; the latter -- `text <span style="float:left">F</span> more`
-       ;; would partition into two one-child runs and stack `text` and
-       ;; `more` on separate lines, where every browser keeps them on one.
-       ;; So each float is lifted out, the rest is grouped as before, and
-       ;; the float is put back in FRONT of the entry its following
-       ;; sibling landed in.
+       ;; Floats and OUT-OF-FLOW boxes are TRANSPARENT to this grouping:
+       ;; neither joins a line box, and neither SPLITS one. Leaving them in
+       ;; the sequence would do the latter -- `text <span
+       ;; style="float:left">F</span> more` would partition into two
+       ;; one-child runs and stack `text` and `more` on separate lines,
+       ;; where every browser keeps them on one. So each is lifted out, the
+       ;; rest is grouped as before, and the lifted child is put back in
+       ;; FRONT of the entry its following sibling landed in.
+       ;;
+       ;; An absolutely positioned child used to be removed from `children`
+       ;; entirely (by a `partition-flow` in layout-block) before this
+       ;; function ever saw it, which is why it could not split a run then
+       ;; either. It travels WITH the flow now because its STATIC POSITION
+       ;; -- where it would have been had it stayed in flow, which is what
+       ;; real CSS uses for every axis with no offset -- is only knowable
+       ;; from the running Y this grouping feeds (see
+       ;; layout-children-block's own out-of-flow branch).
        ;;
        ;; Keeping them in the entry sequence at all (rather than hoisting
        ;; them all to the container's top, which is what this file used to
@@ -6819,14 +6973,15 @@
        ;; position of its own within the line, so it is emitted before the
        ;; whole run -- which is the same y the line box gets.
        ((fn [cs]
-          (let [;; `anchors` maps an index into the float-free `flow`
-                ;; vector to the floats written immediately before it;
-                ;; `pending` is left holding the floats written after the
-                ;; last non-float child, which have nothing to anchor to
-                ;; and are emitted at the end.
+          (let [;; `anchors` maps an index into the lifted-free `flow`
+                ;; vector to the floats/out-of-flow boxes written
+                ;; immediately before it; `pending` is left holding the ones
+                ;; written after the last in-flow child, which have nothing
+                ;; to anchor to and are emitted at the end.
+                lifted? (fn [c] (or (absolute? theme c) (float-child? theme c)))
                 {:keys [flow anchors] tail :pending}
                 (reduce (fn [{:keys [flow anchors pending]} c]
-                          (if (float-child? theme c)
+                          (if (lifted? c)
                             {:flow flow :anchors anchors :pending (conj pending c)}
                             {:flow (conj flow c)
                              :anchors (if (seq pending)
@@ -7060,9 +7215,61 @@
                                 ;; the browser's x=7 w=70).
                                 (if (some floated? children) 1 2))
          y content-y draws [] floats []
-         height 0 prev-mb 0 first? true out-mt 0]
+         height 0 prev-mb 0 first? true out-mt 0 oof []]
     (if-let [child (first remaining)]
       (cond
+        ;; ---- out of flow: the flow yields only its STATIC POSITION ----
+        ;;
+        ;; An `absolute`/`fixed` box takes no part in block flow at all --
+        ;; not the running Y, not margin collapsing, not the float band --
+        ;; but real CSS still needs the flow to answer ONE question about
+        ;; it: where it would have been if it had stayed. That is its
+        ;; STATIC POSITION, and it is what every axis with no offset
+        ;; (`top: auto`/`left: auto`, i.e. the default) resolves to. This
+        ;; loop is the only place that answer exists, which is why the box
+        ;; travels this far before being handed to layout-absolute-children.
+        ;;
+        ;; Measured in Brave, all four rules below:
+        ;;
+        ;; - `<p>flow</p><span style="position:absolute;left:40px">abs</span>`
+        ;;   puts the span at y=34 -- the paragraph's bottom edge (20) plus
+        ;;   its own 14px bottom margin -- where this engine put it at y=0.
+        ;; - the box's OWN top margin is added on top of that:
+        ;;   `<p>one</p><p style="position:absolute">abs</p>` reports y=48,
+        ;;   not 34.
+        ;; - and it does NOT collapse with the preceding sibling's bottom
+        ;;   margin, which is the one rule that could not be guessed:
+        ;;   margin-bottom 10 then margin-top 30 reports y=60 (20+10+30),
+        ;;   and margin-bottom 30 then margin-top 10 reports the same 60
+        ;;   (20+30+10). Collapsing would have given 80 for the first.
+        ;; - as the FIRST child its own margin is added but not collapsed
+        ;;   out either: `<div><p style="position:absolute">abs</p><p>after
+        ;;   </p></div>` puts the absolute one at y=14 and the in-flow one
+        ;;   (whose identical margin DOES collapse through the container's
+        ;;   top edge) at y=0.
+        ;;
+        ;; `prev-mb`/`first?` are exactly the two the in-flow branch below
+        ;; already maintains, so this is the same flow position a real
+        ;; sibling would get, plus the box's own margin and minus the
+        ;; collapsing a real sibling would take part in.
+        ;;
+        ;; Deliberately NOT modelled: `clear` on an out-of-flow box (real
+        ;; CSS ignores it, and so does this), and the INLINE static
+        ;; position -- a box written between two words is placed at the
+        ;; container's content edge here, where a browser puts it at the
+        ;; point in the line it was written at (measured: x=31.38 for
+        ;; `text <span style="position:absolute">pop</span> tail`, and 0
+        ;; here). That one needs the line box that
+        ;; layout-inline-run builds, and only its BLOCK-level half is
+        ;; implemented here -- see layout-inline-run's own `:out-of-flow`
+        ;; return for the half that is.
+        (absolute? theme child)
+        (let [cst (node-style child theme)]
+          (recur (rest remaining) y draws floats height prev-mb first? out-mt
+                 (conj oof {:node child
+                            :x (+ content-x (margin-side cst :left))
+                            :y (+ y (if first? 0 prev-mb) (margin-side cst :top))})))
+
         ;; ---- a float: placed into the band, invisible to block flow ----
         (floated? child)
         (let [fst (node-style child theme)
@@ -7089,18 +7296,25 @@
           (recur (rest remaining) y
                  (into draws (translate-ops (+ fx fml) (+ fy fmt) (:draw m)))
                  (conj floats {:x fx :y fy :w mw :h mh :right? right?})
-                 height prev-mb first? out-mt))
+                 height prev-mb first? out-mt oof))
 
         (and (map? child) (:inline/run child))
         (let [run (:inline/run child)
               [bl br] (float-band floats content-x content-w y)
-              {:keys [draw h]} (layout-inline-run theme bl y (max 0 (- br bl))
-                                                  opacity inherited run)
+              {:keys [draw h] run-oof :out-of-flow}
+              (layout-inline-run theme bl y (max 0 (- br bl))
+                                 opacity inherited run)
               advance (+ h (:gap theme))]
           ;; a line box is real content: nothing collapses through it, so
           ;; `prev-mb` resets to 0 and (when it is the FIRST entry) no top
-          ;; margin escapes this container either.
-          (recur (rest remaining) (+ y advance) (into draws draw) floats (+ height advance) 0 false out-mt))
+          ;; margin escapes this container either. An out-of-flow box
+          ;; NESTED in one of the run's inline elements comes back with the
+          ;; containing block that inline box turned out to be -- it joins
+          ;; the same list this loop's own out-of-flow branch feeds, in
+          ;; document order, and layout-absolute-children reads the
+          ;; per-entry containing block from there.
+          (recur (rest remaining) (+ y advance) (into draws draw) floats (+ height advance) 0 false out-mt
+                 (into oof run-oof)))
 
         :else
         (let [cst (when (map? child) (node-style child theme))
@@ -7176,7 +7390,8 @@
                      shifted)]
           (recur (rest remaining) (+ y advance) (into draws draw) (into floats escaped)
                  (+ height advance) mb* false
-                 (if (and first? collapse-top?) mt* out-mt))))
+                 (if (and first? collapse-top?) mt* out-mt)
+                 oof)))
       ;; ^ closes: if / recur / let / cond
       {:draw draws
        ;; A container grows to hold its floats ONLY when it establishes a
@@ -7194,7 +7409,12 @@
        :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)
        ;; the floats this box did NOT contain, for its parent to keep
        ;; carrying up until something does
-       :float/escaped (if contains-floats? [] floats)})))))
+       :float/escaped (if contains-floats? [] floats)
+       ;; every out-of-flow child, in document order, each carrying the
+       ;; static position the flow above just computed for it -- see the
+       ;; out-of-flow branch. layout-block hands these straight to
+       ;; layout-absolute-children, which is the only consumer.
+       :out-of-flow oof})))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing
@@ -7234,18 +7454,27 @@
    nested stacking contexts of their own), but correctly resolves the
    one case that was silently backwards. Ties within each group still
    sort by `:z` ascending, same as before."
-  ;; `content-x`/`content-y` are the STATIC-position fallback, and they are
-  ;; deliberately not the same origin as `content-w`/`content-h`'s box: with
-  ;; no offset on an axis, real CSS leaves the box where it would have been
-  ;; in flow (its static position), which this engine approximates with the
-  ;; ancestor's content origin -- the same thing it did before the
-  ;; containing block became the padding box. Only an axis that HAS an
-  ;; offset resolves against `pad-*`. Conflating the two moved every
-  ;; offsetless absolute/fixed box by the ancestor's padding, which the
+  ;; `children` are the `{:node :x :y}` entries layout-children-block's own
+  ;; out-of-flow branch produced: `:x`/`:y` are that box's STATIC POSITION,
+  ;; the place the normal flow would have put it, and they are deliberately
+  ;; not the same origin as `pad-*`. With no offset on an axis, real CSS
+  ;; leaves the box exactly there. Only an axis that HAS an offset resolves
+  ;; against `pad-*`. Conflating the two moved every offsetless absolute/
+  ;; fixed box by the ancestor's padding, which the
   ;; fixed-child-does-not-push-its-following-sibling-down test caught.
-  [theme pad-x pad-y pad-w pad-h content-x content-y opacity inherited children]
-  (let [placed (mapv (fn [child]
+  ;;
+  ;; An entry may also carry its own `:cb` -- a containing block that is
+  ;; NOT this block box, which is what a `position: relative` INLINE
+  ;; ancestor establishes (see layout-inline-run). Everything else about
+  ;; the placement is identical, so the containing block is simply read per
+  ;; entry rather than taken from the arguments.
+  [theme pad-x pad-y pad-w pad-h opacity inherited children]
+  (let [placed (mapv (fn [{child :node content-x :x content-y :y cb :cb}]
                         (let [cst (node-style child theme)
+                              pad-x (:x cb pad-x)
+                              pad-y (:y cb pad-y)
+                              pad-w (:w cb pad-w)
+                              pad-h (:h cb pad-h)
                               ;; An absolutely positioned box with
                               ;; `width: auto` is SHRINK-TO-FIT, not
                               ;; fill-the-container: real CSS sizes it to
@@ -7600,7 +7829,6 @@
         content-w (max 0 (- w inset-l inset-r))
         scroll-x (:scroll-left st)
         scroll-y (:scroll-top st)
-        {:keys [in-flow out-of-flow]} (partition-flow theme (:children node))
         explicit-h (resolve-height st)
         ;; Margins collapse THROUGH this box's own edge only when nothing
         ;; separates the edge from the child: no padding on that side, no
@@ -7655,10 +7883,10 @@
                                         (:display st))
                              (contains? #{"left" "right"} (:float st))
                              (contains? #{"absolute" "fixed"} (:position st)))
-        {:keys [draw h] :margin/keys [collapsed-top collapsed-bottom]
+        {:keys [draw h out-of-flow] :margin/keys [collapsed-top collapsed-bottom]
          escaped-floats :float/escaped}
         (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
-                               content-w opacity inherited in-flow
+                               content-w opacity inherited (:children node)
                                collapse-top? collapse-bottom? contains-floats?)
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
@@ -7683,7 +7911,18 @@
         pad-y (+ y bw)
         pad-w (max 0 (- node-w (* 2 bw)))
         pad-h (max 0 (- node-h (* 2 bw)))
-        {above-draws :above below-draws :below} (layout-absolute-children theme pad-x pad-y pad-w pad-h content-x content-y opacity inherited out-of-flow)
+        ;; The static positions came back in the SCROLLED coordinate space
+        ;; the flow above ran in; `pad-*` is unscrolled, and so were the
+        ;; static positions before this. Undoing the scroll here keeps the
+        ;; two halves of a placement in one space, which is what this
+        ;; engine has always done -- an out-of-flow box does not scroll
+        ;; with its container's content here (a documented cut: it is one
+        ;; more consequence of there being no scroll-independent viewport
+        ;; model, the same one `absolute?` names for `position: fixed`).
+        out-of-flow (if (and (zero? scroll-x) (zero? scroll-y))
+                      out-of-flow
+                      (mapv #(-> % (update :x + scroll-x) (update :y + scroll-y)) out-of-flow))
+        {above-draws :above below-draws :below} (layout-absolute-children theme pad-x pad-y pad-w pad-h opacity inherited out-of-flow)
         box-shadow-draws (or (box-shadow-ops st x y node-w node-h opacity) [])
         border-draws (or (border-ops st x y node-w node-h opacity) [])
         outline-draws (or (outline-ops st x y node-w node-h opacity) [])
