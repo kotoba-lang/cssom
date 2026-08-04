@@ -505,6 +505,77 @@ container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
 
+### Round twenty-two: the float band, and all three of round seven's exclusions
+
+Round seven's three named exclusions are gone, and so is the fourth thing it
+did not name (a float's own margins). Every number below was read out of a
+real headless Brave 151 over CDP first — one isolating shape per behaviour,
+each wrapped in its own `overflow: hidden` box, because floats leaking
+between probe cases moved a float from x=0 to x=80 and another from y=0 to
+y=28 before the wrappers went on. Line **249 → 257 / 280**, geometry
+**952 → 963 / 1142** (207 → 212 cases fully clean), float group **9/13 →
+13/13**, page **24/28 → 27/28**.
+
+The v1 band was one `{:h :left :right}` rectangle pinned to the container's
+top. It is now a list of placed float MARGIN boxes and three pure functions
+over them — `float-band` (the `[left right]` edges on a scanline),
+`float-clearance-y` (the lowest bottom edge on a cleared side),
+`place-float` (CSS 9.5.1's placement: never above the flow position or an
+earlier float's top, pushed down until the band is wide enough). Every float
+rule in the file is now stated in terms of those three.
+
+| what changed | browser | before | after |
+|---|---|---|---|
+| two 120px floats in 200px | (0,0) (0,20) | (0,0) **(120,0)** | (0,0) (0,20) |
+| `float:left; margin:10px` | (10,10) | **(0,0)** | (10,10) |
+| a float written after a `<p>` | y=34 | **y=0** | y=34 |
+| `clear:left` past a 40px float | y=40, container 64 | **y=20, container 40** | y=40, container 60 |
+| `clear:both`, floats 30 and 50 tall | y=50 | **y=0** | y=50 |
+| plain `<div>` holding only a float | 200×0 | **200×60** | 200×0 |
+| the same div, `overflow:hidden` | 200×60 | 200×60 | 200×60 |
+
+Three findings worth keeping:
+
+- **Containment and margin-collapsing are different questions.** The engine
+  had one `fc-free?` flag doing both. `border-width` stops a margin
+  collapsing through an edge but does NOT establish a formatting context, and
+  `display: flow-root` — which exists for no other purpose than to establish
+  one — was in neither list. Splitting them fixed
+  `display/flow-root-establishes-a-context`, which had been failing for the
+  margin half while passing the containment half by accident (the old code
+  contained every container's floats unconditionally).
+- **A float must be transparent to inline grouping.** It is blockified, so it
+  never joins a line box — but leaving it in the sequence `inline-runs`
+  partitions splits `text <float> more` into two one-child runs on two lines,
+  where every browser keeps them on one. Floats are lifted out, the rest is
+  grouped, and each float is put back in front of the entry its following
+  sibling landed in. That re-insertion is also what lets a float be placed at
+  the flow position it was WRITTEN at rather than hoisted to the top.
+- **`page/hero-with-floated-image` was the harness, not the engine.** It
+  reported `got []` — an empty line structure for a page that rendered
+  correctly. `engine-lines` skips text inside a replaced box geometrically
+  (draw-ops carry no parentage) and its rectangle test had the right and
+  bottom edges INCLUSIVE, so the headline at x=80 counted as "inside" the
+  80px `<img>` it was flowing beside and all three lines were discarded. A
+  float is the one construct that reliably puts text at exactly a replaced
+  box's right edge. Making those two edges exclusive — a point on a box's
+  right edge is adjacent to it, not in it — also fixed
+  `page/article-with-figure` and `page/login-form`, which is the evidence
+  that it was a real bug in the proxy and not a fix aimed at one case.
+
+**Still not implemented, and named:** the band is consulted by the line boxes
+of the float's OWN container only. `layout-node` does not carry a float
+context into a child, so a block DESCENDANT lays its lines out at full width
+where a browser narrows them. Border boxes — what the geometry axis compares —
+are unaffected either way; what this costs is a wrap point in text long enough
+to break. Pinned by
+`a-float-narrows-its-own-containers-lines-and-not-a-descendants` so it stays a
+recorded cut rather than a silent wrong answer. Also unimplemented: clearance
+does not suppress the cleared box's own margin collapsing, and `float-band` is
+queried at a line's top scanline rather than over its full height (a run gets
+one content width from `layout-inline-run`, so a paragraph that starts beside
+a float keeps the narrow width for the lines continuing below it).
+
 ### Round twenty-one: the corpus grows 200 → 292
 
 The engine went 47% → 89% on geometry while the corpus stayed at 200 cases.
@@ -573,7 +644,9 @@ without the other eight it would read as coverage.
 
 **Floats: `clear`, containment, and the float's own margins.** The float
 round named three unimplemented things and left them without cases. All
-three now have one, plus two more:
+three now have one, plus two more. (All five were fixed in round
+twenty-two, above; the measurements are kept here because they are what
+that round was written against.)
 
 - `float/clear-left`, `float/clear-both` — `clear` is unimplemented.
   `below` lands at y=40 (container 60) in the browser and y=20 (container
@@ -1033,13 +1106,15 @@ children, with the block children hoisted between them — so nothing
 downstream needed a new concept. Bounded v1: the block must be a DIRECT
 child of the inline element.
 
-### The three remaining line-structure failures
+### The remaining line-structure failures
 
-`page/hero-with-floated-image` (the float band's documented v1 boundary:
-the narrowed width applies to the whole run rather than only to the lines
-beside the float) are honest gaps, now measured.
+`page/hero-with-floated-image` was written up here as the float band's
+documented v1 boundary. Round twenty-two measured it and it was neither:
+the engine's three lines were correct and `engine-lines` was discarding
+them, because its inside-a-replaced-box test counted the right edge as
+inside. Fixed there.
 
-The third is deliberate:
+The one below is deliberate:
 
 `position/fixed-leaves-flow` stays red and is NOT chased. `position: fixed`
 takes the box out of flow and OVERLAPS the content beside it, so "which line
