@@ -57,8 +57,8 @@ computed-style axis" below for its first run.
 
 ## Result — 2026-08-04
 
-**Line structure: 184/190 = 97%. Geometry: 634/719 element boxes (88%),
-164/200 cases with every box in agreement. Computed style: 8537/9982
+**Line structure: 184/190 = 97%. Geometry: 638/719 element boxes (89%),
+166/200 cases with every box in agreement. Computed style: 8537/9982
 cascade-resolved values (86%), 197/200 cases with no mismatch attributable
 to the cascade itself**, on a corpus of 200.
 
@@ -66,8 +66,9 @@ The computed-style figures are after the two shorthand bugs this axis found
 on its first run were fixed — cascade-attributed mismatches 41 → 5, cases
 clean of them 190 → 197. See "The 41 that were actually the cascade's".
 
-That geometry number is one point BELOW the previous round's 87%, and it is
-the right trade: see "the font-metrics model" below. The corpus has grown
+That geometry number dipped to 85% on the round the font-metrics model
+landed, which was the right trade at the time — see "the font-metrics
+model" below — and has since come back up past the earlier 87%. The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
