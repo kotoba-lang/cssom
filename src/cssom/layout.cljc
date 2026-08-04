@@ -1095,6 +1095,24 @@
    :margin-right (parse-int (style node :margin-right)
                             (or (:margin-right (ua-control-box-for node))
                                 (get-in ua-box-sides [(:tag node) :margin-right])))
+   ;; A USED height injected by the layout itself (force-cross-size's
+   ;; stretch, layout-absolute-children's top+bottom solve), as an attr
+   ;; rather than a `style/height` declaration because it is a BORDER-box
+   ;; number that has already been solved -- box-sizing must not be applied
+   ;; to it a second time. See used-block-height.
+   :height/used (parse-int (attr node :kotoba/used-height) nil)
+   ;; The margins as the cascade wrote them, alongside the coerced numbers
+   ;; above. `auto` is a real, extremely common margin value that is not a
+   ;; length at all, and the coercion that makes every other reader safe is
+   ;; exactly what erases it -- see auto-margin?.
+   :margin/raw-top (style node :margin-top)
+   :margin/raw-bottom (style node :margin-bottom)
+   :margin/raw-left (style node :margin-left)
+   :margin/raw-right (style node :margin-right)
+   ;; The containing block's inline-axis START edge. Read here, resolved
+   ;; and inherited by layout-node -- see the `:direction` entry it adds to
+   ;; the inherited map for what part of `rtl` this engine implements.
+   :direction (some-> (style node :direction) str str/lower-case str/trim)
    ;; Real CSS's `border-spacing` defaults to 2px in every browser: cells
    ;; are separated by it AND the table is inset by it on all four sides.
    ;; Measured against Chrome, its absence was the single reason table/tr
@@ -1420,11 +1438,50 @@
   [v]
   (when (some? v) (parse-int v nil)))
 
+;; The calc() machinery lives ~700 lines down, next to the grid track-list
+;; parser that first needed it. Declared here because a `calc()` is a LENGTH
+;; before it is a track size -- `width: calc(100% - 40px)` is the ordinary
+;; author idiom this file's length resolution has to answer, and the
+;; alternative (a second copy of calc-pattern next to the length helpers) is
+;; exactly the regex drift this file's own var-ref-pattern comment in
+;; cssom.core argues against.
+(declare calc-pattern resolve-constant-calc)
+
 (defn- percentage?
   "Whether a cascade value is a percentage this engine should resolve
    against a containing block rather than read as a bare pixel count."
   [v]
   (and (string? v) (some? (re-matches #"\s*-?[0-9]*\.?[0-9]+%\s*" v))))
+
+(defn- calc-value?
+  "Whether a cascade value is a whole-value `calc(...)` call this file has to
+   resolve itself.
+
+   cssom.core already collapses a CONSTANT calc() (`calc(100px + 20px)`) to a
+   plain number during the cascade, so anything still wearing the `calc(`
+   text when it gets here contains something the cascade could not resolve
+   without knowing the layout -- a percentage, or a unit outside this
+   engine's subset. Both must stay out of `parse-int`'s leading-digit-run
+   reach: `calc(100% - 40px)` is not 100px, and reading it as one is a guess
+   dressed as a value."
+  [v]
+  (and (string? v) (some? (re-matches calc-pattern (str/trim v)))))
+
+(defn- calc-of
+  "Resolves a whole-value `calc(...)` against `basis` -- the containing
+   block's size in the axis the value is being read in -- or nil when the
+   value is not a calc() call, when its contents are outside this engine's
+   calc subset, or when a percentage appears inside it and `basis` is not a
+   definite length (`percentage-of`'s own rule, for the same reason: a
+   percentage against an indefinite basis is `auto`, not zero).
+
+   Measured against Brave: `width: calc(100% - 40px)` inside a 300px block is
+   260 there and was 300 here (the whole value failed to parse and
+   resolve-width's avail-width fallback won), and `calc(50% + 10px)` is 160
+   against the same 300."
+  [v basis]
+  (when (calc-value? v)
+    (resolve-constant-calc (str/trim v) basis)))
 
 (defn- percentage-of
   "Resolves a cascade value that may be a PERCENTAGE against `basis`, or nil
@@ -1454,13 +1511,15 @@
         (long (Math/round (* basis (/ pct 100.0))))))))
 
 (defn- length-or-percentage
-  "`explicit-length`, but resolving a percentage against `basis` first.
+  "`explicit-length`, but resolving a percentage -- or a `calc()` with a
+   percentage in it -- against `basis` first.
    Call sites that know their containing-block dimension use this; ones that
    genuinely do not (yet) keep calling `explicit-length` and keep its
    documented approximation, so the two are easy to tell apart when reading."
   [v basis]
   (or (percentage-of v basis)
-      (when-not (and (string? v) (str/includes? (str v) "%"))
+      (calc-of v basis)
+      (when-not (or (calc-value? v) (and (string? v) (str/includes? (str v) "%")))
         (explicit-length v))))
 
 (defn- clamp-width
@@ -1519,11 +1578,37 @@
   [st]
   (+ (inset-side st :left) (inset-side st :right)))
 
-(defn- margin-side
-  "One side's margin: the per-side value when present (author or UA), else
-   the uniform `:margin`."
+(defn- auto-margin?
+  "Whether ONE side's margin is the keyword `auto` -- read from the raw
+   cascade value, because `auto` is not a length and node-style's own
+   `parse-int` coercion (correctly) turns it into the same nil a missing
+   margin produces.
+
+   The two are the same number (0) and completely different layout: a 0
+   margin leaves the box where the flow put it, an `auto` one absorbs the
+   leftover space. Real CSS: with both inline margins `auto` the box is
+   CENTRED, with one the box is pushed to the other side, and with neither
+   the leftover goes to whichever side the containing block's `direction`
+   says is the end. (A vertical `auto` margin on an in-flow block is simply
+   0, which is what margin-side below already gives it.)"
   [st side]
-  (or (get st (keyword (str "margin-" (name side)))) (:margin st)))
+  (let [v (get st (keyword "margin" (str "raw-" (name side))))]
+    (and (string? v) (= "auto" (str/lower-case (str/trim v))))))
+
+(defn- margin-side
+  "One side's margin AS A LENGTH: the per-side value when present (author or
+   UA), else the uniform `:margin`, and 0 when the author wrote `auto`.
+
+   The `auto` case has to short-circuit the uniform fallback rather than
+   ride it: `margin: 10px auto` expands to a per-side `auto` on the inline
+   sides AND a uniform `:margin` of 10, so falling through would give the
+   inline sides the VERTICAL margin -- a 10px indent where the box should be
+   centred. Whether an auto side then absorbs the leftover space is
+   layout-children-block's question, asked through auto-margin?."
+  [st side]
+  (if (auto-margin? st side)
+    0
+    (or (get st (keyword (str "margin-" (name side)))) (:margin st))))
 
 (defn- resolve-width
   "The element's BORDER-BOX width.
@@ -1541,10 +1626,12 @@
    With `box-sizing: border-box` the declared width IS the border box, and
    nothing is added -- which is exactly why authors reach for it."
   [st avail]
-  (let [;; a percentage width resolves against the containing block's
-        ;; content width, which is exactly what `avail` is here.
+  (let [;; a percentage width -- on its own or inside a calc() -- resolves
+        ;; against the containing block's content width, which is exactly
+        ;; what `avail` is here.
         declared (or (percentage-of (:width st) avail)
-                     (when-not (percentage? (:width st))
+                     (calc-of (:width st) avail)
+                     (when-not (or (percentage? (:width st)) (calc-value? (:width st)))
                        (parse-int (:width st) nil)))]
     (clamp-width st
                  (cond
@@ -1568,9 +1655,27 @@
    -- so this returns nil (via explicit-length), not a fallback number, for
    that `or` to correctly detect 'nothing explicit was given' the same way
    `(:height st)` being nil already did before any raw string could reach
-   here."
-  [st]
-  (explicit-length (:height st)))
+   here.
+
+   `basis` is the containing block's CONTENT HEIGHT, which is what a
+   percentage height resolves against; nil (the one-argument arity) means
+   that height is not definite, and real CSS then treats the percentage as
+   `auto` -- which is exactly the nil this already returns for `auto`, so
+   the callers' own `(or ... content-driven)` needs no change to get the
+   right answer. Before this, `explicit-length`'s leading-digit-run read
+   turned `height: 50%` into 50 PIXELS whatever the parent was: measured
+   against Brave, `box/percentage-height-of-an-auto-parent` is a 20px
+   content-driven box there and was 50 here. Its deliberate pair
+   `box/percentage-height-of-a-fixed-parent` PASSED throughout -- 50% of a
+   100px parent is 50 either way -- which is how a bug this size hid in a
+   corpus that had a case pointed straight at it."
+  ([st] (resolve-height st nil))
+  ([st basis]
+   (or (:height/used st)
+       (percentage-of (:height st) basis)
+       (calc-of (:height st) basis)
+       (when-not (or (percentage? (:height st)) (calc-value? (:height st)))
+         (explicit-length (:height st))))))
 
 (defn- clamp-height
   "Real CSS min-height/max-height apply to a box's FINAL height regardless
@@ -1591,6 +1696,75 @@
    (let [height (if-let [mn (length-or-percentage (:min-height st) basis)] (max height mn) height)
          height (if-let [mx (length-or-percentage (:max-height st) basis)] (min height mx) height)]
      height)))
+
+(defn- used-block-height
+  "A BLOCK box's own border-box height when its `height` is definite, else
+   nil -- the block-axis counterpart of the content-box correction
+   resolve-width already makes in the inline axis.
+
+   With the default `box-sizing: content-box` a declared `height` is the
+   CONTENT height, so padding and border add OUTSIDE it: measured in Brave,
+   `div{height:100px;padding:10px}` is 120px tall and lays its children out
+   in 100. This engine used the declared height AS the border box in both
+   modes, so the same box was 100 tall with 80 of content -- the identical
+   bug resolve-width's docstring describes in the inline axis, which had
+   been fixed there and not here.
+
+   Deliberately NOT applied in layout-flex/layout-grid/layout-form-control,
+   which read `resolve-height` straight into their own `node-h`: those three
+   have their own open sizing gaps (see the conformance corpus's flex and
+   grid groups) and correcting one axis of one of them in passing would mean
+   claiming a fix nothing in the corpus measures."
+  ;; ...and NOT applied to a height the layout itself solved and injected
+  ;; (`:height/used`): that number is already a border box -- a stretched
+  ;; flex item's line cross size, an absolute box's `top`+`bottom` solve --
+  ;; so adding the insets to it would grow the box past the size that was
+  ;; just computed FOR it. Measured as a 24px `<button>` in
+  ;; `page/form-row` where the browser and the flex line both say 21.
+  [st basis]
+  (if-let [used (:height/used st)]
+    used
+    (when-let [declared (resolve-height st basis)]
+      (if (= "border-box" (:box-sizing st))
+        declared
+        (+ declared (declared-inset-side st :top) (declared-inset-side st :bottom))))))
+
+(defn- definite-content-height
+  "The CONTENT height this box hands its children as the basis a percentage
+   height resolves against, or nil when this box's own height is not
+   definite -- an auto-height parent, which is what makes a child's
+   percentage height `auto` in real CSS (see percentage-of).
+
+   Deliberately the same subtraction layout-block itself performs
+   (`inset-side` on both block edges) rather than an independently derived
+   'true' content height: the basis a child resolves against and the box the
+   child is actually laid out in have to be the same number, and this file's
+   inset-side carries a known asymmetry for a content-box element with a
+   BORDER (it omits the border there, exactly as the width axis does). One
+   consistent answer is worth more here than a second, differently-wrong
+   one; the border case is what `position/absolute-containing-block-is-the-
+   padding-box` already measures, in the axis where it shows up first."
+  [st basis]
+  (when-let [h (used-block-height st basis)]
+    (max 0 (- (clamp-height st h basis) (inset-side st :top) (inset-side st :bottom)))))
+
+(defn- collapse-margins
+  "Real CSS's own rule for collapsing adjacent vertical margins, negatives
+   included: the collapsed margin is the largest POSITIVE margin plus the
+   most negative one -- which reduces to `max` when every margin is positive
+   (this file's original rule) and to `min` when every one is negative.
+
+   `max` alone silently dropped every negative margin on the floor, because
+   a negative never wins a `max` against the 0 that stands in for 'no margin
+   here'. Measured in Brave on `<div>first</div><div style=\"margin-top:
+   -8px\">pulled</div>`: the second block sits at y=12 in a 32px-tall parent
+   there, and sat at y=20 in a 40px one here -- the cascade had the -8 all
+   along (`box/negative-margin-pulls-up` is clean on the computed-style
+   axis) and layout was the half that discarded it."
+  [& ms]
+  (let [ms (remove nil? ms)]
+    (+ (reduce max 0 (filter pos? ms))
+       (reduce min 0 (filter neg? ms)))))
 
 (defn- resolve-line-height
   "Real CSS `line-height` is either an absolute length (`24`/`24px`, already
@@ -2059,7 +2233,15 @@
    scope-cut rather than solving that separate, pre-existing asymmetry
    here too."
   [column? px child]
-  (assoc-in child [:attrs (keyword "style" (if column? "width" "height"))] px))
+  (if column?
+    (assoc-in child [:attrs :style/width] px)
+    ;; The cross size of a ROW line is a BORDER-box height (every base size
+    ;; here is a measured `(:h (:box m))`), so it is injected as the solved
+    ;; used height rather than as a `height` declaration -- box-sizing has
+    ;; already been applied to the number by whatever produced it, and
+    ;; layout-block would otherwise apply it a second time. The same reason
+    ;; force-main-width pins `box-sizing: border-box` on its own injection.
+    (assoc-in child [:attrs :kotoba/used-height] px)))
 
 (defn- force-main-width
   "force-cross-size's MAIN-axis counterpart, for a ROW container: injects
@@ -2173,18 +2355,32 @@
 
 (defn- calc-number-at
   "Attempts to match a numeric literal -- optionally decimal, optionally
-   with an immediately-following `px` unit glued on with no space -- at
-   index `idx` of calc() tokenizer input `s`. Returns `[token next-idx]`,
-   or nil if `idx` isn't the start of one (a `%`/other unit, or stray
-   text), signalling to tokenize-calc that this token isn't this engine's
-   constant-calc() subset at all."
-  [s idx]
+   with an immediately-following `px` or `%` unit glued on with no space --
+   at index `idx` of calc() tokenizer input `s`. Returns `[token next-idx]`,
+   or nil if `idx` isn't the start of one (another unit, or stray text),
+   signalling to tokenize-calc that this token isn't this engine's
+   calc() subset at all.
+
+   A `%` operand is resolved to px HERE, against `basis`, rather than
+   carried as a third unit through eval-calc-node: the whole point of a
+   percentage in a calc() is that it is a length as soon as the containing
+   block is known, and resolving it at the leaf keeps eval-calc-node's
+   `+`/`-` same-unit rule (the rule that makes `calc(100px + 2)` invalid)
+   exactly as it was. `basis` nil means the containing block's size in this
+   axis is not definite, so the percentage cannot be resolved at all and the
+   whole calc() degrades to nil -- the same answer percentage-of gives, for
+   the same reason."
+  [s idx basis]
   (when-let [num-str (re-find #"^[0-9]*\.?[0-9]+" (subs s idx))]
     (let [after (+ idx (count num-str))
           px? (and (<= (+ after 2) (count s)) (= "px" (subs s after (+ after 2))))
-          end (if px? (+ after 2) after)]
-      [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value (parse-dbl num-str 0.0)}
-       end])))
+          pct? (and (not px?) (< after (count s)) (= \% (nth s after)))
+          end (cond px? (+ after 2) pct? (inc after) :else after)
+          n (parse-dbl num-str 0.0)]
+      (cond
+        (not pct?) [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value n} end]
+        (some? basis) [{:calc/type :operand :calc/unit :px :calc/value (* basis (/ n 100.0))} end]
+        :else nil))))
 
 (defn- tokenize-calc
   "Tokenizes the inside of a `calc(...)` call into a flat token vector --
@@ -2194,8 +2390,14 @@
    character isn't part of a recognized token (e.g. a `%`/`em`/other unit
    anywhere inside), the same 'stop, don't guess' contract every other
    token-matching helper in this file already uses (parse-track-token's
-   :else, parse-minmax-token's fallbacks, ...)."
-  [s]
+   :else, parse-minmax-token's fallbacks, ...).
+
+   `basis` is the containing block's size in the axis this calc() is being
+   read in, for a `%` operand to resolve against (see calc-number-at); nil
+   where the caller has none, which is what every track-sizing caller
+   passes and what makes a percentage inside a track size degrade exactly
+   as it always did."
+  [s basis]
   (let [n (count s)]
     (loop [idx 0 tokens []]
       (cond
@@ -2209,7 +2411,7 @@
           \/ (recur (inc idx) (conj tokens {:calc/type :slash}))
           \( (recur (inc idx) (conj tokens {:calc/type :lparen}))
           \) (recur (inc idx) (conj tokens {:calc/type :rparen}))
-          (if-let [[operand next-idx] (calc-number-at s idx)]
+          (if-let [[operand next-idx] (calc-number-at s idx basis)]
             (recur next-idx (conj tokens operand))
             nil))))))
 
@@ -2291,26 +2493,32 @@
   "Resolves a single whole TOKEN (e.g. \"calc(100px + 20px)\", already
    isolated by split-tracks-toplevel/split-args-toplevel's paren-aware
    splitting) to a plain px number when it is a whole-value `calc(...)`
-   call whose entire contents are this engine's constant-calc() subset
-   (plain numbers/px lengths, `+`/`-`/`*`/`/`/parens -- no `%`/`em`/other
-   relative unit), or nil otherwise (not a calc() call at all, a
-   percentage/other-unit operand anywhere inside, an arithmetic-type
-   violation, or a malformed expression) -- callers (parse-track-token,
-   parse-length-px) treat nil exactly like any other unsupported token
-   already degrades in this file (a 0px fixed track / an unconstrained
-   1fr minmax() fallback), never guessing a number. An exact-integer
-   result is returned as a plain integer (matching this file's other
-   integer-pixel track sizes); a genuinely fractional result (e.g.
-   `calc(100px / 3)`) is returned as a double rather than losing
-   precision."
-  [tok]
-  (when-let [[_ inner] (re-matches calc-pattern tok)]
-    (when-let [tokens (tokenize-calc inner)]
-      (when-let [[node toks] (parse-calc-level tokens 0)]
-        (when (empty? toks)
-          (when-let [[value _unit] (eval-calc-node node)]
-            (let [truncated (long value)]
-              (if (== value truncated) truncated value))))))))
+   call whose entire contents are this engine's calc() subset (plain
+   numbers/px lengths, `+`/`-`/`*`/`/`/parens, plus a `%` operand when the
+   caller supplies the `basis` it resolves against -- still no `em`/other
+   relative unit), or nil otherwise (not a calc() call at all, an
+   unsupported-unit operand anywhere inside, a percentage with no definite
+   basis, an arithmetic-type violation, or a malformed expression) --
+   callers (parse-track-token, parse-length-px) treat nil exactly like any
+   other unsupported token already degrades in this file (a 0px fixed
+   track / an unconstrained 1fr minmax() fallback), never guessing a
+   number. An exact-integer result is returned as a plain integer (matching
+   this file's other integer-pixel track sizes); a genuinely fractional
+   result (e.g. `calc(100px / 3)`) is returned as a double rather than
+   losing precision.
+
+   The one-argument arity is the no-containing-block caller: every track
+   sizer, which has no width to resolve a percentage against and so keeps
+   the constant-only subset it has always had."
+  ([tok] (resolve-constant-calc tok nil))
+  ([tok basis]
+   (when-let [[_ inner] (re-matches calc-pattern tok)]
+     (when-let [tokens (tokenize-calc inner basis)]
+       (when-let [[node toks] (parse-calc-level tokens 0)]
+         (when (empty? toks)
+           (when-let [[value _unit] (eval-calc-node node)]
+             (let [truncated (long value)]
+               (if (== value truncated) truncated value)))))))))
 
 (defn- parse-length-px
   "Parses a single px length or bare-integer token -- the two plain-length
@@ -4579,6 +4787,28 @@
         ;; where the browser reports 41. Lay it out and read its box.
         shrink-to-fit? (and shrink-to-fit?
                             (not (and (map? child) (= :table (:tag child)))))
+        ;; A percentage (or percentage-bearing calc()) width would otherwise
+        ;; be resolved TWICE: once here against the containing block, and
+        ;; again inside the child's own layout against the width this
+        ;; function just handed it as its available space. `50%` of 200 came
+        ;; out 100 here and then 50 there -- measured against Brave on
+        ;; `position/absolute-percentage-width`, which reports 100.
+        ;;
+        ;; Resolved by writing the USED width back onto the child as a plain
+        ;; length, so the second resolution is a no-op instead of a second
+        ;; percentage. This is the same technique layout-absolute-children
+        ;; already uses for its `left`+`right` stretch height, and it is
+        ;; written as the `width` PROPERTY's used value (a content width
+        ;; under content-box, a border-box width under border-box), not as
+        ;; resolve-width's border-box result, so the child's own box-sizing
+        ;; arithmetic still applies exactly once.
+        child (if (map? child)
+                (let [st (node-style child theme)]
+                  (if-let [used (or (percentage-of (:width st) content-w)
+                                    (calc-of (:width st) content-w))]
+                    (assoc-in child [:attrs :style/width] used)
+                    child))
+                child)
         child-avail (if (map? child)
                        (let [st (node-style child theme)]
                          (if (and shrink-to-fit? (not (:width st)))
@@ -4720,7 +4950,16 @@
 
 (defn- layout-flex
   [theme x y avail-width opacity inherited st node in-flow]
-  (let [direction (:flex-direction st)
+  (let [;; A flex item's containing block is THIS container, not whatever
+        ;; block set the basis on the way in. This function does not resolve
+        ;; its own definite content height for its items yet (its `node-h`
+        ;; still reads resolve-height straight, see used-block-height), so
+        ;; the honest answer for an item's percentage height here is `auto`
+        ;; -- which is what dropping the parent's basis produces. Passing the
+        ;; GRANDparent's height down instead would be a number arrived at by
+        ;; not thinking about it.
+        inherited (dissoc inherited :block/containing-height)
+        direction (:flex-direction st)
         column? (contains? #{"column" "column-reverse"} direction)
         ;; `row-reverse`/`column-reverse` lay the SAME line out from the
         ;; main-END edge (see mirror-main-offsets, which is where the whole
@@ -5403,7 +5642,11 @@
    in document order -- the two conformance cases scored 0/2 -- so this is
    a large step from nothing, not a complete table implementation."
   [theme x y avail-width opacity inherited st node]
-  (let [inset (content-inset st)
+  (let [;; A cell's containing block is the cell, not the block that set the
+        ;; percentage-height basis on the way in -- same reasoning, and same
+        ;; honest `auto`, as layout-flex's own dissoc.
+        inherited (dissoc inherited :block/containing-height)
+        inset (content-inset st)
         avail-content (max 0 (- (resolve-width st avail-width) (* 2 inset)))
         caption (first (filter #(= "table-caption" (table-part-display theme %)) (:children node)))
         rows (table-rows theme node)
@@ -5585,7 +5828,8 @@
                                                  (:h (:box (layout-node
                                                             theme 0 0 cw opacity inherited
                                                             (update cell :attrs dissoc
-                                                                    :style/height :style/min-height :height))))
+                                                                    :style/height :style/min-height :height
+                                                                    :kotoba/used-height))))
                                                  (:h (:box m))))))
                          assigns)
         row-heights
@@ -5947,7 +6191,11 @@
    `grid-column: 2` item and `grid-auto-columns: 90px` makes a second 90px
    column where this engine puts the item back in the first one."
   [theme x y avail-width opacity inherited st node in-flow]
-  (let [;; `display: inline-grid` is a grid container that is INLINE-level:
+  (let [;; A grid item's containing block is this grid area, not whatever
+        ;; block set the percentage-height basis on the way in -- same
+        ;; reasoning, and same honest `auto`, as layout-flex's own dissoc.
+        inherited (dissoc inherited :block/containing-height)
+        ;; `display: inline-grid` is a grid container that is INLINE-level:
         ;; it sits in its parent's line box and shrink-wraps to its tracks
         ;; instead of filling its containing block -- exactly what
         ;; `inline-flex` already does for flex.
@@ -7677,6 +7925,14 @@
               mb (if cst (margin-side cst :bottom) 0)
               ml (if cst (margin-side cst :left) 0)
               mr (if cst (margin-side cst :right) 0)
+              ;; An `auto` inline margin is not a length, so it contributes
+              ;; NOTHING to the width the child is laid out in -- it absorbs
+              ;; whatever is left over afterwards (see auto-dx below). Both
+              ;; already read 0 through margin-side, because node-style's
+              ;; parse-int turns `auto` into the same nil a missing margin
+              ;; gives; these two flags are the part that coercion erased.
+              ml-auto? (boolean (and cst (auto-margin? cst :left)))
+              mr-auto? (boolean (and cst (auto-margin? cst :right)))
               ;; The child is laid out at the running `y` FIRST and shifted
               ;; down by `gap-before` afterwards, because the gap cannot be
               ;; known until the child has been laid out: a margin that
@@ -7712,12 +7968,16 @@
               ;; the inner `<p>`'s 14px margins separating divs that have
               ;; no margins of their own. This engine stacked them flush at
               ;; 20/40.
-              mt* (max mt (:margin/collapsed-top laid 0))
-              mb* (max mb (:margin/collapsed-bottom laid 0))
+              ;;
+              ;; `collapse-margins` rather than `max` because a NEGATIVE
+              ;; margin collapses too, and never wins a max -- see its own
+              ;; docstring for the measurement.
+              mt* (collapse-margins mt (:margin/collapsed-top laid 0))
+              mb* (collapse-margins mb (:margin/collapsed-bottom laid 0))
               gap-before (cond
                            (and first? collapse-top?) 0
                            first? mt*
-                           :else (max prev-mb mt*))
+                           :else (collapse-margins prev-mb mt*))
               ;; `clear` on a BLOCK child: its top border edge is pushed
               ;; down to the bottom margin edge of the floats on the
               ;; cleared side. The extra distance is CLEARANCE -- real
@@ -7728,17 +7988,50 @@
                           (max 0 (- c (+ y gap-before)))
                           0)
               gap-before (+ gap-before clearance)
-              ;; Floats this child did not contain rise into THIS
-              ;; container's band. Shifted by the same `gap-before` the
-              ;; child's own draw-ops are, and by nothing else -- a
-              ;; `position: relative` offset is paint-only, so it must not
-              ;; move a float, which is layout.
-              escaped (mapv #(update % :y + gap-before) (:float/escaped laid []))
               child-h (:h (:box laid))
+              child-w (:w (:box laid))
+              ;; ---- where the leftover inline space goes ----
+              ;;
+              ;; CSS 2.1 SS10.3.3: `margin-left + width + margin-right` must
+              ;; equal the containing block's width. `free` is what that
+              ;; equation has left over once the child has resolved its own
+              ;; width -- which is why it is computed HERE, after the child
+              ;; is laid out, rather than from its declared `width` (a table
+              ;; shrink-wraps, a `min-width`/`max-width` clamps, and an
+              ;; `auto` width has already absorbed the whole of `free` and
+              ;; leaves 0 here, which is exactly the answer real CSS gives:
+              ;; auto margins on an auto-width block are 0).
+              ;;
+              ;; Who gets it:
+              ;;   both margins `auto`  -> split evenly, i.e. CENTRED
+              ;;   one margin `auto`    -> that side takes all of it
+              ;;   neither, ltr         -> margin-right, so the box stays left
+              ;;   neither, rtl         -> margin-left, so the box goes right
+              ;;
+              ;; Over-constrained the other way (a declared width WIDER than
+              ;; the container, so `free` is negative) an auto margin is 0
+              ;; and the box overflows the end edge -- measured in Brave, a
+              ;; 300px `margin: 0 auto` block in a 200px container sits at
+              ;; x=0 and is 300 wide, NOT centred at x=-50.
+              free (max 0 (- content-w ml mr child-w))
+              rtl? (= "rtl" (:direction inherited))
+              auto-dx (cond
+                        (and ml-auto? mr-auto?) (quot free 2)
+                        ml-auto? free
+                        mr-auto? 0
+                        rtl? free
+                        :else 0)
+              ;; Floats this child did not contain rise into THIS
+              ;; container's band. Shifted by the same `gap-before` and
+              ;; `auto-dx` the child's own draw-ops are, and by nothing else
+              ;; -- a `position: relative` offset is paint-only, so it must
+              ;; not move a float, which is layout.
+              escaped (mapv #(-> % (update :y + gap-before) (update :x + auto-dx))
+                            (:float/escaped laid []))
               advance (+ gap-before child-h (:gap theme))
-              shifted (if (zero? gap-before)
+              shifted (if (and (zero? gap-before) (zero? auto-dx))
                         (:draw laid)
-                        (translate-ops 0 gap-before (:draw laid)))
+                        (translate-ops auto-dx gap-before (:draw laid)))
               draw (if (and cst (= "relative" (:position cst)))
                      (let [[dx dy] (relative-offset cst content-w nil)]
                        (translate-ops dx dy shifted))
@@ -7908,7 +8201,7 @@
                                                     (length-or-percentage (:top cst) pad-h)
                                                     (length-or-percentage (:bottom cst) pad-h))))
                               child (if (and stretch-h (map? child))
-                                      (assoc-in child [:attrs :style/height] stretch-h)
+                                      (assoc-in child [:attrs :kotoba/used-height] stretch-h)
                                       child)
                               m (if stretch-w
                                   (measure-child theme stretch-w opacity inherited child false)
@@ -8228,7 +8521,17 @@
         content-w (max 0 (- w inset-l inset-r))
         scroll-x (:scroll-left st)
         scroll-y (:scroll-top st)
-        explicit-h (resolve-height st)
+        ;; The containing block's own content height, as this box's PARENT
+        ;; resolved it -- the basis this box's percentage height resolves
+        ;; against, and nil when the parent's height is not definite.
+        cb-h (:block/containing-height inherited)
+        explicit-h (used-block-height st cb-h)
+        ;; ...and the basis this box hands its OWN children, replacing the
+        ;; parent's before anything below lays a child out. Threaded on the
+        ;; inherited map because that map is the one channel that reaches
+        ;; every layout-node call site; it is not a text-inheritance
+        ;; property, hence the `:block/` namespace on the key.
+        inherited (assoc inherited :block/containing-height (definite-content-height st cb-h))
         ;; Margins collapse THROUGH this box's own edge only when nothing
         ;; separates the edge from the child: no padding on that side, no
         ;; border, and no formatting context of its own -- which is exactly
@@ -8295,7 +8598,8 @@
                                     (+ h inset-t inset-b
                                        (if (= "border-box" (:box-sizing st))
                                          0
-                                         (* 2 (:border-width st))))))
+                                         (* 2 (:border-width st)))))
+                             cb-h)
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
         ;; An absolutely positioned descendant resolves against this box's
@@ -8468,7 +8772,37 @@
                white-space (or (:white-space st) (:white-space inherited))
                text-overflow (or (:text-overflow st) (:text-overflow inherited))
                overflow-wrap (or (:overflow-wrap st) (:word-break st) (:overflow-wrap inherited))
+               ;; ---- how much of `direction: rtl` this engine implements ----
+               ;;
+               ;; `direction` is an inherited property, so it travels on the
+               ;; same map every other inherited property does. What reads it
+               ;; is layout-children-block, and ONLY for the block-level
+               ;; question: which edge the leftover space of an
+               ;; over-constrained block goes to. In an rtl containing block a
+               ;; block narrower than its container sits against the RIGHT
+               ;; edge, because CSS 2.1 SS10.3.3 solves the over-constrained
+               ;; equation by ignoring the specified `margin-LEFT` under rtl
+               ;; where it ignores `margin-right` under ltr. Measured in
+               ;; Brave: a 60px block in a 200px rtl container is at x=140
+               ;; there and was at x=0 here.
+               ;;
+               ;; What is NOT implemented, and is not a matter of wiring one
+               ;; more property through: the Unicode bidirectional algorithm.
+               ;; There is no reordering of inline content here at all -- no
+               ;; resolved embedding levels, no neutral resolution, no
+               ;; reversal of runs -- so a line of text in an rtl block comes
+               ;; out in DOM order. `text/rtl-with-inline-elements` measures
+               ;; exactly that gap and is expected to keep failing;
+               ;; `text-align`'s own direction-relative `start`/`end` values
+               ;; are deliberately left alone too, because right-aligning
+               ;; an rtl line would make that case's `<b>` land near the
+               ;; browser's x by symmetry (its text either side of the `<b>`
+               ;; is the same width) while the words on the line were still
+               ;; in the wrong order. A number improved by a coincidence is
+               ;; worse than a number that says the gap is still there.
+               direction (or (:direction st) (:direction inherited))
                inherited (assoc inherited
+                                :direction direction
                                 :line-height/explicit? (boolean (or (:line-height st)
                                                                     (:line-height/explicit? inherited)))
                                 :color color :font-size font-size :line-height line-height

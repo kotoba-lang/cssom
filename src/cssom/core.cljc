@@ -1059,8 +1059,9 @@
                        (get box-side-picks n [0 0 0 0]))]
     (when (and (pos? n) (<= n 4)
                ;; Only expand when EVERY token is a length this engine can
-               ;; actually resolve. Anything else -- a percentage, `auto`,
-               ;; or outright nonsense (a var() regression guard in the test
+               ;; actually resolve, or -- for `margin` alone -- the keyword
+               ;; `auto`. Anything else -- a percentage, or outright nonsense
+               ;; (a var() regression guard in the test
                ;; suite passes `margin: 1px solid 3px dashed`) -- is left
                ;; completely untouched for the generic path to store raw,
                ;; this namespace's standing degrade-don't-guess posture.
@@ -1072,9 +1073,25 @@
                ;; (see the docstring). `margin: 1px solid 3px dashed` -- the
                ;; regression guard in the test suite -- still fails this
                ;; check on `solid`/`dashed` and stays unexpanded.
+               ;;
+               ;; `auto` is admitted for `margin` ONLY, and it is admitted
+               ;; even though it will never be a length: it is a real,
+               ;; extremely common margin value with real layout meaning
+               ;; (`margin: 0 auto` centres a block), and declining to
+               ;; expand it left `margin-left` reading 0 where the browser
+               ;; reports 150px -- 2 of the 11 cascade-attributed values the
+               ;; conformance harness's computed-style axis still charged to
+               ;; this namespace, on `box/margin-auto-centers-a-block`. It
+               ;; stays a raw string through the cascade, exactly as a
+               ;; directly-declared `margin-left: auto` already did; layout
+               ;; reads it through cssom.layout's own auto-margin?.
+               ;; `padding: auto` is not valid CSS and is not admitted --
+               ;; the property is checked, not just the token.
                (every? #(or (re-matches #"-?\d+(px)?" %)
                             (re-matches calc-pattern %)
-                            (re-matches var-ref-pattern %))
+                            (re-matches var-ref-pattern %)
+                            (and (= "margin" prop)
+                                 (= "auto" (str/lower-case %))))
                        tokens))
       {(keyword prop) (parse-style-value (tokens 0))
        (keyword (str prop "-top")) (parse-style-value t)
