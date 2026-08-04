@@ -1025,7 +1025,22 @@
    ;; geometry never matched -- a 2-cell table reported 49x20 here against
    ;; the browser's 59x26, an exactly-4px-per-axis difference plus the cell
    ;; padding above.
-   :border-spacing (parse-int (style node :border-spacing) 2)
+   ;;
+   ;; That 2px is a UA-STYLESHEET rule keyed on the TAG (`table {
+   ;; border-spacing: 2px }`), not a CSS initial value -- the initial value
+   ;; is 0. So an ordinary element made into a table by `display: table`
+   ;; gets NO spacing: measured in Brave, `<div style="display:table">`
+   ;; reports `border-spacing: 0px` where `<table>` reports `2px`, and a
+   ;; 300px-wide div-table puts its two cells at x=0 and x=100 with no gap
+   ;; anywhere. Defaulting to 2 for every node put 2px of phantom spacing
+   ;; into every CSS-declared table.
+   :border-spacing (parse-int (style node :border-spacing)
+                              (if (= :table (:tag node)) 2 0))
+   ;; Both read only by layout-table. `border-collapse`'s initial value is
+   ;; `separate` and `table-layout`'s is `auto`, so absent means "what this
+   ;; engine already did".
+   :border-collapse (some-> (style node :border-collapse) str/lower-case)
+   :table-layout (some-> (style node :table-layout) str/lower-case)
    :margin (parse-int (style node :margin) 0)
    ;; Real CSS resolves the USED border width through `border-style`,
    ;; whose initial value is `none`: a `none`/`hidden` border is 0px wide
@@ -3488,6 +3503,69 @@
           children)
     children))
 
+(def ^:private inheritable-style-props
+  "The `:style/*` declarations that real CSS INHERITS, in the subset this
+   engine reads (see node-style). Used only by splice-display-contents,
+   which has to hand a `display: contents` element's declarations to its
+   children by hand because the element itself stops existing before
+   layout-node ever threads its `inherited` map."
+  [:color :font-size :font-weight :font-style :font-family :line-height
+   :text-align :text-transform :text-decoration :white-space :overflow-wrap
+   :word-break :text-shadow-x :text-shadow-y :text-shadow-blur
+   :text-shadow-color :visibility :list-style-type :letter-spacing
+   :word-spacing])
+
+(defn- splice-display-contents
+  "Replaces every `display: contents` child with ITS OWN children, promoted
+   into this element's formatting context.
+
+   Real CSS gives such an element no box at all: its background, border,
+   padding and margin simply do not render, and its children behave as if
+   they were written where it is. Measured in Brave,
+   `<div style=\"display:flex\"><div style=\"display:contents\"><div>a</div>
+   <div>b</div></div></div>` makes `a` and `b` the FLEX ITEMS, at x=0 and
+   x=7, and reports 0x0 for the wrapper -- where this engine gave the
+   wrapper a real 300x40 box and laid `a`/`b` out as its block children.
+   Measured too: a `display: contents` element carrying
+   `border: 5px solid; padding: 10px; margin: 8px` renders none of them (its
+   children start at the parent's own content edge), while its
+   `font-size: 20px` and `color` DO reach them -- inheritance survives, the
+   box does not.
+
+   That inheritance is why the promoted children carry the wrapper's
+   inheritable declarations (inheritable-style-props) where they declared
+   none themselves: this engine resolves inheritance while WALKING the tree,
+   so a wrapper that never gets walked would otherwise drop its font and
+   colour on the floor.
+
+   The wrapper element itself is kept, emptied, so layout-node can still
+   emit the 0x0 box a browser reports for it -- a hit-tester and the
+   conformance harness's tag-matched geometry axis both expect an element to
+   be somewhere.
+
+   Nested `display: contents` splices recursively."
+  [theme children]
+  (reduce
+   (fn [out child]
+     (let [st (when (map? child) (node-style child theme))]
+       (if (= "contents" (:display st))
+         (let [inherit (into {} (for [p inheritable-style-props
+                                      :let [k (keyword "style" (name p))
+                                            v (get-in child [:attrs k])]
+                                      :when (some? v)]
+                                  [k v]))
+               promoted (mapv (fn [gc]
+                                (if (map? gc)
+                                  (update gc :attrs #(merge inherit %))
+                                  gc))
+                              (:children child))]
+           (-> out
+               (conj (assoc child :children []))
+               (into (splice-display-contents theme promoted))))
+         (conj out child))))
+   []
+   children))
+
 ;; ---- non-rendered (metadata) elements ----
 ;;
 ;; <head>, <title>, <script>, <style>, <meta>, <link> are never part of a
@@ -4375,18 +4453,67 @@
 
 ;; ---- table layout ----
 
-(def ^:private table-row-group-tags
+(def ^:private table-cell-tags #{:td :th})
+
+(def ^:private ua-table-display
+  "The `display` a real UA stylesheet gives each table tag. Real CSS's table
+   model is driven ENTIRELY by `display`, not by tag names: `<td>` is a
+   table cell only because `td { display: table-cell }` says so, and a
+   `<div style=\"display: table-cell\">` is exactly as much of a cell.
+
+   This engine's table layout keyed off tags alone, so a CSS-declared table
+   found no rows and no cells and emitted one 300x2 box with nothing in it
+   -- measured on the conformance corpus, `:display/table-cells-from-divs`
+   and `:display/table-with-anonymous-rows` both produced an EMPTY line
+   structure while the browser reports four and three real boxes."
+  {:table "table"
+   :tr "table-row"
+   :td "table-cell"
+   :th "table-cell"
+   :thead "table-header-group"
+   :tbody "table-row-group"
+   :tfoot "table-footer-group"
+   :caption "table-caption"
+   :col "table-column"
+   :colgroup "table-column-group"})
+
+(def ^:private table-row-group-displays
   "The wrappers a real HTML parser puts between `<table>` and its `<tr>`s.
    `<tbody>` in particular is INSERTED by the parser even when the author
    never wrote it, so a table layout that only looked at direct `<tr>`
    children of `<table>` would find no rows at all on most real markup."
-  #{:thead :tbody :tfoot})
+  #{"table-row-group" "table-header-group" "table-footer-group"})
 
-(def ^:private table-cell-tags #{:td :th})
+(defn- table-part-display
+  "The effective `display` of a child of a table box: the author's own
+   declaration when there is one, else the UA default for its tag.
+
+   `nil` for a text node or a tag with no table role, which is what both
+   callers below filter on."
+  [theme node]
+  (when (and (map? node) (not= :text (:node/type node)))
+    (or (:display (node-style node theme))
+        (get ua-table-display (:tag node)))))
+
+(defn- anonymous-row
+  "The anonymous row box CSS generates around cells that are children of a
+   table with no row between them.
+
+   Real CSS wraps every run of consecutive table-cell children in ONE
+   anonymous `table-row` box (CSS 2.1 SS17.2.1). It has no element behind it,
+   so it gets no `:node` draw-op -- measured in Brave,
+   `<div style=\"display:table\"><div style=\"display:table-cell\">a</div>
+   <div style=\"display:table-cell\">b</div></div>` reports exactly three
+   boxes (the table and the two cells) and nothing in between."
+  [cells]
+  {:row {:node/type :element :tag nil :children (vec cells)}
+   :group nil
+   :anonymous true})
 
 (defn- table-rows
-  "Every `<tr>` under `node`, in document order, as `{:row <tr> :group
-   <thead|tbody|tfoot or nil>}`.
+  "Every row box under `node`, in document order, as `{:row <element>
+   :group <row-group element or nil> :anonymous <true when CSS generated
+   it>}`.
 
    The rows are flattened out of their `<thead>`/`<tbody>`/`<tfoot>`
    wrappers -- a real HTML parser INSERTS `<tbody>` even when the author
@@ -4395,21 +4522,43 @@
    layout-table can still emit a box for the group itself. A row group with
    no box of its own was measurable: the geometry axis of the conformance
    harness reported `tbody 0/9`, because the browser has a box there and
-   this engine had nothing to match it with."
-  [node]
-  (vec (mapcat (fn [child]
-                 (cond
-                   (not (map? child)) nil
-                   (= :tr (:tag child)) [{:row child :group nil}]
-                   (contains? table-row-group-tags (:tag child))
-                   (for [r (:children child)
-                         :when (and (map? r) (= :tr (:tag r)))]
-                     {:row r :group child})
-                   :else nil))
-               (:children node))))
+   this engine had nothing to match it with.
 
-(defn- table-cells [row]
-  (vec (filter #(and (map? %) (contains? table-cell-tags (:tag %))) (:children row))))
+   Rows are recognised by their `display` (see table-part-display), so a
+   `<div style=\"display: table-row\">` is a row and a
+   `<tr style=\"display: block\">` is not, and a run of bare cells with no
+   row around them gets the anonymous row box CSS generates for it.
+
+   Scope-cut, deliberate: a NON-cell child of a table (a stray `<div>` with
+   its ordinary block display) is dropped rather than wrapped in the
+   anonymous cell real CSS would generate for it -- the same thing this
+   function did before it looked at `display` at all, so nothing regressed,
+   but it is not the whole rule."
+  [theme node]
+  (let [flush (fn [acc pending] (if (seq pending) (conj acc (anonymous-row pending)) acc))
+        [acc pending]
+        (reduce
+         (fn [[acc pending] child]
+           (let [d (table-part-display theme child)]
+             (cond
+               (= "table-row" d) [(conj (flush acc pending) {:row child :group nil}) []]
+
+               (contains? table-row-group-displays d)
+               [(into (flush acc pending)
+                      (for [r (:children child)
+                            :when (= "table-row" (table-part-display theme r))]
+                        {:row r :group child}))
+                []]
+
+               (= "table-cell" d) [acc (conj pending child)]
+
+               :else [acc pending])))
+         [[] []]
+         (:children node))]
+    (vec (flush acc pending))))
+
+(defn- table-cells [theme row]
+  (vec (filter #(= "table-cell" (table-part-display theme %)) (:children row))))
 
 (defn- cell-colspan
   "A cell's `colspan`, clamped to at least 1. Real CSS lets a cell cover
@@ -4435,8 +4584,11 @@
    and skipping columns still occupied by a `rowspan` from above -- the
    same occupancy walk a real table layout does.
 
-   Returns `[{:cell :row :col :colspan :rowspan :natural} ...]` in document
-   order, where `:natural` is the cell's own shrink-to-fit width."
+   Returns `[{:cell :row :col :colspan :rowspan :natural :declared} ...]` in
+   document order, where `:natural` is the cell's own shrink-to-fit width
+   and `:declared` is its border-box width when it declared one at all (nil
+   otherwise) -- which is what `table-layout: fixed` sizes columns from,
+   since it never looks at the content `:natural` measures."
   [theme content-w opacity inherited rows]
   (first
    (reduce
@@ -4452,15 +4604,141 @@
                              [r c])]
                  [(conj acc {:cell cell :row row-idx :col col
                              :colspan colspan :rowspan rowspan
+                             :declared (let [cst (node-style cell theme)]
+                                         (when (:width cst) (resolve-width cst content-w)))
                              :natural (:w (:box (measure-child theme content-w opacity
                                                                inherited cell true)))})
                   (into occupied cells)
                   (+ col colspan)]))
              [acc occupied 0]
-             (table-cells row))]
+             (table-cells theme row))]
         [acc' occupied']))
     [[] #{}]
     (map-indexed vector rows))))
+
+(defn- table-columns
+  "The `<colgroup>`/`<col>` boxes of a table, one entry per COLUMN they
+   cover, as `[{:col <index> :width <px or nil> :el <element> :group
+   <colgroup element or nil> :first? <true on the element's first column>
+   :span <how many columns the element covers>} ...]`.
+
+   Real CSS gives these two jobs at once, and this engine did neither: a
+   `<col>` sets its column's width, AND both it and its `<colgroup>` get a
+   real box in the box tree. Measured in Brave,
+   `<table><colgroup><col style=\"width:120px\"><col style=\"width:60px\">
+   </colgroup><tr><td>a</td><td>b</td></tr></table>` is 186px wide with
+   `colgroup` 182x22, `col` 120x22 and `col` 60x22 -- against this engine's
+   24px table and no colgroup/col boxes at all.
+
+   A `<col span=\"2\">` covers two columns and gets ONE box spanning both
+   (measured: 82px wide over two 40px columns and the 2px between them),
+   which is why the entries carry `:first?`/`:span` rather than one box per
+   entry. A `<colgroup>` with no `<col>` children covers its own `span`
+   columns.
+
+   Recognised by `display` like every other table part (see
+   table-part-display), so `display: table-column` on an ordinary element
+   works too."
+  [theme node content-w]
+  (let [col-width (fn [el]
+                    (let [st (node-style el theme)]
+                      (or (percentage-of (:width st) content-w)
+                          (when-not (percentage? (:width st))
+                            (parse-int (:width st) nil)))))
+        span (fn [el] (max 1 (parse-int (get-in el [:attrs :span]) 1)))
+        emit (fn [start el group]
+               (let [n (span el) w (col-width el)]
+                 (vec (for [i (range n)]
+                        {:col (+ start i) :width w :el el :group group
+                         :first? (zero? i) :span n}))))]
+    (first
+     (reduce
+      (fn [[acc start] child]
+        (let [d (table-part-display theme child)]
+          (cond
+            (= "table-column" d)
+            (let [cs (emit start child nil)] [(into acc cs) (+ start (count cs))])
+
+            (= "table-column-group" d)
+            (let [cols (filter #(= "table-column" (table-part-display theme %)) (:children child))]
+              (if (seq cols)
+                (let [cs (reduce (fn [[out at] c]
+                                   (let [e (emit at c child)] [(into out e) (+ at (count e))]))
+                                 [[] start] cols)]
+                  [(into acc (first cs)) (second cs)])
+                (let [cs (emit start child child)] [(into acc cs) (+ start (count cs))])))
+
+            :else [acc start])))
+      [[] 0]
+      (:children node)))))
+
+(defn- distribute-excess
+  "Grows `widths` so they add up to `target`, in proportion to what each
+   already wants.
+
+   Real CSS's automatic table layout hands a table's SURPLUS width to its
+   columns rather than leaving it at the right edge, weighted by each
+   column's own demand. Measured in Brave: a 300px-wide table whose two
+   cells want 7px and 14px puts them at 100px and 200px (exactly 1:2), and
+   `<table style=\"width:50%\">` in a 400px parent gives its two equal cells
+   97px each -- where this engine left both at their 9px natural width and
+   the table's own box 182px wider than its contents.
+
+   Returns `widths` untouched when they already reach `target`; the
+   shrink-to-fit direction is table-column-widths' own proportional
+   scale-DOWN, which this deliberately does not duplicate. The rounding
+   remainder goes to the last column so the columns add up to `target`
+   exactly rather than leaving a 1px seam."
+  [widths target]
+  (let [total (reduce + 0 widths)]
+    (if (or (empty? widths) (not (pos? total)) (<= target total))
+      widths
+      (let [grown (mapv #(long (* target (/ % (double total)))) widths)
+            short (- target (reduce + 0 grown))]
+        (update grown (dec (count grown)) + short)))))
+
+(defn- table-fixed-column-widths
+  "`table-layout: fixed`: the columns are sized from the `<col>` elements
+   and the FIRST ROW alone, and the rest of the table's content is never
+   measured at all.
+
+   That is the whole point of the property -- a browser can start painting
+   before it has seen the rest of the table -- and it is why the widths
+   differ so much from the automatic ones: measured in Brave,
+   `<table style=\"table-layout:fixed; width:300px\"><tr><td>a</td>
+   <td>a much longer cell here</td></tr></table>` gives BOTH columns 147px
+   (and a 46px-tall table, because the long cell wraps), where automatic
+   layout gives 9px and 163px in a 26px-tall table.
+
+   A column with a declared width (from its `<col>`, else from the first
+   row's cell) keeps it; the rest share what is left equally -- measured,
+   a first row of `width:50px` + two auto cells in a 300px table gives
+   52/120/120 (the 50 plus the cell's own 1px UA padding on each side).
+
+   Scope-cut, deliberate: percentage COLUMN widths are resolved against the
+   table's content width like any other percentage here, and a table with
+   no definite width falls back to the automatic algorithm entirely --
+   `table-layout: fixed` on an auto-width table is defined to size from the
+   first row's content, which is the automatic algorithm restricted to one
+   row, and this engine does not implement that restriction."
+  [content-w spacing col-widths first-row-assigns n-cols]
+  (let [avail (max 0 (- content-w (* spacing (inc n-cols))))
+        declared (vec (for [c (range n-cols)]
+                        (or (nth col-widths c nil)
+                            (some (fn [a]
+                                    (when (and (= c (:col a)) (= 1 (:colspan a)))
+                                      (:declared a)))
+                                  first-row-assigns))))
+        fixed (reduce + 0 (keep identity declared))
+        autos (count (filter nil? declared))
+        each (if (pos? autos) (max 0 (quot (- avail fixed) autos)) 0)
+        widths (mapv #(or % each) declared)]
+    (if (pos? autos)
+      widths
+      ;; every column declared: real CSS still stretches them to the
+      ;; table's width. Same proportional hand-out the automatic algorithm
+      ;; uses, so the two agree wherever they overlap.
+      (distribute-excess widths avail))))
 
 (defn- table-column-widths
   "Real CSS's automatic table layout, in the one form that matters for a
@@ -4474,15 +4752,27 @@
    own distribution, minus the proportional weighting it does by each
    column's own demand.
 
-   Deliberately NOT implemented: `table-layout: fixed`, `<col>`/`<colgroup>`
-   widths, and border collapsing."
-  [content-w spacing assigns]
+   `col-widths` is the per-column width a `<col>`/`<colgroup>` declared (nil
+   where none did, see table-columns). A declared column width is used as
+   given: real CSS floors it at that column's MIN-content width, which this
+   engine has no way to compute (it measures max-content only), so a
+   `<col>` narrower than its own content makes the content overflow instead
+   of pushing the column back out. Measured, the declared width is what a
+   browser uses whenever it is the larger of the two, which is the case
+   every `<col>` in the wild is written for.
+
+   Deliberately NOT implemented: border collapsing (layout-table's own
+   `collapse?` path handles that), and the surplus hand-out when a table is
+   WIDER than its columns want (distribute-excess, applied by layout-table
+   once the caption and the table's own declared width are known)."
+  [content-w spacing col-widths assigns]
   (let [n-cols (apply max 0 (map #(+ (:col %) (:colspan %)) assigns))
         base (vec (for [col (range n-cols)]
-                    (apply max 1
-                           (for [a assigns
-                                 :when (and (= 1 (:colspan a)) (= col (:col a)))]
-                             (:natural a)))))
+                    (or (nth col-widths col nil)
+                        (apply max 1
+                               (for [a assigns
+                                     :when (and (= 1 (:colspan a)) (= col (:col a)))]
+                                 (:natural a))))))
         natural (reduce (fn [widths a]
                           (if (= 1 (:colspan a))
                             widths
@@ -4512,22 +4802,44 @@
    the accessibility projection and click routing see a real table
    structure rather than a flat pile of text.
 
+   Reached BY DISPLAY, not by tag (see layout-node's dispatch and
+   table-part-display): `<div style=\"display: table\">` gets this same
+   algorithm, its `display: table-row`/`table-cell` descendants are real
+   rows and cells, and a run of cells with no row around them gets the
+   anonymous row box CSS generates (anonymous-row). Every draw-op carries
+   the element's OWN tag, so a div-table reports `div` boxes -- it used to
+   emit one op tagged `table` whatever the element was.
+
    Honest scope-cuts, all of them real CSS features this does NOT do:
-   `colspan`/`rowspan` (a spanning cell occupies one column/row),
-   `table-layout: fixed`, `<col>`/`<colgroup>` sizing, border collapsing,
-   `border-spacing`, `<caption>` placement (a caption is laid out as an
-   ordinary block row above the rows), row-group boxes, and vertical
-   alignment within a cell. Before this existed a table rendered as one
-   stacked column of every cell in document order -- the two conformance
-   cases scored 0/2 -- so this is a large step from nothing, not a
-   complete table implementation."
+   `<caption>` placement (a caption is laid out as an ordinary block row
+   above the rows, never below), `caption-side`, anonymous CELL boxes
+   around a non-cell child of a table or a row (such a child is dropped),
+   an anonymous TABLE box around a stray `display: table-cell` outside any
+   table (it lays out as an ordinary block instead -- measured in Brave,
+   two such divs sit side by side in a generated table), `empty-cells`,
+   `visibility: collapse` on a row or column, and full border-conflict
+   resolution under `border-collapse` (widths only -- see collapse? below).
+   Before this existed a table rendered as one stacked column of every cell
+   in document order -- the two conformance cases scored 0/2 -- so this is
+   a large step from nothing, not a complete table implementation."
   [theme x y avail-width opacity inherited st node]
   (let [inset (content-inset st)
         avail-content (max 0 (- (resolve-width st avail-width) (* 2 inset)))
-        caption (first (filter #(and (map? %) (= :caption (:tag %))) (:children node)))
-        rows (table-rows node)
+        caption (first (filter #(= "table-caption" (table-part-display theme %)) (:children node)))
+        rows (table-rows theme node)
         assigns (assign-table-cells theme avail-content opacity inherited rows)
-        base-widths (table-column-widths avail-content (:border-spacing st) assigns)
+        columns (table-columns theme node avail-content)
+        col-widths (let [m (into {} (map (juxt :col :width) columns))]
+                     (vec (for [c (range (inc (apply max -1 (map :col columns))))]
+                            (get m c))))
+        fixed? (and (= "fixed" (:table-layout st)) (some? (:width st)) (seq assigns))
+        base-widths (if fixed?
+                      (table-fixed-column-widths
+                       avail-content (:border-spacing st) col-widths
+                       (filter #(zero? (:row %)) assigns)
+                       (max (count col-widths)
+                            (apply max 0 (map #(+ (:col %) (:colspan %)) assigns))))
+                      (table-column-widths avail-content (:border-spacing st) col-widths assigns))
         ;; A CAPTION participates in the table's width: real CSS makes the
         ;; table at least as wide as the caption needs, and the extra width
         ;; goes to the columns. Measured: a two-cell table under a
@@ -4563,27 +4875,102 @@
                    (let [add (long (Math/ceil (/ short (count base-widths))))]
                      (mapv #(+ % add) base-widths))
                    base-widths))
+        ;; `border-collapse: collapse` removes the spacing between cells and
+        ;; puts ONE border on each grid line, shared by the two cells that
+        ;; meet there: each takes half of it into its own box and the other
+        ;; half sits outside, which is why a collapsed table is narrower AND
+        ;; shorter than the same table with separate borders. Measured in
+        ;; Brave, `<table style="border-collapse:collapse"><tr><td
+        ;; style="border:2px solid">a</td><td style="border:2px solid">b</td>
+        ;; </tr></table>` is 24x26 with its cells 11x24 at x=1 and x=12,
+        ;; where this engine reported 24x30 with 9x26 cells at x=2 and x=13.
+        ;;
+        ;; The width on a grid line is the WIDEST of the boxes that meet
+        ;; there (the two cells, or a cell and the table's own border):
+        ;; measured, 6px and 2px cell borders give cells 15px and 13px wide
+        ;; in a 32px table -- 3px of the 6 on each side of the shared line --
+        ;; and a 4px table border against 2px cells puts 2px inside the edge
+        ;; cells and 2px outside them.
+        ;;
+        ;; Scope-cut, deliberate and load-bearing: this resolves border
+        ;; WIDTHS only. Real CSS's conflict resolution also ranks
+        ;; border-STYLE (`hidden` beats everything, `double` beats `solid`,
+        ;; ...) and picks the winner's COLOUR, and it resolves per EDGE --
+        ;; this engine's box model has one uniform border width per box, so
+        ;; a cell whose two vertical edges resolve differently paints the
+        ;; half of its OWN border on both sides and only its column width
+        ;; accounts for the neighbour. Nothing here reads border-style
+        ;; beyond the `none`/`hidden` gate node-style already applies.
+        collapse? (= "collapse" (:border-collapse st))
+        cell-border (fn [cell] (:border-width (node-style cell theme)))
+        edge-max (fn [pick]
+                   (fn [i]
+                     (apply max 0
+                            (for [a assigns
+                                  :let [[lo hi] (pick a)]
+                                  :when (or (= i lo) (= i hi))]
+                              (cell-border (:cell a))))))
+        n-cols* (max 1 (count base-widths))
+        n-rows* (max 1 (count rows))
+        vedge (if collapse?
+                (mapv (fn [i] (if (or (zero? i) (= i n-cols*))
+                                (max (:border-width st) ((edge-max (juxt :col #(+ (:col %) (:colspan %)))) i))
+                                ((edge-max (juxt :col #(+ (:col %) (:colspan %)))) i)))
+                      (range (inc n-cols*)))
+                [])
+        hedge (if collapse?
+                (mapv (fn [j] (if (or (zero? j) (= j n-rows*))
+                                (max (:border-width st) ((edge-max (juxt :row #(+ (:row %) (:rowspan %)))) j))
+                                ((edge-max (juxt :row #(+ (:row %) (:rowspan %)))) j)))
+                      (range (inc n-rows*)))
+                [])
+        half (fn [n] (quot n 2))
         ;; Real CSS: a table with `width: auto` is SHRINK-TO-FIT -- it is as
         ;; wide as its columns need, not as wide as its container. Filling
         ;; the container (what resolve-width does, correctly, for an
         ;; ordinary block) put every `<table>`, `<tr>` and row-group box in
         ;; the wrong place at once: the geometry axis reported table 0/9 and
         ;; tr 0/15 purely because of this one decision.
-        spacing (:border-spacing st)
+        spacing (if collapse? 0 (:border-spacing st))
+        ;; What sits between the table's own content edge and the first/last
+        ;; cell: the border-spacing on every side with separate borders, and
+        ;; the OUTER half of the outermost collapsed border with collapsed
+        ;; ones.
+        lead-x (if collapse? (- (nth vedge 0 0) (half (nth vedge 0 0))) spacing)
+        trail-x (if collapse? (- (nth vedge n-cols* 0) (half (nth vedge n-cols* 0))) spacing)
+        lead-y (if collapse? (- (nth hedge 0 0) (half (nth hedge 0 0))) spacing)
+        trail-y (if collapse? (- (nth hedge n-rows* 0) (half (nth hedge n-rows* 0))) spacing)
+        widths (if collapse?
+                 ;; a collapsed cell's box also carries its half of the two
+                 ;; grid lines it sits between, which the natural width
+                 ;; (content + padding, never border) does not include.
+                 (vec (map-indexed (fn [c cw]
+                                     (+ cw (half (nth vedge c 0)) (half (nth vedge (inc c) 0))))
+                                   widths))
+                 widths)
         n-cols (count widths)
-        natural-w (+ (reduce + 0 widths) (* spacing (inc n-cols)))
+        natural-w (+ (reduce + 0 widths) (* spacing (max 0 (dec n-cols))) lead-x trail-x)
         w (if (:width st)
             (resolve-width st avail-width)
             (min (resolve-width st avail-width) (+ natural-w (* 2 inset))))
         content-x (+ x (:margin st) inset)
         content-y (+ y (:margin st) inset)
         content-w (max 0 (- w (* 2 inset)))
+        ;; A table WIDER than its columns want hands the surplus to them
+        ;; rather than leaving it at the right edge -- see distribute-excess
+        ;; for what a browser actually does with it. Only in the automatic
+        ;; algorithm: `table-layout: fixed` already sized every column
+        ;; against the table's own width.
+        widths (if fixed?
+                 widths
+                 (distribute-excess widths (- content-w (* spacing (max 0 (dec n-cols)))
+                                              lead-x trail-x)))
         col-offsets (vec (reductions (fn [acc cw] (+ acc cw spacing))
-                                     spacing
+                                     lead-x
                                      widths))
         caption-layout (when caption
                          (layout-node theme content-x content-y content-w opacity inherited caption))
-        rows-y0 (+ content-y spacing (if caption-layout (:h (:box caption-layout)) 0))
+        rows-y0 (+ content-y lead-y (if caption-layout (:h (:box caption-layout)) 0))
         ;; Row heights: single-row cells set their own row, then a
         ;; rowspan cell grows its LAST row if the rows it covers cannot
         ;; already hold it -- the same shortfall rule colspan uses across
@@ -4593,8 +4980,33 @@
                            (let [cw (+ (reduce + 0 (map #(nth widths % 0)
                                                         (range (:col a) (+ (:col a) (:colspan a)))))
                                        (* spacing (dec (:colspan a))))
-                                 m (layout-node theme 0 0 cw opacity inherited (:cell a))]
-                             (assoc a :w cw :h (:h (:box m)) :draw (:draw m))))
+                                 ;; With collapsed borders the cell keeps
+                                 ;; only HALF its own border, so its box is
+                                 ;; that much shorter -- the same halving
+                                 ;; `widths` already applied across the
+                                 ;; columns, applied down the rows by the
+                                 ;; ordinary layout path.
+                                 cell (if (and collapse? (pos? (cell-border (:cell a))))
+                                        (assoc-in (:cell a) [:attrs :style/border-width]
+                                                  (str (half (cell-border (:cell a))) "px"))
+                                        (:cell a))
+                                 m (layout-node theme 0 0 cw opacity inherited cell)
+                                 ;; How tall the cell's CONTENT is, as
+                                 ;; opposed to its box: a cell that declares
+                                 ;; a `height` has a box taller than what is
+                                 ;; in it, and that difference is the space
+                                 ;; `vertical-align` distributes (see the
+                                 ;; cell-draws comment below). Only measured
+                                 ;; for a cell that declares one -- for every
+                                 ;; other cell the box IS the content.
+                                 cst (node-style cell theme)]
+                             (assoc a :w cw :h (:h (:box m)) :draw (:draw m)
+                                    :content-h (if (or (:height cst) (:min-height cst))
+                                                 (:h (:box (layout-node
+                                                            theme 0 0 cw opacity inherited
+                                                            (update cell :attrs dissoc
+                                                                    :style/height :style/min-height :height))))
+                                                 (:h (:box m))))))
                          assigns)
         row-heights
         (let [base (vec (for [r (range n-rows)]
@@ -4616,24 +5028,31 @@
         row-offsets (vec (reductions (fn [acc rh] (+ acc rh spacing)) 0 row-heights))
         {:keys [draws groups]}
         (reduce
-         (fn [{:keys [draws groups]} {:keys [row-idx row group]}]
+         (fn [{:keys [draws groups]} {:keys [row-idx row group anonymous]}]
            (let [row-y (+ rows-y0 (nth row-offsets row-idx 0))
                  row-h (nth row-heights row-idx 0)
                  rst (node-style row theme)
-                 row-op (merge {:draw/op :node :id (:node/id row) :tag :tr
-                                :x (+ content-x spacing) :y row-y
-                                :w (max 0 (- content-w (* 2 spacing))) :h row-h
-                                :class (attr row :class) :listeners (listeners row)
-                                :opacity opacity}
-                               (style-passthrough rst))
-                 row-bg (when-let [bg (:background rst)]
-                          [{:draw/op :rect :x (+ content-x spacing) :y row-y
-                            :w (max 0 (- content-w (* 2 spacing))) :h row-h
-                            :color bg :tag :tr :opacity opacity}])
+                 row-x (+ content-x lead-x)
+                 row-w (max 0 (- content-w lead-x trail-x))
+                 row-tag (or (:tag row) :tr)
+                 ;; An ANONYMOUS row has no element behind it, so it gets no
+                 ;; box: measured in Brave, a `display: table` with two bare
+                 ;; `display: table-cell` children reports exactly three
+                 ;; boxes (the table and the two cells).
+                 row-op (when-not anonymous
+                          (merge {:draw/op :node :id (:node/id row) :tag row-tag
+                                  :x row-x :y row-y :w row-w :h row-h
+                                  :class (attr row :class) :listeners (listeners row)
+                                  :opacity opacity}
+                                 (style-passthrough rst)))
+                 row-bg (when-let [bg (and (not anonymous) (:background rst))]
+                          [{:draw/op :rect :x row-x :y row-y
+                            :w row-w :h row-h
+                            :color bg :tag row-tag :opacity opacity}])
                  cells (filter #(= row-idx (:row %)) laid-cells)
                  cell-draws (mapcat
                              (fn [c]
-                               ;; A table cell's UA default is
+                               ;; A `<td>`/`<th>`'s UA default is
                                ;; `vertical-align: middle`, so its content
                                ;; is centred in the cell box -- which is
                                ;; what makes a `rowspan` cell sit BETWEEN
@@ -4642,14 +5061,76 @@
                                ;; renders `tall` (rowspan 2) on its own line
                                ;; between `a` and `b`, where this engine put
                                ;; it beside `a`.
+                               ;;
+                               ;; An AUTHORED `vertical-align` overrides it.
+                               ;; Measured, `<td style="height:60px;
+                               ;; vertical-align:top">top</td><td
+                               ;; style="height:60px; vertical-align:bottom">
+                               ;; bot</td>` puts the two words on different
+                               ;; LINES; centring both put them on one, which
+                               ;; is what `:table/cell-vertical-align`
+                               ;; reported as `want ["top" "bot"] got
+                               ;; ["top bot"]`.
+                               ;;
+                               ;; `baseline` -- the real initial value, and
+                               ;; what a `display: table-cell` on an ordinary
+                               ;; element computes to (a `<td>` inherits
+                               ;; `middle` from the UA's `table` rule) -- is
+                               ;; taken as top here. Real CSS aligns the
+                               ;; cells' first BASELINES, which coincides with
+                               ;; the top whenever the cells' first lines
+                               ;; share a font, and this engine does not carry
+                               ;; a per-cell baseline out of layout-node to do
+                               ;; better.
                                (let [cell-h (+ (reduce + 0 (map #(nth row-heights % 0)
                                                                 (range (:row c) (+ (:row c) (:rowspan c)))))
                                                (* spacing (dec (:rowspan c))))
-                                     dy (max 0 (quot (- cell-h (:h c)) 2))
-                                     cell-id (:node/id (:cell c))]
+                                     cst (node-style (:cell c) theme)
+                                     va (or (:vertical-align cst)
+                                            (if (contains? table-cell-tags (:tag (:cell c)))
+                                              "middle"
+                                              "baseline"))
+                                     align (fn [free]
+                                             (case va
+                                               ("top" "baseline" "text-top") 0
+                                               ("bottom" "text-bottom") free
+                                               (quot free 2)))
+                                     ;; TWO gaps can open under a cell, and
+                                     ;; `vertical-align` distributes both.
+                                     ;; The cell's BOX floats in the rows it
+                                     ;; spans when it is shorter than they
+                                     ;; are (a `rowspan` cell), and the
+                                     ;; cell's CONTENT floats in the box when
+                                     ;; the cell declares a `height` bigger
+                                     ;; than what is in it. Only the first
+                                     ;; existed here, which is why the
+                                     ;; `height: 60px` cells in
+                                     ;; `:table/cell-vertical-align` ignored
+                                     ;; their `top`/`bottom` entirely -- box
+                                     ;; and row were the same 60px, so there
+                                     ;; was nothing for the old shift to move.
+                                     dy-box (align (max 0 (- cell-h (:h c))))
+                                     dy-inner (align (max 0 (- (:h c) (:content-h c (:h c)))))
+                                     cell-id (:node/id (:cell c))
+                                     ;; the inner shift moves the cell's
+                                     ;; CONTENT only, never its own
+                                     ;; background/border/box -- those ops
+                                     ;; are the ones emitted up to and
+                                     ;; including the cell's own `:node` op.
+                                     ops (let [v (vec (:draw c))
+                                               i (first (keep-indexed
+                                                         (fn [i op]
+                                                           (when (and (= :node (:draw/op op))
+                                                                      (= cell-id (:id op)))
+                                                             i))
+                                                         v))]
+                                           (if (and (pos? dy-inner) i)
+                                             (into (subvec v 0 (inc i))
+                                                   (translate-ops 0 dy-inner (subvec v (inc i))))
+                                             v))]
                                  (->> (translate-ops (+ content-x (nth col-offsets (:col c) 0))
-                                                     (+ row-y dy)
-                                                     (:draw c))
+                                                     (+ row-y dy-box)
+                                                     ops)
                                       ;; the cell's OWN box spans every row
                                       ;; it covers, even though its content
                                       ;; is centred inside that box
@@ -4659,7 +5140,7 @@
                                                 (assoc op :y row-y :h cell-h)
                                                 op))))))
                              cells)]
-             {:draws (vec (concat draws row-bg [row-op] cell-draws))
+             {:draws (vec (concat draws row-bg (when row-op [row-op]) cell-draws))
               :groups (if group
                         (update groups group
                                 (fn [g] {:y (min (:y g row-y) row-y)
@@ -4667,30 +5148,66 @@
                         groups)}))
          {:draws [] :groups {}}
          (map-indexed (fn [i r] (assoc r :row-idx i)) rows))
-        height (+ (reduce + 0 row-heights) (* spacing (count row-heights)))
+        height (+ (reduce + 0 row-heights) (* spacing (max 0 (dec (count row-heights)))) trail-y)
         group-ops (mapv (fn [[g {:keys [y h]}]]
                           (merge {:draw/op :node :id (:node/id g) :tag (:tag g)
-                                  :x (+ content-x spacing) :y y
-                                  :w (max 0 (- content-w (* 2 spacing))) :h (max 0 (- h spacing))
+                                  :x (+ content-x lead-x) :y y
+                                  :w (max 0 (- content-w lead-x trail-x)) :h (max 0 (- h spacing))
                                   :class (attr g :class) :listeners (listeners g)
                                   :opacity opacity}
                                  (style-passthrough (node-style g theme))))
                         groups)
+        ;; `<colgroup>`/`<col>` get real boxes too, spanning the columns
+        ;; they cover for the full height of the rows -- measured in Brave,
+        ;; a `<col style="width:120px">` reports 120x22 next to its table's
+        ;; own 186x26, and this engine reported no box at all.
+        rows-h (+ (reduce + 0 row-heights) (* spacing (max 0 (dec (count row-heights)))))
+        col-span-w (fn [start n]
+                     (+ (reduce + 0 (map #(nth widths % 0) (range start (+ start n))))
+                        (* spacing (max 0 (dec n)))))
+        col-ops (vec (for [c columns
+                           :when (and (:first? c) (< (:col c) (count widths)))]
+                       (merge {:draw/op :node :id (:node/id (:el c)) :tag (:tag (:el c))
+                               :x (+ content-x (nth col-offsets (:col c) 0)) :y rows-y0
+                               :w (col-span-w (:col c) (:span c)) :h rows-h
+                               :class (attr (:el c) :class) :listeners (listeners (:el c))
+                               :opacity opacity}
+                              (style-passthrough (node-style (:el c) theme)))))
+        colgroup-ops (vec (for [[g cs] (group-by :group columns)
+                                :when (and g (not= g (:el (first cs))))
+                                :let [lo (apply min (map :col cs))
+                                      hi (apply max (map :col cs))]
+                                :when (< lo (count widths))]
+                            (merge {:draw/op :node :id (:node/id g) :tag (:tag g)
+                                    :x (+ content-x (nth col-offsets lo 0)) :y rows-y0
+                                    :w (col-span-w lo (inc (- (min hi (dec (count widths))) lo)))
+                                    :h rows-h
+                                    :class (attr g :class) :listeners (listeners g)
+                                    :opacity opacity}
+                                   (style-passthrough (node-style g theme)))))
         table-h (clamp-height st (+ (- rows-y0 y) height inset))
         table-w w]
     {:box {:x x :y y :w table-w :h table-h}
      :draw (vec (concat
                  (or (box-shadow-ops st x y table-w table-h opacity) [])
-                 (when-let [bg (default-bg :table st theme)]
-                   [{:draw/op :rect :x x :y y :w table-w :h table-h :color bg :tag :table :opacity opacity}])
+                 ;; the element's OWN tag, not `:table`: a `display: table`
+                 ;; div is still a div to a hit-tester, an accessibility
+                 ;; projection and the conformance harness's tag-matched
+                 ;; geometry axis. Emitting `:table` for it meant the two
+                 ;; div-table cases had no div boxes to compare at all.
+                 (when-let [bg (default-bg (:tag node) st theme)]
+                   [{:draw/op :rect :x x :y y :w table-w :h table-h :color bg
+                     :tag (:tag node) :opacity opacity}])
                  (or (border-ops st x y table-w table-h opacity) [])
                  (or (outline-ops st x y table-w table-h opacity) [])
-                 [(merge {:draw/op :node :id (:node/id node) :tag :table
+                 [(merge {:draw/op :node :id (:node/id node) :tag (:tag node)
                           :x x :y y :w table-w :h table-h
                           :class (attr node :class) :listeners (listeners node)
                           :opacity opacity}
                          (style-passthrough st))]
                  (:draw caption-layout)
+                 colgroup-ops
+                 col-ops
                  group-ops
                  draws))}))
 
@@ -6869,10 +7386,25 @@
                                 :text-overflow text-overflow
                                 :overflow-wrap overflow-wrap)
                tag (:tag node)
-               children (with-nested-list-margins
-                         node
-                         (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node)))))]
+               children (splice-display-contents
+                         theme
+                         (with-nested-list-margins
+                          node
+                          (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))))]
            (cond
+             ;; `display: contents` generates NO box -- see
+             ;; splice-display-contents, which has already promoted this
+             ;; element's children into its parent's flow and emptied it.
+             ;; The 0x0 op is kept so the element is still findable (a
+             ;; hit-tester, an accessibility projection and the conformance
+             ;; harness's tag-matched geometry axis all walk these ops).
+             (= "contents" (:display st))
+             {:box {:x x :y y :w 0 :h 0}
+              :draw [(merge {:draw/op :node :id (:node/id node) :tag tag :x x :y y :w 0 :h 0
+                             :class (attr node :class) :listeners (listeners node)
+                             :opacity opacity}
+                            (style-passthrough st))]}
+
              (contains? #{:input :select :textarea} tag)
              (layout-form-control theme x y avail-width opacity st node)
 
