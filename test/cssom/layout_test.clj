@@ -5870,6 +5870,229 @@
         "it reports a BLOCK box (one line-height tall), not an inline box's
          1.2em content area")))
 
+;; ---- floats: placement, stacking, margins, clear, containment ----
+;;
+;; Every number asserted below was read out of a real headless Brave 151
+;; over CDP FIRST (conformance/cdp_dump.cljs, one isolating case per
+;; behaviour) and only then implemented. Where the browser's own figure
+;; differs from the one here it is because the browser's default font is
+;; 16px and this suite's line box is 20px; the RELATIONSHIPS -- which edge,
+;; which stacking order, which box grows -- are the browser's exactly.
+
+(defn- float-ops
+  "draw-ops for a `<div>` of `width` (plus any extra style) whose children
+   are `specs`, at a zero-inset theme so the coordinates that come back are
+   the CSS ones rather than the host theme's 4px padding/gap."
+  ([width specs] (float-ops width {} specs))
+  ([width extra-style specs]
+   (let [[box doc] (dom/create-element dom/empty-document :div)
+         doc (dom/set-root doc box)
+         doc (dom/set-style doc box (merge {:width width} extra-style))
+         doc (build-inline-children doc box specs)
+         [_ doc] (dom/consume-ops doc)]
+     (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}}))))
+
+(defn- div-boxes
+  "The `<div>` element boxes in document order, as [x y w h] vectors."
+  [ops]
+  (->> ops
+       (filter #(and (= :node (:draw/op %)) (= :div (:tag %))))
+       (mapv (juxt :x :y :w :h))))
+
+(deftest floats-that-do-not-fit-side-by-side-stack
+  ;; Two 120px floats cannot share a 200px line. CSS 9.5.1 pushes the
+  ;; second DOWN until the band is wide enough again; this engine used to
+  ;; run a single left cursor and simply put it at x=120, overflowing.
+  ;; Brave: (0,0) and (0,20), and the divergence the conformance corpus
+  ;; charged for that cluster was a -53px median on `div x`.
+  (let [[_root a b tail]
+        (div-boxes (float-ops 200 [[:div {:float "left" :width 120 :height 20} "A"]
+                                   [:div {:float "left" :width 120 :height 20} "B"]
+                                   [:div {} "tail"]]))]
+    (is (= [0 0 120 20] a) "the first float takes the left edge")
+    (is (= [0 20 120 20] b)
+        "the second does not fit beside it, so it drops to the first's
+         bottom edge and takes the left edge there")
+    (is (= [0 0 200 20] tail)
+        "a BLOCK box is not narrowed by a float -- only its line boxes are,
+         so the border box still starts at the container's own left edge
+         and spans its full width")))
+
+(deftest a-float-is-placed-and-measured-by-its-margin-box
+  ;; A float's own margins used to be dropped on the floor: the box painted
+  ;; at the container's edge and the band it excluded was a BORDER box wide,
+  ;; so the content beside it started 10px too early. Brave puts this one at
+  ;; (10,10) with the text beside it at x=80.
+  (let [ops (float-ops 300 [[:div {:float "left" :width 60 :height 30 :margin 10} "F"]
+                            "text beside the float"])
+        [_root f] (div-boxes ops)
+        beside (first (filter #(= "text beside the float" (:text %)) (text-draw-ops ops)))]
+    (is (= [10 10 60 30] f)
+        "the BORDER box sits one margin in from the container's own corner")
+    (is (= 80 (:x beside))
+        "and the band the text avoids is the MARGIN box: 10 + 60 + 10")))
+
+(deftest a-float-narrows-its-own-containers-lines-and-not-a-descendants
+  ;; The documented boundary of this implementation, pinned so it is a
+  ;; recorded scope-cut rather than a silent wrong answer. The float band
+  ;; lives in layout-children-block and is consulted by the line boxes of
+  ;; the float's OWN container; layout-node does not carry a float context
+  ;; down into a child, so a block DESCENDANT lays its lines out at full
+  ;; width. Brave narrows them: on this shape it puts the inner div's text
+  ;; at x=80 while leaving the inner div's BORDER box at x=0 spanning the
+  ;; full 300.
+  ;;
+  ;; The border box -- the thing the conformance corpus's geometry axis
+  ;; actually compares -- is right either way, so what this costs is a wrap
+  ;; point: text long enough to break differs from the browser's. Fixing it
+  ;; means threading a float context through layout-node, which is a
+  ;; larger change than this one.
+  (let [ops (float-ops 300 [[:div {:float "left" :width 80 :height 40} "F"]
+                            [:div {} "beside"]])
+        [_root _f inner] (div-boxes ops)
+        beside (first (filter #(= "beside" (:text %)) (text-draw-ops ops)))]
+    (is (= [0 0 300 20] inner)
+        "the descendant's border box is full width and starts at the
+         container's left edge -- which is what the browser reports too")
+    (is (= 0 (:x beside))
+        "but its LINE is not narrowed by the float, where a browser puts it
+         at 80. Known cut; see this test's comment")))
+
+(deftest a-float-starts-at-the-flow-position-it-was-written-at
+  ;; The v1 float implementation's own headline exclusion: every float was
+  ;; hoisted to the container's TOP, so a float written after a paragraph
+  ;; moved up ABOVE the paragraph it followed. Brave puts it at the
+  ;; paragraph's bottom plus the margin collapsed between the two <p>s --
+  ;; y=34 here (20px line box + a <p>'s 14px UA margin), y=0 before.
+  (let [ops (float-ops 300 [[:p {} "leading text"]
+                            [:div {:float "left" :width 60 :height 30} "F"]
+                            [:p {} "beside the float"]])
+        [_root f] (div-boxes ops)
+        ps (->> ops (filter #(and (= :node (:draw/op %)) (= :p (:tag %)))) (mapv :y))]
+    (is (= [0 34] ps) "the two paragraphs are one collapsed margin apart")
+    (is (= 34 (second f))
+        "and the float sits where the SECOND paragraph starts, which is
+         the flow position it was written at -- a float does not separate
+         its siblings, and their margins collapse straight through it")))
+
+(deftest clear-pushes-a-block-below-the-floats-on-that-side
+  ;; `clear` was read nowhere at all. Brave on this shape: the cleared div
+  ;; at y=40 (the float's bottom margin edge) and the container 64px tall.
+  (let [ops (float-ops 300 [[:div {:float "left" :width 80 :height 40} "F"]
+                            [:div {} "beside"]
+                            [:div {:clear "left"} "below"]])
+        [root f beside below] (div-boxes ops)]
+    (is (= [0 0 80 40] f))
+    (is (= 0 (second beside)) "the uncleared block still starts at the top")
+    (is (= 40 (second below))
+        "the cleared block starts at the float's bottom margin edge")
+    (is (= 60 (nth root 3))
+        "and the clearance is real layout, not a paint offset: it makes the
+         container taller (20 beside + 20 clearance + 20 below)")))
+
+(deftest clear-both-clears-the-lower-of-the-two-sides
+  (let [[_root _l r after]
+        (div-boxes (float-ops 300 [[:div {:float "left" :width 60 :height 30} "L"]
+                                   [:div {:float "right" :width 60 :height 50} "R"]
+                                   [:div {:clear "both"} "after"]]))]
+    (is (= [240 0 60 50] r) "the right float is flush against the right edge")
+    (is (= 50 (second after))
+        "clear:both takes the LOWER of the two bottom edges (50, not 30)")))
+
+(deftest clear-only-ever-pushes-a-box-down
+  ;; Measured in Brave with two blocks ahead of the cleared one: the float's
+  ;; bottom is 40 but the flow has already reached 48, and the browser
+  ;; leaves the cleared box at 48. Clearance is a floor, not a position.
+  (let [[_root _f _a _b below]
+        (div-boxes (float-ops 300 [[:div {:float "left" :width 80 :height 40} "F"]
+                                   [:div {} "one"] [:div {} "two"]
+                                   [:div {:clear "left"} "below"]]))]
+    (is (= 40 (second below))
+        "the flow is already at 40 (two 20px rows), so clearing to the
+         float's bottom edge of 40 moves nothing")))
+
+(deftest clear-ignores-floats-on-the-other-side
+  (let [[_root _f cleared]
+        (div-boxes (float-ops 300 [[:div {:float "left" :width 80 :height 40} "F"]
+                                   [:div {:clear "right"} "r"]]))]
+    (is (= 0 (second cleared))
+        "clear:right has nothing to clear against a LEFT float")))
+
+(deftest an-ordinary-parent-does-not-contain-its-float
+  ;; This engine used to make EVERY container at least as tall as its
+  ;; floats, which is the easy half of the rule and the wrong one for the
+  ;; common case. Brave reports 0 for the plain div and 60 once it
+  ;; establishes a formatting context -- which is the entire reason the
+  ;; `overflow: hidden` clearfix idiom exists.
+  (let [[plain] (div-boxes (float-ops 200 [[:div {:float "left" :width 50 :height 60} "F"]]))
+        [bfc] (div-boxes (float-ops 200 {:overflow "hidden"}
+                                    [[:div {:float "left" :width 50 :height 60} "F"]]))
+        [root-flow] (div-boxes (float-ops 200 {:display "flow-root"}
+                                          [[:div {:float "left" :width 50 :height 60} "F"]]))]
+    (is (= 0 (nth plain 3)) "the float escapes an ordinary block")
+    (is (= 60 (nth bfc 3)) "`overflow: hidden` contains it")
+    (is (= 60 (nth root-flow 3)) "and so does `display: flow-root`")))
+
+(deftest an-escaping-float-keeps-rising-until-something-contains-it
+  ;; The clearfix idiom does not require the `overflow: hidden` box to be
+  ;; the float's own parent, and a first cut of the containment rule that
+  ;; only looked at a container's DIRECT float children got this wrong: the
+  ;; float stopped at the plain inner div, which does not contain it, and
+  ;; then existed for nobody. Brave leaves the outer box 60px tall.
+  ;;
+  ;; Caught by the paint-order axis rather than by geometry: with the outer
+  ;; box 0px tall, all 25 of that case's sample points landed on nothing at
+  ;; all, which is the question "what would a user click" answering `none`
+  ;; for a page that visibly has a float in it.
+  (let [ops (float-ops 400 {:overflow "hidden"}
+                       [[:div {:width 200}
+                         [:div {:float "left" :width 50 :height 60} "F"]]])
+        [outer inner f] (div-boxes ops)]
+    (is (= 60 (nth outer 3))
+        "the outer box establishes the formatting context, so it grows to
+         hold a float two levels down")
+    (is (= 0 (nth inner 3))
+        "while the plain div in between still does not contain it")
+    (is (= [0 0 50 60] f)))
+
+  ;; ...and an escaped float is a full member of the band it rises into,
+  ;; not merely a height contribution: it is there to be cleared, exactly
+  ;; like one written at that level.
+  (let [ops (float-ops 300 {:overflow "hidden"}
+                       [[:div {} [:div {:float "left" :width 80 :height 40} "F"]]
+                        "beside the escaped float"
+                        [:div {:clear "left"} "below"]])
+        beside (first (filter #(= "beside the escaped float" (:text %)) (text-draw-ops ops)))
+        below (last (div-boxes ops))]
+    (is (= 40 (second below)) "`clear` at the level it rose to sees it")
+    ;; The one thing it does not get, and why. Whether a LONE inline child
+    ;; flows as a run (and so consults the band) or takes a full-width
+    ;; block row of its own is decided ONCE, before the loop, from whether
+    ;; this container has a float CHILD -- and an escaped float is not a
+    ;; child, it appears partway through the loop that is already running.
+    ;; Deciding it correctly means asking "does any descendant hold a float
+    ;; that will escape into me", which is a recursive re-derivation of the
+    ;; formatting-context rule over the whole subtree, for a shape the
+    ;; corpus does not contain. A float written at THIS level narrows a
+    ;; lone text child correctly (see
+    ;; a-float-is-placed-and-measured-by-its-margin-box); so does an
+    ;; escaped one as soon as there are two inline children to flow.
+    (is (= 0 (:x beside))
+        "a LONE text child beside a RISEN float is not narrowed by it.
+         Known cut; see this comment")))
+
+(deftest a-float-does-not-split-the-inline-run-it-sits-inside
+  ;; A float is blockified, so it never JOINS a line box -- but it must not
+  ;; SPLIT one either. Grouping with the float still in the sequence would
+  ;; partition `text <float> more` into two one-child runs and stack them
+  ;; on two lines, where every browser keeps `text more` on one.
+  (let [ops (float-ops 300 ["text " [:span {:float "left" :width 40 :height 20} "F"] " more"])
+        flow (remove #(= "F" (:text %)) (text-draw-ops ops))]
+    (is (= 1 (count (distinct (map :y flow))))
+        "the text on either side of the float stays on ONE line")
+    (is (every? #(= 40 (:x %)) flow)
+        "beside the float, in the band it narrowed")))
+
 (deftest an-inline-box-splits-around-a-block-child
   ;; Real CSS's `block-in-inline` fixup. `<p>text <span>a <div>b</div>
   ;; c</span> end</p>` is three lines in every browser -- `text a` / `b` /

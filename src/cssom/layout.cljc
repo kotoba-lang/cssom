@@ -1192,6 +1192,15 @@
    :vertical-align (or (style node :vertical-align)
                        (get ua-vertical-align (:tag node)))
    :float (style node :float)
+   ;; `clear` was read NOWHERE at all, so the single most common float
+   ;; idiom on the web -- a float, some content beside it, then a
+   ;; `clear`ed box that must start BELOW it -- silently put the cleared
+   ;; box beside the float instead. Measured in Brave on
+   ;; `<div style="float:left;width:80px;height:40px">F</div><div>beside
+   ;; </div><div style="clear:left">below</div>`: the browser reports the
+   ;; cleared div at y=40 (the float's bottom margin edge) where this
+   ;; engine had it at y=20, and the container 64px tall against 40.
+   :clear (style node :clear)
    ;; Set by measure-child on a FLEX or GRID item: such a box establishes
    ;; its own formatting context, so margins never collapse through it --
    ;; the same rule `overflow` triggers, but decided by the PARENT, which is
@@ -4985,6 +4994,21 @@
                 (= "inline" (:display st))
                 (contains? inline-level-tags (:tag child)))))))
 
+(defn- float-child?
+  "True when `child` is a `float: left|right` box.
+
+   Hoisted out of the three places that used to spell this predicate
+   inline (inline-flow-candidate?, inline-runs, layout-children-block)
+   because all three have to agree about it exactly: a float is
+   blockified, it does not join a line box, it does not SPLIT one, and it
+   is positioned by its container's float machinery rather than by block
+   flow. Three copies of the same `contains? #{\"left\" \"right\"}` is
+   three chances for them to drift apart."
+  [theme child]
+  (and (map? child)
+       (= :element (:node/type child))
+       (contains? #{"left" "right"} (:float (node-style child theme)))))
+
 (defn- inline-flow-text?
   [child]
   (or (some? (real-text-child child))
@@ -5018,9 +5042,7 @@
     ;; A floated element is BLOCKIFIED and positioned by its container's
     ;; float machinery (see layout-children-block), so it never
     ;; participates in a line box even when its tag is inline-level.
-    (and (map? child)
-         (= :element (:node/type child))
-         (contains? #{"left" "right"} (:float (node-style child theme))))
+    (float-child? theme child)
     false
 
     ;; An atomic inline (an <img>/<input>/<button>/<select>/<textarea>) has
@@ -5808,13 +5830,155 @@
                       (= :element (:node/type child))
                       (or (non-rendered-tag? (:tag child))
                           (= "none" (:display (node-style child theme)))))))
-       (partition-by #(inline-flow-candidate? theme %))
-       (mapcat (fn [group]
-                 (if (and (>= (count group) min-items)
-                          (inline-flow-candidate? theme (first group)))
-                   [{:inline/run (vec group)}]
-                   group)))
+       ;; Floats are TRANSPARENT to this grouping: a float neither joins a
+       ;; line box nor SPLITS one. Leaving them in the sequence would do
+       ;; the latter -- `text <span style="float:left">F</span> more`
+       ;; would partition into two one-child runs and stack `text` and
+       ;; `more` on separate lines, where every browser keeps them on one.
+       ;; So each float is lifted out, the rest is grouped as before, and
+       ;; the float is put back in FRONT of the entry its following
+       ;; sibling landed in.
+       ;;
+       ;; Keeping them in the entry sequence at all (rather than hoisting
+       ;; them all to the container's top, which is what this file used to
+       ;; do) is what lets layout-children-block place a float at the flow
+       ;; position it was WRITTEN at. A float anchored inside a run has no
+       ;; position of its own within the line, so it is emitted before the
+       ;; whole run -- which is the same y the line box gets.
+       ((fn [cs]
+          (let [;; `anchors` maps an index into the float-free `flow`
+                ;; vector to the floats written immediately before it;
+                ;; `pending` is left holding the floats written after the
+                ;; last non-float child, which have nothing to anchor to
+                ;; and are emitted at the end.
+                {:keys [flow anchors] tail :pending}
+                (reduce (fn [{:keys [flow anchors pending]} c]
+                          (if (float-child? theme c)
+                            {:flow flow :anchors anchors :pending (conj pending c)}
+                            {:flow (conj flow c)
+                             :anchors (if (seq pending)
+                                        (assoc anchors (count flow) pending)
+                                        anchors)
+                             :pending []}))
+                        {:flow [] :anchors {} :pending []}
+                        cs)]
+            (loop [groups (partition-by #(inline-flow-candidate? theme %) flow)
+                   base 0
+                   out []]
+              (if-let [group (seq (first groups))]
+                (let [group (vec group)
+                      n (count group)
+                      floats-at (fn [k] (get anchors k []))
+                      run? (and (>= n min-items)
+                                (inline-flow-candidate? theme (first group)))
+                      emitted (if run?
+                                (conj (vec (mapcat #(floats-at %) (range base (+ base n))))
+                                      {:inline/run group})
+                                (vec (mapcat (fn [k c] (conj (vec (floats-at k)) c))
+                                             (range base (+ base n))
+                                             group)))]
+                  (recur (rest groups) (+ base n) (into out emitted)))
+                (into out tail))))))
        vec)))
+
+;; ---- the float band ------------------------------------------------------
+;;
+;; Three tiny pure functions over ONE data shape, and every float rule in
+;; this file is expressed in terms of them. A placed float is
+;;
+;;   {:x :y :w :h :right?}
+;;
+;; -- its MARGIN box, in the same absolute coordinates as the container's
+;; content box, because every one of CSS's float rules is stated about the
+;; margin box and nothing here ever wants the border box again. A float's
+;; own margins used to be dropped entirely (measured in Brave: a
+;; `float:left; margin:10px` box sits at (10,10) and this engine put it at
+;; (0,0), and its NEIGHBOUR started 10px too early because the band was a
+;; border box wide).
+;;
+;; What is deliberately NOT here: the band is consulted by the line boxes
+;; of the float's OWN container only. A float does not narrow the lines of
+;; a descendant block box, because layout-node does not carry a float
+;; context down into a child and giving it one is a much larger change
+;; than this. Real CSS does narrow them -- `<div float><div>text</div>` in
+;; Brave puts the inner div's LINE beside the float while its BORDER BOX
+;; stays full width. This engine gets the border box right (they are
+;; unaffected either way) and the line wrong, which is visible only when
+;; that inner text is long enough that the narrowing would change where it
+;; wraps.
+
+(defn- float-band
+  "The `[left right]` content edges available on the scanline at `y`.
+
+   A scanline rather than the line box's full vertical extent: a line box's
+   height is not known until layout-inline-run has built it, and that
+   function takes ONE content width for the whole run. Querying at the
+   run's own top edge is the honest version of what the single width can
+   express -- it is also why a paragraph that STARTS beside a float keeps
+   the narrow width for the lines that continue below it (see the scope
+   note above)."
+  [floats content-x content-w y]
+  (reduce (fn [[l r] f]
+            (if (and (<= (:y f) y) (< y (+ (:y f) (:h f))))
+              (if (:right? f)
+                [l (min r (:x f))]
+                [(max l (+ (:x f) (:w f))) r])
+              [l r]))
+          [content-x (+ content-x content-w)]
+          floats))
+
+(defn- float-clearance-y
+  "The Y a box with this `clear` value may not start above: the lowest
+   bottom margin edge among the floats on the cleared side(s), or nil when
+   `clear` does not ask for anything.
+
+   `:right?` is the float's own side, so `clear: left` looks at the floats
+   whose `:right?` is false. Clearance never moves a box UP -- measured in
+   Brave with two blocks before the cleared one, the float's bottom is 40
+   but the flow has already reached 48 and the browser leaves it at 48."
+  [floats clear]
+  (when-let [sides (case clear
+                     "both" #{true false}
+                     "left" #{false}
+                     "right" #{true}
+                     nil)]
+    (reduce (fn [acc f]
+              (if (contains? sides (:right? f)) (max acc (+ (:y f) (:h f))) acc))
+            0 floats)))
+
+(defn- place-float
+  "Where a new float's MARGIN box goes, as `[x y]`.
+
+   CSS 9.5.1's placement rules, minus the ones about line boxes this
+   engine has no way to observe: the float may not start above `y0` (the
+   current flow position, and never above an earlier float's own top), and
+   it is pushed DOWN until the band at its top edge is wide enough to hold
+   it. Without the pushing, floats that do not fit simply overlapped or
+   overflowed -- measured in Brave on two 120px floats in a 200px box, the
+   second sits at (0,20) and this engine put it at (120,0), the -53px
+   median `div x` divergence the corpus reported for that cluster.
+
+   The candidate positions are `y0` and every existing float's bottom edge
+   below it: the band only ever CHANGES at a float boundary, so scanning
+   those is exhaustive, not a sample."
+  [floats content-x content-w y0 mw right?]
+  (let [candidates (cons y0 (->> floats
+                                 (map #(+ (:y %) (:h %)))
+                                 (filter #(> % y0))
+                                 distinct
+                                 sort))
+        [y l r] (or (some (fn [y]
+                            (let [[l r] (float-band floats content-x content-w y)]
+                              (when (<= mw (- r l)) [y l r])))
+                          candidates)
+                    ;; wider than the widest band anywhere: CSS puts it at
+                    ;; the lowest candidate and lets it overflow, the same
+                    ;; 'let it overflow rather than invent a break' rule
+                    ;; this file already uses for an over-wide word.
+                    (let [y (last candidates)
+                          [l r] (float-band floats content-x content-w y)]
+                      [y l r]))]
+    [(if right? (- r mw) l) y]))
 
 ;; ---- block (normal-flow) layout ----
 
@@ -5860,71 +6024,112 @@
    (`layout-block`) because real CSS decides them per side: a container
    with `padding-bottom` still lets its FIRST child's top margin collapse
    through its top edge. They used to be one combined flag requiring both
-   edges to be free, which was strictly more conservative than CSS."
+   edges to be free, which was strictly more conservative than CSS.
+
+   ---- floats ----
+
+   A `float: left|right` child is taken OUT of normal flow: it does not
+   advance the running Y, it does not take part in margin collapsing (real
+   CSS: margins collapse straight THROUGH a float, which is why two
+   paragraphs on either side of one are still 1em apart), and it is placed
+   by `place-float` into the running float band instead. What it DOES do is
+   narrow the line boxes that overlap it -- see `float-band`.
+
+   This replaces a bounded v1 that hoisted every float to the container's
+   TOP and modelled the band as one `{:h :left :right}` rectangle. That
+   version named its own three exclusions and this cycle removes all
+   three, each measured in Brave first:
+
+   - a float written AFTER other content now sits at the flow position it
+     was written at (`<p>lead</p><div style=\"float:left\">F</div><p>x</p>`:
+     Brave puts the float 1em below the first paragraph's bottom, the
+     collapsed margin between the two paragraphs, and the old code put it
+     at y=0 ABOVE the paragraph it was written after);
+   - floats that do not fit side by side now STACK (two 120px floats in a
+     200px box: (0,0) and (0,20), not (0,0) and (120,0));
+   - `clear` is implemented (see `float-clearance-y`).
+
+   A float's own MARGINS are now part of its band box, which they were not
+   before -- the band was a border box wide and the float painted at its
+   container's edge regardless of `margin`.
+
+   `contains-floats?` is the caller's answer to 'does this box establish a
+   formatting context'. Only such a box grows to hold its floats. The old
+   code did it unconditionally, which is the easy half of the rule and the
+   wrong one for the common case: an ordinary `<div>` wrapping only a
+   float is 0px tall in every browser, and that is exactly why authors
+   reach for `overflow: hidden` / `display: flow-root` at all.
+
+   A float that its own container does not contain does not stop there: it
+   keeps rising until it reaches a box that DOES, which is what makes the
+   `overflow: hidden` clearfix work on a wrapper two levels up from the
+   float. So a float that escapes is returned as `:float/escaped` and
+   `layout-block` hands it to ITS parent, exactly the way
+   `:margin/collapsed-top`/`-bottom` already travel. The escaped boxes
+   join the parent's own float list, so they narrow its line boxes, push
+   its later floats down, and answer its `clear`s too -- one mechanism,
+   not a special case for height. (This is why they are kept in ABSOLUTE
+   coordinates throughout: the same numbers are meaningful at every level
+   they pass through.)
+
+   Returns `:float/escaped` as well as the four keys above."
   ([theme content-x content-y content-w opacity inherited children]
-   (layout-children-block theme content-x content-y content-w opacity inherited children false false))
-  ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom?]
-  (let [;; ---- floats ----
-        ;; A `float: left|right` box is taken out of normal flow, placed
-        ;; against its container's corresponding edge, and NARROWS the
-        ;; content beside it. This engine had no float concept at all: a
-        ;; floated span simply stayed inline where it was written, so a
-        ;; right-floated badge sat at the START of the text instead of the
-        ;; end (measured: x=0 against the browser's 233 in a 240px box).
-        ;;
-        ;; Bounded v1, documented rather than pretended: floats are placed
-        ;; at the TOP of their container (the overwhelmingly common
-        ;; authoring shape -- a float is written before the text it should
-        ;; sit beside), and the band they exclude applies to content within
-        ;; their own height. Floats appearing after other content, floats
-        ;; that stack vertically when they do not fit side by side, and
-        ;; `clear` are NOT implemented.
-        floated? (fn [c] (and (map? c) (= :element (:node/type c))
-                              (contains? #{"left" "right"} (:float (node-style c theme)))))
-        floats (filterv floated? children)
-        children (filterv (complement floated?) children)
-        laid-floats
-        (first (reduce (fn [[acc left-x right-x] f]
-                         (let [fst (node-style f theme)
-                               m (measure-child theme content-w opacity inherited f true)
-                               fw (:w (:box m))
-                               fh (:h (:box m))
-                               right? (= "right" (:float fst))
-                               x (if right? (- right-x fw) left-x)]
-                           [(conj acc {:w fw :h fh :right? right?
-                                       :draw (translate-ops x content-y (:draw m))})
-                            (if right? left-x (+ left-x fw))
-                            (if right? (- right-x fw) right-x)]))
-                       [[] content-x (+ content-x content-w)]
-                       floats))
-        band {:h (apply max 0 (map :h laid-floats))
-              :left (reduce + 0 (map :w (remove :right? laid-floats)))
-              :right (reduce + 0 (map :w (filter :right? laid-floats)))}
-        float-draws (vec (mapcat :draw laid-floats))]
+   (layout-children-block theme content-x content-y content-w opacity inherited children false false false))
+  ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom? contains-floats?]
+  (let [floated? #(float-child? theme %)]
   (loop [remaining (inline-runs theme children
-                                ;; With a float band present even a LONE
-                                ;; inline child must flow as a run: it has
-                                ;; to sit beside the float in the narrowed
-                                ;; band rather than take a full-width block
-                                ;; row of its own (measured: the text beside
-                                ;; a left float reported x=0 w=800 against
+                                ;; With a float present even a LONE inline
+                                ;; child must flow as a run: it has to sit
+                                ;; beside the float in the narrowed band
+                                ;; rather than take a full-width block row
+                                ;; of its own (measured: the text beside a
+                                ;; left float reported x=0 w=800 against
                                 ;; the browser's x=7 w=70).
-                                (if (pos? (:h band)) 1 2))
-         y content-y draws float-draws
+                                (if (some floated? children) 1 2))
+         y content-y draws [] floats []
          height 0 prev-mb 0 first? true out-mt 0]
     (if-let [child (first remaining)]
-      (if-let [run (and (map? child) (:inline/run child))]
-        (let [in-band? (< (- y content-y) (:h band))
-              {:keys [draw h]} (layout-inline-run theme
-                                                  (+ content-x (if in-band? (:left band) 0))
-                                                  y
-                                                  (- content-w (if in-band? (+ (:left band) (:right band)) 0))
+      (cond
+        ;; ---- a float: placed into the band, invisible to block flow ----
+        (floated? child)
+        (let [fst (node-style child theme)
+              m (measure-child theme content-w opacity inherited child true)
+              fmt (margin-side fst :top)
+              fml (margin-side fst :left)
+              ;; the MARGIN box, which is what every CSS float rule is
+              ;; stated about (see the float-band ns comment)
+              mw (+ fml (:w (:box m)) (margin-side fst :right))
+              mh (+ fmt (:h (:box m)) (margin-side fst :bottom))
+              right? (= "right" (:float fst))
+              ;; CSS 9.5.1: never above the current flow position (which
+              ;; includes the previous sibling's pending bottom margin --
+              ;; measured, the float lands where the NEXT block would),
+              ;; never above an earlier float's own top, and never above
+              ;; whatever its own `clear` demands.
+              y0 (max (+ y (if first? 0 prev-mb))
+                      (reduce (fn [a f] (max a (:y f))) content-y floats)
+                      (or (float-clearance-y floats (:clear fst)) content-y))
+              [fx fy] (place-float floats content-x content-w y0 mw right?)]
+          ;; NOTHING about block flow changes: not `y`, not `height`, not
+          ;; `prev-mb`, not `first?`. A float neither separates its
+          ;; siblings nor stops their margins collapsing through it.
+          (recur (rest remaining) y
+                 (into draws (translate-ops (+ fx fml) (+ fy fmt) (:draw m)))
+                 (conj floats {:x fx :y fy :w mw :h mh :right? right?})
+                 height prev-mb first? out-mt))
+
+        (and (map? child) (:inline/run child))
+        (let [run (:inline/run child)
+              [bl br] (float-band floats content-x content-w y)
+              {:keys [draw h]} (layout-inline-run theme bl y (max 0 (- br bl))
                                                   opacity inherited run)
               advance (+ h (:gap theme))]
           ;; a line box is real content: nothing collapses through it, so
           ;; `prev-mb` resets to 0 and (when it is the FIRST entry) no top
           ;; margin escapes this container either.
-          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) 0 false out-mt))
+          (recur (rest remaining) (+ y advance) (into draws draw) floats (+ height advance) 0 false out-mt))
+
+        :else
         (let [cst (when (map? child) (node-style child theme))
               mt (if cst (margin-side cst :top) 0)
               mb (if cst (margin-side cst :bottom) 0)
@@ -5971,6 +6176,22 @@
                            (and first? collapse-top?) 0
                            first? mt*
                            :else (max prev-mb mt*))
+              ;; `clear` on a BLOCK child: its top border edge is pushed
+              ;; down to the bottom margin edge of the floats on the
+              ;; cleared side. The extra distance is CLEARANCE -- real
+              ;; layout, so it also makes the container taller, which is
+              ;; the whole point of the `clear`ed-empty-div idiom. Never
+              ;; negative: clearance only ever pushes a box DOWN.
+              clearance (if-let [c (float-clearance-y floats (:clear cst))]
+                          (max 0 (- c (+ y gap-before)))
+                          0)
+              gap-before (+ gap-before clearance)
+              ;; Floats this child did not contain rise into THIS
+              ;; container's band. Shifted by the same `gap-before` the
+              ;; child's own draw-ops are, and by nothing else -- a
+              ;; `position: relative` offset is paint-only, so it must not
+              ;; move a float, which is layout.
+              escaped (mapv #(update % :y + gap-before) (:float/escaped laid []))
               child-h (:h (:box laid))
               advance (+ gap-before child-h (:gap theme))
               shifted (if (zero? gap-before)
@@ -5980,17 +6201,27 @@
                      (let [[dx dy] (relative-offset cst content-w nil)]
                        (translate-ops dx dy shifted))
                      shifted)]
-          (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) mb* false
+          (recur (rest remaining) (+ y advance) (into draws draw) (into floats escaped)
+                 (+ height advance) mb* false
                  (if (and first? collapse-top?) mt* out-mt))))
+      ;; ^ closes: if / recur / let / cond
       {:draw draws
-       ;; the container is at least as tall as its floats -- real CSS only
-       ;; does this for a container that establishes a formatting context,
-       ;; another documented simplification
-       :h (max (:h band)
-               (max 0 (+ (- height (:gap theme))
-                         (if collapse-bottom? 0 prev-mb))))
+       ;; A container grows to hold its floats ONLY when it establishes a
+       ;; formatting context (see `contains-floats?`). Otherwise the float
+       ;; escapes it -- measured in Brave, a plain `<div style="width:200px">`
+       ;; whose only child is a 50x60 float reports height 0, and the same
+       ;; div with `overflow: hidden` reports 60.
+       :h (max (if contains-floats?
+                 (reduce (fn [a f] (max a (- (+ (:y f) (:h f)) content-y))) 0 floats)
+                 0)
+               0
+               (+ (- height (:gap theme))
+                  (if collapse-bottom? 0 prev-mb)))
        :margin/collapsed-top out-mt
-       :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)})))))
+       :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)
+       ;; the floats this box did NOT contain, for its parent to keep
+       ;; carrying up until something does
+       :float/escaped (if contains-floats? [] floats)})))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing
@@ -6413,15 +6644,49 @@
         ;; versa. The bottom side additionally requires an AUTO height --
         ;; with an explicit height the box's bottom edge is fixed, so
         ;; nothing collapses across it.
+        ;; `display: flow-root` added here for the same reason it appears in
+        ;; contains-floats? below: it is the ONE display value whose entire
+        ;; purpose is to establish a block formatting context, and a
+        ;; formatting context is exactly what stops a margin collapsing
+        ;; through an edge. Without it, `flow-root` got the containment half
+        ;; of its job (it grew to hold its float) and not the margin half --
+        ;; measured, its first `<p>` sat at the container's own top edge with
+        ;; its margin collapsed out, level with the float, so the browser's
+        ;; two lines came back as one.
         fc-free? (and (zero? (:border-width st))
                       (contains? #{nil "visible"} (:overflow st))
+                      (not= "flow-root" (:display st))
                       (not (:independent-fc? st)))
         collapse-top? (and fc-free? (zero? inset-t))
         collapse-bottom? (and fc-free? (zero? inset-b) (nil? explicit-h))
-        {:keys [draw h] :margin/keys [collapsed-top collapsed-bottom]}
+        ;; Does this box establish a BLOCK FORMATTING CONTEXT, and so grow
+        ;; to contain its own floats? Deliberately NOT `(not fc-free?)`:
+        ;; those are two different questions that happen to share two of
+        ;; their answers. A `border-width` stops margins collapsing through
+        ;; an edge (fc-free?) but does NOT establish a formatting context,
+        ;; so a bordered div still lets its float escape -- and
+        ;; `display: flow-root`, which exists for no other purpose than to
+        ;; establish one, does not appear in fc-free? at all.
+        ;;
+        ;; Every entry here is CSS2.1 9.4.1's own list, restricted to the
+        ;; ones that reach THIS function: `float` and out-of-flow
+        ;; positioning are self-evident, `overflow` other than `visible` is
+        ;; the idiom authors actually use, and `:independent-fc?` is the
+        ;; flag measure-child already sets on a flex/grid item or an
+        ;; inline-block. Flex and grid containers never get here (they take
+        ;; layout-flex/layout-grid), so they are absent by construction
+        ;; rather than by oversight.
+        contains-floats? (or (boolean (:independent-fc? st))
+                             (and (some? (:overflow st)) (not= "visible" (:overflow st)))
+                             (contains? #{"flow-root" "inline-block" "table-cell" "table-caption"}
+                                        (:display st))
+                             (contains? #{"left" "right"} (:float st))
+                             (contains? #{"absolute" "fixed"} (:position st)))
+        {:keys [draw h] :margin/keys [collapsed-top collapsed-bottom]
+         escaped-floats :float/escaped}
         (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
                                content-w opacity inherited in-flow
-                               collapse-top? collapse-bottom?)
+                               collapse-top? collapse-bottom? contains-floats?)
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
         ;; sits outside the content box in both axes. Without it every
@@ -6473,6 +6738,16 @@
                                                  0 (* 2 (:border-width st)))))
                                 collapsed-bottom
                                 0)
+     ;; A float this box did not contain keeps rising: handed to the
+     ;; PARENT's layout-children-block, which adds it to its own band, the
+     ;; same journey a collapsed-out margin makes just above. This is what
+     ;; makes the `overflow: hidden` clearfix work on a wrapper that is not
+     ;; the float's own parent -- measured, a 50x60 float two levels down
+     ;; inside `<div overflow:hidden><div width:200px>` leaves the outer box
+     ;; 60px tall in Brave, and without this it came out 0 and the paint-
+     ;; order axis (which asks what a user would CLICK) reported all 25 of
+     ;; that case's sample points landing on nothing.
+     :float/escaped (or escaped-floats [])
      ;; rect (background) BEFORE border-draws, not after: the real
      ;; painter (kotoba-lang/dom-gpu's webgl.cljs/webgpu.cljs) draws
      ;; :rect ops strictly in array order with no z-index reordering of

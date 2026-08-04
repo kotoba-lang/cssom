@@ -655,10 +655,23 @@
                                     (or (contains? #{:img :input :button :select :textarea} (:tag %))
                                         (= "inline-block" (:display %))))
                               ops)
+        ;; Left/top edges INCLUSIVE, right/bottom edges EXCLUSIVE. A point
+        ;; on a box's right edge is ADJACENT to it, not inside it -- and
+        ;; the difference is not academic here, because a float is the one
+        ;; construct that reliably puts text at exactly the right edge of a
+        ;; replaced box. Measured on :page/hero-with-floated-image (an 80px
+        ;; `float: left` <img> with the headline flowing beside it): the
+        ;; engine correctly put all three lines at x=80, the closed test
+        ;; called x=80 "inside" the img's 0..80 span, and every line was
+        ;; discarded -- the case reported `got []`, an EMPTY line structure
+        ;; for a page that had rendered correctly. The oracle side has no
+        ;; such problem: it uses `closest(...)`, i.e. real parentage, which
+        ;; this geometric predicate only approximates because draw-ops
+        ;; carry no parent pointer.
         inside-atomic? (fn [op]
                          (some (fn [b]
-                                 (and (>= (:x op) (:x b)) (<= (:x op) (+ (:x b) (:w b)))
-                                      (>= (:y op) (:y b)) (<= (:y op) (+ (:y b) (:h b)))))
+                                 (and (>= (:x op) (:x b)) (< (:x op) (+ (:x b) (:w b)))
+                                      (>= (:y op) (:y b)) (< (:y op) (+ (:y b) (:h b)))))
                                atomic-boxes))
         text-ops (->> ops
                       (filter #(= :text (:draw/op %)))
