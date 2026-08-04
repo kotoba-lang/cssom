@@ -1271,9 +1271,21 @@
                          (map :id)
                          set)]
     (->> ops
+         ;; Half-open, like every other rectangle test here: a box spanning
+         ;; [0,400) does not contain x=400. With the far edges inclusive,
+         ;; every sample point that landed exactly on a box's right or
+         ;; bottom edge was scored as a disagreement -- the browser reports
+         ;; the case wrapper there (i.e. `none`) and the engine claimed the
+         ;; box. Measured on :page/header-nav-main, whose own div is 400px
+         ;; wide inside the 800px case container: all five of that case's
+         ;; mismatches were the x=400 column, and its geometry is 10/10.
+         ;;
+         ;; The same inclusive-edge mistake was found and fixed in
+         ;; `engine-lines`' replaced-box test earlier the same day; this is
+         ;; the paint-order axis's copy of it.
          (filter #(and (= :node (:draw/op %))
-                       (<= (:x %) x (+ (:x %) (:w %)))
-                       (<= (:y %) y (+ (:y %) (:h %)))
+                       (<= (:x %) x) (< x (+ (:x %) (:w %)))
+                       (<= (:y %) y) (< y (+ (:y %) (:h %)))
                        (not= :document (:tag %))
                        (not (contains? wrapper-ids (:id %)))))
          last
