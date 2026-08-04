@@ -5353,7 +5353,7 @@
               (let [[tag style & kids] spec
                     ;; a few keys are real ATTRIBUTES, not style: the table
                     ;; spans and the form-control ones layout reads directly
-                    attr-keys #{:colspan :rowspan :type :value :size :href :alt :name :multiple}
+                    attr-keys #{:colspan :rowspan :span :type :value :size :href :alt :name :multiple}
                     attrs (select-keys style attr-keys)
                     style (apply dissoc style attr-keys)
                     [el doc] (dom/create-element doc tag)
@@ -6409,6 +6409,221 @@
     (is (= :input (:tag input)))
     (is (= 21 (:h input)))))
 
+;; ---- display types: CSS-declared tables, and `display: contents` ----
+;;
+;; Every number below was measured in Brave 151 over CDP before the code
+;; that produces it was written -- the case ids are the conformance
+;; corpus's own, and the `oracle`/`engine` pairs quoted are that harness's
+;; --debug-geometry output at its 800px width.
+
+(defn- boxes-of
+  "Every element `:node` box (tag + geometry) `specs` produce under a root
+   <div>, the root's own box included -- block-boxes drops it, and a
+   `display: table` div IS the box under test."
+  [specs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build-inline-children doc root specs)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})]
+    (mapv #(select-keys % [:tag :x :y :w :h :display])
+          (filterv #(= :node (:draw/op %)) ops))))
+
+(defn- texts-of [specs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build-inline-children doc root specs)
+        [_ doc] (dom/consume-ops doc)]
+    (filterv #(= :text (:draw/op %))
+             (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}}))))
+
+(deftest css-declared-table-lays-out-as-a-table
+  ;; `:display/table-cells-from-divs`. Real CSS's table model is driven by
+  ;; `display`, not by tag names, and this engine keyed off tags alone: the
+  ;; whole case produced ONE 300x2 draw-op tagged `table`, with no div boxes
+  ;; and no text at all (`want ["a bb"] got []`).
+  (let [b (boxes-of [[:div {:display "table" :width 300}
+                      [:div {:display "table-row"}
+                       [:div {:display "table-cell"} "a"]
+                       [:div {:display "table-cell"} "bb"]]]])
+        t (texts-of [[:div {:display "table" :width 300}
+                      [:div {:display "table-row"}
+                       [:div {:display "table-cell"} "a"]
+                       [:div {:display "table-cell"} "bb"]]]])
+        [_root table row c1 c2] b]
+    (is (= [:div :div :div :div :div] (mapv :tag b))
+        "every box carries the ELEMENT's tag -- a div-table is still a div")
+    (is (= 300 (:w table)))
+    (is (= 300 (:w row)) "the row spans the table")
+    (is (= 0 (:x c1)))
+    (is (= (:w c1) (:x c2))
+        "the cells sit side by side with no border-spacing: `border-spacing:
+         2px` is a UA rule on the <table> TAG, and a div-table computes 0")
+    (is (= ["a" "bb"] (mapv :text t)))
+    (is (= (:y (first t)) (:y (second t))) "and their text shares a line")))
+
+(deftest a-css-table-hands-its-surplus-width-to-its-columns
+  ;; Measured: a 300px table whose cells want 7px and 14px puts them at
+  ;; 100px and 200px -- exactly 1:2. This engine left both at their natural
+  ;; width and let the table's own box overhang them, which is also what
+  ;; `:table/width-percentage` reported (oracle td 97/97, engine 9/9).
+  (let [[_root _table _row c1 c2]
+        (boxes-of [[:div {:display "table" :width 300}
+                    [:div {:display "table-row"}
+                     [:div {:display "table-cell"} "a"]
+                     [:div {:display "table-cell"} "bb"]]]])]
+    (is (= 300 (+ (:w c1) (:w c2))) "the columns fill the declared width")
+    (is (= (* 2 (:w c1)) (:w c2))
+        "in proportion to what each column wanted")))
+
+(deftest cells-with-no-row-get-an-anonymous-row-box
+  ;; `:display/table-with-anonymous-rows`. CSS generates the row; it has no
+  ;; element behind it, so it gets NO box -- measured, the browser reports
+  ;; exactly three boxes for this shape (the table and the two cells).
+  (let [b (boxes-of [[:div {:display "table" :width 200}
+                      [:div {:display "table-cell"} "a"]
+                      [:div {:display "table-cell"} "b"]]])
+        t (texts-of [[:div {:display "table" :width 200}
+                      [:div {:display "table-cell"} "a"]
+                      [:div {:display "table-cell"} "b"]]])
+        [_root table c1 c2] b]
+    (is (= 4 (count b)) "root, table, and two cells -- no box for the row")
+    (is (= 200 (:w table)))
+    (is (= (:w c1) (:w c2)) "equal content, equal columns")
+    (is (= 0 (:x c1)))
+    (is (= 100 (:x c2)))
+    (is (= (:y (first t)) (:y (second t))) "both cells are on one row")))
+
+(deftest display-contents-generates-no-box-and-promotes-its-children
+  ;; `:display/contents-is-transparent`. Measured in Brave: the wrapper
+  ;; reports 0x0, `a` and `b` become the FLEX ITEMS at x=0 and x=7, and a
+  ;; wrapper carrying `border: 5px; padding: 10px; margin: 8px` renders none
+  ;; of them -- while its `font-size` DOES reach the children. This engine
+  ;; gave the wrapper a real 300x40 box and laid its children out inside it.
+  (let [b (boxes-of [[:div {:display "flex" :width 300}
+                      [:div {:display "contents"}
+                       [:div {} "a"] [:div {} "b"]]]])
+        [_root flex contents a bb] b]
+    (is (= 5 (count b)) "the wrapper is still findable, as a zero box")
+    (is (= [0 0] [(:w contents) (:h contents)])
+        "no box at all: no width, no height, and nothing painted")
+    (is (= 0 (:x a)))
+    (is (= (:w a) (:x bb))
+        "a and b are the flex items, laid out by the flex container itself")
+    (is (= 300 (:w flex))))
+  (let [t (texts-of [[:div {}
+                      [:div {:display "contents" :font-size 20 :border-width 5
+                             :border-style "solid" :padding 10 :margin 8}
+                       [:div {} "a"]]]])]
+    (is (= 20 (:font-size (first t)))
+        "inheritance survives the box the wrapper does not get")
+    (is (= 0 (:x (first t)))
+        "and its padding/border/margin do not indent the promoted child"))
+  (let [b (boxes-of [[:div {:width 300}
+                      [:div {:display "contents"} [:div {} "a"]]
+                      [:div {} "c"]]])
+        [_root _outer _contents a c] b]
+    (is (= 300 (:w a)) "the promoted child is a block in the OUTER flow")
+    (is (= (+ (:y a) (:h a)) (:y c))
+        "and the following sibling stacks directly under it")))
+
+(deftest table-layout-fixed-sizes-columns-from-the-first-row
+  ;; `:table/layout-fixed`. Measured: both columns 147px in a 46px-tall
+  ;; table (the long cell wraps), where the automatic algorithm gives 163/9
+  ;; in a 26px one. The property exists precisely so the rest of the
+  ;; content is never measured.
+  (let [cells (fn [style]
+                (filterv #(= :td (:tag %))
+                         (boxes-of [[:table style
+                                     [:tr {} [:td {} "a"] [:td {} "a much longer cell here"]]]])))
+        [auto1 auto2] (cells {:width 300})
+        [fix1 fix2] (cells {:width 300 :table-layout "fixed"})]
+    (is (= (:w fix1) (:w fix2)) "two auto columns share the space equally")
+    (is (not= (:w auto1) (:w auto2))
+        "where the automatic algorithm sizes each to its own content")
+    (is (< (:w fix1) (:w auto2))
+        "so the long cell's column is NARROWER under fixed layout"))
+  (let [[c1 c2 c3] (filterv #(= :td (:tag %))
+                            (boxes-of [[:table {:width 300 :table-layout "fixed"}
+                                        [:tr {} [:td {:width 50} "a"] [:td {} "b"] [:td {} "c"]]]]))]
+    (is (= 52 (:w c1))
+        "a declared column width is kept -- 50 plus the <td>'s own 1px UA
+         padding on each side, exactly what the browser reports")
+    (is (= (:w c2) (:w c3)) "and the rest share what is left")))
+
+(deftest colgroup-and-col-set-column-widths-and-get-boxes
+  ;; `:table/colgroup-widths`. Measured: a 186px table with `colgroup`
+  ;; 182x22, `col` 120x22, `col` 60x22 and cells to match -- against this
+  ;; engine's 24px table, 9px cells and no colgroup/col boxes at all.
+  (let [b (boxes-of [[:table {}
+                      [:colgroup {} [:col {:width 120}] [:col {:width 60}]]
+                      [:tr {} [:td {} "a"] [:td {} "b"]]]])
+        table (first (filter #(= :table (:tag %)) b))
+        [cg] (filter #(= :colgroup (:tag %)) b)
+        [col1 col2] (filter #(= :col (:tag %)) b)
+        [td1 td2] (filter #(= :td (:tag %)) b)]
+    (is (= 186 (:w table)) "2 + 120 + 2 + 60 + 2, the browser's own number")
+    (is (= [120 60] [(:w col1) (:w col2)]))
+    (is (= [120 60] [(:w td1) (:w td2)]) "the cells take their column's width")
+    (is (= (:x col1) (:x td1)))
+    (is (= (:x col2) (:x td2)))
+    (is (= 182 (:w cg)) "the group spans its columns and the spacing between"))
+  (let [b (boxes-of [[:table {}
+                      [:colgroup {} [:col {:span "2" :width 40}]]
+                      [:tr {} [:td {} "a"] [:td {} "b"] [:td {} "c"]]]])
+        [col] (filter #(= :col (:tag %)) b)
+        [td1 td2 td3] (filter #(= :td (:tag %)) b)]
+    (is (= [40 40] [(:w td1) (:w td2)]) "one <col span=\"2\"> sizes two columns")
+    (is (= 82 (:w col)) "and gets ONE box spanning both, spacing included")
+    (is (< (:w td3) 40) "the undeclared third column still sizes to content")))
+
+(deftest a-cells-vertical-align-moves-its-content-inside-the-cell
+  ;; `:table/cell-vertical-align` -- `want ["top" "bot"] got ["top bot"]`.
+  ;; The engine centred every cell, so with two 60px-tall cells the two
+  ;; words came out on ONE line. Note what the old code could not do: box
+  ;; and row are the same 60px here, so shifting the cell box (all this
+  ;; engine did) had nothing to move -- the CONTENT has to move inside it.
+  (let [t (texts-of [[:table {}
+                      [:tr {} [:td {:height 60 :vertical-align "top"} "top"]
+                       [:td {:height 60 :vertical-align "bottom"} "bot"]]]])
+        [top bot] t]
+    (is (= ["top" "bot"] (mapv :text t)))
+    (is (< (:y top) (:y bot))
+        "top-aligned content sits above bottom-aligned content"))
+  (let [t (texts-of [[:table {}
+                      [:tr {} [:td {:height 60} "mid"] [:td {} "x"]]]])]
+    (is (apply = (mapv :y t))
+        "with no author value a <td> still centres -- `vertical-align:
+         middle` is what a UA stylesheet gives a table cell, and it is what
+         puts a rowspan cell BETWEEN the rows it covers")))
+
+(deftest border-collapse-shares-one-border-between-adjacent-cells
+  ;; `:table/border-collapse`. Measured: 24x26 with 11x24 cells at x=1 and
+  ;; x=12, against this engine's 24x30 with 9x26 cells at x=2 and x=13.
+  ;; Each cell keeps HALF the border on the grid line it shares; the other
+  ;; half is outside it, which is why the table is 1px wider than its cells
+  ;; on each side and there is no spacing anywhere.
+  (let [b (boxes-of [[:table {:border-collapse "collapse"}
+                      [:tr {} [:td {:border-width 2 :border-style "solid"} "a"]
+                       [:td {:border-width 2 :border-style "solid"} "b"]]]])
+        table (first (filter #(= :table (:tag %)) b))
+        [td1 td2] (filter #(= :td (:tag %)) b)]
+    (is (= 1 (:x td1)) "half the outer border sits outside the first cell")
+    (is (= (+ (:x td1) (:w td1)) (:x td2))
+        "and the cells meet with no spacing between them")
+    (is (= (+ (:w td1) (:w td2) 2) (:w table)))
+    (is (= (+ (:h td1) 2) (:h table))))
+  (let [separate (first (filter #(= :table (:tag %))
+                                (boxes-of [[:table {}
+                                            [:tr {} [:td {:border-width 2 :border-style "solid"} "a"]
+                                             [:td {:border-width 2 :border-style "solid"} "b"]]]])))
+        collapsed (first (filter #(= :table (:tag %))
+                                 (boxes-of [[:table {:border-collapse "collapse"}
+                                             [:tr {} [:td {:border-width 2 :border-style "solid"} "a"]
+                                              [:td {:border-width 2 :border-style "solid"} "b"]]]])))]
+    (is (< (:h collapsed) (:h separate))
+        "collapsing makes the table SHORTER: no spacing above or below the
+         row, and half of each horizontal border rather than all of it")))
 ;; ---- grid: auto tracks, implicit tracks, column flow, item alignment ----
 ;;
 ;; Every number below was measured in a real headless Brave over CDP before
