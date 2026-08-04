@@ -1,12 +1,19 @@
 (ns conformance.run
-  "Differential layout conformance: cssom.layout vs a real Blink browser.
+  "Differential conformance: cssom vs a real Blink browser, on three axes.
 
-   For every case in cases.edn this renders the SAME markup twice --
-   once through the real pipeline this repo is part of (htmldom parse ->
-   cssom.core cascade -> cssom.layout draw-ops) and once in a real
-   headless Brave/Chrome -- and compares the LINE STRUCTURE of the two:
-   the ordered list of lines, each line being the whitespace-normalized
-   text that landed on it, in left-to-right order.
+   For every case in cases.edn this renders the SAME markup twice -- once
+   through the real pipeline this repo is part of (htmldom parse ->
+   cssom.core cascade -> cssom.layout draw-ops) and once in a real headless
+   Brave/Chrome -- and compares:
+
+   1. LINE STRUCTURE -- the ordered list of lines, each line being the
+      whitespace-normalized text that landed on it, left to right.
+   2. GEOMETRY -- every element's own box, matched by tag + nearest and
+      compared within 2px on x/y/w/h.
+   3. COMPUTED STYLE -- what cssom.core's CASCADE resolved for each
+      element, against the browser's own getComputedStyle, over a chosen
+      set of properties. See that axis's own header comment further down
+      for what is comparable at that layer and what is explicitly not.
 
    Why line structure and not pixels: this engine has no glyph shaping
    (see cssom.layout's ns docstring -- widths come from a
@@ -27,6 +34,7 @@
    Usage:
      nbb --classpath \"src:<dom-gpu>/src:<htmldom>/src\" conformance/run.cljs \\
        [--browser <path to Brave/Chrome binary>] [--width 800] \\
+       [--only <id substring>] [--debug-geometry] [--debug-style] \\
        [--ledger <path to append a result entry to>]"
   (:require ["node:child_process" :as cp]
             ["node:fs" :as fs]
@@ -54,6 +62,7 @@
         "--ledger" (recur (drop 2 args) (assoc out :ledger (second args)))
         "--only" (recur (drop 2 args) (assoc out :only (second args)))
         "--debug-geometry" (recur (rest args) (assoc out :debug-geometry true))
+        "--debug-style" (recur (rest args) (assoc out :debug-style true))
         (recur (rest args) out))
       out)))
 
@@ -94,6 +103,31 @@
   "
   (function () {
     var out = {};
+    // The property set the computed-style axis compares. Names on the left
+    // are CSS property names (what the engine's own :style/* attrs are
+    // keyed by); on the right, the camelCase getComputedStyle key.
+    var STYLE_PROPS = [
+      ['color', 'color'], ['font-size', 'fontSize'], ['font-weight', 'fontWeight'],
+      ['font-style', 'fontStyle'], ['display', 'display'], ['text-align', 'textAlign'],
+      ['margin-top', 'marginTop'], ['margin-right', 'marginRight'],
+      ['margin-bottom', 'marginBottom'], ['margin-left', 'marginLeft'],
+      ['padding-top', 'paddingTop'], ['padding-right', 'paddingRight'],
+      ['padding-bottom', 'paddingBottom'], ['padding-left', 'paddingLeft']
+    ];
+    function readStyle(el) {
+      var cs = getComputedStyle(el), o = {};
+      for (var p = 0; p < STYLE_PROPS.length; p++) o[STYLE_PROPS[p][0]] = cs[STYLE_PROPS[p][1]];
+      return o;
+    }
+    // The key an element is looked up by in the UA baseline below. Tag
+    // alone is not enough for <input>: this browser's UA sheet gives a
+    // checkbox `margin: 3px 3px 3px 4px` and a bare 13x13 box that a text
+    // input does not get, so probing every <input> as a text one would
+    // charge those differences to the cascade.
+    function probeKey(el) {
+      var tag = el.tagName.toLowerCase();
+      return tag === 'input' ? tag + ':' + ((el.getAttribute('type') || 'text').toLowerCase()) : tag;
+    }
     var roots = document.querySelectorAll('.kotoba-case');
     for (var i = 0; i < roots.length; i++) {
       var root = roots[i];
@@ -144,8 +178,84 @@
                      x: r.left - rootRect.left, y: r.top - rootRect.top,
                      w: r.width, h: r.height });
       }
-      out[root.id] = { words: words, boxes: boxes };
+      // The COMPUTED-STYLE axis: what the CASCADE decided for each
+      // element, in the browser's own normal form. Read in the same
+      // document order as `boxes` above and matched on the other side by
+      // tag + occurrence -- deliberately NOT by the geometry axis's
+      // nearest-box pairing, so a layout failure can never be re-scored
+      // as a cascade failure.
+      var styles = [];
+      for (var k = 0; k < els.length; k++) {
+        var e2 = els[k], cs2 = getComputedStyle(e2);
+        // Three pieces of context travel with each element, used ONLY to
+        // attribute a mismatch, never to decide one:
+        //  - the PARENT's whole computed style, so a value the browser
+        //    plainly INHERITED can be charged to the ancestor it came
+        //    from rather than counted again at every descendant;
+        //  - float/position, because real CSS BLOCKIFIES a float and an
+        //    absolutely positioned box at computed-value time, exactly as
+        //    it does a flex/grid item.
+        styles.push({ tag: e2.tagName.toLowerCase(),
+                      key: probeKey(e2),
+                      parentDisplay: getComputedStyle(e2.parentElement).display,
+                      parent: readStyle(e2.parentElement),
+                      cssFloat: cs2.cssFloat, position: cs2.position,
+                      style: readStyle(e2) });
+      }
+      out[root.id] = { words: words, boxes: boxes, styles: styles };
     }
+    // The UA baseline, MEASURED rather than assumed: what this browser's
+    // own user-agent stylesheet alone gives each tag the corpus uses, with
+    // no author CSS anywhere near it. Without it every `<b>` that is bold
+    // and every `<div>` that is `block` looks like a cascade error; with
+    // it, a mismatch whose oracle value EQUALS this probe is attributable
+    // to the UA sheet (which this engine keeps in cssom.layout, where the
+    // cascade's own output cannot see it) rather than to the cascade
+    // computing a wrong value.
+    //
+    // Some tags only get their real UA style inside a particular parent (a
+    // <td> outside a table is not a table-cell, an <li> outside a list is
+    // not a list-item), so each one is probed inside the minimal legal
+    // ancestor chain it needs.
+    var PROBE_PARENT = {
+      td: 'table>tbody>tr', th: 'table>tbody>tr', tr: 'table>tbody',
+      tbody: 'table', thead: 'table', tfoot: 'table', caption: 'table',
+      col: 'table>colgroup', colgroup: 'table',
+      li: 'ul', dt: 'dl', dd: 'dl', option: 'select', optgroup: 'select',
+      legend: 'fieldset', figcaption: 'figure', summary: 'details',
+      rt: 'ruby', rp: 'ruby', source: 'video', track: 'video'
+    };
+    var probeHost = document.createElement('div');
+    probeHost.className = 'kotoba-case';
+    probeHost.style.cssText = 'position:absolute;left:-9999px;top:0';
+    document.body.appendChild(probeHost);
+    var ua = {};
+    var seenKeys = {};
+    var allEls = document.querySelectorAll('.kotoba-case *');
+    for (var t = 0; t < allEls.length; t++) seenKeys[probeKey(allEls[t])] = true;
+    Object.keys(seenKeys).forEach(function (key) {
+      var parts = key.split(':'), tag = parts[0];
+      var holder = document.createElement('div');
+      probeHost.appendChild(holder);
+      var cur = holder;
+      (PROBE_PARENT[tag] || '').split('>').filter(Boolean).forEach(function (p) {
+        var e = document.createElement(p); cur.appendChild(e); cur = e;
+      });
+      var el = document.createElement(tag);
+      // Some UA rules key off an ATTRIBUTE, not just the tag: an <a> is
+      // only styled as a link (`rgb(0, 0, 238)`) when it HAS an href, and
+      // an <input>'s box depends entirely on its type. Without these the
+      // probe reports plain black for <a> and a text field's box for a
+      // checkbox, and every such divergence gets misattributed to the
+      // cascade.
+      if (tag === 'a') el.setAttribute('href', '#');
+      if (parts[1]) el.setAttribute('type', parts[1]);
+      cur.appendChild(el);
+      ua[key] = readStyle(el);
+      holder.remove();
+    });
+    probeHost.remove();
+    out['__ua__'] = ua;
     // The oracle's OWN character width, measured rather than guessed: the
     // page is monospace, so one Range over a known-length string gives the
     // exact per-character advance this browser uses. Handing that back lets
@@ -364,6 +474,29 @@
 
 ;; ---- the cssom side ----
 
+(defn- cascaded-document
+  "One parse + cascade pass: htmldom parse -> cssom.core/apply-cascade,
+   stopping BEFORE layout. This is the document the computed-style axis
+   reads (`:style/*` attrs are exactly what apply-cascade writes and what
+   `cssom.core/computed-style` returns), and the same document the layout
+   axes then feed to cssom.layout.
+
+   The wrapper carries the SAME declarations the browser page sets on
+   `.kotoba-case`. Without them the engine never saw the container's
+   `line-height: 20px` and fell back to its own `normal` (1.2em) rule, so
+   an <h1> got a 33px line box where the browser -- which inherits the
+   explicit 20px -- reports 20. That was a harness asymmetry being scored
+   as an engine error.
+
+   apply-cascade runs even with no author CSS: it is also what folds a
+   `style=\"...\"` attribute's :style-inline into the :style/* attrs
+   cssom.layout actually reads, so skipping it would silently drop every
+   inline style in the corpus."
+  [{:keys [html css]}]
+  (-> (html/parse-into-document
+       (str "<div id=\"root\" style=\"font-size: 14px; line-height: 20px\">" html "</div>"))
+      (css/apply-cascade (css/parse-rules (or css "")))))
+
 (defn- engine-ops
   "One layout pass through the real pipeline: htmldom parse -> cssom.core
    cascade -> cssom.layout draw-ops, at the harness width.
@@ -382,20 +515,7 @@
      at their defaults they narrow the content width by 16px per nested
      box, scoring the theme instead of the layout."
   [{:keys [html css]} width char-w]
-  (let [;; The wrapper carries the SAME declarations the browser page sets
-        ;; on `.kotoba-case`. Without them the engine never saw the
-        ;; container's `line-height: 20px` and fell back to its own
-        ;; `normal` (1.2em) rule, so an <h1> got a 33px line box where the
-        ;; browser -- which inherits the explicit 20px -- reports 20. That
-        ;; was a harness asymmetry being scored as an engine error.
-        doc (html/parse-into-document
-             (str "<div id=\"root\" style=\"font-size: 14px; line-height: 20px\">" html "</div>"))
-        ;; apply-cascade runs even with no author CSS: it is also what folds
-        ;; a `style="..."` attribute's :style-inline into the :style/* attrs
-        ;; cssom.layout actually reads, so skipping it would silently drop
-        ;; every inline style in the corpus.
-        doc (css/apply-cascade doc (css/parse-rules (or css "")))
-        [_ doc] (dom/consume-ops doc)]
+  (let [[_ doc] (dom/consume-ops (cascaded-document {:html html :css css}))]
     (layout/draw-ops (dom/tree doc)
                      {:width width
                       :theme {:padding 0
@@ -584,21 +704,369 @@
                          :x (- (:x op) rx) :y (- (:y op) ry)
                          :w (:w op) :h (:h op)})))))
 
+;; ---- the computed-style (cascade) axis ----
+;;
+;; Neither layout axis ever looks at the CASCADE. `cssom.core/apply-cascade`
+;; resolves selectors, specificity, layers, `!important`, custom properties
+;; and shorthand expansion into `:style/*` attrs -- and until this axis
+;; existed nothing compared a single one of those values against the
+;; browser's own `getComputedStyle`. A whole subsystem was unmeasured: a
+;; specificity bug that dropped a declaration entirely would still lay out
+;; SOMETHING, and both layout axes would happily score the something.
+;;
+;; What makes this comparable at all, and what does NOT:
+;;
+;; `getComputedStyle` returns the browser's *computed* value -- cascade,
+;; then inheritance, then defaulting from the UA stylesheet, all collapsed
+;; into one absolute normal form (`rgb(255, 0, 0)`, `"14px"`, `"700"`).
+;; This engine's `:style/*` attrs hold only the FIRST of those three
+;; stages, in author-ish form (`"red"`, `14`, `"bold"`). So each side is
+;; normalised into one canonical form per property kind (colours parsed to
+;; [r g b a], lengths to bare pixels, `bold`/`normal` to 700/400), and the
+;; two later stages are supplied on the engine's behalf, explicitly and
+;; labelled:
+;;
+;;   :direct    -- the cascade wrote a value for this element. The only
+;;                 source this axis genuinely MEASURES.
+;;   :inherited -- no value here, but an ancestor had one and the property
+;;                 is inherited in CSS. Supplied by this harness walking
+;;                 up the engine's own document, which is exactly the
+;;                 `(or (:prop st) (:prop inherited))` fallback
+;;                 cssom.layout applies at paint time.
+;;   :initial   -- nobody in the ancestor chain declared it, so CSS's own
+;;                 INITIAL value stands. NOT the browser's UA value: this
+;;                 engine's UA stylesheet lives in cssom.layout (see its
+;;                 `node-style`'s `(or (style node :x) <ua default>)`
+;;                 chains) and is invisible to anything reading the
+;;                 cascade's output.
+;;
+;; That last one is the axis's whole point rather than a flaw in it, so a
+;; mismatch is CLASSIFIED rather than just counted, against a UA baseline
+;; measured in the oracle itself (see the measurement script's `__ua__`
+;; probe):
+;;
+;;   :ua-default  -- the engine has no cascaded value and the browser's
+;;                   value is exactly what its UA sheet gives that tag
+;;                   bare. One architectural divergence, N thousand times.
+;;   :blockified  -- a `display` mismatch on a FLEX or GRID item, where
+;;                   real CSS blockifies at computed-value time and the
+;;                   browser therefore reports `block` with nobody having
+;;                   declared anything. Also measured (the oracle sends
+;;                   each element's parent display) rather than guessed.
+;;   :cascade     -- everything else: the two sides disagree about a value
+;;                   the cascade is genuinely responsible for. THIS is the
+;;                   bucket worth reading.
+
+(def computed-style-properties
+  "The properties this axis compares, and what each side's value means.
+
+   Deliberately small and deliberately boring: every one of these has a
+   normal form both sides can be reduced to without guessing. `:kind`
+   selects the normaliser; `:inherited?` is real CSS's own inheritance
+   flag (which decides whether an absent value looks up the ancestor
+   chain); `:initial` is the CSS initial value, used when nothing in the
+   chain declared the property."
+  [{:prop :color :inherited? true :kind :color
+    ;; CSS's initial `color` is the system colour `canvastext`, which
+    ;; Chrome resolves to opaque black in a light colour scheme.
+    :initial "#000000"}
+   {:prop :font-size :inherited? true :kind :length :initial 16}
+   {:prop :font-weight :inherited? true :kind :weight :initial 400}
+   {:prop :font-style :inherited? true :kind :keyword :initial "normal"}
+   {:prop :display :inherited? false :kind :keyword :initial "inline"}
+   {:prop :text-align :inherited? true :kind :keyword :initial "start"}
+   {:prop :margin-top :inherited? false :kind :length :initial 0}
+   {:prop :margin-right :inherited? false :kind :length :initial 0}
+   {:prop :margin-bottom :inherited? false :kind :length :initial 0}
+   {:prop :margin-left :inherited? false :kind :length :initial 0}
+   {:prop :padding-top :inherited? false :kind :length :initial 0}
+   {:prop :padding-right :inherited? false :kind :length :initial 0}
+   {:prop :padding-bottom :inherited? false :kind :length :initial 0}
+   {:prop :padding-left :inherited? false :kind :length :initial 0}])
+
+(def ^:private named-colors
+  "The CSS named colours this harness can canonicalise. Anything outside
+   this table is EXCLUDED with `:unparseable-color` and printed, never
+   silently treated as a mismatch -- the point of the axis is to be able to
+   say which side is wrong, and a colour neither side parsed says nothing."
+  {"black" [0 0 0] "silver" [192 192 192] "gray" [128 128 128] "grey" [128 128 128]
+   "white" [255 255 255] "maroon" [128 0 0] "red" [255 0 0] "purple" [128 0 128]
+   "fuchsia" [255 0 255] "magenta" [255 0 255] "green" [0 128 0] "lime" [0 255 0]
+   "olive" [128 128 0] "yellow" [255 255 0] "navy" [0 0 128] "blue" [0 0 255]
+   "teal" [0 128 128] "aqua" [0 255 255] "cyan" [0 255 255] "orange" [255 165 0]
+   "pink" [255 192 203] "brown" [165 42 42] "gold" [255 215 0]
+   "darkgray" [169 169 169] "darkgrey" [169 169 169]
+   "lightgray" [211 211 211] "lightgrey" [211 211 211]
+   "transparent" [0 0 0 0]
+   ;; the system colours Chrome reports for the initial `color` value
+   "canvastext" [0 0 0] "windowtext" [0 0 0]})
+
+(defn- parse-color
+  "`#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`/`rgba()` in either the
+   comma or the slash-alpha form, and the named colours above, all reduced
+   to `[r g b a]`. nil when this harness cannot parse it -- the caller
+   turns that into an explicit exclusion rather than a mismatch."
+  [v]
+  (let [s (str/lower-case (str/trim (str v)))
+        hex1 (fn [h i] (let [d (js/parseInt (subs h i (inc i)) 16)] (+ d (* 16 d))))
+        hex2 (fn [h i] (js/parseInt (subs h i (+ i 2)) 16))]
+    (cond
+      (str/blank? s) nil
+      (contains? named-colors s)
+      (let [c (named-colors s)] (if (= 4 (count c)) c (conj c 1)))
+
+      (str/starts-with? s "#")
+      (let [h (subs s 1)]
+        (cond
+          (re-matches #"[0-9a-f]{3}" h) [(hex1 h 0) (hex1 h 1) (hex1 h 2) 1]
+          (re-matches #"[0-9a-f]{4}" h) [(hex1 h 0) (hex1 h 1) (hex1 h 2) (/ (hex1 h 3) 255)]
+          (re-matches #"[0-9a-f]{6}" h) [(hex2 h 0) (hex2 h 2) (hex2 h 4) 1]
+          (re-matches #"[0-9a-f]{8}" h) [(hex2 h 0) (hex2 h 2) (hex2 h 4) (/ (hex2 h 6) 255)]
+          :else nil))
+
+      (re-find #"^rgba?\(" s)
+      (let [nums (mapv js/parseFloat (re-seq #"-?[0-9.]+" (subs s (inc (str/index-of s "(")))))]
+        (when (>= (count nums) 3)
+          [(nth nums 0) (nth nums 1) (nth nums 2) (if (> (count nums) 3) (nth nums 3) 1)]))
+
+      :else nil)))
+
+(def ^:private length-tolerance-px
+  "Lengths agree within this. Not zero because the browser reports
+   fractional device pixels (`13.3333px`) while this engine's cascade
+   coerces `<n>px` to a whole number -- but far tighter than the geometry
+   axis's 2px, because these are DECLARED values rather than accumulated
+   positions."
+  0.5)
+
+(defn- normalize-style-value
+  "Reduces one side's raw value for one property to a comparable canonical
+   form. Returns `{:v <canonical>}`, or `{:excluded <reason>}` when the
+   value is real but not comparable AT THIS LAYER -- which is a different
+   statement from `the two sides disagree` and is reported separately."
+  [kind v]
+  (let [s (str/trim (str v))]
+    (cond
+      (str/blank? s) {:excluded :absent}
+
+      (= :color kind)
+      (if-let [c (parse-color s)] {:v (mapv #(js/Math.round (* 1000 %)) c)} {:excluded :unparseable-color})
+
+      (= :length kind)
+      (cond
+        (number? v) {:v v}
+        (re-matches #"-?[0-9.]+" s) {:v (js/parseFloat s)}
+        (re-matches #"-?[0-9.]+px" s) {:v (js/parseFloat s)}
+        ;; `1em`, `50%`, `auto`, `calc(100% - 8px)`: the cascade legitimately
+        ;; holds the SPECIFIED value for these and resolves them only at
+        ;; paint time (against a font size / containing block it does not
+        ;; have here), while getComputedStyle reports the already-resolved
+        ;; used value. Comparing them would compare two different STAGES,
+        ;; not two answers to the same question.
+        :else {:excluded :non-absolute-length})
+
+      (= :weight kind)
+      (cond
+        (number? v) {:v v}
+        (re-matches #"[0-9]+" s) {:v (js/parseFloat s)}
+        (= "normal" (str/lower-case s)) {:v 400}
+        (= "bold" (str/lower-case s)) {:v 700}
+        ;; `lighter`/`bolder` are relative to the PARENT's computed weight,
+        ;; which is a resolution step the cascade does not perform.
+        :else {:excluded :relative-font-weight})
+
+      :else {:v (str/lower-case s)})))
+
+(defn- resolve-cascaded-style
+  "The engine's answer for one element: for every compared property, the
+   value plus WHERE it came from (:direct / :inherited / :initial -- see
+   this section's header comment). `inherited` is the map the parent hands
+   down."
+  [attrs inherited]
+  (into {}
+        (map (fn [{:keys [prop inherited? initial]}]
+               (let [k (keyword "style" (name prop))]
+                 [prop (cond
+                         (contains? attrs k) {:value (get attrs k) :source :direct}
+                         (and inherited? (contains? inherited prop)) (get inherited prop)
+                         :else {:value initial :source :initial})])))
+        computed-style-properties))
+
+(defn- inheritable-style
+  "What an element hands down to its children: its own resolved value for
+   every INHERITED property, with a `:direct` source demoted to
+   `:inherited` so a descendant's report names where the value really
+   originated rather than claiming the descendant declared it."
+  [resolved]
+  (into {}
+        (keep (fn [{:keys [prop inherited?]}]
+                (when inherited?
+                  (let [r (get resolved prop)]
+                    [prop (cond-> r (= :direct (:source r)) (assoc :source :inherited))]))))
+        computed-style-properties))
+
+(defn- engine-styles
+  "Every element under the case root, in DOCUMENT order, with its
+   cascade-resolved style.
+
+   Reads the cascaded document directly and never touches cssom.layout, so
+   this axis shares no machinery with the geometry axis: a layout bug
+   cannot show up here as a cascade bug, and vice versa. That independence
+   is also why elements are matched by tag + occurrence rather than by the
+   geometry axis's nearest-box pairing."
+  [c]
+  (let [tree (dom/tree (cascaded-document c))
+        root (->> (tree-seq map? #(filter map? (:children %)) tree)
+                  (filter #(= "root" (get-in % [:attrs :id])))
+                  first)]
+    (when root
+      (letfn [(walk [node inherited acc]
+                (reduce (fn [acc child]
+                          (if-not (and (map? child) (:tag child))
+                            acc
+                            (let [resolved (resolve-cascaded-style (:attrs child) inherited)
+                                  tag (name (:tag child))]
+                              (walk child
+                                    (inheritable-style resolved)
+                                    (conj acc {:tag tag
+                                               ;; mirror of the oracle's own probeKey()
+                                               :key (if (= "input" tag)
+                                                      (str "input:" (str/lower-case
+                                                                     (str (get-in child [:attrs :type] "text"))))
+                                                      tag)
+                                               :style resolved})))))
+                        acc
+                        (:children node)))]
+        (walk root (inheritable-style (resolve-cascaded-style (:attrs root) {})) [])))))
+
+(defn- computed-style-agreement
+  "Compares one case's cascade-resolved styles against the browser's
+   `getComputedStyle`, element by element and property by property.
+
+   Elements are paired by tag + occurrence order: both sides walk the same
+   document, so the Nth `<td>` on one side is the Nth `<td>` on the other.
+   Where the two sides disagree about HOW MANY elements of a tag exist
+   (htmldom and Blink both synthesise `<tbody>`, but a parser divergence
+   would show up here), the surplus is excluded as
+   `:element-count-mismatch` rather than zipped against the wrong element.
+
+   `ua` is the oracle's own measured UA baseline, used only to attribute a
+   mismatch (`:ua-default` vs `:cascade`), never to decide one."
+  [oracle-styles engine-styles ua]
+  (let [o (group-by :tag oracle-styles)
+        e (group-by :tag engine-styles)
+        tags (distinct (concat (keys o) (keys e)))
+        same? (fn [kind a b]
+                (if (= :length kind)
+                  (<= (abs (- a b)) length-tolerance-px)
+                  (= a b)))]
+    (reduce
+     (fn [acc tag]
+       (let [os (get o tag []) es (get e tag [])
+             n (min (count os) (count es))
+             surplus (- (max (count os) (count es)) n)
+             acc (cond-> acc
+                   (pos? surplus)
+                   (update :excluded conj {:reason :element-count-mismatch :tag tag
+                                           :n (* surplus (count computed-style-properties))}))]
+         (reduce
+          (fn [acc i]
+            (let [ob (nth os i) eb (nth es i)]
+              (reduce
+               (fn [acc {:keys [prop kind inherited?]}]
+                 (let [raw-o (get-in ob [:style prop])
+                       {:keys [value source]} (get-in eb [:style prop])
+                       no (normalize-style-value kind raw-o)
+                       ne (normalize-style-value kind value)]
+                   (cond
+                     (:excluded no)
+                     (update acc :excluded conj {:reason (keyword "oracle" (name (:excluded no)))
+                                                 :tag tag :prop prop :n 1 :raw raw-o})
+                     (:excluded ne)
+                     (update acc :excluded conj {:reason (keyword "engine" (name (:excluded ne)))
+                                                 :tag tag :prop prop :n 1 :raw value})
+                     (same? kind (:v no) (:v ne))
+                     (-> acc (update :agree inc) (update :total inc)
+                         (update-in [:sources source] (fnil inc 0))
+                         (update-in [:by-prop prop] (fnil (fn [[a t]] [(inc a) (inc t)]) [0 0])))
+                     :else
+                     (let [nua (normalize-style-value kind (get-in ua [(keyword (:key ob)) prop]))
+                           npa (normalize-style-value kind (get-in ob [:parent prop]))
+                           ;; A value the cascade wrote for THIS element is
+                           ;; the cascade's own answer; nothing downstream
+                           ;; can excuse it. Every other source means the
+                           ;; engine had no declaration here, which is when
+                           ;; a UA rule or a blockification could explain
+                           ;; the browser's value instead.
+                           undeclared? (not= :direct source)
+                           cause (cond
+                                   ;; The oracle's value is EXACTLY what
+                                   ;; this browser gives the bare tag, and
+                                   ;; the engine's cascade declared nothing
+                                   ;; here -- so the UA sheet explains it.
+                                   ;; This cannot tell that apart from a
+                                   ;; cascade that DROPPED a declaration
+                                   ;; which happened to restate the UA
+                                   ;; value; that is recorded in the README
+                                   ;; rather than papered over.
+                                   (and undeclared? (:v nua)
+                                        (same? kind (:v no) (:v nua)))
+                                   :ua-default
+
+                                   (and (= :display prop)
+                                        (or (contains? #{"flex" "grid" "inline-flex" "inline-grid"}
+                                                       (str/lower-case (str (:parentDisplay ob))))
+                                            (not (contains? #{"none" ""} (str/lower-case (str (:cssFloat ob)))))
+                                            (contains? #{"absolute" "fixed"}
+                                                       (str/lower-case (str (:position ob)))))
+                                        (contains? #{"block" "flex" "grid" "table"} (:v no)))
+                                   :blockified
+
+                                   ;; The browser's value here is simply its
+                                   ;; PARENT's -- it inherited it. Whatever
+                                   ;; produced the divergence happened at an
+                                   ;; ancestor and is already scored there;
+                                   ;; charging it again at every descendant
+                                   ;; would multiply one cause by the depth
+                                   ;; of the tree.
+                                   (and inherited? undeclared? (:v npa)
+                                        (same? kind (:v no) (:v npa)))
+                                   :ua-inherited
+
+                                   :else :cascade)]
+                       (-> acc (update :total inc)
+                           (update-in [:sources source] (fnil inc 0))
+                           (update-in [:by-prop prop] (fnil (fn [[a t]] [a (inc t)]) [0 0]))
+                           (update :diffs conj {:prop prop :tag tag :cause cause :source source
+                                                :engine (str value) :oracle (str raw-o)}))))))
+               acc
+               computed-style-properties)))
+          acc
+          (range n))))
+     {:total 0 :agree 0 :by-prop {} :sources {} :diffs [] :excluded []}
+     tags)))
+
 (defn- engine-render
-  "Both axes from one layout pass: the line structure and the element
-   boxes."
+  "All three axes from one case: the line structure and the element boxes
+   (both from cssom.layout), and the cascade-resolved style of every
+   element (from cssom.core alone)."
   [c width char-w]
   {:lines (engine-lines c width char-w)
-   :boxes (engine-boxes (engine-ops c width char-w))})
+   :boxes (engine-boxes (engine-ops c width char-w))
+   :styles (engine-styles c)})
 
-(defn- compare-case [oracle-data width char-w c]
+(defn- compare-case [oracle-data ua width char-w c]
   (let [oracle-words (:words oracle-data)
         lines (cluster-lines oracle-words)
         rendered (try (engine-render c width char-w)
                       (catch :default e {:error (ex-message e)}))
         mine (if (:error rendered) rendered (:lines rendered))
         geo (when-not (:error rendered)
-              (geometry-agreement (:boxes oracle-data) (:boxes rendered)))]
+              (geometry-agreement (:boxes oracle-data) (:boxes rendered)))
+        sty (when-not (:error rendered)
+              (-> (computed-style-agreement (:styles oracle-data) (:styles rendered) ua)
+                  (update :diffs (fn [ds] (mapv #(assoc % :id (:id c)) ds)))
+                  (update :excluded (fn [xs] (mapv #(assoc % :id (:id c)) xs)))))]
     (cond
       (map? mine)
       {:id (:id c) :group (:group c) :status :error :detail (:error mine)}
@@ -610,15 +1078,15 @@
       ;; through no fault of either. Marked in the corpus, excluded from
       ;; the score, and printed, rather than silently counted as a failure.
       (:oracle/blind c)
-      {:id (:id c) :group (:group c) :status :unscorable :geo geo
+      {:id (:id c) :group (:group c) :status :unscorable :geo geo :sty sty
        :detail "oracle cannot see generated content" :expected lines :actual mine}
 
       (= lines mine)
-      {:id (:id c) :group (:group c) :status :pass :geo geo
+      {:id (:id c) :group (:group c) :status :pass :geo geo :sty sty
        :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)}
 
       :else
-      {:id (:id c) :group (:group c) :status :fail :geo geo
+      {:id (:id c) :group (:group c) :status :fail :geo geo :sty sty
        :expected lines :actual mine})))
 
 ;; ---- report ----
@@ -629,7 +1097,7 @@
 (defn- pad-right [s n] (let [s (str s)] (str s (apply str (repeat (max 0 (- n (count s))) " ")))))
 (defn- pad-left [s n] (let [s (str s)] (str (apply str (repeat (max 0 (- n (count s))) " ")) s)))
 
-(let [{:keys [browser width ledger only]} (parse-args *command-line-args*)
+(let [{:keys [browser width ledger only] :as opts} (parse-args *command-line-args*)
       candidates (find-browsers browser)
       cases (cond->> (edn/read-string (fs/readFileSync "conformance/cases.edn" "utf8"))
               only (filter #(str/includes? (str (:id %)) only)))
@@ -656,8 +1124,11 @@
               :metrics (:__metrics__ oracle)}
       _ (println (str "metrics: per-character advance table measured in the oracle ("
                       (count (:normal advances)) " chars x normal/bold/italic)\n"))
+      ua (:__ua__ oracle)
+      _ (println (str "UA base: user-agent baseline probed in the oracle for "
+                      (count ua) " tags (bare element, no author CSS)\n"))
       results (vec (map-indexed (fn [i c]
-                                  (compare-case (get oracle (keyword (str "case-" i)) []) width char-w c))
+                                  (compare-case (get oracle (keyword (str "case-" i)) []) ua width char-w c))
                                 cases))
       scorable (remove #(= :unscorable (:status %)) results)
       passed (filter #(= :pass (:status %)) scorable)
@@ -721,6 +1192,81 @@
               :when (< a t)]
         (println (str "            " (pad-right tag 12) a "/" t))))
     (println))
+
+  ;; ---- the computed-style (cascade) axis ----
+  (let [stys (keep :sty results)
+        total (reduce + 0 (map :total stys))
+        agree (reduce + 0 (map :agree stys))
+        clean (count (filter #(and (:sty %) (pos? (:total (:sty %)))
+                                   (= (:total (:sty %)) (:agree (:sty %))))
+                             results))
+        with-styles (count (filter #(pos? (:total (:sty % {:total 0}))) results))
+        diffs (mapcat :diffs stys)
+        excluded (mapcat :excluded stys)
+        sources (apply merge-with + {} (map :sources stys))
+        by-prop (reduce (fn [acc s]
+                          (reduce (fn [acc [p [a t]]]
+                                    (update acc p (fnil (fn [[a0 t0]] [(+ a0 a) (+ t0 t)]) [0 0])))
+                                  acc (:by-prop s)))
+                        {} stys)
+        by-cause (frequencies (map :cause diffs))]
+    (println (str "COMPUTED STYLE  " agree "/" total " cascade-resolved values agree  ("
+                  (pct agree total) "%)"))
+    (println (str "                " clean "/" with-styles " cases with every compared value in agreement"))
+    ;; The actionable count: how many cases have no mismatch this axis can
+    ;; attribute to the CASCADE itself. The headline number above is
+    ;; dominated by the UA stylesheet living one namespace downstream, which
+    ;; is one architectural fact repeated thousands of times rather than
+    ;; thousands of bugs -- and burying that would make the axis unreadable.
+    (println (str "                "
+                  (count (filter (fn [r] (and (:sty r) (pos? (:total (:sty r)))
+                                              (not-any? #(= :cascade (:cause %)) (:diffs (:sty r)))))
+                                 results))
+                  "/" with-styles " cases with no CASCADE-attributed mismatch"))
+    (println (str "                mismatch cause: "
+                  (str/join ", " (map (fn [[c n]] (str (name c) " " n))
+                                      (sort-by (fn [[_ n]] (- n)) by-cause)))))
+    (println (str "                engine-side source: "
+                  (str/join ", " (map (fn [[s n]] (str (name s) " " n))
+                                      (sort-by (fn [[_ n]] (- n)) sources)))))
+    (println "                per property (agreeing/compared):")
+    (doseq [{:keys [prop]} computed-style-properties
+            :let [[a t] (get by-prop prop [0 0])]]
+      (println (str "                  " (pad-right (name prop) 16) (pad-left a 5) "/" (pad-left t 5)
+                    (pad-left (pct a t) 5) "%")))
+    (let [row (fn [[[prop tag engine oracle cause] ds]]
+                (println (str "                  " (pad-right (name prop) 15) (pad-right tag 8)
+                              (pad-left (count ds) 4) "  "
+                              (pad-right (str engine " -> " oracle) 34)
+                              (pad-right (name cause) 12)
+                              (str/join ", " (map (comp str :id) (take 2 ds))))))
+          grouped (fn [ds] (->> ds
+                                (group-by (juxt :prop :tag :engine :oracle :cause))
+                                (sort-by (fn [[_ g]] (- (count g))))))]
+      (println "                worst (property, tag, count, engine -> oracle, cause):")
+      (doseq [g (take 14 (grouped diffs))] (row g))
+      ;; The residual that names BUGS rather than the known architectural
+      ;; split, listed separately because it is otherwise invisible under
+      ;; the UA traffic.
+      (let [cs (filter #(= :cascade (:cause %)) diffs)]
+        (println (str "                cascade-attributed residual (" (count cs) " values):"))
+        (doseq [g (take (if (:debug-style opts) 200 12) (grouped cs))] (row g))))
+    (println (str "                EXCLUDED from comparison (" (reduce + 0 (map :n excluded))
+                  " values), never silently:"))
+    (doseq [[reason xs] (->> excluded
+                             (group-by :reason)
+                             (sort-by (fn [[_ xs]] (- (reduce + 0 (map :n xs))))))]
+      (println (str "                  " (pad-right (name reason) 34)
+                    (pad-left (reduce + 0 (map :n xs)) 5) "  "
+                    (str/join " " (->> xs
+                                       (map #(str (some-> (:prop %) name)
+                                                  (when (:tag %) (str "/" (:tag %)))))
+                                       frequencies
+                                       (sort-by (fn [[_ n]] (- n)))
+                                       (take 4)
+                                       (map (fn [[k n]] (str k "(" n ")")))))
+                    "   " (str/join ", " (map str (distinct (take 3 (map :id xs))))))))
+    (println))
   (println (str "TOTAL " (count passed) "/" (count scorable) " = " (pct (count passed) (count scorable)) "%"
                 (let [u (count (filter #(= :unscorable (:status %)) results))]
                   (when (pos? u) (str "   (" u " unscorable, excluded)")))))
@@ -734,6 +1280,9 @@
                  :conformance/by-group (into {} (map (fn [[g p t]] [g [p t]]) by-group))
                  :conformance/failing (vec (sort (map :id (remove #(= :pass (:status %)) scorable))))
                  :conformance/geometry-boxes-agree (reduce + 0 (map :agree (keep :geo results)))
-                 :conformance/geometry-boxes-total (reduce + 0 (map :total (keep :geo results)))}]
+                 :conformance/geometry-boxes-total (reduce + 0 (map :total (keep :geo results)))
+                 :conformance/computed-style-agree (reduce + 0 (map :agree (keep :sty results)))
+                 :conformance/computed-style-total (reduce + 0 (map :total (keep :sty results)))
+                 :conformance/computed-style-excluded (reduce + 0 (map :n (mapcat :excluded (keep :sty results))))}]
       (fs/appendFileSync ledger (str (pr-str entry) "\n"))
       (println (str "\nappended to " ledger)))))
