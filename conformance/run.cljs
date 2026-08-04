@@ -1158,7 +1158,16 @@
       candidates (find-browsers browser)
       cases (cond->> (edn/read-string (fs/readFileSync "conformance/cases.edn" "utf8"))
               only (filter #(str/includes? (str (:id %)) only)))
-      page (path/join (os/tmpdir) "kotoba-conformance-corpus.html")
+      ;; A per-run directory, not a fixed name in tmpdir. Two runs of this
+      ;; harness overlap routinely now that agents run them in parallel, and
+      ;; a shared path means run B overwrites the page run A is about to
+      ;; measure -- so A reads B's corpus through A's case indices and
+      ;; scores near-zero on everything. Observed exactly that on
+      ;; 2026-08-04: 3/190 lines and 0/750 boxes, the box count coming from
+      ;; a corpus that run had never seen. A harness whose numbers depend on
+      ;; who else is running is not measuring anything.
+      page (path/join (fs/mkdtempSync (path/join (os/tmpdir) "kotoba-conf-page-"))
+                      "corpus.html")
       _ (fs/writeFileSync page (corpus-page cases width))
       [browser transport oracle]
       (loop [[b & more] candidates failures []]
