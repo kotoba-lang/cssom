@@ -38,32 +38,47 @@
    reads that and synthesizes a layout-only child that flows through the
    exact same text-wrapping/paint path (layout-text) real text already
    uses, positioned immediately before/after the element's real children.
-   general INLINE FLOW (see layout-inline-run): a maximal run of two or
-   more adjacent inline-level children — real text nodes, generated
-   content, and inline-level elements (inline-level-tags, or any element
-   an author gives `display: inline`) — shares line boxes instead of each
-   getting its own block row, so `<li>text<b>bold</b></li>` renders on ONE
-   line, wraps as one unit at the content width, collapses whitespace
-   across fragment boundaries the way real CSS does, keeps each fragment's
-   own color/font-size/weight/style/decoration as its own draw-op, and
-   sits every fragment on one shared baseline. Replaced elements and form
+   general INLINE FLOW (see layout-inline-run): a run of adjacent
+   inline-level children — real text nodes, generated content, and
+   inline-level elements (inline-level-tags, or any element an author gives
+   `display: inline`) — shares line boxes instead of each getting its own
+   block row, so `<li>text<b>bold</b></li>` renders on ONE line, wraps as
+   one unit at the content width, collapses whitespace across fragment
+   boundaries the way real CSS does, keeps each fragment's own
+   color/font-size/weight/style/decoration as its own draw-op, and sits
+   every fragment on one shared baseline. Replaced elements and form
    controls (`<img>`, `<input>`, `<button>`, `<select>`, `<textarea>`) flow
    in that line too, as ATOMIC inlines: laid out at their own intrinsic
-   width (inline-atomic-avail-width) and sitting with their bottom edge on
-   the text baseline, the real CSS `vertical-align: baseline` default.
+   width (inline-atomic-avail-width) and sitting on the text baseline with
+   their own internal baseline (a control's text, an inline-block's last
+   line, a scroll container's bottom margin edge — inline-fragments), the
+   real CSS `vertical-align: baseline` default.
+
+   The LINE BOX itself is the real CSS one (leading-ascent,
+   inline-line-metrics): a strut from the block's own font plus every
+   participant, each reaching `floor(ascent + halfLeading)` above the
+   shared baseline and the rest of its line-height below it, the box being
+   the union. Every inline element's own box is its OWN font's content
+   area on that baseline (layout-inline-run's owner-fragments), never the
+   line box and never the box of whatever it contains.
+
    Bounded, documented cuts remain, each at the fn that owns it:
    `<svg>`/`<canvas>`/`<video>`/`<iframe>` are still not inline-level,
    because this engine cannot render them at all (inline-atomic-tags);
-   `vertical-align` values other than the baseline default are not modeled;
    an inline box containing a BLOCK box keeps the
    old block-row path rather than being mis-nested, since real CSS's
    block-in-inline box split is not implemented (inline-flow-candidate?);
-   a non-normal `white-space` keeps the old path (inline-flow-candidate?);
+   a non-normal `white-space` or a `text-overflow` keeps the old path,
+   whether declared on the child or inherited from the container
+   (inline-flow-candidate?, inline-runs);
    inline padding/border/margin are not applied and a wrapped inline box
    reports one union `:node` box (inline-owner-ops); `vertical-align`
-   other than the baseline default is not modeled (inline-line-metrics);
-   and a LONE inline child deliberately stays on the pre-existing
-   layout-text path, byte for byte (inline-runs). Two older, narrower
+   `top`/`bottom`/`middle` are not modeled (`super`/`sub` are —
+   vertical-align-shift, inline-line-metrics); an EMPTY inline box inside a
+   multi-child run still emits no `:node` op (inline-fragment-bearing?);
+   and a LONE inline child that is bare TEXT deliberately stays on the
+   pre-existing layout-text path, byte for byte, where a lone inline
+   ELEMENT does flow (inline-runs). Two older, narrower
    string-level merges predate this and still do exactly what they did —
    they collapse text into ONE styled run, which is a different thing from
    flowing separately styled runs onto one line. The first: a ::before
@@ -801,10 +816,32 @@
   {:family "Arial" :size 13})
 
 (def ^:private ua-control-box
-  "UA padding and border for form controls, measured in Chrome: an
-   `<input>` is `padding: 2px; border: 2px`, a `<button>` `padding: 6px;
-   border: 2px`, a `<select>` `border: 1px`. Without them a control's box
-   was its content width exactly, where a browser reports 8px more.
+  "UA padding and border for form controls, read straight off
+   `getComputedStyle` in Brave rather than reverse-engineered from a total:
+   an `<input>` is `padding: 1px 2px; border: 2px`, a `<button>`
+   `padding: 1px 6px; border: 2px`, a `<select>` `border: 1px` (plus 1px of
+   Chrome's own internal block padding, see below), a `<textarea>`
+   `padding: 2px; border: 1px`. Without them a control's box was its
+   content width exactly, where a browser reports 8px more.
+
+   `:line-height :normal` on every one of them is the other half of the
+   same reading: a control's UA `font:` shorthand RESETS `line-height` to
+   `normal`, so the page's own line-height never reaches it. Measured, all
+   five report `line-height: normal` even inside a `line-height: 20px`
+   block. That matters twice over -- it sets the control's CONTENT height
+   (one font content area per row, not one page line box) and it removes
+   the half-leading from the control's internal baseline, which is what
+   put every `<input>`, `<button>` and the `<label>` around them ~3px
+   wrong on the line.
+
+   The decomposition, not just the total, is what a line box needs: an
+   input measures 21 either way, but its own text baseline sits at
+   `border + padding-top + ascent` -- 15 with the measured `1px` block
+   padding and 16 with the uniform `2px` this used to carry, and the whole
+   line box is built on that number. The earlier note here that a button
+   is `13px content + 2 + 4 border = 21` did not add up (that is 19, which
+   is what this engine produced): the content is the FONT's 15px area, not
+   its 13px size.
 
    NOT here, and measured so the next reader does not have to: `<fieldset>`
    and `<legend>`. Chrome gives a fieldset `margin-inline: 2px`, a 2px
@@ -818,13 +855,20 @@
    not a UA-constant, so `:form/fieldset-and-legend` is left failing rather
    than half-fixed. It is NOT a margin-collapsing failure, which is what
    its residual looks like from the outside."
-  {:input {:padding 2 :border 2}
-   :textarea {:padding 2 :border 2}
+  ;; An input's padding is NOT uniform either: 2px inline, 1px block. The
+  ;; uniform `:padding 2` is kept as the fallback the horizontal axis (and
+  ;; `content-inset`, i.e. where the control's own text and caret are
+  ;; painted) already used; the per-side block values are what the vertical
+  ;; axis reads through `inset-side`.
+  {:input {:padding 2 :padding-top 1 :padding-bottom 1 :border 2
+           :line-height :normal}
+   :textarea {:padding 2 :border 1 :line-height :normal}
    ;; a button's padding is NOT uniform: 6px each side, 1px top and bottom.
-   ;; Measured in Chrome (h=21 = 13px content + 2 + 4 border), and only
-   ;; expressible at all since the box model gained per-side values.
+   ;; Measured in Brave (`padding: 1px 6px`, `border: 2px`, so
+   ;; h = 15 + 2 + 4 = 21), and only expressible at all since the box model
+   ;; gained per-side values.
    :button {:padding 1 :padding-left 6 :padding-right 6 :border 2
-            :line-height :font-size}
+            :line-height :normal}
    ;; a <select>'s 1px block padding is Chrome's own internal button
    ;; padding: it reports `padding: 0px` in getComputedStyle yet a select
    ;; measures 4px taller than its font's content area at EVERY size
@@ -834,7 +878,7 @@
    ;; 0; the horizontal slack is the dropdown arrow, see
    ;; select-arrow-width.
    :select {:padding 0 :padding-top 1 :padding-bottom 1 :border 1
-            :line-height :font-size}})
+            :line-height :normal}})
 
 (defn- select-multiple?
   "A `<select multiple>` is a completely different box from a closed
@@ -913,15 +957,20 @@
       ;; ...and its own margins: Chrome's UA sheet gives a checkbox/radio
       ;; `margin: 3px 3px 3px 4px`, which is the gap a reader sees between
       ;; the box and the label beside it.
+      ;; `:box 13` -- a checkbox is a fixed-size PLATFORM WIDGET, not a box
+      ;; sized from a font: measured in Brave it is 13x13 at every font
+      ;; size. The width path already spells that 13 (see
+      ;; atomic-intrinsic-width); naming it here is what keeps the height
+      ;; from being derived from the control font instead.
       {:padding 0 :border 0 :margin-top 3 :margin-right 3
-       :margin-bottom 3 :margin-left 4}
+       :margin-bottom 3 :margin-left 4 :box 13}
 
       ;; An OPEN listbox has none of the closed dropdown's 1px internal
       ;; block padding: measured, a `size="3"` multiple select is exactly
       ;; `2 (border) + 3 rows` tall at every font size (41/53/62.5625/
       ;; 91.3906 for rows of 13/17/20.1875/29.7969), with nothing left over.
       (select-multiple? node)
-      {:padding 0 :border 1 :line-height :font-size}
+      {:padding 0 :border 1 :line-height :normal}
 
       :else (get ua-control-box tag))))
 
@@ -994,6 +1043,8 @@
                       tok (if (and (= :column axis) (= 2 (count toks))) (second toks) (first toks))]
                   (parse-int tok nil))
     :else nil))
+
+(declare font-metrics)
 
 (defn- node-style [node theme]
   ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
@@ -1143,11 +1194,24 @@
    :font-family (or (style node :font-family)
                     (when (contains? form-control-tags (:tag node)) (:family ua-control-font)))
    :line-height (or (style node :line-height)
-                    ;; a control's UA `font:` shorthand resets line-height to
-                    ;; normal, so an inherited page line-height never applies
-                    ;; to it -- see layout-form-control's own note
-                    (when (= :font-size (:line-height (ua-control-box-for node)))
-                      (or (style node :font-size) (:size ua-control-font))))
+                    ;; A control's UA `font:` shorthand resets line-height to
+                    ;; NORMAL, so an inherited page line-height never applies
+                    ;; to it -- read straight off getComputedStyle in Brave,
+                    ;; where every control reports `line-height: normal`
+                    ;; inside a `line-height: 20px` block. `normal` is the
+                    ;; font's own content area, which is why this needs
+                    ;; font-metrics and not the font SIZE: at 13.3333px Arial
+                    ;; that is 15 (12 + 3), and using the size gave 13, one
+                    ;; whole leading short in the control's box AND in its
+                    ;; internal baseline.
+                    (when (= :normal (:line-height (ua-control-box-for node)))
+                      (let [fs (or (style node :font-size) (:size ua-control-font))
+                            {:keys [ascent descent]}
+                            (font-metrics theme fs
+                                          (style node :font-weight)
+                                          (style node :font-style)
+                                          (or (style node :font-family) (:family ua-control-font)))]
+                        (+ ascent descent))))
    :font-weight (or (style node :font-weight) (get ua-font-weight (:tag node)))
    :font-style (or (style node :font-style) (get ua-font-style (:tag node)))
    ;; parse-int'd for the exact same reason box-shadow-x/y/blur/spread
@@ -1555,6 +1619,39 @@
                       (long (* multiplier font-size))
                       normal)
       :else normal))))
+
+(defn- leading-ascent
+  "How far ABOVE the baseline one inline box reaches inside its line box:
+   the font's own ascent plus HALF THE LEADING, floored.
+
+   This is the single rule the whole inline vertical model is built from,
+   and it is stated once here because four places need to agree about it
+   exactly (the line box's own height, where each inline element's box
+   lands in it, an atomic inline's internal baseline, and a flex item's
+   first-line baseline). CSS 2.1 10.8.1: an inline box occupies
+   `[baseline - ascent - halfLeading, baseline + descent + halfLeading]`
+   where `halfLeading = (line-height - (ascent + descent)) / 2`. Leading
+   can be NEGATIVE -- a declared `line-height` smaller than the font's own
+   content area makes the box overflow its line rather than grow it.
+
+   The FLOOR is not decoration: it is what a real engine does, and leaving
+   it out put every inline element's box a pixel low. Measured in Brave, a
+   14px monospace line (ascent 12, descent 3) at `line-height: 20px` has
+   half-leading 2.5 and reports its text at y=2 -- i.e. a baseline 14px
+   down, not 14.5. The descent side absorbs the rounding
+   (`descent' = line-height - ascent'`, so the two still sum to exactly
+   the line-height), which is why this returns only the ascent half and
+   every caller derives the other from it.
+
+   Reference points, all measured in Brave at `line-height: 20px`:
+   14px/normal (12+3) -> 14, 14px/bold (14+4) -> 15, 24px (21+5) -> 18
+   (its box starts 3px ABOVE the line top), 10px (9+2) -> 13."
+  [ascent descent line-height]
+  ;; `long`, not the bare double `Math/floor` hands back on the JVM: this
+  ;; number is a pixel offset that flows straight into `:x`/`:y` draw-op
+  ;; coordinates, and a 8.0 where every other box says 8 is a difference
+  ;; downstream consumers (and this repo's own tests) can see.
+  (long (Math/floor (+ ascent (/ (- line-height (+ ascent descent)) 2)))))
 
 (defn- translate-ops
   [dx dy ops]
@@ -6002,6 +6099,35 @@
   (or (some? (real-text-child child))
       (generated-node? child)))
 
+(defn- inline-fragment-bearing?
+  "True when `child` would actually contribute a FRAGMENT to a line box --
+   some text, some generated content, or an atomic inline -- as opposed to
+   being an inline element with nothing inside it.
+
+   Only the lone-element widening in inline-runs consults this, and the
+   reason is a real hole rather than a nicety: inline-fragments records an
+   inline element as an OWNER when one of its pieces is emitted, so an
+   element that emits no piece gets no `:node` draw-op at all. For
+   `<div><span></span></div>` that is the difference between a box a
+   hit-tester/accessibility projection can find and no box in the op
+   stream whatsoever, and the block-row path this keeps such an element on
+   does give it one.
+
+   The same hole exists for an empty inline box inside a MULTI-child run
+   (`<p>a<span></span>b</p>` emits no span op today either). That is
+   pre-existing and NOT fixed here -- closing it needs inline-fragments to
+   emit a zero-width marker piece that survives the tokenizer and the line
+   breaker, which is real machinery rather than a predicate."
+  [theme child]
+  (cond
+    (some? (real-text-child child)) (not (str/blank? (real-text-child child)))
+    (generated-node? child) true
+    (inline-atomic-element? theme child) true
+    (and (map? child) (= :element (:node/type child)))
+    (boolean (some #(inline-fragment-bearing? theme %)
+                   (with-generated-content child (:children child))))
+    :else false))
+
 (defn- inline-flow-candidate?
   "True when `child` can participate in an inline formatting context (see
    layout-inline-run): a real text node, a generated ::before/::after
@@ -6238,31 +6364,55 @@
                                                                  nil nil nil)]
                              (max 0 (- h descent)))
 
+                           ;; CSS 2.1 10.8.1's own exception: an
+                           ;; inline-block whose `overflow` is not
+                           ;; `visible`, or which has NO in-flow line box
+                           ;; at all, is baselined on its BOTTOM MARGIN
+                           ;; EDGE rather than on any text inside it.
+                           ;; Both halves are measured in Brave:
+                           ;;
+                           ;; - a default `<textarea>` (UA `overflow:
+                           ;;   auto`, so a scroll container) sits at y=0
+                           ;;   in a 40px line box -- 34 of box with the
+                           ;;   strut's own 6px of descent under it. Its
+                           ;;   own last text row's baseline would have put
+                           ;;   the line at 38 and the box 4px up.
+                           ;; - an EMPTY `<span style="display:inline-
+                           ;;   block;height:10px">` sits at y=4 on a 20px
+                           ;;   line, i.e. its bottom edge on the baseline;
+                           ;;   giving it the strut's baseline instead put
+                           ;;   it at y=0.
+                           ;;
+                           ;; Restricted to non-control boxes on the
+                           ;; second half deliberately: a browser gives an
+                           ;; EMPTY `<input>`/`<button>` its internal text
+                           ;; baseline all the same (measured, an empty
+                           ;; input is still y=0 in a 21px line), because
+                           ;; the control's inner editable box is a line
+                           ;; box even with nothing in it.
+                           (or (and (some? (:overflow st)) (not= "visible" (:overflow st)))
+                               (= :textarea (:tag child))
+                               (and (not (contains? form-control-tags (:tag child)))
+                                    (not-any? #(= :text (:draw/op %)) draw)))
+                           h
+
                            :else
                            ;; ...everything else -- an inline-block, a form
                            ;; control -- aligns by its own last line's
-                           ;; baseline: top inset, then half-leading, then
-                           ;; the font's ascent. Measured, that is exactly
-                           ;; what makes a browser report a line holding a
-                           ;; 20px inline-block as 20px and one holding a
-                           ;; 21px input as 21px, where treating the bottom
-                           ;; edge as the baseline stacks the strut's
-                           ;; descent underneath and gives 26 and 27.
+                           ;; baseline, which is its top inset plus that
+                           ;; line's own `leading-ascent`. Measured, that
+                           ;; is exactly what makes a browser report a line
+                           ;; holding a 30px inline-block as 30px and one
+                           ;; holding a 21px input as 21px, where treating
+                           ;; the bottom edge as the baseline stacks the
+                           ;; strut's descent underneath and gives 36 and
+                           ;; 27.
                            (let [fs (parse-int (:font-size st) (:font-size inherited))
                                  {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                                         (:font-style st) (:font-family st))
-                                 lh (or (parse-int (:line-height st) nil) (:line-height inherited) fs)
-                                 half (max 0 (quot (- lh (+ ascent descent)) 2))]
-                             ;; ...the LAST line's baseline, which for a
-                             ;; multi-row <textarea> is rows-1 lines further
-                             ;; down (the browser reports a 40px line box
-                             ;; for a 2-row textarea, not 34).
+                                 lh (or (parse-int (:line-height st) nil) (:line-height inherited) fs)]
                              (+ mt (or (:padding-top st) (:padding st) 0) (:border-width st)
-                                half ascent
-                                (* (max 0 (dec (if (= :textarea (:tag child))
-                                                 (max 1 (parse-int (get-in child [:attrs :rows]) 2))
-                                                 1)))
-                                   (+ ascent descent)))))]
+                                (leading-ascent ascent descent lh))))]
                      (conj acc (cond-> {:kind :atomic
                                         :w (+ (:w box) ml mr) :h h :baseline-offset baseline-offset
                                         :ml ml :mt mt :draw draw
@@ -6296,12 +6446,25 @@
                          acc
                          (let [opacity (* opacity (:opacity st)
                                           (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
+                               ;; the PARENT's font size, read before
+                               ;; inline-inherited replaces it: `sub`/`super`
+                               ;; raise and lower against the font the box is
+                               ;; a sub/superscript OF, not against their own
+                               ;; (UA `font-size: smaller`) face. Measured in
+                               ;; Brave, `H<sub>2</sub>O X<sup>2</sup>` in a
+                               ;; 14px paragraph puts the two 11.67px boxes
+                               ;; exactly 9.453px apart -- which is
+                               ;; (0.404 + 0.271) x 14, not x 11.67 (that
+                               ;; would be 7.88). Charging the child's own
+                               ;; size made the line box 1.5px short and put
+                               ;; the subscript ~2.5px high.
+                               parent-fs (:font-size inherited)
                                inherited (inline-inherited inherited st)
                                ;; a `vertical-align` on an inline box moves
                                ;; that box AND everything inside it
                                inherited (if-let [f (get vertical-align-shift (:vertical-align st))]
                                            (assoc inherited :vertical-align/shift
-                                                  (* f (:font-size inherited)))
+                                                  (* f parent-fs))
                                            inherited)
                                rel (rel+ (rel-of owners) st)
                                owners (conj owners (cond-> {:idx (swap! counter inc)
@@ -6512,41 +6675,39 @@
         {:ascent fs :descent (long (* 0.2 fs))})))
 
 (defn- inline-line-metrics
-  "One line box's own height and baseline offset. Height is the tallest
-   `line-height` among the line's own pieces (real CSS's own
-   max-of-the-inline-boxes line box height, minus the strut/half-leading
-   subtleties this engine does not model); the baseline sits one
-   MAX-font-size below the line top.
+  "One line box's own height and baseline offset, built the way real CSS
+   builds one: from the STRUT (the block's own font at the block's own
+   line-height, present on every line whether or not any text uses that
+   font) plus every inline participant, all aligned on ONE baseline.
 
-   That baseline rule is what makes mixed font sizes on one line line up
-   the way a reader expects: kotoba-lang/dom-gpu's WebGL/WebGPU hosts both
-   paint a `:text` op at `(+ y font-size)` (a real, checked convention —
-   see webgl.cljs' `:text` case), i.e. `:y` is the top of the em box and
-   `y + font-size` is the baseline, so giving each piece
-   `y = baseline - its own font-size` makes every piece on the line share
-   ONE baseline instead of one top edge. For a line whose pieces all share
-   one font size (the overwhelmingly common case, and every pre-existing
-   single-text-child layout) this reduces EXACTLY to `y = line-top`,
-   which is byte-for-byte what layout-text already emits.
+   Each participant reaches `leading-ascent` above the baseline and
+   `line-height - leading-ascent` below it (see that function for the
+   floor, and for why the descent side is derived rather than computed).
+   The line box is the union: `above` is the largest ascent, `below` the
+   largest descent, the height is their sum and the baseline sits `above`
+   below the line's top edge. That union -- not a max over `line-height`s
+   -- is why a 24px run inside a `line-height: 20px` block reports a 24px
+   line in a browser, and why a 10px run inside the same block reports 21
+   rather than 20 (its half-leading pushes 7px of descent under a strut
+   that only asked for 6).
 
-   An ATOMIC inline (an `<img>`/`<input>`/`<button>`) contributes its whole
-   BOX HEIGHT as ascent, because real CSS `vertical-align: baseline` puts a
-   replaced box's bottom margin edge on the text baseline. A 40px-tall
-   button on a 14px line therefore pushes the baseline down to 40 and grows
-   the line box to fit, rather than being clipped by it or overlapping the
-   line above."
+   Every piece then sits at `baseline - its own ascent`, which is what
+   makes mixed font sizes share one baseline instead of one top edge, and
+   what kotoba-lang/dom-gpu's WebGL/WebGPU hosts already assume: both
+   paint a `:text` op's baseline at `y + font-size` (see webgl.cljs' own
+   `:text` case).
+
+   An ATOMIC inline (an `<img>`/`<input>`/`<button>`/inline-block) brings
+   its own baseline (`:baseline-offset`, measured from its top margin
+   edge by inline-fragments) rather than a font's: `vertical-align:
+   baseline` puts THAT on the line's baseline, so the box contributes
+   `:baseline-offset` above and `h - :baseline-offset` below. A 40px-tall
+   button on a 14px line therefore pushes the baseline down and grows the
+   line box to fit rather than being clipped by it."
   [line inherited theme]
   (let [pieces (:pieces line)
         fallback-fs (or (:font-size (:style line)) (:font-size inherited) (:font-size theme))
         fallback-lh (or (:line-height (:style line)) (:line-height inherited) (:line-height theme))
-        ;; Each inline box occupies [baseline - ascent - halfLeading,
-        ;; baseline + descent + halfLeading], where halfLeading is
-        ;; (line-height - (ascent + descent)) / 2 and CAN BE NEGATIVE -- a
-        ;; declared line-height smaller than the font's own content area
-        ;; makes the box overflow the line rather than grow it. The line box
-        ;; is the union of those spans, which is what makes a 24px run
-        ;; inside a `line-height: 20px` container report 24 in a browser
-        ;; while the line-height rule alone says 20.
         spans (for [p pieces
                     :when (not= :atomic (:kind p))
                     :let [st (:style p)
@@ -6554,18 +6715,20 @@
                           lh (or (:line-height st) fallback-lh fs)
                           {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                                  (:font-style st) (:font-family st))
-                          half (/ (- lh (+ ascent descent)) 2)
+                          a (leading-ascent ascent descent lh)
                           ;; a raised/lowered box carries its whole span
                           ;; with it, growing the line in that direction
+                          ;; (positive = raised, see vertical-align-shift)
                           shift (:shift p 0)]]
-                [(+ ascent half shift) (- (+ descent half) shift)])
+                [(+ a shift) (- (- lh a) shift)])
         atomic-hs (keep #(when (= :atomic (:kind %)) (or (:baseline-offset %) (:h %))) pieces)
         atomic-below (keep #(when (= :atomic (:kind %))
                               (- (:h %) (or (:baseline-offset %) (:h %))))
                            pieces)
         strut (let [{:keys [ascent descent]} (font-metrics theme fallback-fs nil nil nil)
-                    half (/ (- (or fallback-lh fallback-fs) (+ ascent descent)) 2)]
-                [(+ ascent half) (+ descent half)])
+                    lh (or fallback-lh fallback-fs)
+                    a (leading-ascent ascent descent lh)]
+                [a (- lh a)])
         above (apply max (concat (map first spans) atomic-hs [(first strut)]))
         below (apply max (concat (map second spans) atomic-below [(second strut)]))
         ascents (concat (keep #(:font-size (:style %)) pieces) atomic-hs)
@@ -6587,9 +6750,14 @@
     ;; (line box = the tallest line-height, baseline one font-size down),
     ;; byte for byte: the same bargain `:measure-text` makes, since
     ;; inventing metrics would be worse than admitting there are none.
+    ;; `:h` is still rounded UP so successive lines advance by whole pixels
+    ;; (a fractional advance compounds down a long paragraph), but the
+    ;; BASELINE is exact: rounding it up was the old model's way of paying
+    ;; for the missing floor in `leading-ascent`, and doing both now puts
+    ;; every inline box a pixel low again.
     (if (:font-metrics theme)
       {:h (long (Math/ceil (+ above below)))
-       :baseline (long (Math/ceil above))}
+       :baseline above}
       {:h (max max-lh (if (seq atomic-hs) (apply max atomic-hs) 0))
        :baseline max-ascent})))
 
@@ -6726,6 +6894,58 @@
                                0)
                 base-x (+ content-x padding align-offset)
                 baseline (+ y baseline-off)
+                ;; One inline ELEMENT's own box on this line, for every
+                ;; owner the piece passed through. An inline box's height
+                ;; is ITS OWN font's CONTENT AREA (ascent + descent) and
+                ;; its top is one of its own ascents above the shared
+                ;; baseline -- never the line box, and never the box of
+                ;; whatever it happens to contain. Measured in Brave: a
+                ;; 14px `<b>` on a 20px line is (y=1, h=18) and the `<span>`
+                ;; around it is (y=2, h=15), each from its own face; a
+                ;; `<label>` wrapping a 21px `<input>` is still (y=3, h=15),
+                ;; NOT the input's box.
+                ;;
+                ;; Shared by the atomic and the text branch below because
+                ;; that last measurement is exactly where they used to
+                ;; disagree: the atomic branch handed its owners the
+                ;; ATOMIC's box, so a `<label>` around a control reported
+                ;; the control's height and sat 3px too high.
+                ;; The FACE each owner is measured in is resolved down the
+                ;; owner chain, not taken from the innermost piece: a
+                ;; `<code>` inside an `<em>` is drawn in the italic face it
+                ;; inherited, so its box is 18px tall in Brave where its own
+                ;; (empty) declarations alone say 15. Reading only
+                ;; `(:font-* (:st owner))` made every inheriting inline box
+                ;; report the upright metrics -- `code h` 15 against 18 on
+                ;; :inline/deep-nesting-four-levels.
+                owner-fragments
+                (fn [rects owners shift px0 w opacity]
+                  (first
+                   (reduce
+                    (fn [[rects face] owner]
+                      (let [ost (:st owner)
+                            face {:fs (parse-int (:font-size ost) (:fs face))
+                                  :weight (or (:font-weight ost) (:weight face))
+                                  :style (or (:font-style ost) (:style face))
+                                  :family (or (:font-family ost) (:family face))}
+                            om (font-metrics theme (:fs face) (:weight face)
+                                             (:style face) (:family face))
+                            [odx ody] (:rel owner [0 0])]
+                        [(update rects (:idx owner)
+                                 (fn [entry]
+                                   (-> (or entry {:node (:node owner) :st (:st owner)
+                                                  :opacity opacity :fragments []})
+                                       ;; the box follows its own
+                                       ;; vertical-align shift, exactly
+                                       ;; like the text inside it
+                                       (update :fragments conj
+                                               {:x (+ px0 odx)
+                                                :y (+ (- baseline (:ascent om) shift) ody)
+                                                :w w :h (+ (:ascent om) (:descent om))}))))
+                         face]))
+                    [rects {:fs (:font-size inherited) :weight (:font-weight inherited)
+                            :style (:font-style inherited) :family (:font-family inherited)}]
+                    owners)))
                 [line-draws rects]
                 (reduce
                  (fn [[draws rects] piece]
@@ -6748,17 +6968,8 @@
                                   (:mt piece 0))
                            px (+ px0 rdx)
                            py (+ py0 rdy)
-                           rects (reduce (fn [rects owner]
-                                           (let [[odx ody] (:rel owner [0 0])]
-                                             (update rects (:idx owner)
-                                                     (fn [entry]
-                                                       (-> (or entry {:node (:node owner) :st (:st owner)
-                                                                      :opacity (:opacity piece) :fragments []})
-                                                           (update :fragments conj
-                                                                   {:x (+ px0 odx) :y (+ py0 ody)
-                                                                    :w (:w piece) :h (:h piece)}))))))
-                                         rects
-                                         (:owners piece))]
+                           rects (owner-fragments rects (:owners piece) 0
+                                                  px0 (:w piece) (:opacity piece))]
                        [(into draws (translate-ops px py (:draw piece))) rects])
                      (let [st (:style piece)
                            ;; the `position: relative` shift in force
@@ -6780,42 +6991,8 @@
                                               :color (:text-shadow-color st)))
                            main-op (cond-> (assoc base :draw/op :text :x px :y py :color (:color st))
                                      (:text-decoration st) (assoc :text-decoration (:text-decoration st)))
-                           ;; An inline box's own height is the font's
-                           ;; CONTENT AREA (~1.2em), vertically centered in
-                           ;; the line box by half-leading -- NOT the line
-                           ;; box itself, which is what this reported
-                           ;; before. Measured against Chrome: a 14px <b>
-                           ;; on a 20px line reports y=1 h=18, where this
-                           ;; engine reported y=0 h=20, so every inline
-                           ;; element's box missed on both axes at once.
-                           rects (reduce (fn [rects owner]
-                                           ;; An inline box's own height is ITS OWN font's
-                                           ;; content area, not its children's: a <span>
-                                           ;; wrapping a <b> is 15px tall in the browser
-                                           ;; (its own 14px face) while the bold run inside
-                                           ;; it is 18. Using the piece's metrics made every
-                                           ;; nesting parent as tall as its tallest child.
-                                           (let [ost (:st owner)
-                                                 ofs (parse-int (:font-size ost) (:font-size st))
-                                                 om (font-metrics theme ofs (:font-weight ost)
-                                                                  (:font-style ost) (:font-family ost))
-                                                 oh (+ (:ascent om) (:descent om))
-                                                 [odx ody] (:rel owner [0 0])]
-                                             (update rects (:idx owner)
-                                                   (fn [entry]
-                                                     (-> (or entry {:node (:node owner) :st (:st owner)
-                                                                    :opacity (:opacity piece) :fragments []})
-                                                         ;; the box follows its own
-                                                         ;; vertical-align shift, exactly
-                                                         ;; like the text inside it
-                                                         (update :fragments conj
-                                                                 {:x (+ px0 odx)
-                                                                  :y (+ (- (+ y (max 0 (- baseline y (:ascent om))))
-                                                                           (:shift piece 0))
-                                                                        ody)
-                                                                  :w (:w piece) :h oh}))))))
-                                         rects
-                                         (:owners piece))]
+                           rects (owner-fragments rects (:owners piece) (:shift piece 0)
+                                                  px0 (:w piece) (:opacity piece))]
                        [(cond-> draws
                           shadow-op (conj shadow-op)
                           true (conj main-op))
@@ -6824,24 +7001,14 @@
                  (:pieces line))]
             (recur (rest ls) (+ y line-h) (into text-draws line-draws)
                    ;; the <br>'s own zero-width box, at the end of the line
-                   ;; it terminates
-                   (reduce (fn [rects owner]
-                             (let [[odx ody] (:rel owner [0 0])]
-                               (update rects (:idx owner)
-                                       (fn [entry]
-                                         (-> (or entry {:node (:node owner) :st (:st owner)
-                                                        :opacity opacity :fragments []})
-                                             ;; same content-area box every
-                                             ;; other inline element reports
-                                             (update :fragments conj
-                                                     (let [ch (long (* 1.2 (or (:font-size (:style line))
-                                                                               (:font-size inherited)
-                                                                               (:font-size theme))))]
-                                                       {:x (+ base-x (:w line) odx)
-                                                        :y (+ y (max 0 (quot (- line-h ch) 2)) ody)
-                                                        :w 0 :h ch})))))))
-                           rects
-                           (:break-owners line))))
+                   ;; it terminates -- the same content-area box on the
+                   ;; same baseline every other inline element on this line
+                   ;; gets, through the same function, rather than a
+                   ;; 1.2em approximation centred in the line box.
+                   ;; Measured in Brave, `<p>a<br>b</p>` reports the <br>
+                   ;; at (7, 2, 0, 15) where the 1.2em rule gave h=16.
+                   (owner-fragments rects (:break-owners line) 0
+                                    (+ base-x (:w line)) 0 opacity)))
           {:draw (into (inline-owner-ops theme rects) text-draws)
            :h (+ (- y content-y) padding)
            :out-of-flow (finish-oof rects)})))))
@@ -6894,22 +7061,38 @@
 
 
 (defn- inline-runs
-  "Groups `children` into layout entries: each maximal run of TWO OR MORE
-   adjacent inline-flow-candidate? children becomes one
-   `{:inline/run [...]}` entry (laid out by layout-inline-run), everything
-   else passes through as the plain child it already was.
+  "Groups `children` into layout entries: each maximal run of adjacent
+   inline-flow-candidate? children becomes one `{:inline/run [...]}` entry
+   (laid out by layout-inline-run), everything else passes through as the
+   plain child it already was.
 
-   The two-or-more threshold is deliberate. A LONE inline child already
-   occupies its own line either way, so routing it through the inline path
-   would change nothing a reader can see while changing every existing
-   single-text-child geometry (and every test asserting it) for no benefit
-   — including the single most common case in this whole engine, a block
+   TWO OR MORE for a run that includes bare TEXT, one is enough for an
+   ELEMENT. The text half of that threshold is the original and is
+   deliberate: the single most common shape in this whole engine is a block
    whose only child is one text node, which stays on layout-text's exact
-   pre-existing path, byte for byte. Inline flow only engages where the
-   old behavior was genuinely WRONG: two or more inline things that real
-   CSS puts on one line and this file used to stack."
-  ([theme children] (inline-runs theme children 2))
-  ([theme children min-items]
+   pre-existing path, byte for byte, and routing it through the inline path
+   would change every such geometry (and every test asserting it) for no
+   benefit — a lone text child occupies its own line either way.
+
+   A lone ELEMENT is not the same case, because it has a BOX of its own
+   that a full-width block row gets wrong on all four numbers. Measured in
+   Brave, `<td><a href=\"/x\">link</a></td>` reports the `<a>` at
+   (0, 2, 28, 15) -- its own font's content area, sitting on the cell's
+   baseline -- where the block-row fallback made it (0, 0, 800, 20); the
+   same for `<dt><code>opt</code></dt>`, and a lone atomic inline
+   (`<p><input></p>`) shrink-wraps to 153px in the browser where the block
+   row filled the container.
+
+   `inherited` is the container's own inherited text style, and it
+   disqualifies the inline path exactly the way a child's own style does
+   (see inline-flow-candidate?): the inline tokenizer collapses whitespace
+   unconditionally and cannot truncate a line, so a non-normal
+   `white-space` or a `text-overflow` in force from an ANCESTOR keeps
+   everything here on the pre-existing path. Reading only the child's own
+   declaration missed that, because both properties INHERIT --
+   `<pre><span>x\\ny</span></pre>` collapsed to one line."
+  ([theme inherited children] (inline-runs theme inherited children 2))
+  ([theme inherited children min-items]
   (->> (split-block-in-inline theme children)
        ;; A whitespace-only text child that is not part of an inline run is
        ;; dropped: between two blocks it would otherwise become a stray row
@@ -6979,6 +7162,12 @@
                 ;; written after the last in-flow child, which have nothing
                 ;; to anchor to and are emitted at the end.
                 lifted? (fn [c] (or (absolute? theme c) (float-child? theme c)))
+                ;; the container's own inherited text style either admits an
+                ;; inline formatting context or it does not -- see the
+                ;; docstring, and inline-flow-candidate? for the same two
+                ;; properties read off a child's own declarations
+                inline-context? (and (contains? #{nil "normal"} (:white-space inherited))
+                                     (nil? (:text-overflow inherited)))
                 {:keys [flow anchors] tail :pending}
                 (reduce (fn [{:keys [flow anchors pending]} c]
                           (if (lifted? c)
@@ -6997,8 +7186,16 @@
                 (let [group (vec group)
                       n (count group)
                       floats-at (fn [k] (get anchors k []))
-                      run? (and (>= n min-items)
-                                (inline-flow-candidate? theme (first group)))
+                      run? (and (inline-flow-candidate? theme (first group))
+                                (or (>= n min-items)
+                                    ;; a LONE inline ELEMENT -- see the
+                                    ;; docstring for the measurement, and
+                                    ;; for why a lone TEXT child is not the
+                                    ;; same case
+                                    (and inline-context?
+                                         (map? (first group))
+                                         (= :element (:node/type (first group)))
+                                         (inline-fragment-bearing? theme (first group)))))
                       emitted (if run?
                                 (conj (vec (mapcat #(floats-at %) (range base (+ base n))))
                                       {:inline/run group})
@@ -7205,7 +7402,7 @@
    (layout-children-block theme content-x content-y content-w opacity inherited children false false false))
   ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom? contains-floats?]
   (let [floated? #(float-child? theme %)]
-  (loop [remaining (inline-runs theme children
+  (loop [remaining (inline-runs theme inherited children
                                 ;; With a float present even a LONE inline
                                 ;; child must flow as a run: it has to sit
                                 ;; beside the float in the narrowed band
@@ -7621,18 +7818,27 @@
         w (resolve-width st avail-width)
         inset (content-inset st)
         control-font-size (parse-int (:font-size st) (:font-size theme))
-        ;; A control's content box is one FONT-SIZE tall, not one line-box:
-        ;; measured, Chrome reports a 21px <input> = 13px content + 2px
-        ;; padding + 2px border per side, where using the line-height gave
-        ;; 24. A control is a replaced-ish box with its own metrics, not a
-        ;; block of flowing text.
-        ;; ...and the UA `font:` shorthand RESETS line-height to normal for
-        ;; a control, so an inherited page line-height does not apply to it
-        ;; either. The cascade has already folded the inherited value onto
-        ;; this node by the time layout sees it, so the reset is applied
-        ;; here unconditionally rather than by trying to tell inherited from
-        ;; declared -- documented, and matching every measurement taken
-        ;; against the browser.
+        ;; A control's content box is `rows` LINE BOXES of its own font at
+        ;; its own `line-height: normal` -- i.e. `rows * (ascent + descent)`
+        ;; -- and NOT the page's line-height, which the control's UA `font:`
+        ;; shorthand resets away (see ua-control-box, and node-style, which
+        ;; is where that reset is applied). The cascade has already folded
+        ;; any inherited value onto this node by the time layout sees it, so
+        ;; the reset is applied unconditionally rather than by trying to
+        ;; tell inherited from declared.
+        ;;
+        ;; This used to be the font SIZE rather than the font's content
+        ;; area, with each control's UA padding then tuned on top of that
+        ;; proxy to recover the right TOTAL -- an input measuring
+        ;; 21 = 13+4+4 here against Chrome's 21 = 15+2+4. Same total,
+        ;; different decomposition, and the decomposition is what a line box
+        ;; is built from: the control's internal baseline sits at
+        ;; `border + padding-top + ascent`, so the wrong split put the
+        ;; baseline 1px low and the line box 3px tall. The re-derivation the
+        ;; old note here called a separate task is done: all four paddings
+        ;; are now the measured UA values (ua-control-box) and this term is
+        ;; the real content area for every control, not just <select>.
+        ;;
         ;; a <textarea> is `rows` lines tall (HTML's own default is 2),
         ;; where every other control is one line. Measured: the browser
         ;; reports 34px for a default textarea against a 21px input.
@@ -7647,29 +7853,20 @@
           (select-multiple? node)
           (* (select-rows node) (select-option-height control-font-size))
 
-          (= :select tag)
-          ;; A <select>'s content box is the FONT's real content area
-          ;; (ascent + descent), not the font-size proxy every other
-          ;; control uses here. Measured in Chrome across five sizes, a
-          ;; select is exactly ascent+descent+4 tall -- 10px->15 (9+2),
-          ;; 12px->18 (11+3), 13.3333px->19 (12+3), 16px->21 (14+3),
-          ;; 24px->31 (22+5) -- where the font-size proxy gave 15 for the
-          ;; 13.3333px case against the browser's 19.
-          ;;
-          ;; Deliberately NOT applied to <input>/<button>/<textarea> in the
-          ;; same breath: their ua-control-box padding constants were each
-          ;; tuned against the browser ON TOP of the font-size proxy (an
-          ;; input measures 21 = 13+4+4 here and 21 = 15+2+4 in Chrome --
-          ;; same total, different decomposition), so switching the shared
-          ;; term without re-deriving all three paddings would break boxes
-          ;; that currently agree. That re-derivation is a separate,
-          ;; measurable task, not a side effect of this one.
+          ;; A checkbox/radio is a fixed-size platform WIDGET, 13x13 at
+          ;; every font size (measured in Brave), not a box sized from a
+          ;; font at all -- the same 13 the width path already uses.
+          (:box (ua-control-box-for node))
+          (:box (ua-control-box-for node))
+
+          ;; Measured in Chrome across five sizes, a <select> is exactly
+          ;; ascent+descent+4 tall -- 10px->15 (9+2), 12px->18 (11+3),
+          ;; 13.3333px->19 (12+3), 16px->21 (14+3), 24px->31 (22+5).
+          :else
           (let [{:keys [ascent descent]} (font-metrics theme control-font-size
                                                        (:font-weight st) (:font-style st)
                                                        (:font-family st))]
-            (+ ascent descent))
-
-          :else (* control-rows control-font-size))
+            (* control-rows (+ ascent descent))))
         ;; content + padding + BORDER: with `box-sizing: content-box` (the
         ;; default) the border sits outside the content box in the vertical
         ;; axis too. Without it the control came out exactly one border
