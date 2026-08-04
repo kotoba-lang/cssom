@@ -606,6 +606,100 @@ correctly means re-deriving the formatting-context rule recursively over the
 whole subtree before laying anything out, for a shape the corpus does not
 contain.
 
+### Round twenty-three: grid flow, track sizing and item alignment
+
+Every gap round twenty-one recorded under "Grid: one crash, and
+flow/gap/alignment" is closed except the crash, which round nineteen had
+already fixed. Each behaviour was read out of a real headless Brave 151 over
+CDP *before* it was written — three probe rounds of isolating shapes, not
+one — because none of these rules is derivable from the spec text alone.
+
+The one that had to be measured to be believed is `auto` track sizing. A
+browser gives an `auto` track its items' **min-content** width as a floor and
+their **max-content** width as a growth limit, and then shares whatever is
+left **equally** — not proportionally. `grid-template-columns: auto auto` in
+a 400px grid holding `short` (max-content 41.625) and `a much longer cell`
+(145.312) comes out **148.156 / 251.844**: each track's own content plus
+exactly half of the 213px leftover. Proportional distribution would have
+given 85 / 315, and both numbers sum to 400, so a corpus case checking only
+"do the tracks fill the container" would have passed either. The equal share
+is also what makes the narrow case work: at 200px the same two tracks are
+48.156 / 151.844, because `short` freezes at its max-content, its unspent
+share moves to the other track, and only the remainder is shared. And at
+60px they are 41.625 / 50.141 — the min-content floor, overflowing the box
+rather than crushing the words.
+
+Two more that a guess would have got backwards:
+
+- The stretch step does **not** run when an `fr` track is competing for the
+  same space. `auto 1fr` leaves the auto track at exactly 41.625; `auto
+  100px` stretches it to 300.
+- Auto **rows** stretch the same way against a definite container height.
+  `grid-template-rows: 30px` with three items in a 200px-tall grid is
+  **30 / 85 / 85** — the explicit track keeps its size and the two implicit
+  rows share the rest. But `auto 1fr` is 20 / 180, the same fr rule.
+
+`grid-auto-flow: column` is the row-major algorithm with the two axes
+swapped, so it is implemented by transposing the placement request on the
+way in and the placement on the way out rather than by a second placement
+engine; the bounded axis becomes the ROW track count (1 when no
+`grid-template-rows` is declared) and columns become the axis that grows
+implicit tracks. Measured: three items with `grid-auto-columns: 70px` sit at
+x=0/70/140 on one row, and adding `grid-template-rows: 30px 30px` makes the
+second item go DOWN rather than right.
+
+`justify-items`/`justify-self` and `align-items`/`align-self` are a **size**
+decision before they are a position one: `stretch` (the initial value) fills
+the track, and anything else makes the item fit-content and places it
+inside. A one-character item in a 120px column is 9.2px wide at x=55.4 under
+`center` — an engine that only computed the offset and left the item
+track-width would have centred a 120px box in a 120px track and moved
+nothing.
+
+One bug, and it is a placement bug rather than a sizing one: an item with a
+definite **row** was moving the auto-placement cursor. CSS Grid §8.5 runs
+that cursor in step 4, which only ever sees items with a definite COLUMN or
+none at all — an item locked to a row is placed in step 2 and never touches
+it. `<div style="grid-row: 2">t</div><div>b</div>` in a two-column grid puts
+`b` at row 1 column 1 in a browser; this engine advanced the cursor past `t`
+and put them on the same row, which the line axis reported as
+`want ["b" "t"] got ["t b"]`.
+
+`display: inline-grid` joins `inline-flex` on the inline path now that
+`layout-grid` has the shrink-to-fit branch that set was waiting on: an
+inline-level grid is its tracks' max-content sum plus the gaps between them,
+so a two-30px-track grid in a sentence is 60px wide and the sentence stays
+one line instead of becoming three.
+
+`row-gap`/`column-gap` and the two-value `gap: <row> <column>` are resolved
+in `node-style` rather than in the cascade, which loses one thing and says
+so: declaration ORDER between the shorthand and a longhand. `row-gap: 24px;
+gap: 5px` — where the later shorthand should reset the longhand — still
+reports 24.
+
+Named, still not implemented: `justify-content`/`align-content` on the
+container (tracks are always placed from the start edge, which is also why
+the `auto` stretch step runs unconditionally — an authored
+`justify-content: start` should suppress it and cannot be told apart from
+the default here), implicit COLUMN creation in row flow (an out-of-range
+`grid-column` is still clamped, so `grid-auto-columns` only reaches the
+tracks `grid-auto-flow: column` creates), a spanning item's contribution to
+the intrinsic size of the tracks it crosses, and `min-content`/`max-content`/
+`fit-content()` as track keywords.
+
+Fourteen corpus cases were added for the shapes that had no case of their
+own — the `auto` floor and the two `auto`-versus-`fr`/`fixed` interactions,
+`justify-items: end`, `justify-self`, `align-items: end`, `align-self`,
+column flow with explicit rows and past an explicit template, the two-value
+`gap`, `grid-auto-rows` past the template, implicit rows against a definite
+height, an auto row beside an fr row, and an inline-grid with auto tracks.
+All fourteen were measured first and all fourteen pass. The grid group is
+**37/37 on the line axis with 136/136 boxes**.
+
+Corpus-wide: line 280/301 → **289/301**, geometry 1032/1214 →
+**1086/1214** (234 → **256** clean cases), paint order 7499/7805 →
+**7539/7805**. Twenty-two cases improved on geometry and none regressed.
+
 ### Round twenty-one: the corpus grows 200 → 292
 
 The engine went 47% → 89% on geometry while the corpus stayed at 200 cases.

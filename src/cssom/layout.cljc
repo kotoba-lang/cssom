@@ -4,17 +4,20 @@
 
    Covers: padding/border/margin box model with min/max-width and
    content-box/border-box sizing; display:flex with flex-direction/
-   flex-wrap/justify-content/align-items/gap; display:grid with
-   grid-template-columns/grid-template-rows (fixed px + fr tracks, plus
+   flex-wrap/justify-content/align-items/gap; display:grid and
+   display:inline-grid with grid-template-columns/grid-template-rows
+   (fixed px, fr and content-sized `auto` tracks, plus
    `repeat(<n>, <track>)` and `minmax(<px>, <px-or-1fr>)` composing over
    them, plus a constant, percentage-free `calc(...)` track --
    `calc(100px + 20px)`, not `calc(50% - 10px)`, see resolve-constant-calc
-   -- a small local mirror of cssom.core's own same-scoped calc() support)
-   and THREE composing item-placement mechanisms — per-item
-   `grid-column`/`grid-row` explicit line-based placement, per-item
-   `grid-area: <name>` named-area placement resolved against the
-   container's own `grid-template-areas` quoted-string template, and
-   auto-placement for everything else — see layout-grid for the exact
+   -- a small local mirror of cssom.core's own same-scoped calc() support),
+   grid-auto-rows/grid-auto-columns for the implicit tracks, grid-auto-flow:
+   column, separate row-gap/column-gap, justify-items/justify-self and
+   align-items/align-self on items, and THREE composing item-placement
+   mechanisms — per-item `grid-column`/`grid-row` explicit line-based
+   placement, per-item `grid-area: <name>` named-area placement resolved
+   against the container's own `grid-template-areas` quoted-string template,
+   and auto-placement for everything else — see layout-grid for the exact
    subset and its documented limitations; position:absolute (left/top/
    right/bottom anchored against the containing block) with z-index
    stacking; position:relative (top/left/right/bottom as a direct pixel
@@ -970,6 +973,28 @@
                    (:font-size theme))]
         (long (* scale fs))))))
 
+(defn- gap-shorthand-axis
+  "One axis of the `gap` shorthand's `<row-gap> [<column-gap>]` value, in
+   px, or nil when `v` declares nothing usable.
+
+   `gap: 10px` sets both axes to 10; `gap: 24px 8px` sets rows to 24 and
+   columns to 8 (row first, the same order every two-value box shorthand
+   in CSS uses). cssom.core coerces a WHOLE-value single length to a plain
+   number before this file ever sees it, which is why the number case is
+   handled here rather than only the string one -- see parse-track-list's
+   docstring for the same split.
+
+   Returns nil rather than a fallback for an unparseable value, so
+   node-style's own `(or longhand shorthand theme)` chain falls through to
+   the next source instead of the shorthand silently winning with a zero."
+  [v axis]
+  (cond
+    (number? v) v
+    (string? v) (let [toks (str/split (str/trim v) #"\s+")
+                      tok (if (and (= :column axis) (= 2 (count toks))) (second toks) (first toks))]
+                  (parse-int tok nil))
+    :else nil))
+
 (defn- node-style [node theme]
   ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
   ;; UA-stylesheet rule, not !important -- any author :display the cascade
@@ -1188,7 +1213,51 @@
    :grid-column (style node :grid-column)
    :grid-row (style node :grid-row)
    :grid-area (style node :grid-area)
+   ;; `grid-auto-flow` picks which axis auto-placement fills FIRST: `row`
+   ;; (the initial value) fills a row left-to-right before wrapping down,
+   ;; `column` fills a column top-to-bottom before wrapping right. Read
+   ;; raw -- layout-grid only ever asks whether it names `column`, and the
+   ;; `dense` packing keyword (which may appear alongside it) is a
+   ;; documented non-goal there.
+   :grid-auto-flow (style node :grid-auto-flow)
+   ;; The track sizes IMPLICIT tracks take -- the ones auto-placement
+   ;; creates beyond whatever grid-template-rows/-columns declared. Left
+   ;; as the raw cascade value: parse-track-list owns the grammar, and
+   ;; layout-grid is the only reader.
+   :grid-auto-rows (style node :grid-auto-rows)
+   :grid-auto-columns (style node :grid-auto-columns)
+   ;; A grid container's default INLINE-axis alignment for its items, and
+   ;; an item's own override. `stretch` (the initial value, what `normal`
+   ;; computes to for a grid item) fills the whole column track; anything
+   ;; else makes the item fit-content and positions it inside the track --
+   ;; see grid-item-inline-align/layout-grid. `justify-self: auto` means
+   ;; "defer to the container", exactly like align-self, so it is kept
+   ;; verbatim rather than normalised away.
+   :justify-items (or (style node :justify-items) "stretch")
+   :justify-self (style node :justify-self)
    :gap (parse-int (style node :gap) (:gap theme))
+   ;; `row-gap`/`column-gap` are the two LONGHANDS `gap` is shorthand for,
+   ;; and a grid can set them to different values (`row-gap: 24px;
+   ;; column-gap: 8px`). cssom.core's cascade has no shorthand expansion
+   ;; for `gap`, so the fallback chain is written here: an explicit
+   ;; longhand wins, else the matching half of the `gap` shorthand (which
+   ;; itself takes `<row> <column>`, one value meaning both), else the
+   ;; theme's own gap. Nothing read either longhand before this: measured
+   ;; in Brave, `row-gap: 24px; column-gap: 8px` on a 2x2 grid puts the
+   ;; second column at x=68 and the second row at y=44, where this engine
+   ;; had 60 and 20 (the theme gap of 0).
+   ;;
+   ;; Known limit of doing it here rather than in the cascade: DECLARATION
+   ;; ORDER between the shorthand and a longhand is lost, so `row-gap:
+   ;; 24px; gap: 5px` -- where the later shorthand should reset the
+   ;; longhand -- still reports 24. The common order (shorthand first,
+   ;; longhand refining it) is correct.
+   :row-gap (or (parse-int (style node :row-gap) nil)
+                (gap-shorthand-axis (style node :gap) :row)
+                (:gap theme))
+   :column-gap (or (parse-int (style node :column-gap) nil)
+                   (gap-shorthand-axis (style node :gap) :column)
+                   (:gap theme))
    :pointer-events (style node :pointer-events)
    ;; :overflow is exclusively a CSS property in real HTML/CSS -- nothing
    ;; ever sets it as a plain (non-namespaced) DOM attribute the way
@@ -2305,6 +2374,15 @@
       [{:type :fixed :size size}]
       [{:type :fixed :size 0}])
 
+    ;; An `auto` track is sized from what is IN it: min-content as a floor,
+    ;; max-content as a growth limit, then an equal share of whatever is
+    ;; left (see track-sizes). This used to fall through to the :else 0px
+    ;; placeholder below, so `grid-template-columns: auto auto` produced two
+    ;; ZERO-width tracks and every item in them collapsed -- measured in
+    ;; Brave as 154.5/245.5 against this engine's 0/0.
+    (= "auto" (str/lower-case tok))
+    [{:type :auto}]
+
     :else
     [{:type :fixed :size 0}]))
 
@@ -2351,21 +2429,88 @@
     :minmax (when (= :fr (:max-type t)) (:max t))
     nil))
 
+(defn- distribute-equally-with-caps
+  "Adds `free` px to the entries of `sizes` at `idxs`, in EQUAL shares --
+   not shares proportional to what each already holds -- freezing any entry
+   that reaches its cap, and re-offering the share a frozen entry could not
+   take to whoever is left, until every entry is frozen or the space is
+   spent. `cap-of` returns an entry's ceiling, or nil for no ceiling.
+
+   Equal, not proportional, because that is what a browser does with
+   `auto` tracks and it is not derivable from the spec text alone:
+   measured in Brave, `grid-template-columns: auto auto` in a 400px grid
+   holding `short` (max-content 41.625) and `a much longer cell`
+   (max-content 145.312) comes out 148.156 / 251.844 -- each track its own
+   max-content plus exactly (400 - 41.625 - 145.312) / 2. Proportional
+   distribution would have given 85 / 315.
+
+   The re-offer loop is the same shape resolve-flexible-lengths uses for
+   flex, and for the same reason: distributing once and clamping afterwards
+   leaves the space a capped track refused sitting in nobody's hands.
+   Measured in Brave at a 200px width, the same two tracks come out
+   48.156 / 151.844 -- `short` freezes at its 41.625 max-content, its
+   unspent share goes to the other track, which then freezes at 145.312,
+   and only then does the leftover get shared equally."
+  [sizes idxs cap-of free]
+  (if (or (<= free 0) (empty? idxs))
+    sizes
+    (loop [sizes (vec sizes) live (vec idxs) free (long free)]
+      (if (or (empty? live) (<= free 0))
+        ;; nobody left to take it: whatever is unspent stays unspent, which
+        ;; is what a fully-capped track list does with leftover space
+        sizes
+        (let [share (quot free (count live))]
+          (if (<= share 0)
+            ;; fewer px than tracks: hand the remainder out one px at a time
+            ;; so the total is exactly `free` (same 'don't lose a pixel to
+            ;; rounding' convention as distribute-fr)
+            (first (reduce (fn [[sizes free] i]
+                             (if (pos? free)
+                               (let [cap (cap-of i)
+                                     want (inc (nth sizes i))]
+                                 (if (or (nil? cap) (<= want cap))
+                                   [(assoc sizes i want) (dec free)]
+                                   [sizes free]))
+                               [sizes free]))
+                           [sizes free] live))
+            (let [{:keys [sizes unspent still-live]}
+                  (reduce (fn [acc i]
+                            (let [cap (cap-of i)
+                                  cur (nth (:sizes acc) i)
+                                  want (+ cur share)]
+                              (if (and cap (>= want cap))
+                                (-> acc
+                                    (update :sizes assoc i (max cur cap))
+                                    (update :unspent + (- want (max cur cap))))
+                                (-> acc
+                                    (update :sizes assoc i want)
+                                    (update :still-live conj i)))))
+                          {:sizes sizes :unspent 0 :still-live []}
+                          live)
+                  spent (- free unspent (rem free (count live)))]
+              (recur sizes still-live (- free spent)))))))))
+
 (defn- track-sizes
   "Resolves parsed tracks (see parse-track-list) to concrete pixel sizes.
    `definite-total` is the space available along this axis to distribute fr
-   tracks against: always the container's content-width for columns; for
-   rows it is the container's explicit :height if given, else nil. When nil,
-   fr tracks (and the fr-space portion of a :minmax fr-max track) resolve
-   to 0px extra here and layout-grid falls back to auto/content sizing for
-   that row instead (mirroring flexbox's own auto cross-axis convention
-   elsewhere in this file) — there is no definite total to share
-   proportionally when the grid container's height is itself content-driven
-   (a :minmax fr-max track still gets its `min` floor even then, since that
-   floor never depended on fr-space).
+   and `auto` tracks against: always the container's content-width for
+   columns; for rows it is the container's explicit :height if given, else
+   nil. When nil, fr tracks (and the fr-space portion of a :minmax fr-max
+   track) resolve to 0px extra here and layout-grid falls back to
+   auto/content sizing for that row instead (mirroring flexbox's own auto
+   cross-axis convention elsewhere in this file) — there is no definite
+   total to share proportionally when the grid container's height is itself
+   content-driven (a :minmax fr-max track still gets its `min` floor even
+   then, since that floor never depended on fr-space).
 
-   Every track resolves one of three ways (see fixed-contribution/
-   fr-weight above for the exact per-type rules):
+   `intrinsics` is one `{:min <px> :max <px>}` per track — what the items in
+   that track need at min-content and at max-content — and is consulted
+   ONLY by `:auto` tracks. layout-grid measures it (grid-track-intrinsics);
+   an empty/short vector reads as 0/0, which is what every caller that has
+   no `:auto` track at all can pass.
+
+   Every track resolves one of four ways (see fixed-contribution/fr-weight
+   above for the exact per-type rules):
      - :fixed -- always its own px size, no fr participation.
      - :fr -- its proportional share of `remaining` (distribute-fr).
      - :minmax -- a fixed px max resolves like a :fixed track at
@@ -2373,22 +2518,73 @@
        from `remaining` alongside every other track's fixed contribution)
        and then ALSO gets a proportional fr-space share of whatever is left
        over once every reservation is subtracted — so its final size is
-       `min` PLUS that share, never less than `min`."
-  [tracks gap definite-total]
-  (let [n (count tracks)
-        gap-total (* gap (max 0 (dec n)))
-        fixed-total (reduce + 0 (mapv fixed-contribution tracks))
-        remaining (when definite-total (max 0 (- definite-total fixed-total gap-total)))
-        fr-weights (keep fr-weight tracks)
-        fr-sizes (if remaining (distribute-fr remaining fr-weights) [])]
-    (loop [ts tracks frs fr-sizes out []]
-      (if (empty? ts)
-        out
-        (let [t (first ts)]
-          (if (some? (fr-weight t))
-            (recur (rest ts) (rest frs)
-                   (conj out (long (+ (if (= :minmax (:type t)) (:min t) 0) (or (first frs) 0)))))
-            (recur (rest ts) frs (conj out (long (fixed-contribution t))))))))))
+       `min` PLUS that share, never less than `min`.
+     - :auto -- its items' min-content size as a floor, grown toward their
+       max-content size with an EQUAL share of the free space
+       (distribute-equally-with-caps), and then, only when NO `fr` track is
+       competing for the same space, grown again past max-content with an
+       equal share of whatever is still left (CSS Grid §12.8's own 'stretch
+       auto tracks' step, which is what makes `auto auto` fill its
+       container rather than hug its content). Measured in Brave:
+       `auto 1fr` leaves the auto track at exactly its 41.625px
+       max-content, while `auto 100px` stretches the auto track to 300px.
+
+   Scope cut, deliberately: §12.8 stretches auto tracks only when
+   `justify-content`/`align-content` is `normal`/`stretch`, and an authored
+   `justify-content: start` leaves them at max-content (measured:
+   41.625/145.312 rather than 148.156/251.844). This engine does not
+   implement `justify-content` on a grid container at all — layout-grid
+   hardcodes flex-start track placement — so there is no value here to
+   condition the stretch on, and node-style's own `:justify-content`
+   default of \"flex-start\" cannot be told apart from an authored one.
+   Stretching unconditionally matches the initial value, which is what
+   nearly every real grid has."
+  ([tracks gap definite-total] (track-sizes tracks gap definite-total []))
+  ([tracks gap definite-total intrinsics]
+   (let [n (count tracks)
+         gap-total (* gap (max 0 (dec n)))
+         auto-idxs (filterv #(= :auto (:type (nth tracks %))) (range n))
+         intrinsic-min (fn [i] (long (max 0 (:min (nth intrinsics i nil) 0))))
+         intrinsic-max (fn [i] (long (max (intrinsic-min i) (:max (nth intrinsics i nil) 0))))
+         ;; every track's floor, before anything is distributed: an auto
+         ;; track's is its min-content size, everything else's is what
+         ;; fixed-contribution already reserved
+         base (mapv (fn [i] (let [t (nth tracks i)]
+                              (if (= :auto (:type t)) (intrinsic-min i) (long (fixed-contribution t)))))
+                    (range n))
+         has-fr? (boolean (seq (keep fr-weight tracks)))
+         auto-resolved
+         (if (and definite-total (seq auto-idxs))
+           (let [grown (distribute-equally-with-caps
+                        base auto-idxs intrinsic-max
+                        (- definite-total (reduce + 0 base) gap-total))]
+             (if has-fr?
+               grown
+               (distribute-equally-with-caps
+                grown auto-idxs (constantly nil)
+                (- definite-total (reduce + 0 grown) gap-total))))
+           base)
+         fixed-total (reduce + 0 (map-indexed (fn [i t] (if (= :auto (:type t))
+                                                          (nth auto-resolved i)
+                                                          (fixed-contribution t)))
+                                              tracks))
+         remaining (when definite-total (max 0 (- definite-total fixed-total gap-total)))
+         fr-weights (keep fr-weight tracks)
+         fr-sizes (if remaining (distribute-fr remaining fr-weights) [])]
+     (loop [i 0 frs fr-sizes out []]
+       (if (= i n)
+         out
+         (let [t (nth tracks i)]
+           (cond
+             (= :auto (:type t))
+             (recur (inc i) frs (conj out (long (nth auto-resolved i))))
+
+             (some? (fr-weight t))
+             (recur (inc i) (rest frs)
+                    (conj out (long (+ (if (= :minmax (:type t)) (:min t) 0) (or (first frs) 0)))))
+
+             :else
+             (recur (inc i) frs (conj out (long (fixed-contribution t)))))))))))
 
 ;; ---- grid item explicit placement (grid-column / grid-row) ----
 ;;
@@ -2787,10 +2983,28 @@
    exactly the row-major scan every auto item always got before this
    feature existed (the cursor never encounters an already-occupied cell,
    so it always accepts the first cell it lands on) -- a pure
-   backwards-compatibility guarantee, not a special case in the code."
-  [theme children n-cols n-row-tracks areas]
+   backwards-compatibility guarantee, not a special case in the code.
+
+   `flow-column?` (`grid-auto-flow: column`) fills a COLUMN top-to-bottom
+   before moving right, which is the row-major algorithm above with the two
+   axes swapped -- so rather than a second placement engine, the requests
+   are transposed on the way in and the placements transposed back on the
+   way out. The bounded 'lane' axis becomes the ROW track count (rows are
+   what an item wraps within), and columns become the unbounded axis that
+   grows implicit tracks. Nothing else in this function knows the
+   difference. Measured in Brave, `grid-auto-flow: column` with three items
+   and no template puts them at x=0/70/140 in one row, where this engine
+   stacked them vertically at the container's full width."
+  [theme children n-cols n-row-tracks areas flow-column?]
   (let [n (count children)
-        requests (mapv #(item-grid-placement theme % n-cols n-row-tracks areas) children)
+        requests (cond->> (mapv #(item-grid-placement theme % n-cols n-row-tracks areas) children)
+                   flow-column? (mapv (fn [r] {:col (:row r) :row (:col r)})))
+        ;; the axis an auto-placed item wraps WITHIN. In row flow that is
+        ;; the column track count; in column flow it is the row track
+        ;; count, which is 1 when no grid-template-rows was declared (a
+        ;; single row of columns, which is what a bare
+        ;; `grid-auto-flow: column` produces in a browser).
+        n-cols (if flow-column? (max 1 n-row-tracks) n-cols)
         idx-range (range n)
         ;; a bare `span N` (no start line) is NOT an explicit placement: the
         ;; item stays auto-placed and only its WIDTH is declared
@@ -2839,12 +3053,30 @@
         ;; two-column grid put `next` at row 1 column 1 -- beside and BEFORE
         ;; the explicit item -- where a browser wraps it to row 2, since the
         ;; cursor is past column 2 by then. Measured against Chrome.
+        ;;
+        ;; But ONLY an item with a definite COLUMN moves it. CSS Grid §8.5
+        ;; runs the cursor in step 4, which handles exactly two kinds of
+        ;; item: one with a definite column and an automatic row (it sets
+        ;; the cursor's column to the item's column-start), and one that is
+        ;; automatic in both axes. Items placed in step 1 (both axes
+        ;; definite) and step 2 (definite ROW, automatic column) never touch
+        ;; it -- they are already positioned when step 4 starts its cursor
+        ;; at the first row and column. Moving the cursor for a row-definite
+        ;; item was measured wrong in Brave: `<div style="grid-row: 2">t
+        ;; </div><div>b</div>` in a two-column grid puts `b` at row 1
+        ;; column 1, where this engine advanced the cursor past `t` and put
+        ;; it at row 2 column 2 -- the corpus reported it as
+        ;; `want ["b" "t"] got ["t b"]`, i.e. the wrong line structure and
+        ;; not merely the wrong cell.
+        cursor-moving? (fn [i] (boolean (:col (nth requests i))))
         phase2 (reduce
                 (fn [{:keys [occupied placements cursor-row cursor-col] :as state} i]
                   (if-let [p (nth placements i)]
-                    (assoc state
-                           :cursor-row (:row-start p)
-                           :cursor-col (:col-end p))
+                    (if (cursor-moving? i)
+                      (assoc state
+                             :cursor-row (:row-start p)
+                             :cursor-col (:col-end p))
+                      state)
                     (let [req (nth requests i)
                           span (min (max 1 (or (:span (:col req)) 1)) n-cols)
                           ;; `grid-row: span N` occupies N ROWS from wherever
@@ -2877,8 +3109,13 @@
                                    :cursor-row (if wrap? (inc r) r)
                                    :cursor-col (if wrap? 0 end))))))))
                 (assoc phase1 :cursor-row 0 :cursor-col 0)
-                idx-range)]
-    (:placements phase2)))
+                idx-range)
+        placements (:placements phase2)]
+    (if flow-column?
+      (mapv (fn [p] {:col-start (:row-start p) :col-end (:row-end p)
+                     :row-start (:col-start p) :row-end (:col-end p)})
+            placements)
+      placements)))
 
 (defn- span-width
   "The combined pixel width an item spanning column tracks [col-start
@@ -3725,7 +3962,15 @@
           ;; below would do -- gets the items' text but not the `gap`
           ;; between them: measured in Brave, a `gap: 6px` inline-flex
           ;; holding `a` and `b` is 20px wide, and the inline run says 14.
-          (= "inline-flex" (:display st))
+          ;; An `inline-grid` box is the same story for the same reason:
+          ;; layout-grid's own `inline?` branch sizes it from its TRACKS
+          ;; (see its `intrinsic-cw`), and measuring its children as an
+          ;; inline run instead reports the items' text without the track
+          ;; widths at all -- for `grid-template-columns: 30px 30px`
+          ;; holding `a` and `b` that is ~14px against the browser's 60,
+          ;; and the min below would then clamp the grid to the wrong
+          ;; answer rather than merely bound it.
+          (contains? #{"inline-flex" "inline-grid"} (:display st))
           content-w
 
           (contains? #{:input :textarea} tag)
@@ -4450,6 +4695,92 @@
         {:box-w node-w :box-h node-h :draws (vec draws)}))))
 
 ;; ---- grid layout ----
+;;
+;; An `auto` track is sized from what is IN it, so unlike every other track
+;; type it cannot be resolved from the declaration alone: layout-grid has to
+;; measure each item's min-content and max-content width first and hand the
+;; result to track-sizes. These two helpers are that measurement, and they
+;; are deliberately the SAME ones flexbox already uses (flex-item-main-width
+;; for max-content, flex-item-min-content-width for the longest-word floor)
+;; rather than a second, grid-specific notion of intrinsic size.
+
+(defn- grid-item-max-content-width
+  "One grid item's max-content width: what it wants when nothing constrains
+   it, which is the growth limit of an `auto` track holding it and the size
+   a non-stretch `justify-items` gives the item itself.
+
+   An item that declares its own `width` contributes exactly that (measured
+   in Brave: `auto auto` in a 400px grid with a `width: 300px` item and an
+   `x` comes out 345.703 / 54.297 -- the 300 plus an equal share of the
+   leftover, not the item's text width). Everything else goes through
+   flex-item-main-width, inheriting both its coverage (a text leaf, a mixed
+   inline run, a replaced element, an empty box, a single element child)
+   and its documented scope cut -- an item with several ELEMENT children
+   falls back to the available width rather than guessing.
+
+   A bare text child is a real grid item (real CSS wraps it in an anonymous
+   one), so it is measured too, by laying the text out against an
+   effectively unconstrained width -- the same trick flex-item-natural-text-
+   width uses."
+  [theme cw opacity inherited child]
+  (if (map? child)
+    (let [st (node-style child theme)]
+      (if (:width st)
+        (resolve-width st cw)
+        (flex-item-main-width theme cw opacity inherited child st)))
+    (min cw (:w (:box (layout-node theme 0 0 flex-item-shrink-to-fit-measure-width
+                                   opacity inherited child))))))
+
+(defn- grid-item-min-content-width
+  "One grid item's min-content width: the floor an `auto` track will not go
+   below, which is what makes a narrow grid OVERFLOW rather than crush its
+   words. Measured in Brave, `auto auto` at a 60px width holding `short`
+   and `a much longer cell` comes out 41.625 / 50.141 -- the two words'
+   own widths, 91.77px of content in a 60px box.
+
+   Falls back to the max-content width whenever flex-item-min-content-width
+   declines to answer (an explicit `min-width`, a scroll container, or a
+   subtree with no text at all -- see its docstring). That is deliberately
+   the CONSERVATIVE direction: a floor that is too high leaves a track
+   wider than it had to be, where a zero floor would let the track collapse
+   under content that cannot actually shrink."
+  [theme cw opacity inherited child]
+  (if (map? child)
+    (let [st (node-style child theme)]
+      (if (:width st)
+        (resolve-width st cw)
+        (or (flex-item-min-content-width theme inherited child st)
+            (grid-item-max-content-width theme cw opacity inherited child))))
+    (grid-item-max-content-width theme cw opacity inherited child)))
+
+(defn- grid-track-intrinsics
+  "One `{:min <px> :max <px>}` per column track -- the widest min-content and
+   max-content any item placed in that track needs -- in the shape
+   track-sizes' `intrinsics` argument wants.
+
+   Scope cut, deliberately: an item SPANNING more than one track contributes
+   to none of them. Real CSS distributes a spanning item's intrinsic
+   contribution across the tracks it crosses (CSS Grid §12.5), which is a
+   whole second algorithm; measured in Brave the difference is small for the
+   common case -- `grid-template-columns: auto auto` in a 400px grid with a
+   full-width spanning item above two one-character items comes out
+   199.828 / 200.172, and ignoring the span gives 200.17 / 199.83, well
+   inside the harness's 2px tolerance -- because the equal-share stretch
+   step dominates once there is room. It is NOT small for a narrow grid,
+   where the spanning item's own min-content is what would force the tracks
+   wider; that case reports tracks narrower than a browser's."
+  [theme cw opacity inherited children placements n-cols]
+  (reduce (fn [acc [child pl]]
+            (if (and pl (= 1 (- (:col-end pl) (:col-start pl))))
+              (let [i (:col-start pl)]
+                (if (< -1 i n-cols)
+                  (-> acc
+                      (update-in [i :min] max (grid-item-min-content-width theme cw opacity inherited child))
+                      (update-in [i :max] max (grid-item-max-content-width theme cw opacity inherited child)))
+                  acc))
+              acc))
+          (vec (repeat n-cols {:min 0 :max 0}))
+          (map vector children placements)))
 
 ;; ---- table layout ----
 
@@ -5220,8 +5551,13 @@
    container's own `grid-template-areas` (see parse-grid-template-areas), and
    auto-placement in DOM order, row-major (fills a row left-to-right before
    wrapping to the next row) for everything else — see place-grid-items/
-   item-grid-placement for exactly how all three compose. `gap` — the same
-   style key flex already reuses — spaces both rows and columns.
+   item-grid-placement for exactly how all three compose. `grid-auto-flow:
+   column` swaps that last axis (fills a column top-to-bottom before moving
+   right, growing implicit COLUMNS rather than implicit rows); it is
+   implemented by transposing the placement problem, see place-grid-items.
+   `gap` — the same style key flex already reuses — spaces both axes, and
+   `row-gap`/`column-gap` (or `gap: <row> <column>`) space them
+   independently, see node-style.
 
    Column count = the number of parsed grid-template-columns tracks. With no
    (or a blank) grid-template-columns, this falls back to `grid-template-areas`'s
@@ -5241,7 +5577,12 @@
    Column track sizes are always resolved against the container's definite
    content-width (`cw`), exactly like flexbox's main-axis sizing whenever the
    main size is known — so `fr` columns are always well-defined (see
-   track-sizes). An item spanning more than one column (`grid-column: 1 / 3`,
+   track-sizes). An `auto` column is sized from its own items instead: their
+   min-content width is its floor and their max-content width its growth
+   limit (grid-track-intrinsics measures both), and whatever is left over is
+   shared EQUALLY among the auto tracks unless an `fr` track is competing
+   for it — see track-sizes for the measured numbers behind each of those
+   three rules. An item spanning more than one column (`grid-column: 1 / 3`,
    or a multi-column grid-area) gets the combined width of every column it
    spans plus the gaps between them (span-width), and is measured against
    that combined width exactly like a plain single-column item is measured
@@ -5301,20 +5642,36 @@
    is not a fixed, finite axis in this engine to begin with, so an
    out-of-range grid-row line (or a grid-area whose own rows reach further
    than grid-template-rows declares) just means however many more (possibly
-   empty, 0px-tall) rows are needed to reach it. A row whose index has an
-   explicit *fixed*-px grid-template-rows track uses that literal height.
-   Every other row — an `fr` row track, any row beyond the explicit track
-   list, or an empty row nothing was placed into — is auto-sized to the
-   tallest child whose placement STARTS in that row (mirrors flexbox's own
-   auto cross-axis convention elsewhere in this file; a multi-row-span
-   item's height only contributes to its start row's auto-sizing, not any
-   row it merely passes through — a documented simplification, row spans
-   are not this feature's must-have), UNLESS the grid container has an
-   explicit :height, in which case the explicit row tracks (fixed + fr) are
-   resolved proportionally against that height the same way columns are.
-   Without an explicit container height there is no definite total to share
-   `fr` row tracks against, so this is the one deliberate asymmetry versus
-   columns in this subset — documented here rather than silently guessed at.
+   empty, 0px-tall) rows are needed to reach it. Every row has a TRACK:
+   whatever grid-template-rows declared for that index, then
+   `grid-auto-rows` (cycled, as real CSS does) for the implicit rows past
+   it, then `auto` when neither said anything — which is what every row got
+   before grid-auto-rows was read at all, so nothing that worked before
+   changes. A *fixed*-px row track uses that literal height. An `auto` row
+   is sized to the tallest child whose placement STARTS in it (mirrors
+   flexbox's own auto cross-axis convention elsewhere in this file; a
+   multi-row-span item's height only contributes to its start row's
+   auto-sizing, not any row it merely passes through — a documented
+   simplification, row spans are not this feature's must-have), UNLESS the
+   grid container has an explicit :height, in which case the whole row track
+   list is resolved against that height the same way columns are: `fr` rows
+   share it proportionally, `auto` rows stretch past their content to fill
+   it (measured in Brave: `grid-template-rows: 30px` with three items in a
+   200px-tall grid gives 30 / 85 / 85). Without an explicit container height
+   there is no definite total to share, so `fr` and `auto` rows both fall
+   back to content sizing — the one deliberate asymmetry versus columns in
+   this subset, documented here rather than silently guessed at.
+
+   Item alignment: `justify-items`/`justify-self` (inline axis) and
+   `align-items`/`align-self` (block axis) both work, and both are a SIZE
+   decision as much as a position one. `stretch` — the initial value — fills
+   the whole track, which is why an item with no width is a full column wide
+   and an item in a 60px row track is 60px tall. Any other value makes the
+   item fit-content (max-content, clamped to the track) and positions it in
+   the track via cross-offset, the same helper flexbox's cross axis uses.
+   Measured in Brave, `justify-items: center` in a 120px column puts a
+   one-character item at x=55.4 with a 9.2px box, where filling the track
+   gave 0 and 120.
 
    Absolute-positioned children are NOT extracted via partition-flow here —
    this matches layout-flex's current behavior (today only layout-block
@@ -5322,83 +5679,179 @@
    container is placed as an ordinary grid item, the same limitation flex
    already has.
 
-   `repeat(<integer>, <track>)` and `minmax(<px>, <px-or-1fr>)` ARE
+   `repeat(<integer>, <track>)`, `minmax(<px>, <px-or-1fr>)` and `auto` ARE
    supported and compose (e.g. `repeat(3, minmax(80px, 1fr))`) — see
    parse-track-list/parse-track-token/track-sizes. Explicitly out of scope:
-   `auto` tracks, percentage tracks, `repeat(auto-fill|auto-fit, ...)` (real
-   content-based auto-sizing this engine doesn't do), implicit track
-   creation, dense packing, the grid-column-start/grid-column-end/
-   grid-row-start/grid-row-end longhand properties (only the grid-column/
-   grid-row shorthand is parsed), and the 4-value grid-area longhand
-   shorthand (only a bare area-name reference is parsed, see above)."
+   percentage tracks, `min-content`/`max-content`/`fit-content()` as track
+   keywords (only bare `auto` is recognised; the others still degrade to a
+   0px track), `repeat(auto-fill|auto-fit, ...)`, dense packing, the
+   grid-column-start/grid-column-end/grid-row-start/grid-row-end longhand
+   properties (only the grid-column/grid-row shorthand is parsed), the
+   4-value grid-area longhand shorthand (only a bare area-name reference is
+   parsed, see above), `justify-content`/`align-content` on the container
+   (tracks are always placed from the start edge — see track-sizes for what
+   that costs the `auto` stretch step), and implicit COLUMN creation in row
+   flow: an out-of-range `grid-column` is still clamped into the declared
+   range (clamp-col-range) rather than growing the grid, so
+   `grid-auto-columns` only reaches the implicit tracks `grid-auto-flow:
+   column` creates. Measured in Brave, `grid-template-columns: 60px` with a
+   `grid-column: 2` item and `grid-auto-columns: 90px` makes a second 90px
+   column where this engine puts the item back in the first one."
   [theme x y avail-width opacity inherited st node in-flow]
-  (let [w (resolve-width st avail-width)
+  (let [;; `display: inline-grid` is a grid container that is INLINE-level:
+        ;; it sits in its parent's line box and shrink-wraps to its tracks
+        ;; instead of filling its containing block -- exactly what
+        ;; `inline-flex` already does for flex.
+        inline? (= "inline-grid" (:display st))
         inset (content-inset st)
         cx (+ x (:margin st) inset)
         cy (+ y (:margin st) inset)
-        cw (max 0 (- w (* 2 inset)))
-        gap (:gap st)
+        ;; the two gap axes are separate now (`row-gap`/`column-gap`, see
+        ;; node-style); `gap` alone still sets both, which is why every
+        ;; previously-passing single-`gap` case is unaffected
+        row-gap (:row-gap st)
+        col-gap (:column-gap st)
+        flow-column? (str/includes? (str/lower-case (str (:grid-auto-flow st))) "column")
         template-areas (parse-grid-template-areas (:grid-template-areas st))
         explicit-cols (parse-track-list (:grid-template-columns st))
-        col-tracks (cond
-                     (seq explicit-cols) explicit-cols
-                     template-areas (vec (repeat (:col-count template-areas) {:type :fr :size 1.0}))
-                     :else [{:type :fixed :size cw}])
-        n-cols (count col-tracks)
-        col-widths (track-sizes col-tracks gap cw)
-        col-offsets (place-main-axis "flex-start" col-widths gap 0)
+        auto-col-tracks (parse-track-list (:grid-auto-columns st))
         row-tracks (parse-track-list (:grid-template-rows st))
+        auto-row-tracks (parse-track-list (:grid-auto-rows st))
         n-row-tracks (count row-tracks)
-        explicit-h (resolve-height st)
-        row-track-fr-sizes (when explicit-h (track-sizes row-tracks gap explicit-h))
-        placements (place-grid-items theme in-flow n-cols n-row-tracks (:areas template-areas))
+        ;; the width available to measure and to size tracks against,
+        ;; before an inline-level container shrink-wraps below it
+        avail-w (resolve-width st avail-width)
+        avail-cw (max 0 (- avail-w (* 2 inset)))
+        declared-cols (cond
+                        (seq explicit-cols) explicit-cols
+                        template-areas (vec (repeat (:col-count template-areas) {:type :fr :size 1.0}))
+                        :else [])
+        placements (place-grid-items theme in-flow (max 1 (count declared-cols))
+                                     n-row-tracks (:areas template-areas) flow-column?)
         total-rows (if (seq placements) (apply max 0 (map :row-end placements)) 0)
-        measured (mapv (fn [child pl]
-                          (let [item-w (span-width col-widths gap (:col-start pl) (:col-end pl))]
-                            (measure-child theme item-w opacity inherited child false)))
-                        in-flow placements)
-        row-heights (vec (map (fn [row-idx]
-                                 (let [track (nth row-tracks row-idx nil)]
-                                   (cond
-                                     (and track (= :fixed (:type track)))
-                                     (:size track)
-
-                                     (and track row-track-fr-sizes)
-                                     (nth row-track-fr-sizes row-idx)
-
-                                     :else
-                                     (let [hs (keep-indexed
-                                               (fn [i pl]
-                                                 (when (= row-idx (:row-start pl))
-                                                   (:h (:box (nth measured i)))))
-                                               placements)]
-                                       (if (seq hs) (apply max 0 hs) 0)))))
-                               (range total-rows)))
-        ;; A grid item STRETCHES to fill its track (`align-items: stretch`
-        ;; is the default), so an item in a `grid-template-rows: 40px` track
-        ;; is 40px tall whatever its content needs. This engine left every
-        ;; item at its content height -- measured against the browser as
-        ;; four 20px boxes in 40px tracks.
-        measured (mapv (fn [pl m child]
-                         (let [rh (reduce + 0 (map #(nth row-heights % 0)
-                                                   (range (:row-start pl) (:row-end pl))))
-                               own-h (:h (:box m))]
-                           (if (and (map? child) (> rh own-h) (not (:height (node-style child theme))))
-                             (measure-child theme
-                                            (span-width col-widths gap (:col-start pl) (:col-end pl))
-                                            opacity inherited
-                                            (force-cross-size false rh child)
-                                            false)
+        ;; IMPLICIT columns exist only under `grid-auto-flow: column`, where
+        ;; the column axis is the one that grows (in row flow the column
+        ;; count is fixed and an out-of-range line is clamped instead --
+        ;; see clamp-col-range).
+        n-cols (max 1 (count declared-cols)
+                    (if (seq placements) (apply max 0 (map :col-end placements)) 0))
+        implicit-track (fn [tracks i]
+                         (when (seq tracks) (nth tracks (mod i (count tracks)))))
+        col-tracks (if (and (empty? declared-cols) (empty? auto-col-tracks) (= 1 n-cols))
+                     ;; no tracks declared at all: one column, which fills
+                     ;; the container for a block-level grid (the
+                     ;; pre-existing fallback) and hugs its content for an
+                     ;; inline-level one
+                     [(if inline? {:type :auto} {:type :fixed :size avail-cw})]
+                     (mapv (fn [i]
+                             (or (nth declared-cols i nil)
+                                 (implicit-track auto-col-tracks (- i (count declared-cols)))
+                                 {:type :auto}))
+                           (range n-cols)))
+        ;; measuring every item twice is not free, so it only happens when
+        ;; an `auto` track is actually present to need it
+        col-intrinsics (if (some #(= :auto (:type %)) col-tracks)
+                         (grid-track-intrinsics theme avail-cw opacity inherited
+                                                in-flow placements n-cols)
+                         [])
+        ;; An inline-level grid's own width is its tracks' max-content sum
+        ;; plus the gaps between them -- measured in Brave, an
+        ;; `inline-grid` with `grid-template-columns: 30px 30px` inside a
+        ;; sentence is 60px wide and stays on the line, where a
+        ;; block-level box would have taken the whole 800px width and
+        ;; broken the sentence into three lines.
+        fr-intrinsic (apply max 0 (map-indexed (fn [i t] (if (fr-weight t)
+                                                           (:max (nth col-intrinsics i nil) 0)
+                                                           0))
+                                               col-tracks))
+        intrinsic-cw (+ (reduce + 0 (map-indexed
+                                     (fn [i t]
+                                       (case (:type t)
+                                         :fixed (:size t)
+                                         ;; every `fr` track equalises to the
+                                         ;; widest of them under an
+                                         ;; indefinite size
+                                         :fr fr-intrinsic
+                                         :minmax (max (:min t) (:max (nth col-intrinsics i nil) 0))
+                                         (:max (nth col-intrinsics i nil) 0)))
+                                     col-tracks))
+                        (* col-gap (max 0 (dec (count col-tracks)))))
+        cw (if (and inline? (nil? (:width st))) (max 0 (min avail-cw intrinsic-cw)) avail-cw)
+        w (if (and inline? (nil? (:width st))) (+ cw (* 2 inset)) avail-w)
+        col-widths (track-sizes col-tracks col-gap cw col-intrinsics)
+        col-offsets (place-main-axis "flex-start" col-widths col-gap 0)
+        explicit-h (resolve-height st)
+        ;; Every row has a track now: whatever grid-template-rows declared,
+        ;; then grid-auto-rows for the implicit ones beyond it, then `auto`
+        ;; (content-sized) when neither said anything -- which is exactly
+        ;; what every row got before grid-auto-rows was read at all.
+        all-row-tracks (mapv (fn [i]
+                               (or (nth row-tracks i nil)
+                                   (implicit-track auto-row-tracks (- i n-row-tracks))
+                                   {:type :auto}))
+                             (range total-rows))
+        span-w (fn [pl] (span-width col-widths col-gap (:col-start pl) (:col-end pl)))
+        ;; A grid item fills its column track under `justify-items:
+        ;; stretch` (the initial value) and is fit-content under anything
+        ;; else, which is a SIZE difference and therefore has to be decided
+        ;; before the item is measured -- exactly the shape layout-flex
+        ;; already uses for a column container's cross axis.
+        inline-align (fn [child]
+                       (let [self (when (map? child) (:justify-self (node-style child theme)))]
+                         (if (and self (not= "auto" self)) self (:justify-items st))))
+        inline-aligns (mapv inline-align in-flow)
+        measured (mapv (fn [child pl align]
+                         (measure-child theme (span-w pl) opacity inherited child
+                                        (not (contains? #{"stretch" "normal"} align))))
+                       in-flow placements inline-aligns)
+        row-content-h (mapv (fn [row-idx]
+                              (let [hs (keep-indexed
+                                        (fn [i pl]
+                                          (when (= row-idx (:row-start pl))
+                                            (:h (:box (nth measured i)))))
+                                        placements)]
+                                (if (seq hs) (apply max 0 hs) 0)))
+                            (range total-rows))
+        row-track-fr-sizes (when explicit-h
+                             (track-sizes all-row-tracks row-gap explicit-h
+                                          (mapv (fn [h] {:min h :max h}) row-content-h)))
+        row-heights (mapv (fn [row-idx]
+                            (let [track (nth all-row-tracks row-idx)]
+                              (cond
+                                (= :fixed (:type track)) (:size track)
+                                row-track-fr-sizes (nth row-track-fr-sizes row-idx)
+                                :else (nth row-content-h row-idx))))
+                          (range total-rows))
+        row-span-h (fn [pl] (reduce + 0 (map #(nth row-heights % 0)
+                                             (range (:row-start pl) (:row-end pl)))))
+        ;; A grid item STRETCHES to fill its row track (`align-items:
+        ;; stretch` is the default), so an item in a `grid-template-rows:
+        ;; 40px` track is 40px tall whatever its content needs. Under any
+        ;; other `align-items`/`align-self` it keeps its own height and is
+        ;; POSITIONED in the track instead (see block-aligns below):
+        ;; measured in Brave, `align-items: center` on a 60px row leaves a
+        ;; 20px item at y=20, where stretching it unconditionally gave a
+        ;; 60px box at y=0.
+        block-aligns (mapv #(item-cross-align theme st %) in-flow)
+        measured (mapv (fn [pl m child align]
+                         (let [rh (row-span-h pl)]
+                           (if (and (map? child) (> rh (:h (:box m))) (= "stretch" align)
+                                    (not (:height (node-style child theme))))
+                             (measure-child theme (span-w pl) opacity inherited
+                                            (force-cross-size false rh child) false)
                              m)))
-                       placements measured in-flow)
-        row-offsets (place-main-axis "flex-start" row-heights gap 0)
-        draws (vec (mapcat (fn [pl m child]
-                              (let [[rdx rdy] (relative-item-offset theme child)]
-                                (translate-ops (+ cx (nth col-offsets (:col-start pl)) rdx)
-                                               (+ cy (nth row-offsets (:row-start pl)) rdy)
-                                               (:draw m))))
-                            placements measured in-flow))
-        content-h (+ (reduce + 0 row-heights) (* gap (max 0 (dec (count row-heights)))))
+                       placements measured in-flow block-aligns)
+        row-offsets (place-main-axis "flex-start" row-heights row-gap 0)
+        draws (vec (mapcat (fn [pl m child ja aa]
+                             (let [[rdx rdy] (relative-item-offset theme child)]
+                               (translate-ops
+                                (+ cx (nth col-offsets (:col-start pl))
+                                   (cross-offset ja (:w (:box m)) (span-w pl)) rdx)
+                                (+ cy (nth row-offsets (:row-start pl))
+                                   (cross-offset aa (:h (:box m)) (row-span-h pl)) rdy)
+                                (:draw m))))
+                           placements measured in-flow inline-aligns block-aligns))
+        content-h (+ (reduce + 0 row-heights) (* row-gap (max 0 (dec (count row-heights)))))
         node-h (or explicit-h (+ content-h (* 2 inset)))]
     {:box-w w :box-h node-h :draws draws}))
 
@@ -5469,13 +5922,16 @@
    one line (`before a b after`); this engine gave the span a block row
    of its own and produced three lines.
 
-   `inline-grid` is deliberately NOT here: `layout-grid` has no
-   shrink-to-fit branch of its own, so admitting it would put a
-   full-container-width box in the middle of a sentence -- a different
-   answer, not a better one, than the block row it gets today. That is
-   the grid side of this same gap, and it is measured by the corpus as
-   `grid/inline-grid-in-a-sentence`."
-  #{"inline-block" "inline-flex"})
+   `inline-grid` IS here now: layout-grid grew the shrink-to-fit branch
+   this set used to be waiting on -- an inline-level grid sizes itself to
+   its tracks' max-content sum plus the gaps between them (see
+   layout-grid's `intrinsic-cw`), so admitting it puts a 60px two-track
+   box in the line rather than a full-container-width one. Measured in
+   Brave on `before <span style=\"display: inline-grid;
+   grid-template-columns: 30px 30px\">...</span> after`: the span is 60px
+   wide at x=58 and the whole sentence is ONE 20px line, where the block
+   row this engine gave it made three lines."
+  #{"inline-block" "inline-flex" "inline-grid"})
 
 (defn- inline-atomic-element?
   "True for an element that participates in a line as one unbreakable box:
@@ -7442,7 +7898,13 @@
                                     (style-passthrough st))]
                             draws))})
 
-             (= "grid" (:display st))
+             ;; `inline-grid` takes the same path as `grid` -- the only
+             ;; difference lives inside layout-grid, which shrink-wraps to
+             ;; its tracks for the inline case. Reaching this branch at all
+             ;; is what the inline path (inline-atomic-displays) already
+             ;; arranged; without it an `inline-grid` fell through to
+             ;; layout-block and laid its items out as stacked blocks.
+             (contains? #{"grid" "inline-grid"} (:display st))
              (let [{:keys [box-w box-h draws]} (layout-grid theme x y avail-width opacity inherited st node children)
                    box-h (clamp-height st box-h)]
                {:box {:x x :y y :w box-w :h box-h}
