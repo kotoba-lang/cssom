@@ -843,18 +843,35 @@
    is what this engine produced): the content is the FONT's 15px area, not
    its 13px size.
 
-   NOT here, and measured so the next reader does not have to: `<fieldset>`
-   and `<legend>`. Chrome gives a fieldset `margin-inline: 2px`, a 2px
-   groove border, and per-side em padding (`0.35em` top, `0.625em` bottom,
-   `0.75em` inline), and then lifts the `<legend>` OUT of flow into the top
-   border band -- measured at width 800/font 14, fieldset (2, 0, 796,
-   83.64), legend (14.5, 0, 39, 20), inner `<p>` (14.5, 38.89, 771, 20)
-   against this engine's (0, 0, 800, 54) / (0, 0, 800, 20) / (0, 34, 800,
-   20). The box constants would fit in this map, but the legend's
-   out-of-flow placement in the border band is real new layout machinery,
-   not a UA-constant, so `:form/fieldset-and-legend` is left failing rather
-   than half-fixed. It is NOT a margin-collapsing failure, which is what
-   its residual looks like from the outside."
+   `:box-sizing \"border-box\"` on `<button>` and `<select>` is the same
+   kind of reading, and it is NOT decoration. Measured in Brave (2026-08-04,
+   `getComputedStyle`), a `<button>`, a `<select>` and a checkbox/radio
+   `<input>` all report `border-box`, while a text `<input>`, a
+   `<textarea>`, a `<fieldset>` and a `<legend>` report `content-box`.
+   It matters because `inset-side` -- the whole engine's answer to \"where
+   does this box's CONTENT start\" -- only counts the border for a
+   border-box box. Without it a button's own label was painted at its
+   BORDER edge instead of one border plus one padding in: its text sat 3px
+   high, and the em box the engine reports a text op in poked out ABOVE the
+   button's own border box. That is not a rounding error, it is a label
+   that has escaped the control it belongs to -- which is exactly how
+   `:form/button-with-nested-inline` (a button on a line, wanting
+   `[\"tail\"]`) came back as `[\"save now tail\"]`: the harness attributes a
+   text op to the atomic inline whose box CONTAINS it, and the button's did
+   not contain its own.
+
+   The engine-wide version of that bug is still here and is NOT fixed by
+   this: for a plain `content-box` element `inset-side` leaves the border
+   out, so a `border:2px;padding:10px` div puts its `<p>` at y=24 where
+   Brave says 26, and gives it 4px too much content width. That is one
+   change to the box model rather than one UA reading, it moves every
+   bordered box on every page, and it belongs with whoever owns
+   width/height resolution -- named here because a fieldset's inner `<p>`
+   is 4px wide of Brave for exactly that reason and no other.
+
+   `<fieldset>` and `<legend>` are NOT in this map -- their box is em-based
+   rather than constant, so it lives in `ua-em-box` next door, and the
+   legend's placement is a layout rule (`fieldset-legend`), not a box."
   ;; An input's padding is NOT uniform either: 2px inline, 1px block. The
   ;; uniform `:padding 2` is kept as the fallback the horizontal axis (and
   ;; `content-inset`, i.e. where the control's own text and caret are
@@ -868,7 +885,7 @@
    ;; h = 15 + 2 + 4 = 21), and only expressible at all since the box model
    ;; gained per-side values.
    :button {:padding 1 :padding-left 6 :padding-right 6 :border 2
-            :line-height :normal}
+            :line-height :normal :box-sizing "border-box"}
    ;; a <select>'s 1px block padding is Chrome's own internal button
    ;; padding: it reports `padding: 0px` in getComputedStyle yet a select
    ;; measures 4px taller than its font's content area at EVERY size
@@ -878,7 +895,7 @@
    ;; 0; the horizontal slack is the dropdown arrow, see
    ;; select-arrow-width.
    :select {:padding 0 :padding-top 1 :padding-bottom 1 :border 1
-            :line-height :normal}})
+            :line-height :normal :box-sizing "border-box"}})
 
 (defn- select-multiple?
   "A `<select multiple>` is a completely different box from a closed
@@ -963,7 +980,7 @@
       ;; atomic-intrinsic-width); naming it here is what keeps the height
       ;; from being derived from the control font instead.
       {:padding 0 :border 0 :margin-top 3 :margin-right 3
-       :margin-bottom 3 :margin-left 4 :box 13}
+       :margin-bottom 3 :margin-left 4 :box 13 :box-sizing "border-box"}
 
       ;; An OPEN listbox has none of the closed dropdown's 1px internal
       ;; block padding: measured, a `size="3"` multiple select is exactly
@@ -973,6 +990,51 @@
       {:padding 0 :border 1 :line-height :normal}
 
       :else (get ua-control-box tag))))
+
+(def ^:private ua-em-box
+  "The UA box of the two form-GROUPING elements, whose padding is stated in
+   `em` rather than pixels and so cannot live in `ua-control-box` beside the
+   controls' constants. Measured in Brave 2026-08-04 via `getComputedStyle`,
+   at font-size 14 and again at 20 to separate the em terms from the px
+   ones:
+
+     fieldset  margin-inline 2px, border 2px groove,
+               padding 0.35em 0.75em 0.625em
+               (14px -> 4.9/10.5/8.75, 20px -> 7/15/12.5)
+     legend    padding-inline 2px, no block padding, no border
+               (2px at 14, 20 and 30px font -- a constant, not an em)
+
+   `:em` values are multiples of the element's own font size, resolved by
+   `ua-em-box-for`; everything else is pixels. The fieldset's is the LAST
+   piece of the `:form/fieldset-and-legend` cluster that is a box at all --
+   where the legend actually goes is a layout rule, see `fieldset-legend`.
+
+   A `<legend>` gets its 2px whether or not it is inside a fieldset:
+   measured, a bare `<legend>bare legend</legend>` is a full-width block
+   whose text still starts at x=2."
+  {:fieldset {:margin-left 2 :margin-right 2 :border 2
+              :em {:padding-top 0.35 :padding-right 0.75
+                   :padding-bottom 0.625 :padding-left 0.75}}
+   :legend {:padding-left 2 :padding-right 2 :padding-top 0 :padding-bottom 0}})
+
+(defn- ua-em-box-for
+  "`ua-em-box`'s entry for `node`, with its `:em` terms resolved against the
+   element's own font size.
+
+   The font size is the element's DECLARED one or the theme's base, exactly
+   as `ua-margin-y` and `ua-font-scale` already resolve their own em terms
+   -- and with exactly the same honest simplification: a fieldset nested
+   inside larger text will not compound the way real `em` would, because
+   the inherited size is not available here. Measured to be worth having
+   anyway: it is the difference between 4.9px and a guess."
+  [node theme]
+  (when-let [box (get ua-em-box (:tag node))]
+    (if-let [em (:em box)]
+      (let [fs (or (parse-int (get-in node [:attrs :style/font-size]) nil)
+                   (:font-size theme))]
+        (merge (dissoc box :em)
+               (reduce-kv (fn [m k v] (assoc m k (* v fs))) {} em)))
+      box)))
 
 (def ^:private ua-padding
   "UA-stylesheet padding defaults, in the uniform form this engine's box
@@ -1047,6 +1109,11 @@
 (declare font-metrics)
 
 (defn- node-style [node theme]
+  ;; `ua-box` is this element's UA box: the control constants
+  ;; (ua-control-box-for) or, for the two form-grouping elements whose
+  ;; padding is stated in em, ua-em-box-for. One lookup, read by every
+  ;; side below -- they used to call ua-control-box-for ten times over.
+  (let [ua-box (or (ua-control-box-for node) (ua-em-box-for node theme))]
   ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
   ;; UA-stylesheet rule, not !important -- any author :display the cascade
   ;; already resolved wins over it, matching that real override pattern.
@@ -1064,9 +1131,11 @@
    :max-width (style node :max-width)
    :min-height (style node :min-height)
    :max-height (style node :max-height)
-   :box-sizing (or (style node :box-sizing) "content-box")
+   :box-sizing (or (style node :box-sizing)
+                   (:box-sizing ua-box)
+                   "content-box")
    :padding (parse-int (style node :padding)
-                       (or (:padding (ua-control-box-for node))
+                       (or (:padding ua-box)
                            (get ua-padding (:tag node))
                            (:padding theme)))
    ;; The DECLARED padding only -- author or UA -- with no theme fallback.
@@ -1075,25 +1144,25 @@
    ;; because of a styling choice the author never made.
    :padding/declared (parse-int (style node :padding) (get ua-padding (:tag node)))
    :padding-top (parse-int (style node :padding-top)
-                           (:padding-top (ua-control-box-for node)))
+                           (:padding-top ua-box))
    :padding-right (parse-int (style node :padding-right)
-                             (:padding-right (ua-control-box-for node)))
+                             (:padding-right ua-box))
    :padding-bottom (parse-int (style node :padding-bottom)
-                              (:padding-bottom (ua-control-box-for node)))
+                              (:padding-bottom ua-box))
    :padding-left (parse-int (style node :padding-left)
-                            (or (:padding-left (ua-control-box-for node))
+                            (or (:padding-left ua-box)
                                 (get-in ua-box-sides [(:tag node) :padding-left])))
    :margin-top (parse-int (style node :margin-top)
-                          (or (:margin-top (ua-control-box-for node))
+                          (or (:margin-top ua-box)
                               (ua-margin-y node theme)))
    :margin-bottom (parse-int (style node :margin-bottom)
-                             (or (:margin-bottom (ua-control-box-for node))
+                             (or (:margin-bottom ua-box)
                                  (ua-margin-y node theme)))
    :margin-left (parse-int (style node :margin-left)
-                           (or (:margin-left (ua-control-box-for node))
+                           (or (:margin-left ua-box)
                                (get-in ua-box-sides [(:tag node) :margin-left])))
    :margin-right (parse-int (style node :margin-right)
-                            (or (:margin-right (ua-control-box-for node))
+                            (or (:margin-right ua-box)
                                 (get-in ua-box-sides [(:tag node) :margin-right])))
    ;; A USED height injected by the layout itself (force-cross-size's
    ;; stretch, layout-absolute-children's top+bottom solve), as an attr
@@ -1160,7 +1229,7 @@
    ;; bare `border-width` and asserted a border, so they were asking for
    ;; something no browser draws; they now declare `border-style` and go on
    ;; testing borders.
-   :border-width (let [ua-border (get (ua-control-box-for node) :border 0)
+   :border-width (let [ua-border (get ua-box :border 0)
                        border-style (or (some-> (style node :border-style) str/lower-case)
                                         (when (pos? ua-border) "solid"))]
                    (if (or (nil? border-style)
@@ -1222,7 +1291,7 @@
                     ;; that is 15 (12 + 3), and using the size gave 13, one
                     ;; whole leading short in the control's box AND in its
                     ;; internal baseline.
-                    (when (= :normal (:line-height (ua-control-box-for node)))
+                    (when (= :normal (:line-height ua-box))
                       (let [fs (or (style node :font-size) (:size ua-control-font))
                             {:keys [ascent descent]}
                             (font-metrics theme fs
@@ -1374,7 +1443,7 @@
    :independent-fc? (boolean (attr node :kotoba/independent-fc))
    :overflow (style node :overflow)
    :scroll-top (parse-int (attr node :scroll-top) 0)
-   :scroll-left (parse-int (attr node :scroll-left) 0)})
+   :scroll-left (parse-int (attr node :scroll-left) 0)}))
 
 (defn- style-passthrough [st]
   {:display (:display st)
@@ -4370,12 +4439,56 @@
           ;; inherited page font -- the same rule that gives every control
           ;; its own metrics (ua-control-font). Measuring it with the page
           ;; font left a button ~14px narrow against the browser.
+          ;;
+          ;; MARKUP inside the label counts, and used to be dropped on the
+          ;; floor: `real-text-child` sees a control's DIRECT text children
+          ;; only, so `<button>save <b>now</b></button>` was measured as
+          ;; `save ` -- 36px of content where Brave reports 58.5, i.e. a
+          ;; button too narrow to hold its own label. The consequence was
+          ;; not a 22px box error, it was a WRAPPED button: the label broke
+          ;; onto a second line inside the control, the control grew to 34px
+          ;; and its first line's text op ended up ABOVE the control's own
+          ;; box, which is how a button's private formatting context leaked
+          ;; into the surrounding line (:form/button-with-nested-inline
+          ;; wanted `["tail"]` and got `["save tail"]`). The `:else` branch
+          ;; below already knew how to measure mixed inline content; this
+          ;; branch shadowed it for every form-control tag.
+          ;;
+          ;; Routed through inline-max-content-width ONLY when there is
+          ;; markup to account for. The all-text path is left byte-identical
+          ;; on purpose: the two disagree about leading/trailing whitespace
+          ;; (a browser collapses `<button> ok </button>` to `ok`; the join
+          ;; below charges the spaces), and that is a separate measurement
+          ;; from this one.
+          ;; ...and the label is rounded UP to a whole pixel before the
+          ;; inset is added. Not decoration and not a fudge: this width is
+          ;; handed straight back as the box's AVAILABLE width, and
+          ;; layout-block then re-derives the content width by SUBTRACTING
+          ;; the same inset. `(- (+ inset label) inset)` is not `label` in
+          ;; binary floating point -- measured, `save now` is 57.89096472741182
+          ;; and the round trip returns 57.8909647274118, one ulp short --
+          ;; and one ulp short is enough for the line breaker to decide the
+          ;; label does not fit the box that was sized for it. The button
+          ;; then wrapped its own label and doubled in height. Rounding the
+          ;; content up makes the subtraction exact (whole pixel minus whole
+          ;; pixel) instead of lucky, and it is the same direction Chrome's
+          ;; own intrinsic sizing rounds -- a box may be a fraction wider
+          ;; than its content, never a fraction narrower.
           (contains? form-control-tags tag)
           (+ inset-x
-             (let [label (->> (:children child) (keep real-text-child) (str/join ""))]
-               (if measure-text
-                 (measure-text label font-size (:font-weight st) (:font-style st) (:font-family st))
-                 (* (count label) char-w))))
+             (Math/ceil
+              (let [cs (intrinsic-flow-children theme (laid-out-children theme child))
+                   markup? (some #(and (map? %) (= :element (:node/type %))) cs)]
+               (if (and markup? (every? #(inline-flow-candidate? theme %) cs))
+                 ;; `st` is the CONTROL's own style, so inline-inherited
+                 ;; (inside inline-max-content-width) resolves the whole
+                 ;; label -- nested elements included -- against the control
+                 ;; font rather than the page font.
+                 (inline-max-content-width theme content-w opacity inherited st cs)
+                 (let [label (->> (:children child) (keep real-text-child) (str/join ""))]
+                   (if measure-text
+                     (measure-text label font-size (:font-weight st) (:font-style st) (:font-family st))
+                     (* (count label) char-w)))))))
 
           :else
           ;; An out-of-flow child contributes nothing to an intrinsic width
@@ -7627,16 +7740,26 @@
 ;; (0,0), and its NEIGHBOUR started 10px too early because the band was a
 ;; border box wide).
 ;;
-;; What is deliberately NOT here: the band is consulted by the line boxes
-;; of the float's OWN container only. A float does not narrow the lines of
-;; a descendant block box, because layout-node does not carry a float
-;; context down into a child and giving it one is a much larger change
-;; than this. Real CSS does narrow them -- `<div float><div>text</div>` in
-;; Brave puts the inner div's LINE beside the float while its BORDER BOX
-;; stays full width. This engine gets the border box right (they are
-;; unaffected either way) and the line wrong, which is visible only when
-;; that inner text is long enough that the narrowing would change where it
-;; wraps.
+;; A float narrows the line boxes of every box in its formatting context,
+;; not just its own parent's: `<div><img float><h3>Title</h3><p>body</p>
+;; </div>` puts the `<h3>`'s and the `<p>`'s LINES beside the float in
+;; Brave while both BORDER BOXES stay full width. That used to be a
+;; documented scope cut here ("layout-node does not carry a float context
+;; down into a child"); layout-node now does, as an optional trailing
+;; `intruding` argument (see layout-children-block's `---- floats ----`
+;; section), and the cut is gone. It was not cosmetic: on
+;; `:page/media-object` the harness's line axis reported ONE line for a
+;; three-line page, because every line the engine put at x=0 was inside the
+;; float's own box and was therefore attributed to the float rather than to
+;; the paragraph it belongs to.
+;;
+;; What is still deliberately NOT here: a float never narrows a box that
+;; establishes its own formatting context (correct -- CSS says the same),
+;; and it does not SHRINK such a box to fit beside itself either, which CSS
+;; does say. An `overflow: hidden` sibling of a float keeps its full width
+;; and overlaps it here, where a browser would narrow it. That needs a
+;; width-resolution pass that consults the band, not just a line-breaking
+;; one, and is a separate measurement.
 
 (defn- float-band
   "The `[left right]` content edges available on the scanline at `y`.
@@ -7803,10 +7926,27 @@
    coordinates throughout: the same numbers are meaningful at every level
    they pass through.)
 
+   ---- floats that belong to an ANCESTOR's formatting context ----
+
+   `intruding` is the float list of the formatting context this box takes
+   part in, in the same ABSOLUTE coordinates every float here is kept in.
+   A box that does not establish a formatting context of its own shares its
+   ancestor's, so those floats narrow ITS line boxes too, push ITS floats
+   down, and answer ITS `clear`s -- which is why they are simply seeded into
+   the running float list rather than consulted through a second mechanism.
+   They are tagged `:intruding?` for the two questions where they must NOT
+   count: this box never grows to contain a float it does not own, and it
+   never re-escapes one to its parent (the parent already has it, and a
+   duplicate would push the next float down twice).
+
    Returns `:float/escaped` as well as the four keys above."
   ([theme content-x content-y content-w opacity inherited children]
    (layout-children-block theme content-x content-y content-w opacity inherited children false false false))
   ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom? contains-floats?]
+   (layout-children-block theme content-x content-y content-w opacity inherited children
+                          collapse-top? collapse-bottom? contains-floats? nil))
+  ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom? contains-floats?
+    intruding]
   (let [floated? #(float-child? theme %)]
   (loop [remaining (inline-runs theme inherited children
                                 ;; With a float present even a LONE inline
@@ -7816,8 +7956,8 @@
                                 ;; of its own (measured: the text beside a
                                 ;; left float reported x=0 w=800 against
                                 ;; the browser's x=7 w=70).
-                                (if (some floated? children) 1 2))
-         y content-y draws [] floats []
+                                (if (or (seq intruding) (some floated? children)) 1 2))
+         y content-y draws [] floats (vec intruding)
          height 0 prev-mb 0 first? true out-mt 0 oof []]
     (if-let [child (first remaining)]
       (cond
@@ -7903,11 +8043,28 @@
 
         (and (map? child) (:inline/run child))
         (let [run (:inline/run child)
-              [bl br] (float-band floats content-x content-w y)
+              ;; The preceding sibling's pending bottom margin separates a
+              ;; line box exactly as it separates a block box: CSS wraps
+              ;; inline content in an ANONYMOUS block, and an anonymous
+              ;; block has no margins of its own, so the collapsed gap is
+              ;; simply whatever was pending. This branch used to drop it on
+              ;; the floor -- and the reason that was not caught earlier is
+              ;; that a LONE inline child never reaches this branch (see
+              ;; inline-runs' minimum of 2): `<div><p>para</p>bare text
+              ;; </div>` took the block path and got the gap right, while
+              ;; `<div><p>para</p><span>a</span> <b>b</b></div>` came here
+              ;; and lost it. Measured in Brave, the second is 55px tall
+              ;; (20 + the <p>'s 14px margin + a 21px line box) and was 41
+              ;; here. It is the whole of :page/login-form's `label y
+              ;; -18.4`/`input y -17.4` residual: an <h2>'s 17.43px bottom
+              ;; margin vanished before the first <label>/<input> line.
+              gap-before (if first? 0 prev-mb)
+              run-y (+ y gap-before)
+              [bl br] (float-band floats content-x content-w run-y)
               {:keys [draw h] run-oof :out-of-flow}
-              (layout-inline-run theme bl y (max 0 (- br bl))
+              (layout-inline-run theme bl run-y (max 0 (- br bl))
                                  opacity inherited run)
-              advance (+ h (:gap theme))]
+              advance (+ gap-before h (:gap theme))]
           ;; a line box is real content: nothing collapses through it, so
           ;; `prev-mb` resets to 0 and (when it is the FIRST entry) no top
           ;; margin escapes this container either. An out-of-flow box
@@ -7941,9 +8098,29 @@
               ;; it is equivalent here for the reason layout-absolute-
               ;; children's docstring already establishes -- layout-node
               ;; only ever ADDS its x/y params as an offset.
-              laid (layout-node theme (+ content-x ml) y
-                                (max 0 (- content-w ml mr))
-                                opacity inherited child)
+              ;;
+              ;; That equivalence is exactly what a float breaks, and it is
+              ;; the ONLY thing that makes this a two-pass step: the band a
+              ;; child's lines must avoid depends on where the child really
+              ;; ends up, so floats handed down are expressed relative to
+              ;; the origin the child is being laid out at (`y`), which is
+              ;; `gap-before` above its final one. The first pass exists to
+              ;; learn `gap-before`; when it turns out to be non-zero and
+              ;; there is a band to avoid, the child is laid out again with
+              ;; the band shifted to match. Bounded by construction -- the
+              ;; second pass happens only for a block child that has floats
+              ;; overlapping it AND a gap, and it passes no floats of its
+              ;; own down a third time.
+              band-for-child (when (seq floats) floats)
+              lay (fn [dx dy]
+                    (layout-node theme (+ content-x ml) y
+                                 (max 0 (- content-w ml mr))
+                                 opacity inherited child
+                                 (when band-for-child
+                                   (mapv #(-> % (update :x - dx) (update :y - dy)
+                                              (assoc :intruding? true))
+                                         band-for-child))))
+              laid (lay 0 0)
               ;; Real CSS collapses ADJACENT vertical margins: the gap
               ;; between two siblings is the LARGER of the first's bottom
               ;; and the second's top, not their sum. Without this, UA
@@ -7988,7 +8165,6 @@
                           (max 0 (- c (+ y gap-before)))
                           0)
               gap-before (+ gap-before clearance)
-              child-h (:h (:box laid))
               child-w (:w (:box laid))
               ;; ---- where the leftover inline space goes ----
               ;;
@@ -8021,6 +8197,18 @@
                         mr-auto? 0
                         rtl? free
                         :else 0)
+              ;; second pass: see `lay` above. The band is expressed relative
+              ;; to the origin the child was laid out at, so it has to be
+              ;; shifted by the SAME `auto-dx`/`gap-before` the child's own
+              ;; draw-ops are about to be. Only the draw ops, the escaped
+              ;; floats and the child's HEIGHT can differ -- a narrowed line
+              ;; makes a paragraph taller -- so `gap-before`/`mt*`/`mb*` and
+              ;; `child-w` stay the ones the first pass produced, and
+              ;; `child-h` is read from this one.
+              laid (if (and band-for-child (or (pos? gap-before) (not (zero? auto-dx))))
+                     (lay auto-dx gap-before)
+                     laid)
+              child-h (:h (:box laid))
               ;; Floats this child did not contain rise into THIS
               ;; container's band. Shifted by the same `gap-before` and
               ;; `auto-dx` the child's own draw-ops are, and by nothing else
@@ -8047,8 +8235,14 @@
        ;; escapes it -- measured in Brave, a plain `<div style="width:200px">`
        ;; whose only child is a 50x60 float reports height 0, and the same
        ;; div with `overflow: hidden` reports 60.
+       ;; ...its OWN floats. A float that intruded from an ancestor's
+       ;; formatting context is already contained (or escaping) up there;
+       ;; growing to hold it here would report a box taller than any browser
+       ;; does, and re-escaping it would deliver the parent a duplicate.
        :h (max (if contains-floats?
-                 (reduce (fn [a f] (max a (- (+ (:y f) (:h f)) content-y))) 0 floats)
+                 (reduce (fn [a f]
+                           (if (:intruding? f) a (max a (- (+ (:y f) (:h f)) content-y))))
+                         0 floats)
                  0)
                0
                (+ (- height (:gap theme))
@@ -8057,7 +8251,7 @@
        :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)
        ;; the floats this box did NOT contain, for its parent to keep
        ;; carrying up until something does
-       :float/escaped (if contains-floats? [] floats)
+       :float/escaped (if contains-floats? [] (filterv (complement :intruding?) floats))
        ;; every out-of-flow child, in document order, each carrying the
        ;; static position the flow above just computed for it -- see the
        ;; out-of-flow branch. layout-block hands these straight to
@@ -8501,13 +8695,55 @@
              ;; on top of its background exactly as a real listbox does
              option-ops (into option-ops))}))
 
+(defn- fieldset-legend
+  "The RENDERED legend of a `<fieldset>`: the box HTML lifts out of the
+   fieldset's normal flow and into its block-start border band. Returns the
+   child, or nil when this fieldset has none and is laid out like any other
+   block.
+
+   Every clause was measured in Brave 2026-08-04 rather than read off the
+   spec, because three of the four are surprising:
+
+   - it is the first `<legend>` DIRECT child, not the first child. A legend
+     written after two paragraphs is still the one that gets lifted (the
+     paragraphs then start below the band), and a SECOND legend is an
+     ordinary full-width block inside the content.
+   - a legend nested inside a `<div>` is NOT it: measured, it lays out as an
+     ordinary block at the content top and the fieldset has no band at all.
+   - `display: none`, `float: left|right` and `position: absolute` each take
+     the legend out of the running -- the fieldset then measures exactly as
+     if the legend were not there (65.641 tall against 83.641), and a
+     FLOATED legend becomes an ordinary float inside the content, with the
+     following paragraph's text flowing beside it.
+   Scope cut, stated because the measurement says otherwise: in Brave,
+   `display: flex` on the FIELDSET does not change any of this -- the legend
+   is lifted first and only the remaining children become flex items. Here
+   the lift lives in `layout-block`, so a `display: flex|grid|table`
+   fieldset lays its legend out as an ordinary item and has no border band
+   (measured: 20px tall against Brave's 83.641). Doing it properly means the
+   lift has to happen before the display-driven branch in `layout-node`
+   picks a formatting context, which is a different edit from this one and
+   affects three more layout functions. Every fieldset in the conformance
+   corpus, and every one in ordinary markup, is a block."
+  [theme node]
+  (when (= :fieldset (:tag node))
+    (->> (:children node)
+         (filter #(and (map? %) (= :legend (:tag %))))
+         (remove #(let [lst (node-style % theme)]
+                    (or (= "none" (:display lst))
+                        (contains? #{"left" "right"} (:float lst))
+                        (contains? #{"absolute" "fixed"} (:position lst)))))
+         first)))
+
 (defn- layout-block
-  [theme x y avail-width opacity inherited st node]
+  ([theme x y avail-width opacity inherited st node]
+   (layout-block theme x y avail-width opacity inherited st node nil))
+  ([theme x y avail-width opacity inherited st node intruding]
   (let [w (resolve-width st avail-width)
         inset (content-inset st)
         inset-l (inset-side st :left)
         inset-r (inset-side st :right)
-        inset-t (inset-side st :top)
+        inset-t0 (inset-side st :top)
         inset-b (inset-side st :bottom)
         ;; `x`/`y` are the BORDER-BOX origin the parent already placed this
         ;; box at, margins included -- layout-children-block owns a child's
@@ -8517,8 +8753,57 @@
         ;; stylesheet gave `<p>` a real one (a paragraph's own text sat
         ;; 14px below its own box).
         content-x (+ x inset-l)
-        content-y (+ y inset-t)
         content-w (max 0 (- w inset-l inset-r))
+        ;; ---- <fieldset>/<legend> ----
+        ;;
+        ;; A rendered legend is not in the flow at all: it sits in the
+        ;; fieldset's block-start BORDER, and the border band grows to hold
+        ;; it. Measured in Brave at width 800 / font 14 (see fieldset-legend
+        ;; for the shape rules and ua-em-box for the box constants):
+        ;;
+        ;;   band      = max(border-block-start-width, legend height +
+        ;;               legend margin-block-END)
+        ;;   legend y  = (band - that margin box) / 2, from the fieldset's
+        ;;               own border-box top
+        ;;   content   = band + padding-top, as usual, i.e. `band - border`
+        ;;               more than an ordinary block
+        ;;
+        ;; Three readings that are not guesses and are easy to get wrong:
+        ;; the legend's margin-block-START is IGNORED outright (`margin-top:
+        ;; 10px` and `margin-top: 40px` both leave the fieldset 83.641 tall,
+        ;; where `margin-bottom: 10px` makes it 93.641); the legend is
+        ;; CENTRED in the band, which only shows up when the border is
+        ;; thicker than the legend (`border-top-width: 40px` puts a 20px
+        ;; legend at y=10); and its margin-INLINE is honoured normally
+        ;; (`margin: 10px` moves it from x=14.5 to 24.5).
+        ;;
+        ;; Shrink-to-fit, through the same measure-child a float uses -- a
+        ;; legend is 39px wide for `Group` and 242 for a sentence, and an
+        ;; explicit `width` still resolves against its own content box (a
+        ;; `width: 300px` legend is 304 wide, its 2px UA side padding
+        ;; outside the 300).
+        legend (fieldset-legend theme node)
+        legend-st (when legend (node-style legend theme))
+        legend-m (when legend
+                   (measure-child theme content-w opacity inherited legend true))
+        legend-h (if legend-m (:h (:box legend-m)) 0)
+        legend-mb (if legend-st (margin-side legend-st :bottom) 0)
+        band (max (:border-width st) (+ legend-h legend-mb))
+        ;; how much taller than an ordinary block the block-start edge is.
+        ;; Folded into the top inset rather than added to the height
+        ;; separately, so content placement and the box's own height cannot
+        ;; drift apart -- and so an EXPLICIT height on the fieldset keeps
+        ;; meaning what it meant (this only moves the content box's top).
+        legend-extra (if legend (max 0 (- band (:border-width st))) 0)
+        inset-t (+ inset-t0 legend-extra)
+        content-y (+ y inset-t)
+        legend-draw (when legend-m
+                      (translate-ops (+ content-x (margin-side legend-st :left))
+                                     (+ y (/ (- band legend-h legend-mb) 2))
+                                     (:draw legend-m)))
+        node-children (if legend
+                        (filterv #(not (identical? % legend)) (:children node))
+                        (:children node))
         scroll-x (:scroll-left st)
         scroll-y (:scroll-top st)
         ;; The containing block's own content height, as this box's PARENT
@@ -8556,9 +8841,20 @@
         ;; measured, its first `<p>` sat at the container's own top edge with
         ;; its margin collapsed out, level with the float, so the browser's
         ;; two lines came back as one.
+        ;; A `<fieldset>`'s content box establishes an INDEPENDENT formatting
+        ;; context, which is why it appears here and in contains-floats?
+        ;; below. Not inferable from its border (an author can set
+        ;; `border: 0`) -- measured on exactly that shape,
+        ;; `<fieldset style="border:0;padding:0;margin:0"><legend>G</legend>
+        ;; <p>inside</p></fieldset>`: Brave puts the `<p>` at y=34, i.e. its
+        ;; own 14px margin INTACT below the 20px legend band, and reports the
+        ;; fieldset 68px tall with the `<p>`'s bottom margin held inside too.
+        ;; Both margins collapse out of an ordinary div.
+        fieldset? (= :fieldset (:tag node))
         fc-free? (and (zero? (:border-width st))
                       (contains? #{nil "visible"} (:overflow st))
                       (not= "flow-root" (:display st))
+                      (not fieldset?)
                       (not (:independent-fc? st)))
         collapse-top? (and fc-free? (zero? inset-t))
         collapse-bottom? (and fc-free? (zero? inset-b) (nil? explicit-h))
@@ -8580,6 +8876,7 @@
         ;; layout-flex/layout-grid), so they are absent by construction
         ;; rather than by oversight.
         contains-floats? (or (boolean (:independent-fc? st))
+                             fieldset?
                              (and (some? (:overflow st)) (not= "visible" (:overflow st)))
                              (contains? #{"flow-root" "inline-block" "table-cell" "table-caption"}
                                         (:display st))
@@ -8588,8 +8885,15 @@
         {:keys [draw h out-of-flow] :margin/keys [collapsed-top collapsed-bottom]
          escaped-floats :float/escaped}
         (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
-                               content-w opacity inherited (:children node)
-                               collapse-top? collapse-bottom? contains-floats?)
+                               content-w opacity inherited node-children
+                               collapse-top? collapse-bottom? contains-floats?
+                               ;; A box that establishes a formatting context
+                               ;; of its own is NOT intruded on by its
+                               ;; ancestors' floats -- that is what a
+                               ;; formatting context means, and it is the one
+                               ;; place this decision belongs, because
+                               ;; `contains-floats?` is computed right here.
+                               (when-not contains-floats? intruding))
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
         ;; sits outside the content box in both axes. Without it every
@@ -8686,12 +8990,28 @@
      ;; child previously always painted on TOP of in-flow content,
      ;; backwards from real CSS stacking order). above-draws (z-index >=
      ;; 0) keeps the original splice point, after in-flow content.
-     :draw (vec (concat box-shadow-draws rect border-draws outline-draws below-draws semantic clip-push draw clip-pop above-draws))}))
+     ;; `legend-draw` goes with the in-flow content, not with the border it
+     ;; sits in: a legend paints ON TOP of the fieldset's border (that is
+     ;; the whole visual point of the notch), and it is NOT clipped by an
+     ;; `overflow` on the fieldset because it is outside the content box --
+     ;; hence outside clip-push/clip-pop.
+     :draw (vec (concat box-shadow-draws rect border-draws outline-draws below-draws semantic
+                        clip-push draw clip-pop legend-draw above-draws))})))
 
 (defn layout-node
+  "`intruding` (optional, 8th argument) is the float band of the formatting
+   context this node takes part in, in absolute coordinates -- see
+   layout-children-block's `---- floats that belong to an ANCESTOR's
+   formatting context ----`. Every caller that has no band, and every caller
+   outside this file, may keep using the 7-argument form. Only the block
+   path reads it: a flex/grid/table container, a form control and a text
+   node all establish their own formatting context (or hold no line boxes at
+   all), so a float outside them cannot narrow anything inside them."
   ([node] (layout-node default-theme 0 0 320 1.0 {:color (:fg default-theme) :font-size (:font-size default-theme)
                                                   :line-height (:line-height default-theme)} node))
   ([theme x y avail-width opacity inherited node]
+   (layout-node theme x y avail-width opacity inherited node nil))
+  ([theme x y avail-width opacity inherited node intruding]
    (cond
      (nil? node)
      {:box {:x x :y y :w 0 :h 0} :draw []}
@@ -8728,7 +9048,7 @@
                   (:text-overflow inherited) (:overflow-wrap inherited) node)
 
      (= :text (:node/type node))
-     (recur theme x y avail-width opacity inherited (:text node))
+     (recur theme x y avail-width opacity inherited (:text node) intruding)
 
      (and (= :element (:node/type node)) (non-rendered-tag? (:tag node)))
      ;; <head>/<title>/<script>/<style>/<meta>/<link>: zero box, zero
@@ -8895,10 +9215,11 @@
                             draws))})
 
              :else
-             (layout-block theme x y avail-width opacity inherited st (assoc node :children children))))))
+             (layout-block theme x y avail-width opacity inherited st (assoc node :children children)
+                           intruding)))))
 
      :else
-     (recur theme x y avail-width opacity inherited (str node)))))
+     (recur theme x y avail-width opacity inherited (str node) intruding))))
 
 (defn draw-ops
   "Entry point: projects a kotoba.wasm.dom/tree to a flat vector of draw
