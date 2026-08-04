@@ -2541,7 +2541,14 @@
         idx-range (range n)
         ;; a bare `span N` (no start line) is NOT an explicit placement: the
         ;; item stays auto-placed and only its WIDTH is declared
-        span-only? (fn [r] (and (map? (:col r)) (:span (:col r))))
+        ;; A bare `span N` on EITHER axis is auto placement with a declared
+        ;; size, not explicit placement. Checking only :col meant
+        ;; `grid-row: span 2` was treated as explicit, and `resolve-explicit`
+        ;; then destructured its `{:span 2}` map as a [start end] vector --
+        ;; the one input in a 292-case corpus that made this engine THROW
+        ;; (`nth not supported on this type`) instead of answer.
+        span-only? (fn [r] (boolean (or (and (map? (:col r)) (:span (:col r)))
+                                        (and (map? (:row r)) (:span (:row r))))))
         explicit? (fn [i] (let [{:keys [col row] :as r} (nth requests i)]
                             (and (not (span-only? r)) (boolean (or col row)))))
         explicit-idxs (filter explicit? idx-range)
@@ -2585,19 +2592,35 @@
                     (assoc state
                            :cursor-row (:row-start p)
                            :cursor-col (:col-end p))
-                    (let [span (min (max 1 (or (:span (:col (nth requests i))) 1)) n-cols)]
+                    (let [req (nth requests i)
+                          span (min (max 1 (or (:span (:col req)) 1)) n-cols)
+                          ;; `grid-row: span N` occupies N ROWS from wherever
+                          ;; the cursor lands. Rows are unbounded in real CSS
+                          ;; (the grid grows implicit rows), so unlike the
+                          ;; column span this one is not clamped to the
+                          ;; declared track count.
+                          row-span (max 1 (or (:span (:row req)) 1))]
                       (loop [r cursor-row c cursor-col]
                         (cond
                           (> (+ c span) n-cols) (recur (inc r) 0)
-                          (some #(contains? occupied [r %]) (range c (+ c span)))
+                          ;; every cell of the whole rectangle has to be
+                          ;; free, not just the first row's -- a 2-row item
+                          ;; dropped into a slot whose row below is taken
+                          ;; would silently overlap.
+                          (some (fn [rr]
+                                  (some #(contains? occupied [rr %]) (range c (+ c span))))
+                                (range r (+ r row-span)))
                           (if (< (inc c) n-cols) (recur r (inc c)) (recur (inc r) 0))
                           :else
                           (let [end (+ c span)
+                                row-end (+ r row-span)
                                 wrap? (>= end n-cols)]
                             (assoc state
-                                   :occupied (into occupied (for [cc (range c end)] [r cc]))
+                                   :occupied (into occupied (for [rr (range r row-end)
+                                                                  cc (range c end)]
+                                                              [rr cc]))
                                    :placements (assoc placements i {:col-start c :col-end end
-                                                                    :row-start r :row-end (inc r)})
+                                                                    :row-start r :row-end row-end})
                                    :cursor-row (if wrap? (inc r) r)
                                    :cursor-col (if wrap? 0 end))))))))
                 (assoc phase1 :cursor-row 0 :cursor-col 0)

@@ -1912,6 +1912,46 @@
   [ops]
   (filterv #(= :node (:draw/op %)) ops))
 
+(deftest grid-row-span-auto-places-the-item-and-occupies-both-rows
+  ;; `grid-row: span 2` with no start line: the item stays AUTO-placed and
+  ;; only its height is declared. Until this worked, it was the single
+  ;; input in a 292-case differential corpus that made cssom.layout THROW
+  ;; rather than answer -- `span-only?` checked only the column axis, so a
+  ;; row span was taken for an explicit placement and its `{:span 2}` map
+  ;; was destructured as a [start end] vector (`nth not supported on this
+  ;; type`).
+  ;;
+  ;; The expected rects are Brave's, read off the conformance oracle for
+  ;; `:grid/row-span-two`: a 70x60 item spanning both 30px rows, then the
+  ;; two remaining items stacked in column 2.
+  (let [tree (grid-tree {:grid-template-columns "70px 70px"
+                          :grid-template-rows "30px 30px"
+                          :gap 0 :padding 0 :width 140}
+                         [[nil nil {:grid-row "span 2"}] [nil nil] [nil nil]])
+        ops (layout/draw-ops tree {:width 140})
+        [_ a b c] (node-ops ops)]
+    (is (= {:x 0 :y 0 :w 70 :h 60} (select-keys a [:x :y :w :h]))
+        "spans both row tracks")
+    (is (= {:x 70 :y 0 :w 70 :h 30} (select-keys b [:x :y :w :h])))
+    (is (= {:x 70 :y 30 :w 70 :h 30} (select-keys c [:x :y :w :h]))
+        "the second auto item does NOT land under the spanning item")))
+
+(deftest grid-row-span-does-not-overlap-an-occupied-cell
+  ;; The whole rectangle has to be free, not just its first row: an item
+  ;; spanning two rows must skip a slot whose lower row is already taken by
+  ;; an explicitly placed item, or the two silently overlap.
+  (let [tree (grid-tree {:grid-template-columns "40px 40px"
+                          :grid-template-rows "20px 20px 20px"
+                          :gap 0 :padding 0 :width 80}
+                         [[nil nil {:grid-column 1 :grid-row 2}]
+                          [nil nil {:grid-row "span 2"}]])
+        ops (layout/draw-ops tree {:width 80})
+        [_ explicit spanning] (node-ops ops)]
+    (is (= {:x 0 :y 20} (select-keys explicit [:x :y])))
+    (is (not= [0 0] [(:x spanning) (:y spanning)])
+        "column 1 rows 0-1 is not free, because row 1 is taken")
+    (is (= 40 (:h spanning)) "still spans two 20px rows wherever it lands")))
+
 (deftest grid-fixed-px-tracks-place-items-at-exact-rects
   ;; grid-template-columns "50px 80px" / grid-template-rows "20px 30px", no
   ;; gap/padding/border: exact column x-offsets (0, 50), exact FIXED row
