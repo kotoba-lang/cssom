@@ -471,6 +471,36 @@
                        :stderr (str/trim (or (.-stderr res) ""))})))
     out))
 
+(defn- run-cdp-with-retry!
+  "`run-cdp!`, retried once.
+
+   A CDP launch fails TRANSIENTLY when several harness runs overlap, which
+   is now routine -- agents run this concurrently. Measured 2026-08-04: a
+   run reported `browser produced no measurement block over CDP` with eight
+   leftover Brave processes on the machine, and the identical command
+   succeeded seconds later. Without a retry the run silently falls through
+   to the next candidate browser, so a transient failure quietly changes
+   WHICH browser produced the numbers -- and Brave is the named comparison
+   target. One retry, with a short pause, converts the common case back
+   into a Brave measurement; a genuine failure still falls through and is
+   still printed."
+  [browser file]
+  (try
+    (run-cdp! browser file)
+    (catch :default first-err
+      (println (str "  oracle retry: " (last (str/split browser #"/"))
+                    " did not answer CDP (" (ex-message first-err) ") -- retrying once"))
+      ;; A brief pause: the observed failure mode is contention with other
+      ;; browser instances still shutting down, which resolves in seconds.
+      ;;
+      ;; Atomics.wait, not a busy loop on Date.now: this harness is
+      ;; deliberately synchronous end to end (see run-cdp!), and the machine
+      ;; running it is typically running other agents' browsers at the same
+      ;; time -- spinning a core for three seconds to wait for THOSE to
+      ;; finish would make the thing it is waiting for slower.
+      (js/Atomics.wait (js/Int32Array. (js/SharedArrayBuffer. 4)) 0 0 3000)
+      (run-cdp! browser file))))
+
 (defn- run-dump-dom!
   "Runs the corpus page in a real Blink browser and returns its measurement
    block.
@@ -537,7 +567,7 @@
    measurement."
   [browser file]
   (try
-    {:transport :cdp :data (parse-block (run-cdp! browser file))}
+    {:transport :cdp :data (parse-block (run-cdp-with-retry! browser file))}
     (catch :default cdp-err
       (try
         {:transport :dump-dom :data (parse-block (run-dump-dom! browser file))}
