@@ -1649,7 +1649,7 @@
    sibling layout with `position: absolute` on the first correctly
    leaves the second at y=4, unaffected.
 
-   Routing `fixed` through the SAME partition-flow/layout-absolute-
+   Routing `fixed` through the SAME out-of-flow/layout-absolute-
    children machinery `absolute` already uses is an honest, documented
    scope-cut: this engine has no separate scroll-independent viewport
    model (see the namespace docstring), so a `fixed` element is anchored
@@ -1664,12 +1664,6 @@
    engine with no real scroll-position-dependent re-layout."
   [theme child]
   (and (map? child) (contains? #{"absolute" "fixed"} (:position (node-style child theme)))))
-
-(defn- partition-flow
-  [theme children]
-  (let [groups (group-by #(absolute? theme %) children)]
-    {:in-flow (get groups false [])
-     :out-of-flow (get groups true [])}))
 
 ;; ---- flexbox main-axis distribution / cross-axis alignment ----
 
@@ -5156,9 +5150,9 @@
    one-character item at x=55.4 with a 9.2px box, where filling the track
    gave 0 and 120.
 
-   Absolute-positioned children are NOT extracted via partition-flow here —
-   this matches layout-flex's current behavior (today only layout-block
-   partitions out-of-flow children); a position:absolute child inside a grid
+   Absolute-positioned children are NOT taken out of flow here — this
+   matches layout-flex's current behavior (today only layout-children-block
+   takes out-of-flow children out); a position:absolute child inside a grid
    container is placed as an ordinary grid item, the same limitation flex
    already has.
 
@@ -6286,14 +6280,23 @@
                       (= :element (:node/type child))
                       (or (non-rendered-tag? (:tag child))
                           (= "none" (:display (node-style child theme)))))))
-       ;; Floats are TRANSPARENT to this grouping: a float neither joins a
-       ;; line box nor SPLITS one. Leaving them in the sequence would do
-       ;; the latter -- `text <span style="float:left">F</span> more`
-       ;; would partition into two one-child runs and stack `text` and
-       ;; `more` on separate lines, where every browser keeps them on one.
-       ;; So each float is lifted out, the rest is grouped as before, and
-       ;; the float is put back in FRONT of the entry its following
-       ;; sibling landed in.
+       ;; Floats and OUT-OF-FLOW boxes are TRANSPARENT to this grouping:
+       ;; neither joins a line box, and neither SPLITS one. Leaving them in
+       ;; the sequence would do the latter -- `text <span
+       ;; style="float:left">F</span> more` would partition into two
+       ;; one-child runs and stack `text` and `more` on separate lines,
+       ;; where every browser keeps them on one. So each is lifted out, the
+       ;; rest is grouped as before, and the lifted child is put back in
+       ;; FRONT of the entry its following sibling landed in.
+       ;;
+       ;; An absolutely positioned child used to be removed from `children`
+       ;; entirely (by a `partition-flow` in layout-block) before this
+       ;; function ever saw it, which is why it could not split a run then
+       ;; either. It travels WITH the flow now because its STATIC POSITION
+       ;; -- where it would have been had it stayed in flow, which is what
+       ;; real CSS uses for every axis with no offset -- is only knowable
+       ;; from the running Y this grouping feeds (see
+       ;; layout-children-block's own out-of-flow branch).
        ;;
        ;; Keeping them in the entry sequence at all (rather than hoisting
        ;; them all to the container's top, which is what this file used to
@@ -6302,14 +6305,15 @@
        ;; position of its own within the line, so it is emitted before the
        ;; whole run -- which is the same y the line box gets.
        ((fn [cs]
-          (let [;; `anchors` maps an index into the float-free `flow`
-                ;; vector to the floats written immediately before it;
-                ;; `pending` is left holding the floats written after the
-                ;; last non-float child, which have nothing to anchor to
-                ;; and are emitted at the end.
+          (let [;; `anchors` maps an index into the lifted-free `flow`
+                ;; vector to the floats/out-of-flow boxes written
+                ;; immediately before it; `pending` is left holding the ones
+                ;; written after the last in-flow child, which have nothing
+                ;; to anchor to and are emitted at the end.
+                lifted? (fn [c] (or (absolute? theme c) (float-child? theme c)))
                 {:keys [flow anchors] tail :pending}
                 (reduce (fn [{:keys [flow anchors pending]} c]
-                          (if (float-child? theme c)
+                          (if (lifted? c)
                             {:flow flow :anchors anchors :pending (conj pending c)}
                             {:flow (conj flow c)
                              :anchors (if (seq pending)
@@ -6543,9 +6547,61 @@
                                 ;; the browser's x=7 w=70).
                                 (if (some floated? children) 1 2))
          y content-y draws [] floats []
-         height 0 prev-mb 0 first? true out-mt 0]
+         height 0 prev-mb 0 first? true out-mt 0 oof []]
     (if-let [child (first remaining)]
       (cond
+        ;; ---- out of flow: the flow yields only its STATIC POSITION ----
+        ;;
+        ;; An `absolute`/`fixed` box takes no part in block flow at all --
+        ;; not the running Y, not margin collapsing, not the float band --
+        ;; but real CSS still needs the flow to answer ONE question about
+        ;; it: where it would have been if it had stayed. That is its
+        ;; STATIC POSITION, and it is what every axis with no offset
+        ;; (`top: auto`/`left: auto`, i.e. the default) resolves to. This
+        ;; loop is the only place that answer exists, which is why the box
+        ;; travels this far before being handed to layout-absolute-children.
+        ;;
+        ;; Measured in Brave, all four rules below:
+        ;;
+        ;; - `<p>flow</p><span style="position:absolute;left:40px">abs</span>`
+        ;;   puts the span at y=34 -- the paragraph's bottom edge (20) plus
+        ;;   its own 14px bottom margin -- where this engine put it at y=0.
+        ;; - the box's OWN top margin is added on top of that:
+        ;;   `<p>one</p><p style="position:absolute">abs</p>` reports y=48,
+        ;;   not 34.
+        ;; - and it does NOT collapse with the preceding sibling's bottom
+        ;;   margin, which is the one rule that could not be guessed:
+        ;;   margin-bottom 10 then margin-top 30 reports y=60 (20+10+30),
+        ;;   and margin-bottom 30 then margin-top 10 reports the same 60
+        ;;   (20+30+10). Collapsing would have given 80 for the first.
+        ;; - as the FIRST child its own margin is added but not collapsed
+        ;;   out either: `<div><p style="position:absolute">abs</p><p>after
+        ;;   </p></div>` puts the absolute one at y=14 and the in-flow one
+        ;;   (whose identical margin DOES collapse through the container's
+        ;;   top edge) at y=0.
+        ;;
+        ;; `prev-mb`/`first?` are exactly the two the in-flow branch below
+        ;; already maintains, so this is the same flow position a real
+        ;; sibling would get, plus the box's own margin and minus the
+        ;; collapsing a real sibling would take part in.
+        ;;
+        ;; Deliberately NOT modelled: `clear` on an out-of-flow box (real
+        ;; CSS ignores it, and so does this), and the INLINE static
+        ;; position -- a box written between two words is placed at the
+        ;; container's content edge here, where a browser puts it at the
+        ;; point in the line it was written at (measured: x=31.38 for
+        ;; `text <span style="position:absolute">pop</span> tail`, and 0
+        ;; here). That one needs the line box that
+        ;; layout-inline-run builds, and only its BLOCK-level half is
+        ;; implemented here -- see layout-inline-run's own `:out-of-flow`
+        ;; return for the half that is.
+        (absolute? theme child)
+        (let [cst (node-style child theme)]
+          (recur (rest remaining) y draws floats height prev-mb first? out-mt
+                 (conj oof {:node child
+                            :x (+ content-x (margin-side cst :left))
+                            :y (+ y (if first? 0 prev-mb) (margin-side cst :top))})))
+
         ;; ---- a float: placed into the band, invisible to block flow ----
         (floated? child)
         (let [fst (node-style child theme)
@@ -6572,7 +6628,7 @@
           (recur (rest remaining) y
                  (into draws (translate-ops (+ fx fml) (+ fy fmt) (:draw m)))
                  (conj floats {:x fx :y fy :w mw :h mh :right? right?})
-                 height prev-mb first? out-mt))
+                 height prev-mb first? out-mt oof))
 
         (and (map? child) (:inline/run child))
         (let [run (:inline/run child)
@@ -6583,7 +6639,7 @@
           ;; a line box is real content: nothing collapses through it, so
           ;; `prev-mb` resets to 0 and (when it is the FIRST entry) no top
           ;; margin escapes this container either.
-          (recur (rest remaining) (+ y advance) (into draws draw) floats (+ height advance) 0 false out-mt))
+          (recur (rest remaining) (+ y advance) (into draws draw) floats (+ height advance) 0 false out-mt oof))
 
         :else
         (let [cst (when (map? child) (node-style child theme))
@@ -6659,7 +6715,8 @@
                      shifted)]
           (recur (rest remaining) (+ y advance) (into draws draw) (into floats escaped)
                  (+ height advance) mb* false
-                 (if (and first? collapse-top?) mt* out-mt))))
+                 (if (and first? collapse-top?) mt* out-mt)
+                 oof)))
       ;; ^ closes: if / recur / let / cond
       {:draw draws
        ;; A container grows to hold its floats ONLY when it establishes a
@@ -6677,7 +6734,12 @@
        :margin/collapsed-bottom (if collapse-bottom? prev-mb 0)
        ;; the floats this box did NOT contain, for its parent to keep
        ;; carrying up until something does
-       :float/escaped (if contains-floats? [] floats)})))))
+       :float/escaped (if contains-floats? [] floats)
+       ;; every out-of-flow child, in document order, each carrying the
+       ;; static position the flow above just computed for it -- see the
+       ;; out-of-flow branch. layout-block hands these straight to
+       ;; layout-absolute-children, which is the only consumer.
+       :out-of-flow oof})))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing
@@ -6717,18 +6779,27 @@
    nested stacking contexts of their own), but correctly resolves the
    one case that was silently backwards. Ties within each group still
    sort by `:z` ascending, same as before."
-  ;; `content-x`/`content-y` are the STATIC-position fallback, and they are
-  ;; deliberately not the same origin as `content-w`/`content-h`'s box: with
-  ;; no offset on an axis, real CSS leaves the box where it would have been
-  ;; in flow (its static position), which this engine approximates with the
-  ;; ancestor's content origin -- the same thing it did before the
-  ;; containing block became the padding box. Only an axis that HAS an
-  ;; offset resolves against `pad-*`. Conflating the two moved every
-  ;; offsetless absolute/fixed box by the ancestor's padding, which the
+  ;; `children` are the `{:node :x :y}` entries layout-children-block's own
+  ;; out-of-flow branch produced: `:x`/`:y` are that box's STATIC POSITION,
+  ;; the place the normal flow would have put it, and they are deliberately
+  ;; not the same origin as `pad-*`. With no offset on an axis, real CSS
+  ;; leaves the box exactly there. Only an axis that HAS an offset resolves
+  ;; against `pad-*`. Conflating the two moved every offsetless absolute/
+  ;; fixed box by the ancestor's padding, which the
   ;; fixed-child-does-not-push-its-following-sibling-down test caught.
-  [theme pad-x pad-y pad-w pad-h content-x content-y opacity inherited children]
-  (let [placed (mapv (fn [child]
+  ;;
+  ;; An entry may also carry its own `:cb` -- a containing block that is
+  ;; NOT this block box, which is what a `position: relative` INLINE
+  ;; ancestor establishes (see layout-inline-run). Everything else about
+  ;; the placement is identical, so the containing block is simply read per
+  ;; entry rather than taken from the arguments.
+  [theme pad-x pad-y pad-w pad-h opacity inherited children]
+  (let [placed (mapv (fn [{child :node content-x :x content-y :y cb :cb}]
                         (let [cst (node-style child theme)
+                              pad-x (:x cb pad-x)
+                              pad-y (:y cb pad-y)
+                              pad-w (:w cb pad-w)
+                              pad-h (:h cb pad-h)
                               ;; An absolutely positioned box with
                               ;; `width: auto` is SHRINK-TO-FIT, not
                               ;; fill-the-container: real CSS sizes it to
@@ -7083,7 +7154,6 @@
         content-w (max 0 (- w inset-l inset-r))
         scroll-x (:scroll-left st)
         scroll-y (:scroll-top st)
-        {:keys [in-flow out-of-flow]} (partition-flow theme (:children node))
         explicit-h (resolve-height st)
         ;; Margins collapse THROUGH this box's own edge only when nothing
         ;; separates the edge from the child: no padding on that side, no
@@ -7138,10 +7208,10 @@
                                         (:display st))
                              (contains? #{"left" "right"} (:float st))
                              (contains? #{"absolute" "fixed"} (:position st)))
-        {:keys [draw h] :margin/keys [collapsed-top collapsed-bottom]
+        {:keys [draw h out-of-flow] :margin/keys [collapsed-top collapsed-bottom]
          escaped-floats :float/escaped}
         (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
-                               content-w opacity inherited in-flow
+                               content-w opacity inherited (:children node)
                                collapse-top? collapse-bottom? contains-floats?)
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
@@ -7166,7 +7236,18 @@
         pad-y (+ y bw)
         pad-w (max 0 (- node-w (* 2 bw)))
         pad-h (max 0 (- node-h (* 2 bw)))
-        {above-draws :above below-draws :below} (layout-absolute-children theme pad-x pad-y pad-w pad-h content-x content-y opacity inherited out-of-flow)
+        ;; The static positions came back in the SCROLLED coordinate space
+        ;; the flow above ran in; `pad-*` is unscrolled, and so were the
+        ;; static positions before this. Undoing the scroll here keeps the
+        ;; two halves of a placement in one space, which is what this
+        ;; engine has always done -- an out-of-flow box does not scroll
+        ;; with its container's content here (a documented cut: it is one
+        ;; more consequence of there being no scroll-independent viewport
+        ;; model, the same one `absolute?` names for `position: fixed`).
+        out-of-flow (if (and (zero? scroll-x) (zero? scroll-y))
+                      out-of-flow
+                      (mapv #(-> % (update :x + scroll-x) (update :y + scroll-y)) out-of-flow))
+        {above-draws :above below-draws :below} (layout-absolute-children theme pad-x pad-y pad-w pad-h opacity inherited out-of-flow)
         box-shadow-draws (or (box-shadow-ops st x y node-w node-h opacity) [])
         border-draws (or (border-ops st x y node-w node-h opacity) [])
         outline-draws (or (outline-ops st x y node-w node-h opacity) [])

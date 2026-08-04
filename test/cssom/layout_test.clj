@@ -3877,12 +3877,18 @@
 (deftest absolute-child-with-no-offset-keeps-its-static-position
   ;; The containing block for an absolute child is the ancestor's PADDING
   ;; box -- but only for an axis that actually HAS an offset. With no offset
-  ;; the box stays where it would have been in flow, and this engine
-  ;; approximates that static position with the ancestor's content origin.
+  ;; the box stays where it would have been in flow: its STATIC POSITION.
   ;;
   ;; Conflating the two is a real regression, not a hypothetical: making the
   ;; padding box the origin on every axis moved every offsetless absolute
   ;; and fixed box by the ancestor's padding.
+  ;;
+  ;; The static position is now computed by the flow itself (see
+  ;; layout-children-block's out-of-flow branch) rather than approximated
+  ;; by the ancestor's content origin; for THIS shape -- a lone first
+  ;; child with no margin of its own -- the two answers coincide, which is
+  ;; why the numbers below are unchanged. The tests right below vary the
+  ;; two inputs that make them differ (a preceding sibling, and a margin).
   (let [[root doc] (dom/create-element dom/empty-document :main)
         doc (dom/set-root doc root)
         [div doc] (dom/create-element doc :div)
@@ -3896,6 +3902,141 @@
     ;; :main's own default 4px padding: the static position, not 0.
     (is (= 4 (:x div-op)))
     (is (= 4 (:y div-op)))))
+
+;; ---- the static position is the FLOW's answer, not the container's
+;;      origin (an offsetless absolute box used to drop to the containing
+;;      block's content corner, wherever the flow had actually reached) ----
+
+(defn- static-position-op
+  "Shared harness: a :main root holding an optional in-flow :div sibling
+   FIRST (styled by `before-style`, nil for none) and then a
+   position:absolute :div (styled by `box-style`); returns the absolute
+   box's own :node draw-op.
+
+   :main's own default 4px padding is the content origin, so every
+   expected number below starts from 4 rather than 0."
+  [before-style box-style]
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [doc] (if before-style
+                (let [[before doc] (dom/create-element doc :div)
+                      doc (dom/append-child doc root before)]
+                  [(dom/set-attribute doc before :class "before")])
+                [doc])
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules
+               (str (when before-style (str ".before { " before-style " } "))
+                    ".box { position: absolute; width: 40; height: 10; " box-style " }"))
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480})]
+    (some #(and (= :node (:draw/op %)) (= :div (:tag %)) (= "box" (:class %)) %) ops)))
+
+(deftest static-position-follows-the-preceding-siblings-flow
+  ;; Measured in Brave: `<p>flow</p><span style="position:absolute;
+  ;; left:40px">abs</span>` puts the span at y=34 -- the paragraph's
+  ;; bottom edge plus its own 14px bottom margin -- where this engine put
+  ;; it at y=0, the containing block's corner.
+  ;;
+  ;; Here: content origin 4 + the sibling's 20px height + this engine's
+  ;; own 4px inter-row theme gap = 28.
+  (let [div-op (static-position-op "height: 20" "")]
+    (is (= 4 (:x div-op)))
+    (is (= 28 (:y div-op)))))
+
+(deftest static-position-adds-the-preceding-siblings-bottom-margin
+  ;; 4 + 20 (sibling) + 4 (theme gap) + 10 (the sibling's bottom margin,
+  ;; which is where the next in-flow box would start too).
+  (let [div-op (static-position-op "height: 20; margin-bottom: 10" "")]
+    (is (= 38 (:y div-op)))))
+
+(deftest static-position-adds-the-boxs-own-top-margin-without-collapsing-it
+  ;; The one rule here that could not be guessed, so it was measured in
+  ;; Brave directly: the out-of-flow box's own top margin is added to the
+  ;; flow position AND does not collapse with the preceding sibling's
+  ;; bottom margin. `margin-bottom: 10` then `margin-top: 30` reports
+  ;; y=60 there (20 + 10 + 30), and `margin-bottom: 30` then
+  ;; `margin-top: 10` reports the same 60 (20 + 30 + 10) -- collapsing
+  ;; would have made the first 80 and the two differ.
+  ;;
+  ;; Both numbers below are that sum plus this engine's content origin (4)
+  ;; and its own inter-row theme gap (4).
+  (is (= 68 (:y (static-position-op "height: 20; margin-bottom: 10"
+                                    "margin-top: 30"))))
+  (is (= 68 (:y (static-position-op "height: 20; margin-bottom: 30"
+                                    "margin-top: 10")))))
+
+(deftest static-position-of-a-first-child-keeps-its-own-top-margin
+  ;; Measured: `<div><p style="position:absolute">abs</p><p>after</p></div>`
+  ;; puts the absolute paragraph at y=14 (its own margin) while the
+  ;; in-flow one -- whose identical margin DOES collapse out through the
+  ;; container's top edge -- sits at y=0. An out-of-flow box takes no part
+  ;; in margin collapsing at all, so nothing collapses its margin away.
+  (is (= 16 (:y (static-position-op nil "margin-top: 12")))))
+
+(deftest static-position-includes-the-boxs-own-left-margin
+  ;; Measured: `<span style="position:absolute;margin-left:25px">` sits at
+  ;; x=25, not at the container's content edge.
+  (is (= 29 (:x (static-position-op nil "margin-left: 25")))))
+
+(deftest an-offset-axis-still-wins-over-the-static-position
+  ;; The static position is the fallback for an `auto` offset, not a new
+  ;; origin: `left` still resolves against the containing block's padding
+  ;; box while `top: auto` keeps the flow's answer, and the two axes are
+  ;; decided independently.
+  (let [div-op (static-position-op "height: 20" "left: 40")]
+    (is (= 40 (:x div-op)) "left: 40 against :main's padding box, origin 0")
+    (is (= 28 (:y div-op)) "top: auto -- still the static position")))
+
+(deftest an-out-of-flow-child-does-not-split-an-inline-run
+  ;; The out-of-flow box now travels through inline-runs' own grouping
+  ;; (that is how it learns its static position), and a box that takes no
+  ;; part in a line box must not SPLIT one either -- the same rule
+  ;; float-child? already has. `text <span absolute>x</span> more` is one
+  ;; line in every browser; grouping around the absolute span would make
+  ;; `text` and `more` two one-child runs and stack them.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [t1 doc] (dom/create-text-node doc "text ")
+        doc (dom/append-child doc p t1)
+        [span doc] (dom/create-element doc :span)
+        doc (dom/append-child doc p span)
+        doc (dom/set-attribute doc span :class "box")
+        [st doc] (dom/create-text-node doc "x")
+        doc (dom/append-child doc span st)
+        [t2 doc] (dom/create-text-node doc " more")
+        doc (dom/append-child doc p t2)
+        rules (css/parse-rules ".box { position: absolute }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480})
+        p-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %) ops)
+        flow-text (->> ops
+                       (filterv #(= :text (:draw/op %)))
+                       (remove #(= "x" (:text %)))
+                       (mapv :y))
+        ;; Reference: the same <p> with the absolute span deleted rather
+        ;; than taken out of flow -- one genuine, unambiguous line. Written
+        ;; as a comparison rather than a pinned number because the height
+        ;; of a line box is the theme's business (padding/gap), and this
+        ;; test is about how many lines there are.
+        [p2 doc2] (dom/create-element dom/empty-document :p)
+        doc2 (dom/set-root doc2 p2)
+        [r1 doc2] (dom/create-text-node doc2 "text ")
+        doc2 (dom/append-child doc2 p2 r1)
+        [r2 doc2] (dom/create-text-node doc2 " more")
+        doc2 (dom/append-child doc2 p2 r2)
+        [_ doc2] (dom/consume-ops doc2)
+        ref-op (some #(and (= :node (:draw/op %)) (= :p (:tag %)) %)
+                     (layout/draw-ops (dom/tree doc2) {:width 480}))]
+    (is (= 1 (count (distinct flow-text)))
+        "the text on either side of the absolute span shares ONE line box")
+    (is (= (:h ref-op) (:h p-op))
+        "the paragraph is exactly as tall as the same paragraph without
+         the absolute span in it -- one line, not two one-child rows with
+         the span's own row between them")))
 
 (deftest absolute-child-right-anchors-to-container-right-edge
   ;; 200 (container content-w) - 40 (child width) - 10 (right) = 150.
