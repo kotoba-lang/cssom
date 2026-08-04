@@ -5500,7 +5500,16 @@
    nested stacking contexts of their own), but correctly resolves the
    one case that was silently backwards. Ties within each group still
    sort by `:z` ascending, same as before."
-  [theme content-x content-y content-w content-h opacity inherited children]
+  ;; `content-x`/`content-y` are the STATIC-position fallback, and they are
+  ;; deliberately not the same origin as `content-w`/`content-h`'s box: with
+  ;; no offset on an axis, real CSS leaves the box where it would have been
+  ;; in flow (its static position), which this engine approximates with the
+  ;; ancestor's content origin -- the same thing it did before the
+  ;; containing block became the padding box. Only an axis that HAS an
+  ;; offset resolves against `pad-*`. Conflating the two moved every
+  ;; offsetless absolute/fixed box by the ancestor's padding, which the
+  ;; fixed-child-does-not-push-its-following-sibling-down test caught.
+  [theme pad-x pad-y pad-w pad-h content-x content-y opacity inherited children]
   (let [placed (mapv (fn [child]
                         (let [cst (node-style child theme)
                               ;; An absolutely positioned box with
@@ -5510,7 +5519,38 @@
                               ;; browser, a corner-pinned label reported 800
                               ;; here against its 21 -- so it also covered
                               ;; the entire row it was pinned over.
-                              m (measure-child theme content-w opacity inherited child true)
+                              ;; `left` and `right` both set with `width:
+                              ;; auto` SIZE the box: real CSS solves the
+                              ;; over-constrained equation by giving the box
+                              ;; whatever is left of the containing block.
+                              ;; Measured in Brave, `left:20;right:20` inside
+                              ;; a 300px box is 260 wide there and was 63
+                              ;; here (shrink-to-fit around the text).
+                              stretch-w (when (and (nil? (explicit-length (:width cst)))
+                                                   (some? (length-or-percentage (:left cst) pad-w))
+                                                   (some? (length-or-percentage (:right cst) pad-w)))
+                                          (max 0 (- pad-w
+                                                    (length-or-percentage (:left cst) pad-w)
+                                                    (length-or-percentage (:right cst) pad-w))))
+                              ;; the block-axis counterpart: `top` and
+                              ;; `bottom` both set with `height: auto` size
+                              ;; the box. There is no height argument to
+                              ;; measure-child -- a box's height comes from
+                              ;; its content -- so the resolved height is
+                              ;; written onto the child as the used value,
+                              ;; which is precisely what CSS says it is.
+                              stretch-h (when (and (nil? (explicit-length (:height cst)))
+                                                   (some? (length-or-percentage (:top cst) pad-h))
+                                                   (some? (length-or-percentage (:bottom cst) pad-h)))
+                                          (max 0 (- pad-h
+                                                    (length-or-percentage (:top cst) pad-h)
+                                                    (length-or-percentage (:bottom cst) pad-h))))
+                              child (if (and stretch-h (map? child))
+                                      (assoc-in child [:attrs :style/height] stretch-h)
+                                      child)
+                              m (if stretch-w
+                                  (measure-child theme stretch-w opacity inherited child false)
+                                  (measure-child theme pad-w opacity inherited child true))
                               {:keys [w h]} (:box m)
                               ;; percentage offsets resolve against the
                               ;; containing block: the inline axis against
@@ -5518,16 +5558,16 @@
                               ;; height. Measured against Brave, `left: 50%`
                               ;; inside a 200px box is 100px there and was
                               ;; 50px here.
-                              left (length-or-percentage (:left cst) content-w)
-                              right (length-or-percentage (:right cst) content-w)
-                              top (length-or-percentage (:top cst) content-h)
-                              bottom (length-or-percentage (:bottom cst) content-h)
-                              dx (+ content-x (cond left left
-                                                     right (- content-w w right)
-                                                     :else 0))
-                              dy (+ content-y (cond top top
-                                                     bottom (- content-h h bottom)
-                                                     :else 0))]
+                              left (length-or-percentage (:left cst) pad-w)
+                              right (length-or-percentage (:right cst) pad-w)
+                              top (length-or-percentage (:top cst) pad-h)
+                              bottom (length-or-percentage (:bottom cst) pad-h)
+                              dx (cond left (+ pad-x left)
+                                       right (+ pad-x (- pad-w w right))
+                                       :else content-x)
+                              dy (cond top (+ pad-y top)
+                                       bottom (+ pad-y (- pad-h h bottom))
+                                       :else content-y)]
                           {:z (or (:z-index cst) 0) :draw (translate-ops dx dy (:draw m))}))
                       children)
         sorted (sort-by :z placed)
@@ -5863,7 +5903,19 @@
                                          (* 2 (:border-width st))))))
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
-        {above-draws :above below-draws :below} (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
+        ;; An absolutely positioned descendant resolves against this box's
+        ;; PADDING box, not its content box -- `left: 0` sits just inside
+        ;; the border, with the ancestor's padding OUTSIDE it rather than
+        ;; indenting it. Measured in Brave on a `padding:20px;border:5px`
+        ;; ancestor: the corner-pinned child sits at (5,5) there and sat at
+        ;; (20,20) here, off by exactly the padding. The padding box is the
+        ;; border box inset by the border alone.
+        bw (:border-width st)
+        pad-x (+ x bw)
+        pad-y (+ y bw)
+        pad-w (max 0 (- node-w (* 2 bw)))
+        pad-h (max 0 (- node-h (* 2 bw)))
+        {above-draws :above below-draws :below} (layout-absolute-children theme pad-x pad-y pad-w pad-h content-x content-y opacity inherited out-of-flow)
         box-shadow-draws (or (box-shadow-ops st x y node-w node-h opacity) [])
         border-draws (or (border-ops st x y node-w node-h opacity) [])
         outline-draws (or (outline-ops st x y node-w node-h opacity) [])
