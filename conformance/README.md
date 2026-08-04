@@ -1209,6 +1209,44 @@ and looping on that count throws `EAGAIN`. The `--dump-dom` path already
 wrote to a file for an unrelated reason (Chromium's children hold stdout
 open, so a pipe never reaches EOF); both paths now do.
 
+## The paint-order axis (added 2026-08-04)
+
+The three original axes all measure SIZE and POSITION. None of them can see
+**stacking**: which element is on top where two overlap. `z-index`, negative
+`z-index`, later-sibling overlap and `pointer-events` were invisible to the
+whole harness, so a paint-order regression could not fail anything.
+
+The axis samples a 5x5 grid of interior points per case and asks each side
+which element is at that point: `document.elementFromPoint` in the browser,
+and in the engine the LAST `:node` draw-op whose box contains the point.
+Reading the emitted op vector back is deliberate — that vector *is* the
+engine's paint order, so the question asked is "given what this engine told
+a host to paint, what would a user click?". Re-deriving stacking inside the
+harness would test the harness author's model of the engine instead.
+
+First measurement: **6978/7285 points = 96%**, 238/292 cases fully agreeing.
+
+Two things it found immediately:
+
+- `:stacking/negative-z-index` agrees on **every box** (geometry 12/12) and
+  still disagrees at 5 points. That is the whole reason for the axis: an
+  engine can get every rectangle right and still paint them in the wrong
+  order.
+- The rest of the residue lands on cases already failing on geometry —
+  `:page/two-column-text`, `:position/absolute-inside-table-cell`,
+  `:form/fieldset-and-legend` — where a box in the wrong place naturally
+  puts the wrong element under a point. Those are not new bugs and are not
+  counted as such.
+
+Both sides wrap each case (the page in `.kotoba-case`, `cascaded-document`
+in `<div id="root">`), and neither wrapper is an answer. Scoring one against
+the other made every point landing on a case's own top-level text read as a
+disagreement — text nodes are not elements, so the browser returns the
+containing element, which there is the wrapper. That single asymmetry was
+2246 of 2523 disagreements on the first run, i.e. the axis's first number
+was 65% and meaningless. Points outside the viewport, or on page chrome, are
+counted as skipped rather than scored.
+
 ## An axis that measured nothing says so
 
 If any axis compares zero values, the run prints `UNMEASURED:` with the
