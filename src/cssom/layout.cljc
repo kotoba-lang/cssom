@@ -776,6 +776,13 @@
 (def ^:private ua-font-style
   {:em "italic" :i "italic" :cite "italic" :dfn "italic" :var "italic" :address "italic"})
 
+(def ^:private ua-vertical-align
+  "`sub { vertical-align: sub }` and `sup { vertical-align: super }` are UA
+   stylesheet rules -- an author writes `<sub>`, never the declaration --
+   so without them a subscript and a superscript sat on the same baseline
+   as the text around them, which is the entire visual point of both tags."
+  {:sub "sub" :sup "super"})
+
 (def ^:private ua-font-scale
   "Heading font sizes from the HTML5 UA stylesheet, as multiples of the
    base font size (`h1 { font-size: 2em }` and so on down). Resolved
@@ -958,6 +965,8 @@
    ;; browser.document-input's own scrollable-node? already gets this
    ;; right (checks `style` first, falling back to `attr`), confirming
    ;; this file was the outlier, not an intentional design choice.
+   :vertical-align (or (style node :vertical-align)
+                       (get ua-vertical-align (:tag node)))
    :float (style node :float)
    ;; Set by measure-child on a FLEX or GRID item: such a box establishes
    ;; its own formatting context, so margins never collapse through it --
@@ -4050,6 +4059,23 @@
 
     :else false))
 
+(def ^:private vertical-align-shift
+  "How far `vertical-align` raises (positive) or lowers (negative) an inline
+   box from its parent's baseline, as a fraction of the PARENT's font size.
+
+   Measured in Chrome rather than guessed: `super` raises a 14px run by
+   5.66px and `sub` lowers it by 3.79px, i.e. 0.404em and 0.271em. These are
+   the font's own superscript/subscript offsets, which a real browser reads
+   from the OS/2 table; this engine has no font tables, so the measured
+   platform values are used and named as such.
+
+   `top`/`bottom`/`middle` are deliberately ABSENT: each aligns against the
+   final line box, which is not known until every other box on the line has
+   been placed, so they need a second pass this file does not have. They
+   keep the baseline default, which is what this engine did for every value
+   before."
+  {"super" 0.404 "sub" -0.271})
+
 (defn- inline-inherited
   "The text style context an inline box (or a generated node) hands to its
    own children — the same `inherited` map shape, and the same
@@ -4163,7 +4189,8 @@
                               :text (real-text-child child)
                               :style inherited
                               :owners owners
-                              :opacity opacity})
+                              :opacity opacity
+                              :shift (:vertical-align/shift inherited 0)})
 
                    (and (map? child) (= :element (:node/type child)))
                    (if (non-rendered-tag? (:tag child))
@@ -4174,6 +4201,12 @@
                          (let [opacity (* opacity (:opacity st)
                                           (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
                                inherited (inline-inherited inherited st)
+                               ;; a `vertical-align` on an inline box moves
+                               ;; that box AND everything inside it
+                               inherited (if-let [f (get vertical-align-shift (:vertical-align st))]
+                                           (assoc inherited :vertical-align/shift
+                                                  (* f (:font-size inherited)))
+                                           inherited)
                                owners (conj owners {:idx (swap! counter inc) :node child :st st})]
                            (if (= :br (:tag child))
                              (conj acc {:kind :break :style inherited :owners owners :opacity opacity})
@@ -4256,7 +4289,8 @@
                                            :space-style space-style
                                            :style (:style fr)
                                            :owners (:owners fr)
-                                           :opacity (:opacity fr)}))
+                                           :opacity (:opacity fr)
+                                           :shift (:shift fr 0)}))
                                       words))))))
       out)))
 
@@ -4330,7 +4364,8 @@
                     merge? (and last-piece
                                 (= (:style last-piece) st)
                                 (= (:owners last-piece) (:owners t))
-                                (= (:opacity last-piece) (:opacity t)))
+                                (= (:opacity last-piece) (:opacity t))
+                                (= (:shift last-piece 0) (:shift t 0)))
                     x' (+ x sep ww)]
                 (recur (rest ts) x'
                        (if merge?
@@ -4339,7 +4374,8 @@
                                       :text (str (:text last-piece) (if (pos? sep) " " "") word)
                                       :w (- x' (:x last-piece))))
                          (conj pieces {:text word :style st :owners (:owners t)
-                                       :opacity (:opacity t) :x (+ x sep) :w ww}))
+                                       :opacity (:opacity t) :x (+ x sep) :w ww
+                                       :shift (:shift t 0)}))
                        lines))))
           )
         (cond
@@ -4416,8 +4452,11 @@
                           lh (or (:line-height st) fallback-lh fs)
                           {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                                  (:font-style st) (:font-family st))
-                          half (/ (- lh (+ ascent descent)) 2)]]
-                [(+ ascent half) (+ descent half)])
+                          half (/ (- lh (+ ascent descent)) 2)
+                          ;; a raised/lowered box carries its whole span
+                          ;; with it, growing the line in that direction
+                          shift (:shift p 0)]]
+                [(+ ascent half shift) (- (+ descent half) shift)])
         atomic-hs (keep #(when (= :atomic (:kind %)) (or (:baseline-offset %) (:h %))) pieces)
         atomic-below (keep #(when (= :atomic (:kind %))
                               (- (:h %) (or (:baseline-offset %) (:h %))))
@@ -4569,7 +4608,7 @@
                        [(into draws (translate-ops px py (:draw piece))) rects])
                      (let [st (:style piece)
                            px (+ base-x (:x piece))
-                           py (- baseline (:font-size st))
+                           py (- baseline (:font-size st) (:shift piece 0))
                            base (cond-> {:text (:text piece) :font-size (:font-size st) :opacity (:opacity piece)}
                                   (:font-weight st) (assoc :font-weight (:font-weight st))
                                   (:font-style st) (assoc :font-style (:font-style st))
@@ -4604,8 +4643,12 @@
                                                    (fn [entry]
                                                      (-> (or entry {:node (:node owner) :st (:st owner)
                                                                     :opacity (:opacity piece) :fragments []})
+                                                         ;; the box follows its own
+                                                         ;; vertical-align shift, exactly
+                                                         ;; like the text inside it
                                                          (update :fragments conj
-                                                                 {:x px :y (+ y half-leading)
+                                                                 {:x px :y (- (+ y half-leading)
+                                                                              (:shift piece 0))
                                                                   :w (:w piece) :h content-h})))))
                                          rects
                                          (:owners piece))]

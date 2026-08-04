@@ -5555,3 +5555,16 @@
         box (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
     (is (= {:x 4 :y 3 :w 13 :h 13} (select-keys box [:x :y :w :h]))
         "a bare 13x13 square, offset by its own UA margins")))
+
+(deftest sub-and-sup-are-raised-and-lowered
+  ;; `sub { vertical-align: sub }` / `sup { vertical-align: super }` are UA
+  ;; rules -- an author writes the tag, never the declaration -- so without
+  ;; them a subscript and a superscript sat on the same baseline as the text
+  ;; around them, which is the entire visual point of both tags.
+  (let [t (text-draw-ops (inline-ops ["H" [:sub {} "low"] "O and x" [:sup {} "high"] " end"]))
+        y-of (fn [s] (:y (first (filter #(= s (:text %)) t))))]
+    (is (< (y-of "high") (y-of "H"))
+        "the superscript sits ABOVE the surrounding text...")
+    (is (> (y-of "low") (y-of "H"))
+        "...and the subscript below it")
+    (is (< (y-of "high") (y-of "low")))))

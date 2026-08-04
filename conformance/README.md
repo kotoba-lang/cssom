@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 139/142 = 98%. Geometry: 422/493 element boxes (86%),
-117/150 cases with every box in agreement**, on a corpus of 150.
+**Line structure: 139/142 = 98%. Geometry: 424/493 element boxes (86%),
+118/150 cases with every box in agreement**, on a corpus of 150.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -286,6 +286,27 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round fourteen: vertical-align, on that foundation
+
+The first rule the metrics model made implementable. Measured rather than
+looked up: Chrome raises a 14px `super` run by 5.66px and lowers a `sub`
+one by 3.79px — 0.404em and 0.271em, the font's own superscript/subscript
+offsets, which a browser reads from the OS/2 table and this engine takes as
+measured platform values.
+
+`sub { vertical-align: sub }` and `sup { vertical-align: super }` are UA
+rules too — an author writes the tag, never the declaration — so without
+them a subscript and a superscript sat on the same baseline as the text
+around them, which is the entire visual point of both tags. A shifted box
+carries its whole vertical span with it, so it grows the line box in that
+direction; the corpus case went from a 21px line box against the browser's
+29.45 to 28, with `sup` at 4.13 against 4 and `sub` at 11.55 against 13.45.
+
+`top`, `bottom` and `middle` are deliberately absent: each aligns against
+the FINAL line box, which is not known until every other box on the line
+has been placed, so they need a second pass this file does not have. They
+keep the baseline default — which is what every value did before.
 
 ### Round thirteen: the font-metrics model
 
