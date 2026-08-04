@@ -1241,16 +1241,63 @@
   [v]
   (when (some? v) (parse-int v nil)))
 
+(defn- percentage?
+  "Whether a cascade value is a percentage this engine should resolve
+   against a containing block rather than read as a bare pixel count."
+  [v]
+  (and (string? v) (some? (re-matches #"\s*-?[0-9]*\.?[0-9]+%\s*" v))))
+
+(defn- percentage-of
+  "Resolves a cascade value that may be a PERCENTAGE against `basis`, or nil
+   when the value is absent, is not a percentage this engine can resolve, or
+   `basis` is not a definite length.
+
+   Real CSS resolves a percentage against a dimension of the containing
+   block. Until this existed, `parse-int`'s leading-digit-run extraction
+   turned a `50%` string straight into 50 PIXELS -- documented in
+   `explicit-length` as a deliberate consistency choice with `resolve-width`,
+   and measured against Brave as wrong in nine corpus cases at once
+   (`box/percentage-width` 200 vs 50, `box/max-width-percentage` 150 vs 50,
+   `position/absolute-percentage-offsets`, `table/width-percentage`, ...).
+   The corpus also carries the control that shows how such a bug hides: a
+   50% width inside a 100px parent resolves to 50 either way, so it passed
+   throughout.
+
+   `basis` nil means the containing block's size in that axis is NOT
+   definite -- an auto-height parent, typically. Real CSS treats a
+   percentage against an indefinite basis as `auto`, which is why this
+   returns nil there rather than falling back to the raw number: nil is what
+   every caller already spells 'auto, size me from content'."
+  [v basis]
+  (when (and (string? v) (some? basis))
+    (when-let [[_ n] (re-matches #"\s*(-?[0-9]*\.?[0-9]+)%\s*" v)]
+      (let [pct #?(:clj (Double/parseDouble n) :cljs (js/parseFloat n))]
+        (long (Math/round (* basis (/ pct 100.0))))))))
+
+(defn- length-or-percentage
+  "`explicit-length`, but resolving a percentage against `basis` first.
+   Call sites that know their containing-block dimension use this; ones that
+   genuinely do not (yet) keep calling `explicit-length` and keep its
+   documented approximation, so the two are easy to tell apart when reading."
+  [v basis]
+  (or (percentage-of v basis)
+      (when-not (and (string? v) (str/includes? (str v) "%"))
+        (explicit-length v))))
+
 (defn- clamp-width
   "The :width counterpart to clamp-height's own shared min/max clamp --
    split out so flex-item-main-width's shrink-to-fit natural width (which
    never runs through resolve-width's own avail-width fallback base) still
    gets the same min-width/max-width treatment an explicit or avail-
    defaulted width already does."
-  [st width]
-  (let [width (if-let [mn (explicit-length (:min-width st))] (max width mn) width)
-        width (if-let [mx (explicit-length (:max-width st))] (min width mx) width)]
-    width))
+  ;; `basis` is the containing block's content WIDTH, against which a
+  ;; percentage min/max resolves; callers that do not have one pass nothing
+  ;; and a percentage min/max is then ignored rather than read as pixels.
+  ([st width] (clamp-width st width nil))
+  ([st width basis]
+   (let [width (if-let [mn (length-or-percentage (:min-width st) basis)] (max width mn) width)
+         width (if-let [mx (length-or-percentage (:max-width st) basis)] (min width mx) width)]
+     width)))
 
 (defn- content-inset
   [st]
@@ -1296,14 +1343,19 @@
    With `box-sizing: border-box` the declared width IS the border box, and
    nothing is added -- which is exactly why authors reach for it."
   [st avail]
-  (let [declared (parse-int (:width st) nil)]
+  (let [;; a percentage width resolves against the containing block's
+        ;; content width, which is exactly what `avail` is here.
+        declared (or (percentage-of (:width st) avail)
+                     (when-not (percentage? (:width st))
+                       (parse-int (:width st) nil)))]
     (clamp-width st
                  (cond
                    (nil? declared) avail
                    (= "border-box" (:box-sizing st)) declared
                    :else (+ declared
                             (declared-inset-side st :left)
-                            (declared-inset-side st :right))))))
+                            (declared-inset-side st :right)))
+                 avail)))
 
 (defn- resolve-height
   "The :height counterpart to resolve-width's own defensive numeric
@@ -1334,10 +1386,13 @@
    wraps its own already-or'd height value with this, so min/max apply
    uniformly whether that value came from an explicit :height or a
    content-driven fallback."
-  [st height]
-  (let [height (if-let [mn (explicit-length (:min-height st))] (max height mn) height)
-        height (if-let [mx (explicit-length (:max-height st))] (min height mx) height)]
-    height))
+  ;; `basis` is the containing block's content HEIGHT (nil when that height
+  ;; is not definite -- see percentage-of).
+  ([st height] (clamp-height st height nil))
+  ([st height basis]
+   (let [height (if-let [mn (length-or-percentage (:min-height st) basis)] (max height mn) height)
+         height (if-let [mx (length-or-percentage (:max-height st) basis)] (min height mx) height)]
+     height)))
 
 (defn- resolve-line-height
   "Real CSS `line-height` is either an absolute length (`24`/`24px`, already
@@ -4323,13 +4378,20 @@
    block-size-dependent math needed at all -- `bottom`/`right` alone
    shift the OPPOSITE physical direction (a positive `bottom` pulls the
    box UP, a positive `right` pulls it LEFT), matching real CSS exactly."
-  [st]
-  (let [left (explicit-length (:left st))
-        right (explicit-length (:right st))
-        top (explicit-length (:top st))
-        bottom (explicit-length (:bottom st))]
-    [(cond left left right (- right) :else 0)
-     (cond top top bottom (- bottom) :else 0)]))
+  ;; `basis-w`/`basis-h` are the containing block's content dimensions, for
+  ;; percentage offsets (`left: 50%`). The 1-arity keeps the previous
+  ;; behaviour for the flex/grid item call site, which does not have them
+  ;; threaded yet -- a percentage offset on a flex item is therefore still
+  ;; ignored rather than misread as pixels, and that is a smaller lie than
+  ;; the pixels were.
+  ([st] (relative-offset st nil nil))
+  ([st basis-w basis-h]
+   (let [left (length-or-percentage (:left st) basis-w)
+         right (length-or-percentage (:right st) basis-w)
+         top (length-or-percentage (:top st) basis-h)
+         bottom (length-or-percentage (:bottom st) basis-h)]
+     [(cond left left right (- right) :else 0)
+      (cond top top bottom (- bottom) :else 0)])))
 
 ;; ---- inline formatting context ----
 
@@ -5385,7 +5447,7 @@
                         (:draw laid)
                         (translate-ops 0 gap-before (:draw laid)))
               draw (if (and cst (= "relative" (:position cst)))
-                     (let [[dx dy] (relative-offset cst)]
+                     (let [[dx dy] (relative-offset cst content-w nil)]
                        (translate-ops dx dy shifted))
                      shifted)]
           (recur (rest remaining) (+ y advance) (into draws draw) (+ height advance) mb* false
@@ -5450,10 +5512,16 @@
                               ;; the entire row it was pinned over.
                               m (measure-child theme content-w opacity inherited child true)
                               {:keys [w h]} (:box m)
-                              left (explicit-length (:left cst))
-                              right (explicit-length (:right cst))
-                              top (explicit-length (:top cst))
-                              bottom (explicit-length (:bottom cst))
+                              ;; percentage offsets resolve against the
+                              ;; containing block: the inline axis against
+                              ;; its width, the block axis against its
+                              ;; height. Measured against Brave, `left: 50%`
+                              ;; inside a 200px box is 100px there and was
+                              ;; 50px here.
+                              left (length-or-percentage (:left cst) content-w)
+                              right (length-or-percentage (:right cst) content-w)
+                              top (length-or-percentage (:top cst) content-h)
+                              bottom (length-or-percentage (:bottom cst) content-h)
                               dx (+ content-x (cond left left
                                                      right (- content-w w right)
                                                      :else 0))
