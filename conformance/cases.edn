@@ -306,13 +306,31 @@
   :group :position
   :html "<div><div style=\"position: relative; left: 40px\">moved</div><div>after</div></div>"}
 
- ;; The LINE-structure comparison for this case is ill-defined and it is
- ;; kept as a known failure rather than chased: `position: fixed` takes the
- ;; box out of flow and OVERLAPS the content beside it, so "which line is
- ;; this word on" has no single right answer -- the browser's own word
- ;; rects for the fixed box and for the flow text occupy the same band. The
- ;; GEOMETRY axis, which asks the well-defined question (where is the box,
- ;; how big is it), agrees with the browser on every box in this case.
+ ;; THIS HARNESS CANNOT SCORE THE BLOCK AXIS OF A FIXED BOX, and the case
+ ;; is kept as a permanent, explained failure rather than chased or
+ ;; deleted. Every case shares ONE long scrolling page, and a `fixed` box
+ ;; is measured against the viewport, so the browser's answer for its `y`
+ ;; relative to this case is `-(this case's distance from the viewport
+ ;; top)` at whatever scroll position the previous case's paint-order pass
+ ;; left behind: measured -47.84 here, 0 if the same case is placed first
+ ;; on the page, and a different number again as soon as a case is added
+ ;; above it. There is no engine behaviour that can agree with a number
+ ;; that moves when an unrelated case is inserted, so this case's fixed
+ ;; box is one permanently disagreeing box on the geometry axis (3/4), and
+ ;; no further `fixed` case is added to the corpus for the same reason.
+ ;;
+ ;; What IS measurable about `fixed` was measured directly instead, on a
+ ;; probe page shaped like this one, and is pinned by unit tests rather
+ ;; than here: the INLINE axis, where there is no scrolling. Brave puts a
+ ;; `left: 0` fixed box at x=0 inside a `margin-left: 120px` wrapper (not
+ ;; 120), `left: 50%` at half the VIEWPORT (378 of 756, not half the
+ ;; wrapper), and `right: 0` at 749 = 756 - 7. See
+ ;; layout-absolute-children.
+ ;;
+ ;; The LINE-structure comparison is ill-defined here for a related
+ ;; reason: the fixed box overlaps the content beside it, so "which line
+ ;; is this word on" has no single right answer -- the browser's own word
+ ;; rects for the fixed box and for the flow text occupy the same band.
  {:id :position/fixed-leaves-flow
   :group :position
   :html "<div><div style=\"position: fixed; left: 300px; top: 0\">fixed</div><div>a</div><div>b</div></div>"}
@@ -868,10 +886,44 @@
   :group :table
   :html "<table><thead><tr><th>h</th><th>i</th></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody><tfoot><tr><td>f</td><td>g</td></tr></tfoot></table>"}
 
+ ;; Every box in this case is now the right SHAPE and 13.7px too wide,
+ ;; and the whole residual has one named cause: this engine paints an
+ ;; <li>'s marker INSIDE the item's own line (with-implicit-list-markers
+ ;; adds it as a ::before), where a browser's `list-style-position:
+ ;; outside` puts it in the list's padding and leaves it out of the item's
+ ;; width. Once the cell shrink-wraps at all (it used to take the whole
+ ;; 800px page, td +761), that difference is exactly what is left: Brave
+ ;; reports li 21 / ul 61 / td 63 / table 99, this engine 34.7 / 74.7 /
+ ;; 76.7 / 112.7, i.e. `• ` on every one of them. The measured fix is
+ ;; list-style-position, not a wider cell -- see with-implicit-list-markers,
+ ;; which names that property as out of scope.
  {:id :table/cell-with-a-list
   :group :table
   :oracle/blind true
   :html "<table><tr><td><ul><li>one</li><li>two</li></ul></td><td>next</td></tr></table>"}
+
+ ;; ---- what a shrink-to-fit box measures itself from ----
+ ;; A `<td>` is the loudest place to put these, but the code under test is
+ ;; every shrink-to-fit width in the engine (flex item, grid item,
+ ;; inline-block, table cell all reach it through the same function). Each
+ ;; of these shapes used to fall through to `take the whole container`.
+
+ {:id :table/cell-holding-two-blocks
+  :group :table
+  :html "<table><tr><td><div>alpha</div><div>bb</div></td><td>x</td></tr></table>"}
+
+ ;; A block child's own MARGINS are part of what it contributes: the
+ ;; blockquote's UA `margin: 1em 40px` is 80 of this cell's 89 px.
+ {:id :table/cell-holding-a-block-with-margins
+  :group :table
+  :html "<table><tr><td><blockquote>q</blockquote></td><td>x</td></tr></table>"}
+
+ ;; The out-of-flow half of the same rule, outside a table: an absolutely
+ ;; positioned box contributes nothing to the intrinsic width of the flex
+ ;; item it sits in, exactly as it contributes nothing to a table cell's.
+ {:id :flex/item-with-an-absolutely-positioned-child
+  :group :flex
+  :html "<div style=\"display: flex\"><div style=\"position: relative\"><span style=\"position: absolute; left: 40px; top: 0\">pop</span>item</div><div>side</div></div>"}
 
  {:id :table/table-inside-flex
   :group :table

@@ -4109,10 +4109,100 @@
          the fixed child pulled out of flow, exactly like position:absolute
          already does, not pushing the sibling down")))
 
-(deftest fixed-child-anchors-to-right-and-bottom-like-absolute-does
+(deftest fixed-child-anchors-right-to-the-viewport-not-to-its-ancestor
+  ;; This used to assert x=150 -- `right: 10` solved against the 200px
+  ;; `.container`, i.e. treating `fixed` as `absolute`. That is not what a
+  ;; browser does, and the number changed because the behaviour was wrong,
+  ;; not because a constant was tuned. Measured in Brave: the SAME markup
+  ;; (a 200x200 zero-padding container holding `position: fixed; right:
+  ;; 10px; bottom: 5px; width: 40px; height: 20px`) puts the box at x=706
+  ;; in a 756px viewport -- viewport width minus `right` minus the box, and
+  ;; nothing to do with the 200px container it is written inside. Here the
+  ;; viewport is the 480px draw-ops width, so the same subtraction gives
+  ;; 480 - 10 - 40 = 430.
+  ;;
+  ;; `y` is unchanged at 175 and is NOT the browser's answer: Brave
+  ;; resolves `bottom` against the viewport HEIGHT (419px there, putting
+  ;; the box at viewport y=394), and draw-ops was given no `:height`, so
+  ;; the block axis falls back to the ancestor exactly as before -- the
+  ;; scope cut layout-absolute-children states. Pinned here so that
+  ;; fallback is a decision on the record rather than an accident.
   (let [div-op (absolute-child-op "position: fixed; right: 10; bottom: 5; width: 40; height: 20")]
-    (is (= 150 (:x div-op)))
-    (is (= 175 (:y div-op)))))
+    (is (= 430 (:x div-op)) "480 viewport - 10 right - 40 wide")
+    (is (= 175 (:y div-op)) "no :height given, so `bottom` still uses the 200px ancestor")))
+
+(deftest fixed-child-with-a-viewport-height-anchors-bottom-to-the-viewport
+  ;; The other half of the same rule: given a `:height`, `bottom` resolves
+  ;; against the viewport too. Brave's own answer for this markup in a
+  ;; 419px-tall viewport is viewport y = 419 - 5 - 20 = 394; the same
+  ;; subtraction against the 300px height passed here gives 275.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :class "container")
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules
+               (str ".container { width: 200; height: 200; padding: 0 } "
+                    ".box { position: fixed; right: 10; bottom: 5; width: 40; height: 20 }"))
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480 :height 300})
+        div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
+    (is (= 430 (:x div-op)) "480 viewport - 10 right - 40 wide")
+    (is (= 275 (:y div-op)) "300 viewport - 5 bottom - 20 tall")))
+
+(deftest fixed-child-ignores-an-offset-ancestor-on-the-inline-axis
+  ;; Measured in Brave on a page shaped like the conformance corpus's own:
+  ;; a `margin-left: 120px` wrapper holding `position: fixed; left: 0` puts
+  ;; the fixed box at x=0, and `left: 10px` puts it at x=10 -- the wrapper's
+  ;; own 120px offset does not reach it. This engine put them at 120 and
+  ;; 130, because `fixed` ran through the ancestor like `absolute`.
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [wrap doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root wrap)
+        doc (dom/set-attribute doc wrap :class "wrap")
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc wrap div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules
+               ".wrap { margin-left: 120; width: 200 }
+                .box { position: fixed; left: 10; width: 40; height: 20 }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480})
+        div-op (last (filter #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))]
+    (is (= 10 (:x div-op)) "the viewport's own left edge plus `left`, not the wrapper's")))
+
+(deftest fixed-child-percentage-offset-resolves-against-the-viewport
+  ;; Measured in Brave: `left: 50%` on a fixed box inside a 200px wrapper
+  ;; is 378px in a 756px viewport -- half the VIEWPORT, not half the
+  ;; wrapper (which would be 100).
+  (let [[root doc] (dom/create-element dom/empty-document :main)
+        doc (dom/set-root doc root)
+        [wrap doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root wrap)
+        doc (dom/set-attribute doc wrap :class "wrap")
+        [div doc] (dom/create-element doc :div)
+        doc (dom/append-child doc wrap div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules
+               ".wrap { width: 200 }
+                .box { position: fixed; left: 50%; width: 40; height: 20 }")
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480})
+        div-op (last (filter #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))]
+    (is (= 240 (:x div-op)) "half of the 480px viewport, not half of the 200px wrapper")))
+
+(deftest absolute-child-still-anchors-to-its-ancestor-not-the-viewport
+  ;; The guard for the change above: only `fixed` moved. An `absolute` box
+  ;; keeps resolving against the ancestor, which is what real CSS says and
+  ;; what every other absolute test here already depends on.
+  (let [div-op (absolute-child-op "position: absolute; right: 10; bottom: 5; width: 40; height: 20")]
+    (is (= 150 (:x div-op)) "200 container - 10 right - 40 wide")
+    (is (= 175 (:y div-op)) "200 container - 5 bottom - 20 tall")))
 
 (deftest fixed-child-honors-top-and-left-like-absolute-does
   (let [div-op (absolute-child-op "position: fixed; top: 8; left: 15; width: 40; height: 20")]
@@ -5916,6 +6006,97 @@
     (is (apply = col1))
     (is (> (first col0) (first col1))
         "and it is the width of the widest cell in that column")))
+
+;; ---- intrinsic (max-content) width: what a shrink-to-fit box measures ----
+;;
+;; Every case below is a `<td>`, because a table column is where a wrong
+;; intrinsic width is loudest, but the code under test is shared with flex
+;; items, grid items and inline-blocks (all of them reach it through
+;; measure-child -> flex-item-main-width). `table-ops` uses no
+;; :measure-text, so a character is the engine's own 0.6-em estimate --
+;; 8px at 14px -- where the Brave numbers quoted are its monospace face's
+;; 7px. The SHAPE is what is being compared, and each assertion also says
+;; the thing that does not depend on a character width at all: the cell is
+;; its content, not its container.
+
+(defn- td-widths
+  [rows]
+  (mapv :w (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) (table-ops rows))))
+
+(deftest an-absolutely-positioned-child-does-not-widen-its-table-cell
+  ;; Real CSS excludes out-of-flow boxes from intrinsic sizing outright.
+  ;; This engine included them by accident: an absolute child is correctly
+  ;; not an inline-flow candidate, which made the cell's children neither
+  ;; all-inline nor a single element, and the intrinsic width fell through
+  ;; to "take the whole container". Measured in Brave, this exact markup
+  ;; reports td 30px wide (`cell` plus the UA cell padding) against this
+  ;; engine's 791 -- the single largest numeric error the conformance
+  ;; corpus was reporting.
+  (let [[w0 w1] (td-widths [[:tr {}
+                             [:td {:position "relative"}
+                              [:span {:position "absolute" :left 20} "abs"]
+                              "cell"]
+                             [:td {} "b"]]])]
+    (is (= 34 w0) "`cell` (4 chars) plus the UA cell's 1px padding per side")
+    (is (< w0 100) "and emphatically not the 400px table width")
+    (is (= 10 w1))))
+
+(deftest a-fixed-child-does-not-widen-its-table-cell-either
+  ;; Same rule, same reason: `fixed` is out of flow too. Measured in Brave,
+  ;; `<td><div style="position:fixed;left:0">fixedcell</div>c</td>` reports
+  ;; td 9px wide -- the 63px fixed box contributes nothing.
+  (let [[w0] (td-widths [[:tr {}
+                          [:td {} [:div {:position "fixed" :left 0} "fixedcell"] "c"]
+                          [:td {} "b"]]])]
+    (is (= 10 w0) "`c` plus the UA cell padding")))
+
+(deftest a-cell-holding-blocks-is-as-wide-as-its-widest-block
+  ;; The other half of the same fallback: a cell with two block children
+  ;; was neither all-inline nor a single element either, so it took the
+  ;; container width as well. Real CSS's max-content for a block container
+  ;; is the widest of its children. Measured in Brave: td 37 (`alpha` at
+  ;; 35 plus 2px of UA padding), not 782.
+  (let [[w0] (td-widths [[:tr {}
+                          [:td {} [:div {} "alpha"] [:div {} "bb"]]
+                          [:td {} "x"]]])]
+    (is (= 42 w0) "`alpha` (5 chars) plus the UA cell's padding, not `bb`")))
+
+(deftest a-cell-mixing-text-and-a-block-takes-the-wider-of-the-two
+  ;; The inline children form one anonymous block, measured as a run on a
+  ;; single line; the block child is measured on its own; the cell is the
+  ;; larger. Measured in Brave: `lead<div>bb</div>` reports td 30 -- the
+  ;; text, which is wider than the `bb` block.
+  (let [[w0] (td-widths [[:tr {}
+                          [:td {} "lead" [:div {} "bb"]]
+                          [:td {} "x"]]])]
+    (is (= 34 w0) "`lead` (4 chars) plus the UA cell padding")))
+
+(deftest a-block-childs-horizontal-margins-count-toward-the-cell
+  ;; Real CSS counts a child's margins in its intrinsic contribution, and
+  ;; the single-element rule this generalises measured the border box
+  ;; alone. Measured in Brave, `<td><blockquote>q</blockquote></td>` is 89
+  ;; wide: the UA `margin: 1em 40px` around a 7px word plus 2px of cell
+  ;; padding. This engine reported 9 -- the word and the padding, with the
+  ;; 80px of margin dropped on the floor.
+  (let [[w0] (td-widths [[:tr {}
+                          [:td {} [:blockquote {} "q"]]
+                          [:td {} "x"]]])]
+    (is (= 90 w0) "8px word + 80px of blockquote margin + 2px cell padding")))
+
+(deftest a-cell-measures-the-list-marker-it-will-be-laid-out-with
+  ;; The intrinsic path and layout-node have to agree about what the
+  ;; children ARE (see laid-out-children). They did not: a `<ul>` was
+  ;; measured from its bare `<li>` text and then laid out with the marker
+  ;; with-implicit-list-markers adds, so every item was wider than the box
+  ;; it had just been given and wrapped onto a second line -- a cell with
+  ;; the browser's exact width and twice its height.
+  (let [ops (table-ops [[:tr {}
+                         [:td {} [:ul {} [:li {} "one"] [:li {} "two"]]]
+                         [:td {} "next"]]])
+        lis (filterv #(and (= :node (:draw/op %)) (= :li (:tag %))) ops)]
+    (is (= 2 (count lis)))
+    (is (every? #(= 20 (:h %)) lis)
+        "one line each -- the width the cell was given holds the marker too")))
 
 (deftest table-emits-row-and-cell-node-ops-for-hit-testing
   (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {} "b"]]])]
