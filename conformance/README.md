@@ -512,11 +512,15 @@ did not name (a float's own margins). Every number below was read out of a
 real headless Brave 151 over CDP first — one isolating shape per behaviour,
 each wrapped in its own `overflow: hidden` box, because floats leaking
 between probe cases moved a float from x=0 to x=80 and another from y=0 to
-y=28 before the wrappers went on. Line **249 → 257 / 280**, geometry
-**952 → 966 / 1142** (207 → 215 cases fully clean), paint order **6968 →
-6996 / 7285** (237 → 242 cases fully clean), float group **9/13 → 13/13**,
-page **24/28 → 27/28**. Computed style is unchanged, as it should be: the
-only cascade-facing part of this is that `clear` is now read at all.
+y=28 before the wrappers went on.
+
+Measured against the main this landed on (`3cace9b`, i.e. with the flex
+round already in): line **255 → 263 / 280**, geometry **981 → 995 / 1142**
+(220 → 228 cases fully clean), paint order **6978 → 7006 / 7285** (239 →
+244 cases fully clean), float group **9/13 → 13/13**, page **24/28 →
+27/28**. Eight cases went red to green and none went the other way.
+Computed style is unchanged, as it should be: the only cascade-facing part
+of this round is that `clear` is now read at all.
 
 The v1 band was one `{:h :left :right}` rectangle pinned to the container's
 top. It is now a list of placed float MARGIN boxes and three pure functions
