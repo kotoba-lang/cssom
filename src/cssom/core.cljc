@@ -903,6 +903,32 @@
 
       :else (parse-style-value v))))
 
+(def ^:private var-ref-pattern
+  ;; Defined HERE, above the shorthand expanders, rather than down in the
+  ;; custom-property section with its only other user (`resolve-value`),
+  ;; because `expand-box-side-shorthand` below has to recognize a whole-token
+  ;; `var(...)` reference too -- see its own docstring. One pattern, two
+  ;; readers: a second, separately-written copy of this regex next to the
+  ;; expander is exactly the kind of drift this cycle is removing.
+  ;;
+  ;; The fallback capture allows the fallback text to contain ONE level of
+  ;; balanced, paren-free-inside parens (`(?:[^()]|\([^()]*\))*`) -- not
+  ;; just `[^()]*` -- so a fallback with a nested function call
+  ;; (`rgba(...)`, `hsl(...)`, `calc(...)`, or another `var(--y, plain)`)
+  ;; still matches, instead of the WHOLE `var(...)` reference failing to
+  ;; match at all. Previously `var(--x, rgba(0,0,0,0.5))` -- an ordinary,
+  ;; common custom-property idiom, not a contrived case -- left the
+  ;; literal, unresolved text in the computed value: the character class
+  ;; excluded any paren whatsoever from the fallback, so as soon as the
+  ;; fallback contained ITS OWN parens, this pattern's own trailing `\)`
+  ;; had nothing left to close against and the match failed outright.
+  ;; Bounded, honest scope cut (consistent with this file's calc()/hsl()
+  ;; cuts elsewhere): a fallback nested TWO levels deep (e.g. a `calc()`
+  ;; inside an `rgba()` inside the fallback) still doesn't match -- real
+  ;; recursive-descent parsing would be needed for arbitrary nesting, and
+  ;; one level already covers the overwhelmingly common real-world cases.
+  #"var\(\s*(--[A-Za-z_][-A-Za-z0-9_]*)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)")
+
 (def ^:private border-style-keywords
   #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
 
@@ -954,6 +980,36 @@
             {}
             tokens)))
 
+(defn- box-shorthand-tokens
+  "Splits a `margin`/`padding` shorthand value into its top-level values,
+   paren-aware: `padding: calc(2 * 8px)` is ONE value whose own internal
+   spaces must not be mistaken for side separators, and neither is
+   `padding: var(--a, 10px) var(--b)` two-and-a-half. Shared by
+   `expand-box-side-shorthand` (before custom-property substitution) and
+   `resolve-style-map`'s own post-substitution re-slice, so the two can
+   never disagree about where one side's value ends."
+  [v]
+  (loop [chars (seq (str/trim (str v))) depth 0 cur "" out []]
+    (if-let [c (first chars)]
+      (cond
+        (= c \() (recur (rest chars) (inc depth) (str cur c) out)
+        (= c \)) (recur (rest chars) (dec depth) (str cur c) out)
+        (and (zero? depth) (re-matches #"\s" (str c)))
+        (recur (rest chars) depth "" (if (str/blank? cur) out (conj out cur)))
+        :else (recur (rest chars) depth (str cur c) out))
+      (if (str/blank? cur) out (conj out cur)))))
+
+(def ^:private box-side-picks
+  "Real CSS's own 1-to-4 value rule as a token index per side, indexed by
+   the number of values written: one value applies to all four sides, two
+   are vertical/horizontal, three are top/horizontal/bottom, four are
+   top/right/bottom/left clockwise. Sides are in that same clockwise order
+   (top, right, bottom, left)."
+  {1 [0 0 0 0]
+   2 [0 1 0 1]
+   3 [0 1 2 1]
+   4 [0 1 2 3]})
+
 (defn- expand-box-side-shorthand
   "Expands a `margin`/`padding` shorthand into its four per-side longhands
    using real CSS's own 1-to-4 value rule: one value applies to all four
@@ -970,25 +1026,37 @@
 
    The uniform `:margin`/`:padding` key is still emitted alongside the
    longhands (set to the first value) so every existing reader that has
-   only ever known the uniform form keeps working unchanged."
+   only ever known the uniform form keeps working unchanged.
+
+   A token that is entirely a `var(--name[, fallback])` reference counts as
+   expandable even though it is not a length YET. Custom properties are
+   substituted much later (`style-element`, once the element's inherited
+   environment is known), and NOTHING re-expanded a shorthand after that --
+   so `padding: var(--pad)` with `--pad: 20px` resolved to a lone
+   `:padding 20` with no per-side longhands at all, and this engine's box
+   model reads only the longhands. Measured against a real browser by the
+   conformance harness: `:cascade/custom-property` was one of the cases
+   reporting a cascade-attributed `padding-left 0 -> 20px` mismatch.
+   Expanding here, BEFORE substitution, is also what keeps the cascade
+   honest: expansion has to happen at declaration time so that
+   `padding: 12px; padding-left: 0` and `padding-left: 0; padding: 12px`
+   still resolve differently (they do -- confirmed through the real
+   pipeline). Re-expanding after the cascade had already merged would
+   clobber a later, more specific longhand with the earlier shorthand.
+
+   Each side therefore carries the var() reference verbatim and substitutes
+   independently. When a custom property's own value is ITSELF a multi-value
+   box shorthand (`--pad: 4px 8px`, then `padding: var(--pad)`), the four
+   sides would each end up holding the whole substituted string -- so
+   `resolve-style-map` re-slices exactly those keys once substitution has
+   actually happened. That post-substitution step is the ONLY place a box
+   shorthand is re-read after the cascade, and it is safe there precisely
+   because it rewrites a value the substitution itself produced."
   [prop v]
-  (let [;; paren-aware: `padding: calc(2 * 8px)` is ONE value whose own
-        ;; internal spaces must not be mistaken for side separators.
-        tokens (loop [chars (seq (str/trim (str v))) depth 0 cur "" out []]
-                 (if-let [c (first chars)]
-                   (cond
-                     (= c \() (recur (rest chars) (inc depth) (str cur c) out)
-                     (= c \)) (recur (rest chars) (dec depth) (str cur c) out)
-                     (and (zero? depth) (re-matches #"\s" (str c)))
-                     (recur (rest chars) depth "" (if (str/blank? cur) out (conj out cur)))
-                     :else (recur (rest chars) depth (str cur c) out))
-                   (if (str/blank? cur) out (conj out cur))))
+  (let [tokens (box-shorthand-tokens v)
         n (count tokens)
-        [t r b l] (case n
-                    1 [(tokens 0) (tokens 0) (tokens 0) (tokens 0)]
-                    2 [(tokens 0) (tokens 1) (tokens 0) (tokens 1)]
-                    3 [(tokens 0) (tokens 1) (tokens 2) (tokens 1)]
-                    [(tokens 0) (tokens 1) (tokens 2) (tokens 3)])]
+        [t r b l] (map #(get tokens % (last tokens))
+                       (get box-side-picks n [0 0 0 0]))]
     (when (and (pos? n) (<= n 4)
                ;; Only expand when EVERY token is a length this engine can
                ;; actually resolve. Anything else -- a percentage, `auto`,
@@ -998,8 +1066,15 @@
                ;; this namespace's standing degrade-don't-guess posture.
                ;; Silently keeping the first token of an unparseable
                ;; shorthand would be a guess dressed as a value.
+               ;;
+               ;; A whole-token var() reference is admitted too: it is not a
+               ;; length yet, but it is a value this engine WILL resolve
+               ;; (see the docstring). `margin: 1px solid 3px dashed` -- the
+               ;; regression guard in the test suite -- still fails this
+               ;; check on `solid`/`dashed` and stays unexpanded.
                (every? #(or (re-matches #"-?\d+(px)?" %)
-                            (re-matches calc-pattern %))
+                            (re-matches calc-pattern %)
+                            (re-matches var-ref-pattern %))
                        tokens))
       {(keyword prop) (parse-style-value (tokens 0))
        (keyword (str prop "-top")) (parse-style-value t)
@@ -3892,24 +3967,11 @@
   [k]
   (str/starts-with? (name k) "--"))
 
-(def ^:private var-ref-pattern
-  ;; The fallback capture allows the fallback text to contain ONE level of
-  ;; balanced, paren-free-inside parens (`(?:[^()]|\([^()]*\))*`) -- not
-  ;; just `[^()]*` -- so a fallback with a nested function call
-  ;; (`rgba(...)`, `hsl(...)`, `calc(...)`, or another `var(--y, plain)`)
-  ;; still matches, instead of the WHOLE `var(...)` reference failing to
-  ;; match at all. Previously `var(--x, rgba(0,0,0,0.5))` -- an ordinary,
-  ;; common custom-property idiom, not a contrived case -- left the
-  ;; literal, unresolved text in the computed value: the character class
-  ;; excluded any paren whatsoever from the fallback, so as soon as the
-  ;; fallback contained ITS OWN parens, this pattern's own trailing `\)`
-  ;; had nothing left to close against and the match failed outright.
-  ;; Bounded, honest scope cut (consistent with this file's calc()/hsl()
-  ;; cuts elsewhere): a fallback nested TWO levels deep (e.g. a `calc()`
-  ;; inside an `rgba()` inside the fallback) still doesn't match -- real
-  ;; recursive-descent parsing would be needed for arbitrary nesting, and
-  ;; one level already covers the overwhelmingly common real-world cases.
-  #"var\(\s*(--[A-Za-z_][-A-Za-z0-9_]*)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)")
+;; `var-ref-pattern` (the `var(--name[, fallback])` regex the three
+;; functions below read) is defined much higher up, next to the shorthand
+;; expanders -- `expand-box-side-shorthand` needs the same pattern to
+;; recognize a `padding: var(--pad)` shorthand as expandable, and one
+;; shared def is the point.
 
 (defn- var-lookup
   [env var-name fallback]
@@ -3944,9 +4006,57 @@
                           (str (var-lookup env var-name fallback))))
            value))))))
 
+(def ^:private box-side-key-pattern
+  #"(?:margin|padding)(?:-(top|right|bottom|left))?")
+
+(def ^:private box-side-order
+  "Side name -> its index in `box-side-picks`' clockwise order. The uniform
+   `margin`/`padding` key itself has no side and takes index 0, i.e. the
+   first written value -- the same value `expand-box-side-shorthand` puts
+   there."
+  {"top" 0 "right" 1 "bottom" 2 "left" 3})
+
+(defn- reslice-substituted-box-shorthands
+  "Re-slices a `margin`/`padding` key (uniform or per-side) whose value is
+   STILL a multi-value box shorthand after custom-property substitution.
+
+   `expand-box-side-shorthand` runs at declaration-parse time, which is what
+   keeps the cascade honest (a later `padding-left` must beat an earlier
+   `padding`, and vice versa) -- but it therefore hands each side the var()
+   reference verbatim, not the substituted text. That is exact whenever the
+   custom property holds ONE value (`--pad: 20px`, the overwhelmingly common
+   form). When it holds a whole box shorthand (`--pad: 4px 8px`), every side
+   would instead be left holding the entire string `4px 8px`, so the 1-to-4
+   rule is applied here, to the text substitution actually produced.
+
+   Deliberately narrow, so this cannot become a second, order-blind
+   expansion path: it only rewrites keys that are already margin/padding
+   (uniform or one of the four sides), only when the value is still a
+   STRING (a declaration that expanded normally is already a number and is
+   never revisited), and only when every top-level token is a length this
+   engine can resolve. `margin: 0 auto` and any other multi-token value with
+   a non-length in it is left exactly as it was."
+  [m]
+  (reduce-kv
+   (fn [acc k v]
+     (if-let [[_ side] (and (string? v) (re-matches box-side-key-pattern (name k)))]
+       (let [tokens (box-shorthand-tokens v)
+             n (count tokens)]
+         (if (and (> n 1) (<= n 4)
+                  (every? #(or (re-matches #"-?\d+(px)?" %)
+                               (re-matches calc-pattern %))
+                          tokens))
+           (let [idx (get box-side-order side 0)]
+             (assoc acc k (parse-style-value (tokens (nth (get box-side-picks n) idx)))))
+           acc))
+       acc))
+   m
+   m))
+
 (defn- resolve-style-map
   [env m]
-  (into {} (map (fn [[k v]] [k (resolve-value env v)])) m))
+  (reslice-substituted-box-shorthands
+   (into {} (map (fn [[k v]] [k (resolve-value env v)])) m)))
 
 (defn- apply-counter-pairs
   "Applies `op` (:reset or :increment) over `pairs` (a `[[name amount] ...]`

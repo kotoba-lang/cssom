@@ -1255,6 +1255,70 @@
     (is (= "1px solid 3px dashed" (:style/margin attrs))
         "an embedded var() with a plain (paren-free) fallback, surrounded by other text on both sides, still substitutes correctly without over- or under-consuming neighboring text -- a pre-existing-behavior regression guard, not itself discriminating for this fix (a plain fallback never hit the bug)")))
 
+(deftest box-shorthand-holding-a-var-reference-still-expands-to-per-side-longhands
+  ;; Measured, not hypothesised: the conformance harness's computed-style
+  ;; axis attributed a `padding-left 0 -> 20px` mismatch on
+  ;; `:cascade/custom-property` to the cascade. `expand-box-side-shorthand`
+  ;; runs when a declaration is PARSED, but `var()` is not substituted until
+  ;; `style-element` knows the element's inherited environment -- so
+  ;; `padding: var(--pad)` was correctly declined as "not a length yet" and
+  ;; then nothing ever re-expanded it. The element ended up with a lone
+  ;; `:style/padding 20` and no per-side longhands, and this engine's box
+  ;; model reads only the longhands.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "vars")
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc div p)
+        rules (css/parse-rules ".vars { --pad: 20px } .vars p { padding: var(--pad) }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes p :attrs])]
+    (is (= 20 (:style/padding attrs)) "the uniform key resolves as it always did")
+    (is (= [20 20 20 20]
+           [(:style/padding-top attrs) (:style/padding-right attrs)
+            (:style/padding-bottom attrs) (:style/padding-left attrs)])
+        "and the four per-side longhands the box model actually reads now exist")))
+
+(deftest a-custom-property-holding-a-whole-box-shorthand-is-sliced-per-side
+  ;; The follow-on case the fix above would otherwise get wrong: each side
+  ;; carries the var() reference verbatim, so when the custom property's own
+  ;; value is ITSELF a multi-value shorthand, every side would be left
+  ;; holding the entire substituted string. Real CSS re-parses the
+  ;; substituted shorthand, so the 1-to-4 rule has to be applied AFTER
+  ;; substitution (`reslice-substituted-box-shorthands`).
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "vars")
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc div p)
+        rules (css/parse-rules ".vars { --box: 4px 8px } .vars p { margin: var(--box) }")
+        doc (css/apply-cascade doc rules)
+        attrs (get-in doc [:nodes p :attrs])]
+    (is (= [4 8 4 8]
+           [(:style/margin-top attrs) (:style/margin-right attrs)
+            (:style/margin-bottom attrs) (:style/margin-left attrs)])
+        "two values are vertical/horizontal, exactly as if written literally")
+    (is (= 4 (:style/margin attrs))
+        "the uniform key keeps meaning the first written value")))
+
+(deftest declaration-order-still-decides-between-a-box-shorthand-and-its-longhands
+  ;; Regression guard for the shape this cycle deliberately did NOT adopt.
+  ;; Re-expanding a shorthand after the cascade has already merged would be
+  ;; simpler, and wrong: it would clobber a longhand that legitimately won
+  ;; by coming later. Expansion therefore has to stay at declaration-parse
+  ;; time, where the cascade's own ordering still applies to each longhand
+  ;; independently.
+  (let [probe (fn [css]
+                (let [[div doc] (dom/create-element dom/empty-document :div)
+                      doc (dom/set-root doc div)
+                      doc (dom/set-attribute doc div :class "a")
+                      doc (css/apply-cascade doc (css/parse-rules css))]
+                  (get-in doc [:nodes div :attrs :style/padding-left])))]
+    (is (= 0 (probe ".a { padding: 12px; padding-left: 0 }"))
+        "a longhand written after the shorthand wins")
+    (is (= 12 (probe ".a { padding-left: 0; padding: 12px }"))
+        "a shorthand written after the longhand wins")))
+
 (deftest var-fallback-nested-two-levels-deep-is-a-documented-scope-cut
   ;; Bounded, honest scope cut mirroring this file's calc()/hsl() cuts
   ;; elsewhere: one level of nested parens in a fallback resolves (see

@@ -57,10 +57,14 @@ computed-style axis" below for its first run.
 
 ## Result — 2026-08-04
 
-**Line structure: 184/190 = 97%. Geometry: 609/719 element boxes (85%),
-160/200 cases with every box in agreement. Computed style: 8501/9982
-cascade-resolved values (85%), 190/200 cases with no mismatch attributable
+**Line structure: 184/190 = 97%. Geometry: 634/719 element boxes (88%),
+164/200 cases with every box in agreement. Computed style: 8537/9982
+cascade-resolved values (86%), 197/200 cases with no mismatch attributable
 to the cascade itself**, on a corpus of 200.
+
+The computed-style figures are after the two shorthand bugs this axis found
+on its first run were fixed — cascade-attributed mismatches 41 → 5, cases
+clean of them 190 → 197. See "The 41 that were actually the cascade's".
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -142,7 +146,7 @@ author CSS anywhere near it:
 | cause | first run | meaning |
 |---|---|---|
 | `ua-default` | 1407 | the engine declared nothing and the browser's value is exactly what its UA sheet gives that tag bare |
-| `cascade` | 41 | the two sides disagree about a value the cascade is responsible for. **This is the bucket worth reading** |
+| `cascade` | 41 → **5** | the two sides disagree about a value the cascade is responsible for. **This is the bucket worth reading** |
 | `blockified` | 23 | a `display` mismatch on a flex/grid item, a float, or an absolutely positioned box — real CSS blockifies all three at computed-value time |
 | `ua-inherited` | 10 | the browser's value here is simply its parent's. Whatever diverged happened at an ancestor and is already scored there; charging it again at every descendant would multiply one cause by the depth of the tree |
 
@@ -157,10 +161,12 @@ all.
 `--debug-style` prints the whole cascade-attributed residual rather than
 its head.
 
-### The 41 that are actually the cascade's
+### The 41 that were actually the cascade's — both fixed
 
 Two bugs, both invisible to 502 unit tests and to both layout axes, both
-reproduced directly through the real pipeline:
+reproduced directly through the real pipeline. **Both are fixed; the
+cascade bucket went 41 → 5 and cases clean of it 190 → 197.** What they
+were:
 
 - **An inline `style="..."` shorthand is not expanded into longhands.**
   `htmldom.core`'s inline-style declaration splitter expands `border`,
@@ -172,14 +178,46 @@ reproduced directly through the real pipeline:
   `style="padding: 12px"` yields `{:style/padding 12}` alone. Worse,
   `style="margin: 4px 8px"` is stored as the raw **string** `"4px 8px"`,
   which the per-side box model cannot read at all. 34 of the 41.
+
+  **Fixed by deleting the second copy, not by adding margin/padding to it.**
+  An inline `style="..."` *is* a CSS declaration block, so `htmldom.core`
+  now hands the text to `cssom.core/parse-declarations-with-importance` —
+  the same entry point a `<style>` rule body goes through — and its own
+  ~330-line copy of the declaration parser (the `calc()` pipeline, five
+  shorthand expanders, the value coercion, the `!important` regex) is gone.
+  htmldom depends on cssom; cssom does not depend on htmldom, so there is
+  no cycle. The drift was not confined to margin/padding either:
+  `content`/`counter-reset`/`counter-increment` also meant different things
+  inline than in a rule, and now do not.
 - **Shorthand expansion runs BEFORE `var()` substitution.**
   `padding: var(--pad)` is not a length at declaration-parse time, so
   `expand-box-side-shorthand` correctly declines to expand it — and nothing
   re-expands it after `style-element` resolves the custom property. Result:
   `:style/padding 20` with no longhands. 4 of the 41.
 
-The remaining 3 are the probe's own honest limits, listed under exclusions
-below rather than left to look like engine errors.
+  **Fixed by admitting a whole-token `var()` reference as expandable**, so
+  each side carries the reference and substitutes independently. Expansion
+  deliberately stays at declaration-parse time: re-expanding after the
+  cascade merged would be simpler and wrong, because it would clobber a
+  longhand that legitimately won by being declared later
+  (`padding: 12px; padding-left: 0` and its reverse do resolve
+  differently, and there is now a test that says so). The follow-on case —
+  a custom property whose own value is a whole shorthand, `--pad: 4px 8px`
+  — is re-sliced per side after substitution, which is the one place a box
+  shorthand is legitimately re-read post-cascade.
+
+Neither fix moved geometry (634/719 before and after, byte-identical
+report). That is expected rather than disappointing: `cssom.layout` falls
+back to the uniform `:padding`/`:margin` key when a side is missing, so a
+one-value inline shorthand already laid out correctly. What was wrong was
+the *computed style* — the values `getComputedStyle` actually reports, and
+the ones a multi-value shorthand needs.
+
+The 5 that remain are a different cause, not a residue of these two: four
+are a `<p>`'s UA `margin: 1em 0` resolved against a font size the two sides
+disagree about (`:cascade/inherited-font-size-chain`,
+`:text/font-size-percentless-inheritance`), and one is a disabled
+`<input>`'s UA text colour (`:form/disabled-input`).
 
 ### Excluded from comparison, explicitly
 
