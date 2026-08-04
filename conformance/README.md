@@ -700,6 +700,95 @@ Corpus-wide: line 280/301 → **289/301**, geometry 1032/1214 →
 **1086/1214** (234 → **256** clean cases), paint order 7499/7805 →
 **7539/7805**. Twenty-two cases improved on geometry and none regressed.
 
+### Round twenty-four: intrinsic width, and the viewport a fixed box belongs to
+
+Two gaps, one of them the largest single number the geometry axis was
+reporting.
+
+**A shrink-to-fit box took the whole container whenever its content was
+not a shape the intrinsic sizing recognised.** `flex-item-main-width` —
+which despite the name is *every* shrink-to-fit width in the engine (flex
+item, grid item, table cell, inline-block, all through `measure-child`) —
+recognised a single text child, an all-inline run, an empty box and a
+single element child, and ended with `:else content-w`. Everything else
+swallowed its container. Two corpus cases were sitting on that fallback
+with `td` **+761px** and `tbody` **+755px**, and they had two different
+causes underneath one symptom:
+
+- **An absolutely positioned child.** `<td style="position:relative">
+  <span style="position:absolute">abs</span>cell</td>` has two children,
+  and the absolute one is (correctly) not an inline-flow candidate, so the
+  cell was neither all-inline nor single-element. Real CSS excludes
+  out-of-flow boxes from intrinsic sizing outright — measured in Brave, td
+  is **30**, the width of `cell` alone. Same for `fixed`: a
+  `position: fixed` div in a cell leaves the cell **9** wide.
+- **Block children.** `<td><ul><li>one</li><li>two</li></ul></td>` and
+  `<td><div>alpha</div><div>bb</div></td>` are block containers, whose
+  max-content width in real CSS is the **widest** of their children's,
+  with each maximal run of adjacent inline children forming one anonymous
+  block measured on a single line. Measured in Brave: 63 and 37.
+
+Both are implemented (`intrinsic-flow-children`,
+`block-max-content-width`), and two things fell out of doing it that the
+old fallback had been hiding:
+
+- **A child's horizontal MARGINS are part of its contribution.**
+  `<td><blockquote>q</blockquote></td>` is **89** in Brave — the UA
+  `margin: 1em 40px` is 80 of it — where the single-element rule this
+  generalises measured the border box alone and said 9.
+- **The intrinsic path and layout disagreed about what the children
+  ARE.** A `<ul>` was measured from its bare `<li>` text and then laid out
+  with the `• ` marker `with-implicit-list-markers` adds, so every item
+  came out 14px wider than the box it had just been given and wrapped to
+  two lines. Both now go through one `laid-out-children`.
+
+**`position: fixed` is anchored to the viewport, not to an ancestor.**
+It already left the flow correctly; what it did not do was escape its
+ancestor. Measured in Brave on a probe page shaped like this corpus (800px
+cases, 756px viewport): a `left: 0` fixed box inside a `margin-left: 120px`
+wrapper is at **x=0**, not 120; `left: 10px` is at **10**, not 130;
+`left: 50%` is at **378** = half the *viewport*, not half the 200px
+wrapper; `right: 0` is at **749** = 756 − 7. `draw-ops` now assembles a
+viewport from its own `:x`/`:y`/`:width` (plus a new optional `:height`)
+and `layout-absolute-children` resolves a fixed box's offsets against it.
+An offsetless fixed box still uses its static position, which is what
+Brave does too (measured x=40 inside a `margin-left: 40px` container).
+
+**This harness cannot score the block axis of a fixed box, and says so
+rather than pretending.** Every case shares one long scrolling page and a
+fixed box is measured against the viewport, so the browser's answer for
+its `y` relative to a case is `-(that case's distance from the viewport
+top)` — measured **−47.84** for `:position/fixed-leaves-flow`, **0** if
+the same case is placed first on the page, and a different number again as
+soon as a case is added above it. No engine behaviour can agree with a
+number that moves when an unrelated case is inserted. So that case keeps
+one permanently disagreeing box (3/4), **no new `fixed` case was added**,
+and the inline-axis behaviour is pinned by unit tests against the measured
+Brave numbers instead. The same measurement rules out the other case that
+suggested itself — an absolutely positioned box in a cell with *no*
+positioned ancestor, which Brave anchors to the initial containing block
+and reports at **y=−304**, i.e. this case's own offset down the page.
+
+Three cases were added that ARE honest — `:table/cell-holding-two-blocks`,
+`:table/cell-holding-a-block-with-margins`,
+`:flex/item-with-an-absolutely-positioned-child` — and all three agree with
+Brave on **every box, exactly**, on first contact.
+
+Corpus-wide, 313 → 316 cases: geometry 1120/1212 → **1142/1229**
+(267/313 → **271/316** clean), paint order 7575/7805 → **7693/7880**,
+line 297/301 → **300/304**, computed style 14782/16964 → **14984/17202**.
+Five cases' boxes changed and **none regressed**;
+`:position/absolute-inside-table-cell` went 1/6 → **6/6**.
+
+The one that did not move: `:table/cell-with-a-list` is still 0/8, but
+every box is now the right shape and **13.7px** too wide instead of
+**+769**, and the whole residual has one named cause — this engine paints
+an `<li>`'s marker inside the item's own line, where a browser's
+`list-style-position: outside` puts it in the list's padding and leaves it
+out of the item's width. That property is named as out of scope in
+`with-implicit-list-markers`, and the honest fix is that property, not a
+wider cell.
+
 ### Round twenty-one: the corpus grows 200 → 292
 
 The engine went 47% → 89% on geometry while the corpus stayed at 200 cases.

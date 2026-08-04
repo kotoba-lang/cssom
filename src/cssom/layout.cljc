@@ -1436,6 +1436,25 @@
   (+ (or (get st (keyword (str "padding-" (name side)))) (:padding st))
      (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
 
+(defn- intrinsic-inset-x
+  "The horizontal inset an intrinsic width has to put around its content:
+   exactly the pair layout-block will subtract when it lays the box out
+   (inset-side :left/:right), so a measured content width and the width
+   the box is then given describe the same box.
+
+   `(* 2 (content-inset st))` -- what every intrinsic branch used to add --
+   reads the UNIFORM `:padding` alone, so any box with a PER-SIDE padding
+   was measured against an inset it does not have. That was harmless while
+   the fallback for an unfamiliar shape was `content-w` (nothing reached
+   the arithmetic), and stops being harmless the moment a block container
+   is measured from its children: a `<ul>`, whose UA padding is
+   `padding-left: 40px` and nothing else, came out 21px wide -- its widest
+   `<li>` and not one pixel of room for the 40px layout-block then takes
+   off the left, which collapsed both list items to zero width and two
+   lines tall."
+  [st]
+  (+ (inset-side st :left) (inset-side st :right)))
+
 (defn- margin-side
   "One side's margin: the per-side value when present (author or UA), else
    the uniform `:margin`."
@@ -1664,15 +1683,17 @@
    sibling layout with `position: absolute` on the first correctly
    leaves the second at y=4, unaffected.
 
-   Routing `fixed` through the SAME out-of-flow/layout-absolute-
-   children machinery `absolute` already uses is an honest, documented
-   scope-cut: this engine has no separate scroll-independent viewport
-   model (see the namespace docstring), so a `fixed` element is anchored
-   against its nearest containing block exactly like `absolute` is,
-   rather than the real viewport -- real fixed-to-viewport decoupling
-   under scrolling is a deeper, deliberately out-of-scope behavior, the
-   same kind of honest cut this file already makes elsewhere (e.g.
-   `layout-absolute-children`'s own `hsl()`-hue-unit-scoping comparison).
+   `fixed` shares ALL of `absolute`'s out-of-flow machinery -- it takes
+   no part in block flow, it keeps a static position for the axes with
+   no offset, and it is placed by layout-absolute-children -- and
+   differs in exactly one thing: its containing block is the VIEWPORT,
+   not an ancestor. That difference lives in layout-absolute-children,
+   which reads the viewport off the theme; see its own comment for the
+   Brave measurements and for the two things it deliberately does not
+   model (there is no scroll position here, so a fixed box does not stay
+   put as a page scrolls, and `bottom`/a `%` block offset need a
+   viewport HEIGHT the host may not have supplied).
+
    `position: sticky` is deliberately NOT included here -- its
    unscrolled default position is legitimately identical to normal
    flow, so leaving it in-flow is correct, not a gap, for a rendering
@@ -3869,7 +3890,9 @@
                               :font-family (or (:font-family st) (:font-family inherited))
                               :text-transform (or (:text-transform st) (:text-transform inherited)))
         text-box (:box (layout-node theme 0 0 flex-item-shrink-to-fit-measure-width opacity text-inherited text))]
-    (+ (:w text-box) (* 2 (content-inset st)))))
+    ;; the SAME horizontal inset layout-block will subtract -- see
+    ;; intrinsic-inset-x for why the uniform `:padding` is not it.
+    (+ (:w text-box) (intrinsic-inset-x st))))
 
 (def ^:private inline-atomic-tags
   "Inline-level elements that are ATOMIC: they participate in a line box as
@@ -3897,8 +3920,34 @@
    where every browser's ~20ch default text-field width comes from."
   20)
 
+(defn- laid-out-children
+  "The children `node` will actually be laid out with: its own
+   `:children` after every box-tree fixup this file applies -- a
+   `<details>`'s collapsed content, an implicit list marker, ::before/
+   ::after generated content, the nested-list margin rule, and
+   `display: contents` promotion.
+
+   Extracted because there are now TWO readers of it and they must not
+   drift: layout-node, which lays these children out, and the intrinsic
+   sizing path (flex-item-main-width, atomic-intrinsic-width,
+   block-max-content-width), which has to MEASURE the same ones.
+
+   The drift this closes, measured: a `<ul>` inside a shrink-to-fit
+   `<td>` was MEASURED from its bare `<li>` text (`one` -> 21px) and then
+   LAID OUT with the `\u2022 ` marker with-implicit-list-markers adds
+   (`\u2022 one` -> 35px), so every item was 14px wider than the box it
+   had just been given and wrapped to two lines -- a cell reporting the
+   browser's exact width and twice its height."
+  [theme node]
+  (splice-display-contents
+   theme
+   (with-nested-list-margins
+    node
+    (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node)))))))
+
 (declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited
-         inline-max-content-width font-metrics measure-child)
+         inline-max-content-width block-max-content-width intrinsic-flow-children
+         font-metrics measure-child)
 
 (defn- atomic-intrinsic-width
   "The available width an atomic inline is laid out at — its intrinsic
@@ -4024,7 +4073,9 @@
                  (* (count label) char-w))))
 
           :else
-          (let [cs (:children child)]
+          ;; An out-of-flow child contributes nothing to an intrinsic width
+          ;; -- see intrinsic-flow-children, which measures the case.
+          (let [cs (intrinsic-flow-children theme (laid-out-children theme child))]
             (cond
               (and (= 1 (count cs)) (string? (first cs)))
               (flex-item-natural-text-width theme opacity inherited st (first cs))
@@ -4033,31 +4084,47 @@
               ;; </button>` fell through to the container width, so a button
               ;; with any markup in its label swallowed the whole line and
               ;; pushed the text after it onto the next one.
+              ;;
+              ;; The inset added here is content-inset, not this fn's own
+              ;; inset-x, only because that is what inline-max-content-width
+              ;; used to add for itself -- kept verbatim so moving the inset
+              ;; out of that function changes no number. The two disagree
+              ;; about per-side padding and about a non-border-box border;
+              ;; reconciling them is a separate change with its own
+              ;; measurements.
               (and (seq cs) (every? #(inline-flow-candidate? theme %) cs))
-              (inline-max-content-width theme content-w opacity inherited st cs)
+              (+ (inline-max-content-width theme content-w opacity inherited st cs)
+                 (* 2 (content-inset st)))
 
-              ;; the same two rules flex-item-main-width already applies --
-              ;; an empty box is its own insets, and a single element child
-              ;; is measured rather than given up on. Without them an
-              ;; `inline-block` wrapping a block took the whole container
+              ;; an empty box is its own insets -- without this an
+              ;; `inline-block` wrapping nothing took the whole container
               ;; width and dropped out of its line.
               (empty? cs) inset-x
 
-              (and (= 1 (count cs)) (map? (first cs)))
-              (+ (:w (:box (measure-child theme content-w opacity inherited (first cs) true)))
-                 inset-x)
-
-              :else content-w)))]
+              ;; anything else is a block container: its widest child, not
+              ;; whatever box happens to contain IT (see
+              ;; block-max-content-width, which subsumes the
+              ;; single-element-child rule this used to spell separately
+              ;; and adds the child margins that rule dropped).
+              :else
+              (+ (block-max-content-width theme content-w opacity inherited st cs)
+                 inset-x))))]
     (max 0 (min content-w natural))))
 
 (defn- inline-max-content-width
-  "The width an inline run would occupy on ONE line -- real CSS's
-   max-content size for a box whose children are all inline-level.
+  "The width the RUN itself would occupy on ONE line -- real CSS's
+   max-content size for a sequence of inline-level children.
 
    Reuses the inline machinery rather than approximating: the same
    fragments, the same tokenizer (so whitespace collapses exactly as it
    will when the run is really laid out), and the same per-character
-   measurement the line breaker uses."
+   measurement the line breaker uses.
+
+   The containing box's own padding/border is NOT included: this measures
+   a run, and a run has no insets. Every caller adds the inset it is
+   responsible for -- which is what lets block-max-content-width compare
+   an inline run against a block child's width without one of them
+   carrying the parent's padding twice."
   [theme content-w opacity inherited st children]
   (let [inherited (inline-inherited inherited st)
         tokens (inline-tokens (:fragments (inline-fragments theme inherited opacity content-w children)))
@@ -4074,8 +4141,96 @@
                 (+ total
                    (w-of (:text t) (:style t))
                    (if (:space-before? t) (w-of " " (or (:space-style t) (:style t))) 0))))
-            (* 2 (content-inset st))
+            0
             tokens)))
+
+(defn- intrinsic-flow-children
+  "The children that take part in a box's INTRINSIC (max-content) width.
+
+   Real CSS excludes out-of-flow boxes from intrinsic sizing outright: an
+   `absolute`/`fixed` child is sized and placed against a containing block
+   that is not this box, so it can neither widen it nor narrow it.
+
+   Measured in Brave, in both directions, on a page shaped like the
+   conformance corpus's own:
+
+   - `<td style=\"position:relative\"><span style=\"position:absolute;
+     left:20px\">abs</span>cell</td>` reports `td` 30px wide -- `cell`
+     plus the UA cell padding, i.e. exactly what the cell holds once the
+     span is disregarded -- where this engine reported 791 and blew the
+     whole table out to the full 800px page width. The span is correctly
+     NOT an inline-flow candidate (inline-level-element? requires an
+     in-flow position), so the cell's children were neither all-inline nor
+     a single element, and the intrinsic width fell through to
+     `content-w`. Dropping the span puts the cell back on the ordinary
+     single-text-child path.
+   - `<td><div style=\"position:fixed;left:0\">fixedcell</div>c</td>`
+     reports `td` 9px wide for the same reason: `fixed` is out of flow
+     too, and the 63px-wide fixed box contributes nothing.
+
+   Floats deliberately stay: a float DOES contribute to its container's
+   max-content width in real CSS, and layout-children-block already places
+   it inside this box."
+  [theme children]
+  (if (some #(absolute? theme %) children)
+    (vec (remove #(absolute? theme %) children))
+    children))
+
+(defn- block-max-content-width
+  "The max-content width of a box's CONTENT when its children are not all
+   inline-level: the WIDEST of their own max-content contributions.
+   Excludes the box's own padding/border -- every caller adds the inset it
+   is responsible for.
+
+   Real CSS's intrinsic sizing for a block container is `max` over its
+   in-flow children, where each maximal run of adjacent inline-level
+   children forms one anonymous block whose max-content is the whole run
+   on a single line. That is exactly the grouping here: an inline run is
+   measured with inline-max-content-width, a block child is measured at
+   its own shrink-to-fit width PLUS its horizontal margins (real CSS
+   counts a child's margins in its contribution).
+
+   What this replaces is a `content-w` fallback -- 'I cannot tell, so take
+   the whole container' -- which was the single largest numeric error left
+   in the conformance corpus: any table cell, flex item or inline-block
+   holding more than one element child swallowed its container. Measured
+   in Brave against this engine before the change:
+
+   | markup (inside a `<td>`, at 800px)     | Brave | engine |
+   |----------------------------------------|-------|--------|
+   | `<div>alpha</div><div>bb</div>`        |    37 |    ~782 |
+   | `lead<div>bb</div>`                    |    30 |    ~782 |
+   | `<ul><li>one</li><li>two</li></ul>`    |    63 |     771 |
+   | `<blockquote>q</blockquote>`           |    89 |       9 |
+
+   The last row is the margins: `<blockquote>`'s UA `margin: 1em 40px`
+   puts 80px around a 7px word, and the single-element rule this
+   generalises measured the border box alone. A flex item is the same
+   mechanism seen from the other side -- `<div><div>alpha</div>
+   <div>bb</div></div>` as a flex item is 35px in Brave, its widest
+   child, not the container.
+
+   SCOPE CUT, stated where it is made: an inline run is measured as its
+   own children rather than as a real anonymous block box, so a run that
+   contains something with an intrinsic size the inline path does not
+   model reports what that path reports. And `min-content` is not
+   computed at all -- this engine has one intrinsic width, the
+   max-content one, and a box that would need to be narrower than its
+   content in a real browser is not narrowed here."
+  [theme content-w opacity inherited st children]
+  (let [inline? #(boolean (inline-flow-candidate? theme %))
+        outer (fn [c]
+                (let [w (:w (:box (measure-child theme content-w opacity inherited c true)))]
+                  (if (map? c)
+                    (let [cst (node-style c theme)]
+                      (+ w (margin-side cst :left) (margin-side cst :right)))
+                    w)))]
+    (->> (partition-by inline? children)
+         (map (fn [run]
+                (if (inline? (first run))
+                  (inline-max-content-width theme content-w opacity inherited st (vec run))
+                  (apply max 0 (map outer run)))))
+         (apply max 0))))
 
 (defn- flex-item-main-width
   "Real CSS flex-basis:auto (the default) falls back to an item's own
@@ -4086,21 +4241,24 @@
    confirmed via direct REPL reproduction: two unstyled <button> flex
    children each rendered at the FULL flex container width instead of
    shrink-wrapping to their own short labels, ballooning the container
-   itself to fit them). Only handles the single-text-child leaf shape
-   (see flex-item-natural-text-width) -- a flex item with more complex
-   nested content (multiple children, or a single child that is itself
-   an element) falls back to the pre-existing fill-available-width
-   behavior, an honest, disclosed scope-cut rather than a half-correct
-   guess. Clamps the natural width to both min/max-width AND whatever
-   main-axis space is actually available, so an overly-wide label still
-   shrinks to fit rather than overflowing un-shrunk. Deliberately does
-   not implement flex-grow/flex-shrink/an explicit flex-basis -- with the
-   real default flex-grow:0, an item simply stays at this natural size
+   itself to fit them). Clamps the natural width to both min/max-width AND
+   whatever main-axis space is actually available, so an overly-wide label
+   still shrinks to fit rather than overflowing un-shrunk. Deliberately
+   does not implement flex-grow/flex-shrink/an explicit flex-basis -- with
+   the real default flex-grow:0, an item simply stays at this natural size
    regardless (leftover main-axis space is real CSS's own default
    behavior too, governed by justify-content), an honest, separate
-   scope-cut."
+   scope-cut.
+
+   Despite the name this is every shrink-to-fit width in the file: a flex
+   item, a grid item, a table cell (assign-table-cells' `:natural`) and an
+   inline-block all reach it through measure-child. The `fill the
+   container when the shape is unfamiliar` fallback it used to end with is
+   gone -- see block-max-content-width, which answers for a block
+   container, and intrinsic-flow-children, which drops the out-of-flow
+   children that were never the box's to measure."
   [theme content-w opacity inherited child st]
-  (let [cs (:children child)
+  (let [cs (intrinsic-flow-children theme (laid-out-children theme child))
         natural (cond
                   ;; A replaced element or form control has an INTRINSIC
                   ;; size wherever it appears -- as a flex item, a grid
@@ -4122,25 +4280,25 @@
                   ;; measured, a two-cell table with one `<b>` in it filled
                   ;; 800px where the browser shrink-wraps to 72.
                   (and (seq cs) (every? #(inline-flow-candidate? theme %) cs))
-                  (inline-max-content-width theme content-w opacity inherited st cs)
+                  (+ (inline-max-content-width theme content-w opacity inherited st cs)
+                     (intrinsic-inset-x st))
 
                   ;; NOTHING inside: the box is its own insets, not the
                   ;; whole container. An empty `<td>` took the container
                   ;; width and swallowed its table -- the browser gives it
                   ;; 2px, this engine gave it 782.
                   (empty? cs)
-                  (* 2 (content-inset st))
+                  (intrinsic-inset-x st)
 
-                  ;; A single ELEMENT child: measure IT, rather than giving
-                  ;; up. A `<td>` holding a nested `<table>` fell back to
-                  ;; the container width for want of a rule, so the outer
-                  ;; table filled 800px where the browser shrink-wraps to
-                  ;; 86 around the nested one.
-                  (and (= 1 (count cs)) (map? (first cs)))
-                  (+ (:w (:box (measure-child theme content-w opacity inherited (first cs) true)))
-                     (* 2 (content-inset st)))
-
-                  :else content-w)]
+                  ;; A BLOCK container: the widest of its children's own
+                  ;; max-content contributions. This subsumes the single-
+                  ;; element-child rule that used to sit here (a `<td>`
+                  ;; holding a nested `<table>` shrink-wraps to 86, not to
+                  ;; 800) and adds the child margins that rule dropped --
+                  ;; see block-max-content-width for the measurements.
+                  :else
+                  (+ (block-max-content-width theme content-w opacity inherited st cs)
+                     (intrinsic-inset-x st)))]
     (min content-w (clamp-width st natural))))
 
 (defn- flex-item-base-size
@@ -7468,13 +7626,57 @@
   ;; ancestor establishes (see layout-inline-run). Everything else about
   ;; the placement is identical, so the containing block is simply read per
   ;; entry rather than taken from the arguments.
+  ;;
+  ;; ---- `position: fixed` is anchored to the VIEWPORT ----
+  ;;
+  ;; Real CSS gives a fixed box the viewport as its containing block, and
+  ;; no ancestor can take that away: an offsetting ancestor must not move
+  ;; it, a `position: relative` ancestor must not capture it, and a `%`
+  ;; offset resolves against the viewport's size rather than the
+  ;; ancestor's. This engine used to run `fixed` through the ancestor
+  ;; exactly like `absolute`, which is why a fixed header inside any
+  ;; indented wrapper came out indented too.
+  ;;
+  ;; Measured in Brave, on a probe page shaped like the conformance
+  ;; corpus's own (800px cases, 756px viewport):
+  ;;
+  ;;   ancestor at x=120, child `left: 0`    -> x=0    (was 120 here)
+  ;;   ancestor at x=120, child `left: 10px` -> x=10   (was 130 here)
+  ;;   200px ancestor,    child `left: 50%`  -> x=378  = 756/2, not 100
+  ;;   200px ancestor,    child `right: 0`   -> x=749  = 756-7, not 193
+  ;;
+  ;; and a fixed box with NO offset on an axis stays at its STATIC
+  ;; position on that axis (measured x=40 inside a `margin-left: 40px`
+  ;; container) -- which is why only the offset branches below read the
+  ;; viewport at all, and why an offsetless fixed box is unaffected by
+  ;; this.
+  ;;
+  ;; The viewport is what `draw-ops` was told the root box is (`:x`/`:y`/
+  ;; `:width`, plus an OPTIONAL `:height`). Two scope cuts, both stated
+  ;; here rather than tuned away:
+  ;;
+  ;; - This is a containing block, not a fixed-positioning model. There
+  ;;   is no scroll position in this engine, so a fixed box does not stay
+  ;;   put while its page scrolls -- it is placed against a viewport that
+  ;;   never moves. That is also why the conformance corpus cannot score
+  ;;   the block axis of a fixed box at all: its cases share one long
+  ;;   scrolling page, so the browser's own answer for a fixed box's `y`
+  ;;   relative to a case is `-(that case's distance from the viewport
+  ;;   top)` -- measured at -47.84 for `:position/fixed-leaves-flow`, and
+  ;;   a different number as soon as a case is added above it.
+  ;; - With no `:height` given there is no viewport height for `bottom`
+  ;;   or a `%` block offset to resolve against, so those two keep
+  ;;   resolving against the ancestor exactly as before rather than
+  ;;   against a number nobody supplied. A host that knows its viewport
+  ;;   height passes `:height` and gets the real rule.
   [theme pad-x pad-y pad-w pad-h opacity inherited children]
   (let [placed (mapv (fn [{child :node content-x :x content-y :y cb :cb}]
                         (let [cst (node-style child theme)
-                              pad-x (:x cb pad-x)
-                              pad-y (:y cb pad-y)
-                              pad-w (:w cb pad-w)
-                              pad-h (:h cb pad-h)
+                              vp (when (= "fixed" (:position cst)) (:viewport theme))
+                              pad-x (if vp (:x vp) (:x cb pad-x))
+                              pad-y (if vp (:y vp) (:y cb pad-y))
+                              pad-w (if vp (:w vp) (:w cb pad-w))
+                              pad-h (if (:h vp) (:h vp) (:h cb pad-h))
                               ;; An absolutely positioned box with
                               ;; `width: auto` is SHRINK-TO-FIT, not
                               ;; fill-the-container: real CSS sizes it to
@@ -8081,11 +8283,7 @@
                                 :text-overflow text-overflow
                                 :overflow-wrap overflow-wrap)
                tag (:tag node)
-               children (splice-display-contents
-                         theme
-                         (with-nested-list-margins
-                          node
-                          (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))))]
+               children (laid-out-children theme node)]
            (cond
              ;; `display: contents` generates NO box -- see
              ;; splice-display-contents, which has already promoted this
@@ -8204,9 +8402,23 @@
    already threads its own `theme` argument straight into this same
    `opts` map -- can supply `:measure-text` to make this engine's
    word-wrap decisions agree with how the text will actually be painted,
-   with no other call-site changes needed anywhere in that chain."
+   with no other call-site changes needed anywhere in that chain.
+
+   `opts` also accepts an OPTIONAL `:height` -- the viewport's height.
+   Nothing about normal flow needs it (a document is as tall as its
+   content), and the one thing that does is `position: fixed`: a fixed
+   box's containing block is the viewport, so `bottom` and a `%` block
+   offset have nothing to resolve against without it. The viewport itself
+   is assembled here from `:x`/`:y`/`:width`/`:height` and handed to
+   layout-absolute-children on the theme -- see its own comment for what
+   is and is not modelled, and note that a host with no `:height` loses
+   only those two properties on fixed boxes, nothing else."
   ([tree] (draw-ops tree {}))
   ([tree opts]
-   (let [theme (merge default-theme (:theme opts))
+   (let [x (or (:x opts) 0)
+         y (or (:y opts) 0)
+         width (or (:width opts) 320)
+         theme (assoc (merge default-theme (:theme opts))
+                      :viewport {:x x :y y :w width :h (:height opts)})
          inherited {:color (:fg theme) :font-size (:font-size theme)}]
-     (:draw (layout-node theme (or (:x opts) 0) (or (:y opts) 0) (or (:width opts) 320) 1.0 inherited tree)))))
+     (:draw (layout-node theme x y width 1.0 inherited tree)))))
