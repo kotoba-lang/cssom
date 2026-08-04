@@ -3471,9 +3471,16 @@
         ops (layout/draw-ops tree {:width 480})
         div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
     (is (= "90%" (get-in doc [:nodes div :attrs :style/min-width])))
-    ;; Same permissive digit-run parse-int as :width's own precedent:
-    ;; "90%" -> 90, clamping the box up from its declared 50px width.
-    (is (= 90 (:w div-op)))))
+    ;; 90% of the 480px containing block = 432, clamping the box up from its
+    ;; declared 50px width.
+    ;;
+    ;; This assertion used to read 90, pinning the engine's old
+    ;; approximation: parse-int's leading-digit run turned "90%" into 90
+    ;; PIXELS. The test's subject is that a percentage does not CRASH
+    ;; resolve-width, and that still holds; the number changed because
+    ;; percentages now resolve against the containing block, which is what
+    ;; the browser does (measured across nine corpus cases).
+    (is (= 432 (:w div-op)))))
 
 (deftest explicit-percentage-max-width-does-not-crash-resolve-width
   (let [[div doc] (dom/create-element dom/empty-document :div)
@@ -3486,8 +3493,10 @@
         ops (layout/draw-ops tree {:width 480})
         div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
     (is (= "20%" (get-in doc [:nodes div :attrs :style/max-width])))
-    ;; "20%" -> 20, clamping the box down from its declared 500px width.
-    (is (= 20 (:w div-op)))))
+    ;; 20% of the 480px containing block = 96, clamping the box down from
+    ;; its declared 500px width. Was 20, for the same reason as the
+    ;; min-width test above.
+    (is (= 96 (:w div-op)))))
 
 ;; ---- min-height/max-height (previously entirely unimplemented -- unlike
 ;;      min-width/max-width, which resolve-width already clamped, height
@@ -3566,10 +3575,19 @@
         ops (layout/draw-ops tree {:width 480})
         div-op (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)]
     (is (= "10%" (get-in doc [:nodes div :attrs :style/left])))
-    ;; root :main's own default padding (4, its content inset) + the
-    ;; permissive digit-run parse of "10%"/"5%" -> 10/5.
-    (is (= (+ 4 10) (:x div-op)))
-    (is (= (+ 4 5) (:y div-op)))))
+    ;; root :main's own default padding (4, its content inset) + a REAL
+    ;; percentage: 10% of the 472px content width = 47.
+    ;;
+    ;; Both numbers used to be 14 and 9, pinning the engine's old
+    ;; approximation where parse-int's digit run made "10%"/"5%" into
+    ;; 10px/5px. The test's subject -- that a percentage offset does not
+    ;; crash -- is unchanged.
+    (is (= (+ 4 47) (:x div-op)))
+    ;; `top: 5%` resolves against the containing block's HEIGHT, which is
+    ;; auto here. Real CSS treats a percentage against an indefinite basis
+    ;; as auto, so the offset is 0 and the box stays at the content origin
+    ;; -- it does not fall back to 5px.
+    (is (= 4 (:y div-op)))))
 
 ;; ---- position:absolute right/bottom (layout-absolute-children previously
 ;;      read ONLY left/top; right/bottom -- extremely common for
