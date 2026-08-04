@@ -1686,4 +1686,76 @@
  {:id :stacking/table-cell-content-over-row-background
   :group :stacking
   :html "<table style=\"width: 200px\"><tr style=\"background: #eee\"><td>cell one</td><td>cell two</td></tr></table>"}
+
+ ;; ---- CSS transforms, and other properties with no case at all ---------
+ ;;
+ ;; `transform` appears nowhere in this engine (the only match in the
+ ;; source is `text-transform`, an unrelated property) and nowhere in this
+ ;; corpus, so the size of the gap was unknown. A transform changes what
+ ;; `getBoundingClientRect` reports, so it IS measurable on the geometry
+ ;; axis -- these cases are here to find out how much is missing, and are
+ ;; expected to fail until it is implemented.
+
+ {:id :transform/translate-moves-the-box
+  :group :transform
+  :html "<div style=\"width: 400px; height: 40px\"><div style=\"width: 100px; height: 20px; transform: translate(30px, 10px)\">moved</div></div>"}
+
+ {:id :transform/translate-does-not-affect-siblings
+  :group :transform
+  ;; A transform is a paint-time operation: the following sibling stays
+  ;; where the untransformed box left it.
+  :html "<div style=\"width: 400px\"><div style=\"height: 20px; transform: translateX(50px)\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :transform/scale-changes-the-reported-box
+  :group :transform
+  ;; getBoundingClientRect reports the VISUAL box, so a 2x scale doubles
+  ;; the reported width and height around the centre.
+  :html "<div style=\"width: 400px; height: 60px\"><div style=\"width: 100px; height: 20px; transform: scale(2)\">big</div></div>"}
+
+ {:id :transform/percentage-translate-is-of-the-box
+  :group :transform
+  ;; Unlike almost every other percentage in CSS, a translate percentage
+  ;; resolves against the ELEMENT's own size, not the containing block.
+  :html "<div style=\"width: 400px; height: 40px\"><div style=\"width: 100px; height: 20px; transform: translateX(50%)\">half</div></div>"}
+
+ {:id :transform/rotate-grows-the-reported-box
+  :group :transform
+  ;; A 45-degree rotation of a 100x20 box reports a larger axis-aligned
+  ;; bounding box than the box itself.
+  :html "<div style=\"width: 400px; height: 120px\"><div style=\"width: 100px; height: 20px; transform: rotate(45deg)\">turn</div></div>"}
+
+ {:id :transform/on-an-inline-block
+  :group :transform
+  :html "<p style=\"width: 400px\">before <span style=\"display: inline-block; width: 60px; transform: translateY(-4px)\">up</span> after</p>"}
+
+ ;; Properties that likewise have no case. Each is common enough in real
+ ;; pages that not knowing whether this engine handles it is itself a gap.
+
+ {:id :sizing/aspect-ratio-derives-the-height
+  :group :sizing
+  :html "<div style=\"width: 400px\"><div style=\"width: 120px; aspect-ratio: 3 / 1; background: #eee\">box</div></div>"}
+
+ {:id :sizing/min-height-wins-over-content
+  :group :sizing
+  :html "<div style=\"width: 400px\"><div style=\"min-height: 60px\">short</div></div>"}
+
+ {:id :overflow/text-overflow-ellipsis-keeps-one-line
+  :group :overflow
+  ;; LINE-AXIS BLIND, and in the opposite direction from generated content:
+  ;; the browser keeps the whole string in the DOM and paints the ellipsis
+  ;; at paint time, so the oracle's Range reads "a very long label indeed";
+  ;; this engine has to truncate to emit a text op at all, so it reports
+  ;; "a very lon…". Both are right for what they are, and comparing them
+  ;; compares a DOM to a rendering. Geometry and paint order still score.
+  :oracle/blind true
+  :html "<div style=\"width: 90px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis\">a very long label indeed</div>"}
+
+ {:id :text/white-space-pre-wrap-keeps-runs
+  :group :text
+  :html "<div style=\"width: 200px; white-space: pre-wrap\">two  spaces\nand a newline that wraps eventually</div>"}
+
+ {:id :text/visibility-hidden-keeps-the-box
+  :group :text
+  ;; `visibility: hidden` still occupies space, unlike `display: none`.
+  :html "<div style=\"width: 400px\"><div style=\"visibility: hidden; height: 20px\">gone</div><div style=\"height: 20px\">after</div></div>"}
 ]
