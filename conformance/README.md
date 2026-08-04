@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 139/142 = 98%. Geometry: 424/493 element boxes (86%),
-118/150 cases with every box in agreement**, on a corpus of 150.
+**Line structure: 139/142 = 98%. Geometry: 438/493 element boxes (89%),
+120/150 cases with every box in agreement**, on a corpus of 150.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -286,6 +286,24 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round fifteen: a cell with nothing measurable in it
+
+Two clusters with enormous deltas (`td w +727`, `tbody w +759`, `tr w +759`)
+turned out to be one missing rule with two faces: a box whose content has no
+measurable natural width fell back to the CONTAINER width.
+
+- An **empty** `<td>` took 782px where the browser gives it 2 (its padding),
+  so a single empty cell made its table fill the page.
+- A `<td>` holding a **nested table** did the same, for want of a rule for
+  "a single element child": measure it.
+
+And measuring it exposed the follow-on: a TABLE must be laid out rather than
+recursed into, because it already shrink-wraps itself and recursing finds
+its rows while losing its border-spacing (37px against the browser's 41).
+
+The nested-table case now agrees with the browser on **all nine boxes**, the
+empty-cells case on all six, and the geometry axis went 86% → 89%.
 
 ### Round fourteen: vertical-align, on that foundation
 

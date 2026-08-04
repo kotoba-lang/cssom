@@ -3085,7 +3085,7 @@
   20)
 
 (declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited
-         inline-max-content-width font-metrics)
+         inline-max-content-width font-metrics measure-child)
 
 (defn- atomic-intrinsic-width
   "The available width an atomic inline is laid out at — its intrinsic
@@ -3258,6 +3258,22 @@
                   (and (seq cs) (every? #(inline-flow-candidate? theme %) cs))
                   (inline-max-content-width theme content-w opacity inherited st cs)
 
+                  ;; NOTHING inside: the box is its own insets, not the
+                  ;; whole container. An empty `<td>` took the container
+                  ;; width and swallowed its table -- the browser gives it
+                  ;; 2px, this engine gave it 782.
+                  (empty? cs)
+                  (* 2 (content-inset st))
+
+                  ;; A single ELEMENT child: measure IT, rather than giving
+                  ;; up. A `<td>` holding a nested `<table>` fell back to
+                  ;; the container width for want of a rule, so the outer
+                  ;; table filled 800px where the browser shrink-wraps to
+                  ;; 86 around the nested one.
+                  (and (= 1 (count cs)) (map? (first cs)))
+                  (+ (:w (:box (measure-child theme content-w opacity inherited (first cs) true)))
+                     (* 2 (content-inset st)))
+
                   :else content-w)]
     (min content-w (clamp-width st natural))))
 
@@ -3266,6 +3282,13 @@
   (let [child (if (map? child)
                 (assoc-in child [:attrs :kotoba/independent-fc] true)
                 child)
+        ;; A TABLE already shrink-wraps itself (layout-table takes the
+        ;; smaller of the available width and its own columns plus
+        ;; border-spacing), so recursing into it for a "natural" width finds
+        ;; its rows and loses the spacing: a nested table came out 37px
+        ;; where the browser reports 41. Lay it out and read its box.
+        shrink-to-fit? (and shrink-to-fit?
+                            (not (and (map? child) (= :table (:tag child)))))
         child-avail (if (map? child)
                        (let [st (node-style child theme)]
                          (if (and shrink-to-fit? (not (:width st)))

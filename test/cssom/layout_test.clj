@@ -5568,3 +5568,31 @@
     (is (> (y-of "low") (y-of "H"))
         "...and the subscript below it")
     (is (< (y-of "high") (y-of "low")))))
+
+(deftest an-empty-cell-does-not-swallow-its-table
+  ;; A box with NO children took the whole container width for want of a
+  ;; natural-width rule, so one empty `<td>` made its table fill the page:
+  ;; the browser gives that cell 2px (its padding), this engine gave it 782.
+  (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {}] [:td {} "c"]]])
+        cells (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) ops)
+        table (first (filter #(and (= :node (:draw/op %)) (= :table (:tag %))) ops))]
+    (is (< (:w (second cells)) 8)
+        "the empty cell is its own padding wide, nothing more")
+    (is (< (:w table) 60)
+        "so the table shrink-wraps to its real content")))
+
+(deftest a-nested-table-keeps-its-own-width
+  ;; A `<td>` holding a nested `<table>` also fell back to the container
+  ;; width. Measuring the cell's single element child fixes that -- but a
+  ;; TABLE must be laid out rather than recursed into, because it already
+  ;; shrink-wraps itself and recursion loses its border-spacing (37px
+  ;; against the browser's 41).
+  (let [ops (table-ops [[:tr {}
+                         [:td {} [:table {} [:tr {} [:td {} "inner"]]]]
+                         [:td {} "outer"]]])
+        tables (filterv #(and (= :node (:draw/op %)) (= :table (:tag %))) ops)
+        [outer inner] tables]
+    (is (< (:w outer) 200) "the outer table shrink-wraps")
+    (is (< (:w inner) (:w outer)))
+    (is (> (:w inner) 20)
+        "and the inner one keeps its own columns plus its border-spacing")))
