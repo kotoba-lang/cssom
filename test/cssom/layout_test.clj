@@ -5710,6 +5710,101 @@
         "same for a non-rendered tag: <script> source never reaches layout
          and never breaks the line around it")))
 
+;; ---- position: relative on an INLINE box (it used to be BLOCKIFIED:
+;;      inline-level-element? required `position: static`, so the element
+;;      left the inline path entirely and the whole line fell apart into
+;;      full-width block rows -- far worse than the missing offset the
+;;      exclusion was written to avoid) ----
+
+(deftest a-relative-inline-stays-on-the-line-with-the-text-around-it
+  ;; Measured in Brave: `<p>text <span style="position: relative">anchor
+  ;; </span> tail</p>` is ONE 20px line with the span at (35,2). This
+  ;; engine made the paragraph 60px tall with the span on a row of its
+  ;; own, 800px wide.
+  ;;
+  ;; Written as a comparison against the identical markup with a STATIC
+  ;; span: with no offsets declared, `position: relative` changes nothing
+  ;; a reader can see, and that is the whole assertion.
+  (let [rel (text-draw-ops (inline-ops ["text " [:span {:position "relative"} "anchor"] " tail"]))
+        static (text-draw-ops (inline-ops ["text " [:span {} "anchor"] " tail"]))]
+    (is (= ["text" "anchor" "tail"] (mapv :text rel)))
+    (is (apply = (mapv :y rel)) "one shared line box")
+    (is (= (mapv (juxt :text :x :y) static) (mapv (juxt :text :x :y) rel))
+        "an offsetless relative inline lays out exactly like a static one")))
+
+(deftest a-relative-inlines-offset-moves-it-and-nothing-else
+  ;; Real CSS: relative positioning affects PAINTING only. The offset is
+  ;; accumulated onto the owner stack in inline-fragments and added at
+  ;; paint time, so it never reaches the line breaker -- the words after
+  ;; the span therefore do not move, exactly as layout-children-block
+  ;; already arranges for a relative BLOCK row.
+  (let [ops (inline-ops ["text " [:span {:position "relative" :left "5" :top "3"} "anchor"] " tail"])
+        t (text-draw-ops ops)
+        base (text-draw-ops (inline-ops ["text " [:span {} "anchor"] " tail"]))
+        span-op (some #(and (= :node (:draw/op %)) (= :span (:tag %)) %) ops)
+        base-span (some #(and (= :node (:draw/op %)) (= :span (:tag %)) %)
+                        (inline-ops ["text " [:span {} "anchor"] " tail"]))]
+    (is (= [(+ 5 (:x (nth base 1))) (+ 3 (:y (nth base 1)))]
+           [(:x (nth t 1)) (:y (nth t 1))])
+        "the span's own text moves by exactly its declared offset")
+    (is (= [(+ 5 (:x base-span)) (+ 3 (:y base-span))] [(:x span-op) (:y span-op)])
+        "and so does the box a click/hit-test sees")
+    (is (= [((juxt :x :y) (nth base 0)) ((juxt :x :y) (nth base 2))]
+           [((juxt :x :y) (nth t 0)) ((juxt :x :y) (nth t 2))])
+        "the text on either side of it does not move at all")))
+
+(deftest a-relative-inline-is-the-containing-block-of-its-absolute-child
+  ;; The reason anyone writes `position: relative` in the first place.
+  ;; Measured in Brave: `<p>text <span style="position: relative">anchor
+  ;; <span style="position: absolute; left: 0; top: 20px">pop</span>
+  ;; </span> tail</p>` puts the inner span at (35,22) -- 35 being where
+  ;; the RELATIVE span starts in the line, not the paragraph's content
+  ;; edge, which is where this engine put it (x=0).
+  ;;
+  ;; The absolute child is written as an offset FROM the anchor's own box
+  ;; rather than as fixed numbers, because the anchor's x is the measured
+  ;; width of the text before it and this test is about the anchoring.
+  (let [ops (inline-ops ["text " [:span {:position "relative"}
+                                  "anchor"
+                                  [:span {:position "absolute" :left "0" :top "20"} "pop"]]
+                         " tail"])
+        anchor (some #(and (= :node (:draw/op %)) (= :span (:tag %))
+                           (= "relative" (:position %)) %)
+                     ops)
+        pop-op (some #(and (= :node (:draw/op %)) (= :span (:tag %))
+                           (= "absolute" (:position %)) %)
+                     ops)
+        t (text-draw-ops ops)]
+    (is (= ["text" "anchor" "tail" "pop"] (mapv :text t))
+        "the absolute child contributes nothing to the LINE -- but its
+         ancestor still flows, which it could not do while an out-of-flow
+         child counted as a block child (split-block-in-inline) or made
+         its parent unflowable (inline-flow-candidate?). It paints last,
+         after the in-flow content, which is where an out-of-flow box with
+         no negative z-index belongs")
+    (is (= (:x anchor) (:x pop-op))
+        "left: 0 resolves against the relative INLINE's own box -- the
+         paragraph's content edge, where this used to land, is 44px to
+         the left of it here")
+    (is (= (+ 20 (:y anchor)) (:y pop-op))
+        "and top: 20 against the same box's top edge")
+    (is (apply = (mapv :y (remove #(= "pop" (:text %)) t)))
+        "the three in-flow words still share one line")))
+
+(deftest nested-relative-inlines-accumulate-their-offsets
+  ;; A relative box moves everything inside it, INCLUDING another relative
+  ;; box, whose own offset is then measured from there.
+  (let [ops (inline-ops ["a "
+                         [:span {:position "relative" :left "10"}
+                          "outer "
+                          [:span {:position "relative" :left "4"} "inner"]]])
+        t (text-draw-ops ops)
+        base (text-draw-ops (inline-ops ["a " [:span {} "outer " [:span {} "inner"]]]))]
+    (is (= (+ 10 (:x (nth base 1))) (:x (nth t 1)))
+        "the outer span's own text moves by its own offset")
+    (is (= (+ 14 (:x (nth base 2))) (:x (nth t 2)))
+        "the inner one moves by both")))
+
 (deftest an-img-flows-inline-at-its-presentational-size
   ;; <img width/height> are presentational hints real UA stylesheets map
   ;; onto CSS width/height. Without that mapping the image resolved to the
