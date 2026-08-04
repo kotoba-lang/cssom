@@ -1378,12 +1378,17 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         button-rect (first (filter #(= :button (:tag %)) ops))]
-    (is (= 216 (:w button-rect))
+    (is (= 200 (:w button-rect))
         "an explicit :width must win outright, exactly like real CSS
-         flex-basis:auto falling back to an explicit width first. 200 of
-         CONTENT plus the button's own UA box (6px padding each side, 2px
-         border each side) is a 216px border box -- content-box sizing,
-         and the UA padding/border a browser gives a <button>")))
+         flex-basis:auto falling back to an explicit width first -- and for
+         a <button> the width IS the border box, because the UA stylesheet
+         gives a button `box-sizing: border-box`. This used to assert 216
+         (200 of content plus the UA 6px padding and 2px border per side),
+         which is what content-box sizing would give. Measured in Brave
+         2026-08-04 on this exact markup: 200. The same reading gives
+         `select { width: 200px }` a 200px border box, while an <input>
+         (208) and a <textarea> (206) stay content-box -- see
+         ua-control-box, where all four are recorded")))
 
 (deftest flex-item-shrink-to-fit-still-clamps-to-available-space
   (let [[div doc] (dom/create-element dom/empty-document :div)
@@ -6359,21 +6364,19 @@
     (is (= 80 (:x beside))
         "and the band the text avoids is the MARGIN box: 10 + 60 + 10")))
 
-(deftest a-float-narrows-its-own-containers-lines-and-not-a-descendants
-  ;; The documented boundary of this implementation, pinned so it is a
-  ;; recorded scope-cut rather than a silent wrong answer. The float band
-  ;; lives in layout-children-block and is consulted by the line boxes of
-  ;; the float's OWN container; layout-node does not carry a float context
-  ;; down into a child, so a block DESCENDANT lays its lines out at full
-  ;; width. Brave narrows them: on this shape it puts the inner div's text
-  ;; at x=80 while leaving the inner div's BORDER box at x=0 spanning the
-  ;; full 300.
+(deftest a-float-narrows-a-descendant-blocks-lines-but-not-its-border-box
+  ;; This used to pin the OPPOSITE answer -- `(is (= 0 (:x beside)))`, with
+  ;; a comment calling it a recorded scope-cut ("layout-node does not carry
+  ;; a float context down into a child"). The cut is gone, and the reason it
+  ;; had to go is not that 80 is prettier than 0: on :page/media-object the
+  ;; conformance harness's line axis reported ONE line for a three-line
+  ;; page, because a line the engine left at x=0 is geometrically INSIDE the
+  ;; float's own box and so gets attributed to the float instead of to the
+  ;; paragraph it belongs to. A wrong wrap point was the visible half; a
+  ;; whole page's line structure disappearing was the other.
   ;;
-  ;; The border box -- the thing the conformance corpus's geometry axis
-  ;; actually compares -- is right either way, so what this costs is a wrap
-  ;; point: text long enough to break differs from the browser's. Fixing it
-  ;; means threading a float context through layout-node, which is a
-  ;; larger change than this one.
+  ;; The border box is unchanged and still full width -- which is what the
+  ;; browser reports too, and what the geometry axis compares.
   (let [ops (float-ops 300 [[:div {:float "left" :width 80 :height 40} "F"]
                             [:div {} "beside"]])
         [_root _f inner] (div-boxes ops)
@@ -6381,9 +6384,9 @@
     (is (= [0 0 300 20] inner)
         "the descendant's border box is full width and starts at the
          container's left edge -- which is what the browser reports too")
-    (is (= 0 (:x beside))
-        "but its LINE is not narrowed by the float, where a browser puts it
-         at 80. Known cut; see this test's comment")))
+    (is (= 80 (:x beside))
+        "and its LINE starts past the float's margin box, where Brave puts
+         it")))
 
 (deftest a-float-starts-at-the-flow-position-it-was-written-at
   ;; The v1 float implementation's own headline exclusion: every float was
@@ -7400,3 +7403,206 @@
   ;; bearing?).
   (is (some #(= :span (first %)) (metric-boxes [[:span {} ]]))
       "an empty inline element keeps a box of its own"))
+
+;; ---- <fieldset>/<legend>, the button label, and the anonymous block ----
+;;
+;; Every number below is a Brave 2026-08-04 reading at the conformance
+;; harness's own frame (width 800, monospace 14px/20px, html/body margin 0)
+;; UNLESS it is called out as this engine's own -- the two differ by exactly
+;; one border width wherever a bordered box's CONTENT is involved, because
+;; `inset-side` leaves the border out of a content-box element's content
+;; origin (see ua-control-box's closing paragraph). That residual is named,
+;; not tuned away.
+
+(defn- fieldset-boxes
+  "Every element box `specs` produce under a root <div>, at the zero-inset
+   theme, as `[tag x y w h]`."
+  [specs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build-inline-children doc root specs)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})]
+    (->> ops
+         (filter #(and (= :node (:draw/op %)) (not= :document (:tag %))))
+         (mapv (juxt :tag :x :y :w :h)))))
+
+(defn- box-for [boxes tag] (first (filter #(= tag (first %)) boxes)))
+
+(deftest a-fieldset-carries-its-ua-margin-border-and-em-padding
+  ;; Brave: `<fieldset><p>inside</p></fieldset>` is (2, 0, 796, 65.641) --
+  ;; 2px of inline margin, a 2px groove border, and 0.35em/0.75em/0.625em of
+  ;; padding, which at font-size 14 is 4.9/10.5/8.75. Before this the
+  ;; fieldset was (0, 0, 800, 54): no margin, no border, no padding at all.
+  (let [b (fieldset-boxes [[:fieldset {} [:p {} "inside"]]])
+        [_ x y w h] (box-for b :fieldset)]
+    (is (= [2 0 796] [x y w]))
+    (is (< (abs (- 65.641 h)) 0.05)
+        "2 border + 4.9 padding + 20 line + 14+14 collapsed-in margins +
+         8.75 padding + 2 border")))
+
+(deftest a-fieldsets-content-does-not-collapse-its-margins-out
+  ;; The fieldset's content box establishes an independent formatting
+  ;; context. Measured on the shape that isolates it from the border:
+  ;; `<fieldset style="border:0;padding:0;margin:0"><legend>G</legend>
+  ;; <p>inside</p></fieldset>` is 68px tall in Brave with the <p> at y=34 --
+  ;; its own 14px margin intact below the 20px legend band, and its bottom
+  ;; margin held inside. Both collapse out of an ordinary <div>. Written
+  ;; per-side here because this test builds its DOM directly rather than
+  ;; through the cascade, so a `padding`/`margin` SHORTHAND never reaches
+  ;; the per-side UA values layout reads.
+  (let [zero {:border-width 0 :border-style "none"
+              :padding-top 0 :padding-right 0 :padding-bottom 0 :padding-left 0
+              :margin-left 0 :margin-right 0}
+        b (fieldset-boxes [[:fieldset zero [:legend {} "G"] [:p {} "inside"]]])]
+    (is (= [:fieldset 0 0 800 68] (box-for b :fieldset)))
+    (is (= [:p 0 34 800 20] (box-for b :p))
+        "the <p>'s own top margin did NOT collapse through the fieldset's
+         top edge, and its bottom margin did not escape the bottom one")))
+
+(deftest a-legend-is-lifted-into-the-fieldsets-block-start-border-band
+  ;; Brave, at width 800/font 14: fieldset (2, 0, 796, 83.641), legend
+  ;; (14.5, 0, 39, 20), <p> (14.5, 38.891, 771, 20). The band is
+  ;; `max(border-top, legend height)` = 20, so everything after it starts
+  ;; 18px lower than it would with no legend, and the fieldset is 18px
+  ;; taller.
+  ;;
+  ;; The x/y below are 2px less than Brave's and the width 4px more, for the
+  ;; border reason ua-control-box's closing paragraph names. The WIDTHS are
+  ;; this engine's own 0.6-em text model rather than Brave's monospace face
+  ;; (this test builds its DOM directly, so there is no :measure-text host
+  ;; hook) -- what is being pinned is that the legend SHRINK-WRAPS at all,
+  ;; and by exactly its own 2px-per-side UA padding.
+  (let [b (fieldset-boxes [[:fieldset {} [:legend {} "Group"] [:p {} "inside"]]])
+        [_ _ _ _ fh] (box-for b :fieldset)
+        [_ lx ly lw lh] (box-for b :legend)
+        [_ _ py] (box-for b :p)]
+    (is (< (abs (- 83.641 fh)) 0.05) "18px taller than the same fieldset with no legend")
+    (is (= [0 20] [ly lh])
+        "the legend's border box sits at the fieldset's own top edge")
+    (is (= 44 lw) "5 characters of this engine's own text model plus 2px of
+                   UA padding per side -- shrink-wrapped, not the 775 a
+                   block child of this fieldset would get (Brave: 39)")
+    (is (= 12.5 lx) "the fieldset's content edge (Brave 14.5, one border out)")
+    (is (< (abs (- 36.9 py)) 0.05)
+        "band 20 + padding-top 4.9 + the <p>'s own 14px margin (Brave
+         38.891, again one border out)")))
+
+(deftest a-legend-that-is-not-the-rendered-one-stays-in-the-flow
+  ;; Four separate readings, each on its own shape:
+  ;;   - a SECOND legend is an ordinary full-width block in the content
+  ;;     (Brave: (14.5, 24.891, 771, 20), i.e. below the band)
+  ;;   - `display: none` leaves the fieldset exactly as tall as one with no
+  ;;     legend at all (65.641, not 83.641)
+  ;;   - `position: absolute` does the same, and the legend goes to its
+  ;;     static position inside the content
+  ;;   - a legend nested in a <div> is not the fieldset's legend
+  (let [two (fieldset-boxes [[:fieldset {} [:legend {} "One"] [:legend {} "Two"]
+                              [:p {} "inside"]]])
+        hidden (fieldset-boxes [[:fieldset {} [:legend {:display "none"} "G"]
+                                 [:p {} "inside"]]])
+        abs* (fieldset-boxes [[:fieldset {} [:legend {:position "absolute"} "G"]
+                               [:p {} "inside"]]])
+        nested (fieldset-boxes [[:fieldset {} [:div {} [:legend {} "G"]]
+                                 [:p {} "inside"]]])
+        ;; the lifted legend paints LAST (it sits on top of the border), so
+        ;; these are picked by geometry rather than by op order
+        legends (filter #(= :legend (first %)) two)
+        lifted (first (filter #(zero? (nth % 2)) legends))
+        in-flow (first (remove #(zero? (nth % 2)) legends))]
+    (is (= 2 (count legends)))
+    (is (= 28 (nth lifted 3))
+        "the lifted one shrink-wraps `One` (Brave 25)")
+    (is (< (abs (- 22.9 (nth in-flow 2))) 0.05)
+        "the second stays in the flow just below the band (Brave 24.891)")
+    (is (= 775.0 (nth in-flow 3))
+        "and is a full-width block there, not shrink-wrapped (Brave 771)")
+    (is (< (abs (- 65.65 (nth (box-for hidden :fieldset) 4))) 0.05)
+        "a display:none legend leaves no band")
+    (is (< (abs (- 65.65 (nth (box-for abs* :fieldset) 4))) 0.05)
+        "nor does an absolutely positioned one")
+    (is (< (abs (- 85.65 (nth (box-for nested :fieldset) 4))) 0.05)
+        "nor does one that is not a DIRECT child (Brave 85.641: the wrapper
+         div's own 20px line inside the ordinary 65.641 box)")))
+
+(deftest a-floated-legend-is-a-float-not-a-legend
+  ;; Brave: `<fieldset><legend style="float:left">Group</legend>
+  ;; <p>inside</p></fieldset>` is 65.641 tall -- no band -- with the legend
+  ;; at (14.5, 6.891) inside the content and the <p>'s text flowing beside
+  ;; it at x=53.5 instead of 14.5.
+  (let [b (fieldset-boxes [[:fieldset {} [:legend {:float "left"} "Group"]
+                            [:p {} "inside"]]])
+        [_ lx ly] (box-for b :legend)]
+    (is (< (abs (- 65.65 (nth (box-for b :fieldset) 4))) 0.05))
+    (is (= 12.5 lx))
+    (is (< (abs (- 4.9 ly)) 0.05)
+        "at the content top (Brave 6.891), not in the border band")))
+
+(deftest a-buttons-label-counts-its-markup-and-stays-on-one-line
+  ;; `<button>save <b>now</b></button>` used to be measured as `save ` --
+  ;; real-text-child sees direct text children only -- so the button was
+  ;; 52px wide where Brave says 74.531, and it WRAPPED ITS OWN LABEL: two
+  ;; lines inside the control, 34px tall, with the first line's text painted
+  ;; above the control's own box. The conformance harness attributes a text
+  ;; op to the atomic inline whose box contains it, so the label leaked onto
+  ;; the surrounding line (`:form/button-with-nested-inline` wanted
+  ;; ["tail"] and got ["save tail"]).
+  (let [spec [[:p {} [:button {} "save " [:b {} "now"]] " tail"]]
+        b (fieldset-boxes spec)
+        [_ bx by bw bh] (box-for b :button)
+        texts (let [[root doc] (dom/create-element dom/empty-document :div)
+                    doc (dom/set-root doc root)
+                    doc (build-inline-children doc root spec)
+                    [_ doc] (dom/consume-ops doc)]
+                (filterv #(= :text (:draw/op %))
+                         (layout/draw-ops (dom/tree doc)
+                                          {:width 800 :theme {:padding 0 :gap 0}})))
+        label-ops (remove #(= "tail" (:text %)) texts)]
+    (is (= 21 bh) "one line inside the control, not two -- it was 34 (Brave 21)")
+    (is (= 72.0 bw)
+        "8 characters of this engine's own text model rounded UP to a whole
+         pixel, plus the button's 12px of side padding and 4px of border --
+         the ceil is what makes `content = width - inset` return a box the
+         label still fits in (Brave, with a real font, 74.531)")
+    (is (= 2 (count label-ops)) "the label is `save` and `now`")
+    (is (every? (fn [t] (and (>= (:x t) bx) (< (:x t) (+ bx bw))
+                             (>= (:y t) by) (< (:y t) (+ by bh))))
+                label-ops)
+        "every op of the label is INSIDE the button's own border box -- the
+         property that makes a button an atomic inline rather than a box
+         whose contents join the surrounding line")))
+
+(deftest a-buttons-explicit-width-is-its-border-box
+  ;; Brave gives <button> and <select> `box-sizing: border-box` and leaves
+  ;; <input>/<textarea> content-box. Measured on `width: 200px`: button 200,
+  ;; select 200, input 208, textarea 206.
+  (let [b (fieldset-boxes [[:button {:width 200} "OK"]])
+        s (fieldset-boxes [[:select {:width 200} [:option {} "a"]]])
+        i (fieldset-boxes [[:input {:width 200 :type "text"}]])]
+    (is (= 200 (nth (box-for b :button) 3)))
+    (is (= 200 (nth (box-for s :select) 3)))
+    (is (= 204 (nth (box-for i :input) 3))
+        "an <input> stays content-box, so its 200 GROWS -- by its 2px of
+         side padding here, and by that plus its 2px border (208) in Brave;
+         the missing border is the same content-box residual named in
+         ua-control-box, and is not what this test is about")))
+
+(deftest a-line-box-after-a-block-keeps-the-pending-bottom-margin
+  ;; CSS wraps inline content in an ANONYMOUS block, and the preceding
+  ;; sibling's bottom margin separates it exactly as it separates a real
+  ;; block. This branch dropped it, and it went unnoticed because a LONE
+  ;; inline child never becomes a run (inline-runs needs two), so the
+  ;; one-child shape took the block path and got it right.
+  ;; Brave: `<div><p>para</p><span>inline</span> <b>run</b></div>` is 55px
+  ;; tall with the <span> at y=37 -- 20px line + the <p>'s 14px margin +
+  ;; a 21px line box. It was 41 here, and it is the whole of
+  ;; :page/login-form's `label y -18.4` (an <h2>'s 17.43px bottom margin
+  ;; vanishing before the first <label><input> line).
+  (let [b (fieldset-boxes [[:div {} [:p {} "para"] [:span {} "inline"] " " [:b {} "run"]]])
+        outer (second (filter #(= :div (first %)) b))]
+    (is (= 54 (nth outer 4))
+        "20px line + the <p>'s 14px margin + a 20px line box. It was 41.
+         Brave says 55 because its <b> makes the second line box 21 tall;
+         this test has no :font-metrics host hook, so the line is 20")
+    (is (= 34 (nth (box-for b :span) 2))
+        "the pending 14px margin, which this branch used to drop")))
