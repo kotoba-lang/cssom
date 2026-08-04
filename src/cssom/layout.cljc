@@ -4188,13 +4188,33 @@
                          ;; where treating the bottom edge as the baseline
                          ;; adds the strut's descent under it and gives 27.
                          baseline-offset
-                         (if (contains? form-control-tags (:tag child))
-                           (let [{:keys [descent]} (font-metrics theme (parse-int (:font-size st) nil)
-                                                                 (:font-weight st) (:font-style st)
-                                                                 (:font-family st))]
-                             (max 0 (- h (or (:padding-bottom st) (:padding st) 0)
-                                       (:border-width st) descent (margin-side st :bottom))))
-                           h)]
+                         (if (= :img (:tag child))
+                           ;; a REPLACED box sits ON the baseline
+                           h
+                           ;; ...everything else -- an inline-block, a form
+                           ;; control -- aligns by its own last line's
+                           ;; baseline: top inset, then half-leading, then
+                           ;; the font's ascent. Measured, that is exactly
+                           ;; what makes a browser report a line holding a
+                           ;; 20px inline-block as 20px and one holding a
+                           ;; 21px input as 21px, where treating the bottom
+                           ;; edge as the baseline stacks the strut's
+                           ;; descent underneath and gives 26 and 27.
+                           (let [fs (parse-int (:font-size st) (:font-size inherited))
+                                 {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
+                                                                        (:font-style st) (:font-family st))
+                                 lh (or (parse-int (:line-height st) nil) (:line-height inherited) fs)
+                                 half (max 0 (quot (- lh (+ ascent descent)) 2))]
+                             ;; ...the LAST line's baseline, which for a
+                             ;; multi-row <textarea> is rows-1 lines further
+                             ;; down (the browser reports a 40px line box
+                             ;; for a 2-row textarea, not 34).
+                             (+ mt (or (:padding-top st) (:padding st) 0) (:border-width st)
+                                half ascent
+                                (* (max 0 (dec (if (= :textarea (:tag child))
+                                                 (max 1 (parse-int (get-in child [:attrs :rows]) 2))
+                                                 1)))
+                                   (+ ascent descent)))))]
                      (conj acc {:kind :atomic
                                 :w (+ (:w box) ml mr) :h h :baseline-offset baseline-offset
                                 :ml ml :mt mt :draw draw
@@ -5102,7 +5122,13 @@
         ;; here unconditionally rather than by trying to tell inherited from
         ;; declared -- documented, and matching every measurement taken
         ;; against the browser.
-        control-line-height control-font-size
+        ;; a <textarea> is `rows` lines tall (HTML's own default is 2),
+        ;; where every other control is one line. Measured: the browser
+        ;; reports 34px for a default textarea against a 21px input.
+        control-rows (if (= :textarea tag)
+                       (max 1 (parse-int (get-in node [:attrs :rows]) 2))
+                       1)
+        control-line-height (* control-rows control-font-size)
         ;; content + padding + BORDER: with `box-sizing: content-box` (the
         ;; default) the border sits outside the content box in the vertical
         ;; axis too. Without it the control came out exactly one border

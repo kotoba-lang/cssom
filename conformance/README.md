@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 139/142 = 98%. Geometry: 438/493 element boxes (89%),
-120/150 cases with every box in agreement**, on a corpus of 150.
+**Line structure: 139/142 = 98%. Geometry: 439/493 element boxes (89%),
+122/150 cases with every box in agreement**, on a corpus of 150.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -286,6 +286,26 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round sixteen: one baseline rule for every atomic inline
+
+The `p h +6` cluster was one rule again. An atomic inline's baseline is its
+own LAST LINE's baseline — top inset, half-leading, ascent — for everything
+except a replaced box, which alone sits on the baseline. That single rule
+covers an `inline-block` (a browser reports a line holding a 20px one as
+20px, where the bottom-edge reading stacks the strut's descent underneath
+and gives 26), a form control (21px, not 27), and a `<textarea>`, whose
+last line is `rows − 1` lines further down.
+
+`<textarea>` also gained its own height: `rows` lines (HTML's default is 2),
+where every other control is one — 34px against a 21px input, and a 40px
+line box around it.
+
+And the harness stopped measuring only ASCII. `©`, `·`, `›`, `—` and friends
+were falling back to a guessed advance, which put the first link of a footer
+1.4px off and the second 6.4px — small, but a mismatch the engine was blamed
+for and never made. The advance table now covers ASCII, Latin-1 and the
+typographic codepoints real page furniture uses.
 
 ### Round fifteen: a cell with nothing measurable in it
 

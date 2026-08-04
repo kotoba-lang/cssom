@@ -5132,7 +5132,7 @@
         input-op (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
     (is (= 8 (:y input-op))
         "the control sits at the top of the line box it made taller")
-    (is (= 9 (:y (first t)))
+    (is (= 13 (:y (first t)))
         "and the label text is pushed down so both sit on one baseline:
          the control's own INTERNAL baseline (its text's, not its bottom
          edge -- see inline-fragments' baseline-offset) and the label's

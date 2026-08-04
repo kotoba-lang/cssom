@@ -170,17 +170,29 @@
     // bold and its italic faces are proportional, so one table cannot
     // stand in for the others (an <em> measured 7.0/char here against the
     // browser's 10.28).
+    // ASCII, Latin-1, and the typographic codepoints real page furniture
+    // uses. Measuring only ASCII left `©`, `·`, `›`, `—` and friends on the
+    // fallback advance, which put the first link of a footer 1.4px off and
+    // the second 6.4px off -- small, but a mismatch the engine was blamed
+    // for and never made.
+    var CHARS = [];
+    for (var c1 = 32; c1 <= 126; c1++) CHARS.push(c1);
+    for (var c2 = 160; c2 <= 255; c2++) CHARS.push(c2);
+    [0x2013,0x2014,0x2018,0x2019,0x201C,0x201D,0x2022,0x2026,0x2030,0x2039,
+     0x203A,0x2044,0x2122,0x2190,0x2191,0x2192,0x2193,0x2194,0x2212,0x2260,
+     0x2264,0x2265,0x221E,0x2248,0x2217,0x25CA,0x2660,0x2663,0x2665,0x2666,
+     0x2020,0x2021,0x203E,0x2032,0x2033].forEach(function (c) { CHARS.push(c); });
     var advances = { normal: {}, bold: {}, italic: {}, control: {} };
     [['normal', 'normal', 'normal'],
      ['bold', 'bold', 'normal'],
      ['italic', 'normal', 'italic']].forEach(function (spec) {
       probe.style.fontWeight = spec[1];
       probe.style.fontStyle = spec[2];
-      for (var code = 32; code <= 126; code++) {
+      CHARS.forEach(function (code) {
         var ch = String.fromCharCode(code);
         probe.textContent = new Array(21).join(ch);
         advances[spec[0]][code] = probe.getBoundingClientRect().width / 20;
-      }
+      });
     });
     // The CONTROL face. Form controls do not inherit the page font: this
     // browser computes `Arial 13.3333px` for an <input> inside a monospace
@@ -189,11 +201,11 @@
     // for by naming the family in its own UA defaults.
     probe.style.cssText = 'white-space:pre;' + getComputedStyle(document.createElement('input')).font;
     probe.style.font = '400 13.3333px Arial';
-    for (var code = 32; code <= 126; code++) {
+    CHARS.forEach(function (code) {
       var ch = String.fromCharCode(code);
       probe.textContent = new Array(21).join(ch);
       advances.control[code] = probe.getBoundingClientRect().width / 20;
-    }
+    });
     probe.remove();
     out['__advances__'] = advances;
     // The vertical half: a font's real ASCENT and DESCENT, which is what a
