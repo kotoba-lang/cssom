@@ -160,7 +160,46 @@
           range.setEnd(node, m.index + m[0].length);
           var r = range.getBoundingClientRect();
           if (!r.width && !r.height) continue;
-          words.push({ text: m[0], top: r.top, bottom: r.bottom, left: r.left });
+          // A word that is BROKEN ACROSS LINES (overflow-wrap: break-word,
+          // word-break: break-all, or a word longer than its line) has one
+          // client rect per line fragment, and its bounding rect spans all
+          // of them. Reporting the bounding rect made every intra-word
+          // break invisible: the whole word clustered onto one line, and a
+          // correct engine that broke it exactly where the browser did was
+          // scored as WRONG for producing more lines than the oracle could
+          // see (`:text/overflow-wrap-anywhere`, `:text/word-break-break-all`).
+          //
+          // Measured in Brave: `short aaaaaaaaaaaaaaaaaaaa` in a 90px box
+          // reports three rects at 20px steps, so the browser breaks the
+          // a-run in two -- exactly as the engine does. The disagreement
+          // was entirely in the measurement.
+          //
+          // Which characters land on which line cannot be read off the
+          // rects, so for a multi-rect word (only) each character is
+          // measured on its own and grouped by top. That is the browser's
+          // own answer to what-is-on-this-line, at the only granularity
+          // that can answer it.
+          var rects = range.getClientRects();
+          if (rects.length <= 1) {
+            words.push({ text: m[0], top: r.top, bottom: r.bottom, left: r.left });
+          } else {
+            var frags = [];
+            for (var ci = 0; ci < m[0].length; ci++) {
+              var cr = document.createRange();
+              cr.setStart(node, m.index + ci);
+              cr.setEnd(node, m.index + ci + 1);
+              var q = cr.getBoundingClientRect();
+              if (!q.width && !q.height) continue;
+              var last = frags[frags.length - 1];
+              if (last && Math.abs(last.top - q.top) < 1) {
+                last.text += m[0][ci];
+                last.bottom = Math.max(last.bottom, q.bottom);
+              } else {
+                frags.push({ text: m[0][ci], top: q.top, bottom: q.bottom, left: q.left });
+              }
+            }
+            for (var fi = 0; fi < frags.length; fi++) words.push(frags[fi]);
+          }
         }
       }
       // The GEOMETRY axis: every element's own box, relative to the case

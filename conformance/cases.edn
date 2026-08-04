@@ -1518,4 +1518,44 @@
  {:id :grid/inline-grid-with-auto-tracks
   :group :grid
   :html "<p>before <span style=\"display: inline-grid; grid-template-columns: auto auto\"><span>aaa</span><span>bb</span></span> after</p>"}
+ ;; ---- stacking: what is ON TOP where boxes overlap ---------------------
+ ;;
+ ;; The paint-order axis asks both sides which element is at a sample point
+ ;; -- the only axis that sees ORDER rather than size. The corpus held four
+ ;; stacking cases when that axis landed, so it was measuring mostly
+ ;; incidental overlap from cases about something else. These exercise it
+ ;; deliberately.
+
+ {:id :stacking/later-sibling-covers-earlier
+  :group :stacking
+  ;; No z-index anywhere: document order alone decides where they overlap.
+  :html "<div style=\"position: relative; height: 60px\"><div style=\"position: absolute; left: 0; top: 0; width: 80px; height: 40px; background: #f00\">a</div><div style=\"position: absolute; left: 40px; top: 0; width: 80px; height: 40px; background: #0f0\">b</div></div>"}
+
+ {:id :stacking/z-index-beats-document-order
+  :group :stacking
+  ;; The EARLIER box wins because it asks to.
+  :html "<div style=\"position: relative; height: 60px\"><div style=\"position: absolute; left: 0; top: 0; width: 80px; height: 40px; z-index: 2; background: #f00\">a</div><div style=\"position: absolute; left: 40px; top: 0; width: 80px; height: 40px; z-index: 1; background: #0f0\">b</div></div>"}
+
+ {:id :stacking/positioned-covers-later-flow-content
+  :group :stacking
+  ;; Position alone is enough to paint above in-flow content that follows.
+  :html "<div style=\"position: relative; height: 60px\"><div style=\"position: absolute; left: 0; top: 0; width: 200px; height: 30px; background: #f00\">over</div><p>under</p></div>"}
+
+ {:id :stacking/nested-positioned-child-over-parents-sibling
+  :group :stacking
+  :html "<div style=\"position: relative; height: 80px\"><div style=\"position: absolute; left: 0; top: 0; width: 100px; height: 30px; background: #eee\"><div style=\"position: absolute; left: 20px; top: 10px; width: 100px; height: 40px; background: #f00\">inner</div></div><div style=\"position: absolute; left: 60px; top: 20px; width: 60px; height: 30px; background: #0f0\">sib</div></div>"}
+
+ {:id :stacking/float-under-later-inline-text
+  :group :stacking
+  ;; A float is out of flow for LAYOUT but still painted under the line
+  ;; boxes that flow beside it.
+  :html "<div style=\"width: 200px\"><span style=\"float: left; width: 60px; height: 40px; background: #eee\">f</span>text that flows beside the float and wraps under it</div>"}
+
+ {:id :stacking/inline-background-under-following-text
+  :group :stacking
+  :html "<p style=\"width: 200px\">before <span style=\"background: #eee\">highlighted run</span> after</p>"}
+
+ {:id :stacking/table-cell-content-over-row-background
+  :group :stacking
+  :html "<table style=\"width: 200px\"><tr style=\"background: #eee\"><td>cell one</td><td>cell two</td></tr></table>"}
 ]
