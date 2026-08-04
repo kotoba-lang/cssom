@@ -3115,9 +3115,13 @@
         char-w (if measure-text
                  (measure-text "0" font-size (:font-weight st) (:font-style st) (:font-family st))
                  (long (* 0.6 font-size)))
-        ;; the intrinsic size is a BORDER box: padding and border sit
-        ;; outside the characters it is asked to hold
-        inset (+ (:padding st) (:border-width st))
+        ;; the intrinsic size is a BORDER box, and the HORIZONTAL padding
+        ;; is what matters for a width -- a <button>'s UA padding is 6px at
+        ;; the sides and 1px top/bottom, so charging the uniform value left
+        ;; it 10px narrow.
+        inset-x (+ (or (:padding-left st) (:padding st))
+                   (or (:padding-right st) (:padding st))
+                   (* 2 (:border-width st)))
         natural
         (cond
           (:width st) (resolve-width st content-w)
@@ -3127,7 +3131,7 @@
             (if (contains? #{"checkbox" "radio"} input-type)
               13
               (+ (* char-w (parse-int (get-in child [:attrs :size]) inline-atomic-default-input-chars))
-                 (* 2 inset))))
+                 inset-x)))
 
           (= :select tag)
           ;; Widest option label -- a <select> is as wide as the longest
@@ -3137,13 +3141,24 @@
           (let [labels (->> (:children child)
                             (filter #(and (map? %) (= :option (:tag %))))
                             (map #(->> (:children %) (filter string?) (str/join ""))))]
-            (+ (* char-w (apply max 1 (map count labels))) (* 2 inset)))
+            (+ (* char-w (apply max 1 (map count labels))) inset-x))
 
           ;; A <button> and any other atomic element with no intrinsic
           ;; rule of its own shrink-wraps to its content, exactly as a flex
           ;; item does. Inlined rather than delegating to
           ;; flex-item-main-width, which now consults THIS function for
           ;; atomic tags -- delegating would recurse forever.
+          ;; A <button>'s label is measured in the CONTROL font, not the
+          ;; inherited page font -- the same rule that gives every control
+          ;; its own metrics (ua-control-font). Measuring it with the page
+          ;; font left a button ~14px narrow against the browser.
+          (contains? form-control-tags tag)
+          (+ inset-x
+             (let [label (->> (:children child) (keep real-text-child) (str/join ""))]
+               (if measure-text
+                 (measure-text label font-size (:font-weight st) (:font-style st) (:font-family st))
+                 (* (count label) char-w))))
+
           :else
           (let [cs (:children child)]
             (cond
@@ -4105,8 +4120,18 @@
                    (inline-atomic-element? theme child)
                    (let [st (node-style child theme)
                          avail (atomic-intrinsic-width theme content-w opacity inherited child st)
-                         {:keys [box draw]} (layout-node theme 0 0 avail opacity inherited child)]
-                     (conj acc {:kind :atomic :w (:w box) :h (:h box) :draw draw
+                         {:keys [box draw]} (layout-node theme 0 0 avail opacity inherited child)
+                         ;; An atomic inline's own MARGINS take part in the
+                         ;; line: a checkbox's UA `margin: 3px 3px 3px 4px`
+                         ;; is the gap a reader sees between the box and the
+                         ;; label beside it. Measured, the browser puts the
+                         ;; checkbox at x=4 y=3 where this engine had 0,1.
+                         ml (margin-side st :left)
+                         mr (margin-side st :right)
+                         mt (margin-side st :top)]
+                     (conj acc {:kind :atomic
+                                :w (+ (:w box) ml mr) :h (+ (:h box) mt (margin-side st :bottom))
+                                :ml ml :mt mt :draw draw
                                 :owners owners :opacity opacity}))
 
                    (generated-node? child)
@@ -4267,7 +4292,7 @@
                       (w-of " " (or (:space-style t)
                                     {:font-size (or (:font-size (:style (peek pieces))) 14)}))
                       0)
-                piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h])
+                piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h :ml :mt])
                                      :kind :atomic :x x :w (:w t)))]
             (if (and (seq pieces) (> (+ x sep (:w t)) content-w))
               (recur (rest ts) (:w t) [(piece 0)] (flush lines pieces x nil))
@@ -4456,8 +4481,8 @@
                      ;; the origin by inline-fragments, so placing it is a
                      ;; translate -- its bottom edge onto the baseline, the
                      ;; real CSS `vertical-align: baseline` default.
-                     (let [px (+ base-x (:x piece))
-                           py (- baseline (:h piece))
+                     (let [px (+ base-x (:x piece) (:ml piece 0))
+                           py (+ (- baseline (:h piece)) (:mt piece 0))
                            rects (reduce (fn [rects owner]
                                            (update rects (:idx owner)
                                                    (fn [entry]

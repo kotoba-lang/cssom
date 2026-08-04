@@ -5525,3 +5525,32 @@
         y-of (fn [s] (:y (first (filter #(= s (:text %)) t))))]
     (is (< (y-of "a") (y-of "tall") (y-of "b"))
         "the spanning cell's text sits between the two rows' own text")))
+
+(deftest a-control-label-is-measured-in-the-control-font
+  ;; A <button>'s label is measured in the CONTROL font (ua-control-font),
+  ;; not the inherited page font -- measuring it with the page font left a
+  ;; button ~14px narrow against the browser -- and its width includes the
+  ;; UA horizontal padding (6px a side) and border, not the uniform value.
+  (let [ops (inline-ops ["hit " [:button {} "go"] " now"] {} {:width 400})
+        b (first (filter #(and (= :node (:draw/op %)) (= :button (:tag %))) ops))]
+    (is (<= 26 (:w b) 36)
+        "about a browser's 30.8px for `go`: the label plus 6px padding a
+         side plus a 2px border a side")))
+
+(deftest an-atomic-inline-carries-its-own-margins
+  ;; A checkbox's UA `margin: 3px 3px 3px 4px` is the gap a reader sees
+  ;; between the box and the label beside it. The browser puts it at x=4
+  ;; y=3; this engine had it at 0,0 with the margins counted in the line's
+  ;; advance but never applied to the box itself.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [i doc] (dom/create-element doc :input)
+        doc (dom/append-child doc p i)
+        doc (dom/set-attribute doc i :type "checkbox")
+        [t doc] (dom/create-text-node doc " agree")
+        doc (dom/append-child doc p t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        box (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
+    (is (= {:x 4 :y 3 :w 13 :h 13} (select-keys box [:x :y :w :h]))
+        "a bare 13x13 square, offset by its own UA margins")))

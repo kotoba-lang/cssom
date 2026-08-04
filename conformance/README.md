@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 140/142 = 99%. Geometry: 421/493 element boxes (85%),
-118/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
+**Line structure: 140/142 = 99%. Geometry: 427/493 element boxes (87%),
+123/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
@@ -305,10 +305,16 @@ puts outside the content box in both axes.
 
 input 0/9 → 5/9 boxes, geometry 84% → 85%, cases fully clean 115 → 118.
 
-Still open: a `<button>`'s intrinsic width is measured in the inherited
-font rather than the control font, leaving it ~14px narrow, and an atomic
-inline's own margins are not applied (which is why the checkbox sits 4px
-left of the browser's).
+Both follow-ups from that round are now closed. A `<button>`'s label is
+measured in the CONTROL font and its width counts the UA *horizontal*
+padding (6px a side) rather than the uniform value — charging the uniform
+padding left it 10px narrow even after the font was right. And an atomic
+inline carries its own margins: a checkbox's UA `margin: 3px 3px 3px 4px`
+now places it at x=4 y=3, exactly where the browser puts it, where before
+the margins were counted in the line's advance but never applied to the box
+itself (the line breaker rebuilt the piece and dropped them).
+
+Geometry 85% → 87%, cases fully clean 118 → 123.
 
 ### Round eleven: rowspan, and the rule behind it
 
