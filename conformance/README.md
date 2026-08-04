@@ -912,13 +912,15 @@ block (correctly, 100) and handed the result down as the child's
 percentage a second time and got 50. The used width is now written back
 onto the child as a plain length, so the second resolution is a no-op.
 
-Corpus-wide, 316 → 326 cases. On the 326-case corpus, against the same
-harness: geometry 1187/1250 → **1201/1250** (292/326 → **303/326** clean),
-computed style 15249/17493 → **15250/17487** with the cascade-attributed
-residual 16 → **9**, paint order 8037/8130 → **8038/8130** (303 → **304**
-clean cases), line structure **310/314** unchanged. Twelve cases' boxes
-changed and **none regressed**; every one of the twelve went to exact
-agreement on every box.
+Corpus-wide, this round added 10 cases (four of them controls that already
+agreed). Measured on the 337-case corpus as it stands after merging round
+twenty-six's transform cases, same harness both sides: geometry
+1201/1272 → **1215/1272** (296/337 → **307/337** clean), computed style
+15534/17801 → **15535/17795** with the cascade-attributed residual 16 →
+**9**, paint order 8307/8409 → **8308/8409** (311 → **312** clean cases),
+line structure **320/324** unchanged. Twelve cases' boxes changed and
+**none regressed**; every one of the twelve went to exact agreement on
+every box.
 
 The computed-style axis's compared-value count falls by 6 because
 `margin-left`/`margin-right` now hold the string `auto` on the cases that
