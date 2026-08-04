@@ -6408,3 +6408,219 @@
     (is (== 22 (:w empty-select)))
     (is (= :input (:tag input)))
     (is (= 21 (:h input)))))
+
+;; ---- grid: auto tracks, implicit tracks, column flow, item alignment ----
+;;
+;; Every number below was measured in a real headless Brave over CDP before
+;; the behaviour was written (the conformance corpus carries the same shapes
+;; as `grid/auto-*`, `grid/justify-*`, `grid/align-*`); these pin the
+;; arithmetic that produced them so a regression names itself.
+
+(defn- grid-item-boxes
+  "Element :node boxes for a display:grid `<div>` with `container-style` and
+   one `<div>` per `specs` entry, with the engine's own theme padding/gap
+   turned off so the numbers are pure CSS. The container's own box is
+   dropped -- callers here are always asking about the items."
+  ([container-style specs] (grid-item-boxes container-style specs 400))
+  ([container-style specs width]
+   (let [[g doc] (dom/create-element dom/empty-document :div)
+         doc (dom/set-root doc g)
+         doc (dom/set-style doc g (merge {:display "grid"} container-style))
+         doc (build-inline-children doc g specs)
+         [_ doc] (dom/consume-ops doc)
+         ops (layout/draw-ops (dom/tree doc) {:width width :theme {:padding 0 :gap 0}})]
+     (mapv #(select-keys % [:x :y :w :h])
+           (rest (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))))))
+
+(deftest auto-tracks-grow-to-max-content-then-share-the-rest-equally
+  ;; Brave: `auto auto` in a 400px grid holding `short` (max-content
+  ;; 41.6px) and `a much longer cell` (145.3px) comes out 148.2 / 251.8 --
+  ;; each track's own max-content plus exactly half of the leftover. The
+  ;; two tracks were ZERO wide before `auto` was a track type at all.
+  (let [[a b] (grid-item-boxes {:grid-template-columns "auto auto" :width 400}
+                               [[:div {} "short"] [:div {} "a much longer cell"]])]
+    (is (pos? (:w a)) "an auto track is not zero-width")
+    (is (= 400 (+ (:w a) (:w b))) "the two tracks fill the container")
+    (is (= (:x b) (:w a)) "and abut with no gap")
+    (is (< (:w a) (:w b)) "the track holding more text is the wider one")
+    (is (= (- (:w b) (:w a))
+           (- (- (:w b) (quot (- 400 (+ (:w a) (:w b)) 0) 2))
+              (- (:w a) (quot (- 400 (+ (:w a) (:w b)) 0) 2))))
+        "the leftover was shared EQUALLY, so the difference between the two
+         tracks is exactly the difference between their contents")))
+
+(deftest an-auto-track-does-not-stretch-when-an-fr-track-competes-for-the-space
+  ;; Measured in Brave: `auto 1fr` at 400px leaves the auto track at its own
+  ;; 41.6px max-content and gives the fr track the other 358. With `auto
+  ;; 100px` -- no fr -- the same auto track stretches to 300 instead.
+  (let [[with-fr] (grid-item-boxes {:grid-template-columns "auto 1fr" :width 400}
+                                   [[:div {} "short"] [:div {} "x"]])
+        [with-fixed] (grid-item-boxes {:grid-template-columns "auto 100px" :width 400}
+                                      [[:div {} "short"] [:div {} "x"]])]
+    (is (< (:w with-fr) 200) "the fr track takes the leftover")
+    (is (= 300 (:w with-fixed)) "with no fr track the auto one stretches to fill")))
+
+(deftest an-auto-track-floors-at-min-content-and-overflows-a-narrow-grid
+  ;; A browser overflows rather than crushing an unbreakable word: two auto
+  ;; tracks holding 41.6px and 50.1px of word are 91.7px of content in a
+  ;; 60px box. An engine that only divides the available width gives 30/30.
+  (let [[a b] (grid-item-boxes {:grid-template-columns "auto auto" :width 60}
+                               [[:div {} "short"] [:div {} "a much longer cell"]] 200)]
+    (is (> (+ (:w a) (:w b)) 60) "the tracks overflow the container")
+    (is (> (:w a) 30) "neither is crushed to an equal share")))
+
+(deftest grid-auto-flow-column-fills-a-column-before-moving-right
+  ;; Brave puts three items at x=0/70/140 on ONE row; this engine stacked
+  ;; them vertically at the container's full width.
+  (let [[a b c] (grid-item-boxes {:grid-auto-flow "column" :grid-auto-columns "70px"}
+                                 [[:div {} "a"] [:div {} "b"] [:div {} "c"]])]
+    (is (= [0 70 140] [(:x a) (:x b) (:x c)]))
+    (is (= [0 0 0] [(:y a) (:y b) (:y c)]))
+    (is (every? #(= 70 (:w %)) [a b c]) "each implicit column takes grid-auto-columns"))
+  ;; With two explicit ROWS the flow fills a column top-to-bottom first.
+  (let [[a b c] (grid-item-boxes {:grid-auto-flow "column"
+                                  :grid-template-rows "30px 30px"
+                                  :grid-auto-columns "50px"}
+                                 [[:div {} "a"] [:div {} "b"] [:div {} "c"]])]
+    (is (= [0 0] [(:x a) (:y a)]))
+    (is (= [0 30] [(:x b) (:y b)]) "second item goes DOWN, not right")
+    (is (= [50 0] [(:x c) (:y c)]) "third starts the next column")))
+
+(deftest grid-auto-rows-sizes-the-implicit-rows
+  ;; `grid-auto-rows: 40px` was read nowhere: two items in a single 60px
+  ;; column were 20px tall each where the browser reports 40.
+  (let [[a b] (grid-item-boxes {:grid-template-columns "60px" :grid-auto-rows "40px"}
+                               [[:div {} "a"] [:div {} "b"]])]
+    (is (= 40 (:h a)))
+    (is (= 40 (:y b)))
+    (is (= 40 (:h b))))
+  ;; and only the IMPLICIT ones -- the explicit 20px track keeps its size
+  (let [[a b c] (grid-item-boxes {:grid-template-columns "60px"
+                                  :grid-template-rows "20px"
+                                  :grid-auto-rows "40px"}
+                                 [[:div {} "a"] [:div {} "b"] [:div {} "c"]])]
+    (is (= 20 (:h a)))
+    (is (= [20 40] [(:y b) (:h b)]))
+    (is (= [60 40] [(:y c) (:h c)]))))
+
+(deftest auto-rows-stretch-to-fill-a-definite-container-height
+  ;; Brave: `grid-template-rows: 30px` with three items in a 200px-tall grid
+  ;; gives 30 / 85 / 85 -- the explicit track keeps its size and the two
+  ;; implicit auto rows share the remaining 170 equally.
+  (let [[a b c] (grid-item-boxes {:grid-template-columns "60px"
+                                  :grid-template-rows "30px" :height 200}
+                                 [[:div {} "a"] [:div {} "b"] [:div {} "c"]])]
+    (is (= 30 (:h a)))
+    (is (= (:h b) (:h c)) "the two implicit rows share the rest equally")
+    (is (= 200 (+ (:h a) (:h b) (:h c))))
+    (is (= [30 115] [(:y b) (:y c)])))
+  ;; but an fr row takes the leftover instead of the auto row stretching
+  (let [[a b] (grid-item-boxes {:grid-template-columns "60px"
+                                :grid-template-rows "auto 1fr" :height 200}
+                               [[:div {} "a"] [:div {} "b"]])]
+    (is (= 20 (:h a)) "the auto row stays at its content height")
+    (is (= 180 (:h b)))))
+
+(deftest row-gap-and-column-gap-longhands-space-the-two-axes-independently
+  ;; Brave puts the second column at x=68 and the second row at y=44 for
+  ;; `row-gap: 24px; column-gap: 8px`. Both longhands were unread, so the
+  ;; grid used the theme gap of 0 on both axes.
+  (let [[_ b c _] (grid-item-boxes {:grid-template-columns "60px 60px"
+                                    :row-gap 24 :column-gap 8}
+                                   [[:div {} "a"] [:div {} "b"] [:div {} "c"] [:div {} "d"]])]
+    (is (= 68 (:x b)))
+    (is (= 44 (:y c))))
+  ;; `gap: <row> <column>` is the same two numbers, row first
+  (let [[_ b c _] (grid-item-boxes {:grid-template-columns "60px 60px" :gap "24px 8px"}
+                                   [[:div {} "a"] [:div {} "b"] [:div {} "c"] [:div {} "d"]])]
+    (is (= 68 (:x b)))
+    (is (= 44 (:y c))))
+  ;; and a one-value `gap` still sets both, which is what every
+  ;; previously-passing single-gap case relies on
+  (let [[_ b c _] (grid-item-boxes {:grid-template-columns "60px 60px" :gap 10}
+                                   [[:div {} "a"] [:div {} "b"] [:div {} "c"] [:div {} "d"]])]
+    (is (= 70 (:x b)))
+    (is (= 30 (:y c)))))
+
+(deftest justify-items-sizes-the-item-to-its-content-and-places-it-in-the-track
+  ;; Brave: a one-character item in a 120px column is 9.2px wide, at x=55.4
+  ;; under `center` and x=110.8 under `end`. Under the default `stretch` it
+  ;; is the full 120 at x=0, which is what this engine always gave.
+  (let [[stretched] (grid-item-boxes {:grid-template-columns "120px"} [[:div {} "a"]])
+        [centred] (grid-item-boxes {:grid-template-columns "120px" :justify-items "center"}
+                                   [[:div {} "a"]])
+        [ended] (grid-item-boxes {:grid-template-columns "120px" :justify-items "end"}
+                                 [[:div {} "a"]])]
+    (is (= [0 120] [(:x stretched) (:w stretched)]))
+    (is (< (:w centred) 120) "a non-stretch item is fit-content, not track-width")
+    (is (= (:x centred) (quot (- 120 (:w centred)) 2)))
+    (is (= (:x ended) (- 120 (:w ended))))
+    (is (= (:w centred) (:w ended)) "the size does not depend on where it lands")))
+
+(deftest justify-self-overrides-justify-items-for-one-item-only
+  (let [[own other] (grid-item-boxes {:grid-template-columns "120px 120px"}
+                                     [[:div {:justify-self "center"} "a"] [:div {} "bb"]])]
+    (is (< (:w own) 120))
+    (is (= (:x own) (quot (- 120 (:w own)) 2)))
+    (is (= [120 120] [(:x other) (:w other)])
+        "its sibling keeps the container's stretch")))
+
+(deftest align-items-positions-an-item-in-a-taller-row-instead-of-stretching-it
+  ;; Brave: `align-items: center` on a 60px row leaves a 20px item at y=20;
+  ;; `end` at y=40. Stretch (the default) makes it 60 tall at y=0.
+  (let [[stretched] (grid-item-boxes {:grid-template-columns "80px" :grid-template-rows "60px"}
+                                     [[:div {} "mid"]])
+        [centred] (grid-item-boxes {:grid-template-columns "80px" :grid-template-rows "60px"
+                                    :align-items "center"}
+                                   [[:div {} "mid"]])
+        [ended] (grid-item-boxes {:grid-template-columns "80px" :grid-template-rows "60px"
+                                  :align-items "end"}
+                                 [[:div {} "mid"]])
+        [self] (grid-item-boxes {:grid-template-columns "80px" :grid-template-rows "60px"}
+                                [[:div {:align-self "center"} "mid"]])]
+    (is (= [0 60] [(:y stretched) (:h stretched)]))
+    (is (= 20 (:h centred)) "a non-stretch item keeps its own height")
+    (is (= (:y centred) (quot (- 60 (:h centred)) 2)))
+    (is (= (:y ended) (- 60 (:h ended))))
+    (is (= [(:y centred) (:h centred)] [(:y self) (:h self)])
+        "align-self resolves the same way when the container says nothing")))
+
+(deftest an-explicit-row-does-not-move-the-auto-placement-cursor
+  ;; CSS Grid 8.5 runs the auto-placement cursor in step 4, which only ever
+  ;; sees items with a definite COLUMN or none at all -- an item locked to a
+  ;; row is placed in step 2 and never touches it. Measured in Brave,
+  ;; `grid-row: 2` on the first of two items leaves the second at row 1
+  ;; column 1; this engine advanced the cursor past the explicit item and
+  ;; put them on the same row.
+  (let [[t b] (grid-item-boxes {:grid-template-columns "70px 70px"
+                                :grid-template-rows "30px 30px"}
+                               [[:div {:grid-row 2} "t"] [:div {} "b"]])]
+    (is (= [0 30] [(:x t) (:y t)]))
+    (is (= [0 0] [(:x b) (:y b)]) "the auto item starts at the first cell"))
+  ;; an explicit COLUMN still moves it, which is the behaviour this must
+  ;; not have broken
+  (let [[t b c] (grid-item-boxes {:grid-template-columns "70px 70px"}
+                                 [[:div {:grid-column 2} "t"] [:div {} "b"] [:div {} "c"]])]
+    (is (= 70 (:x t)))
+    (is (= [0 20] [(:x b) (:y b)]) "the next auto item wraps past the cursor")
+    (is (= [70 20] [(:x c) (:y c)]))))
+
+(deftest inline-grid-shrink-wraps-to-its-tracks-and-stays-on-the-line
+  ;; Brave keeps `before <inline-grid> after` on one 20px line with the grid
+  ;; 60px wide (two 30px tracks). This engine gave it a block row of its own
+  ;; and produced three lines -- the grid side of the gap `inline-flex`
+  ;; closed earlier.
+  (let [ops (inline-ops ["before "
+                         [:span {:display "inline-grid" :grid-template-columns "30px 30px"}
+                          [:span {} "a"] [:span {} "b"]]
+                         " after"]
+                        {}
+                        {:width 480 :theme {:padding 0 :gap 0}})
+        container (first (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))
+        grid (first (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))
+        sentence (filterv #(contains? #{"before" "after"} (:text %)) (text-draw-ops ops))]
+    (is (= 60 (:w grid)) "two 30px tracks, not the container's width")
+    (is (= 20 (:h container)) "the whole sentence is ONE line box, not three")
+    (is (apply = (map :y sentence)) "and the words either side of it share it")
+    (is (< (:x (first sentence)) (:x grid) (:x (second sentence)))
+        "with the grid between them rather than above or below")))

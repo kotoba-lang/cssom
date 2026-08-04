@@ -1440,6 +1440,84 @@
   :composite true
   :html "<div style=\"display: flex; align-items: center; gap: 8px; width: 480px; padding: 6px; border: 1px solid #ccc\"><strong>App</strong><a href=\"/a\">One</a><a href=\"/b\">Two</a><button style=\"margin-left: auto\">Save</button></div>"}
 
+ ;; --- grid track sizing and item alignment ------------------------------
+ ;;
+ ;; The corpus already had a case per FLOW gap (auto-flow-column,
+ ;; auto-rows, the gap longhands); these are the sizing and alignment rules
+ ;; those cases depend on but never isolate, so a regression in one of them
+ ;; would have shown up only as a mystery in a composite case.
+
+ {:id :grid/auto-track-overflows-a-narrow-grid
+  :group :grid
+  ;; An `auto` track's floor is its items' MIN-content size, so two of them
+  ;; holding 41.6px and 50.1px of unbreakable word overflow a 60px grid
+  ;; rather than crushing to 30px each.
+  :html "<div style=\"display: grid; grid-template-columns: auto auto; width: 60px\"><div>short</div><div>a much longer cell</div></div>"}
+
+ {:id :grid/auto-track-beside-an-fr
+  :group :grid
+  ;; With an `fr` track competing for the leftover space, the `auto` track
+  ;; stops at its own max-content instead of stretching -- the opposite of
+  ;; what it does in :grid/auto-columns-size-to-content.
+  :html "<div style=\"display: grid; grid-template-columns: auto 1fr; width: 400px\"><div>short</div><div>x</div></div>"}
+
+ {:id :grid/auto-track-beside-a-fixed-one
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: auto 100px; width: 400px\"><div>short</div><div>x</div></div>"}
+
+ {:id :grid/justify-items-end
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 120px 120px; justify-items: end\"><div>a</div><div>bb</div></div>"}
+
+ {:id :grid/justify-self-overrides-justify-items
+  :group :grid
+  ;; The item with `justify-self` shrinks and centres; its sibling keeps
+  ;; the container's stretch and stays a full track wide.
+  :html "<div style=\"display: grid; grid-template-columns: 120px 120px\"><div style=\"justify-self: center\">a</div><div>bb</div></div>"}
+
+ {:id :grid/align-items-end
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 80px; grid-template-rows: 60px; align-items: end\"><div>mid</div></div>"}
+
+ {:id :grid/align-self-in-a-tall-row
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 80px; grid-template-rows: 60px\"><div style=\"align-self: center\">mid</div></div>"}
+
+ {:id :grid/auto-flow-column-fills-rows-first
+  :group :grid
+  ;; Two explicit rows and five items: the flow fills a COLUMN top to
+  ;; bottom before moving right, so the third item starts a new column.
+  :html "<div style=\"display: grid; grid-auto-flow: column; grid-template-rows: 30px 30px; grid-auto-columns: 70px\"><div>a</div><div>b</div><div>c</div><div>d</div><div>e</div></div>"}
+
+ {:id :grid/auto-flow-column-past-the-template
+  :group :grid
+  ;; Column flow creates IMPLICIT columns beyond grid-template-columns;
+  ;; with no grid-auto-columns they are `auto`.
+  :html "<div style=\"display: grid; grid-auto-flow: column; grid-template-columns: 50px 50px\"><div>a</div><div>b</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/gap-shorthand-two-values
+  :group :grid
+  ;; `gap: <row> <column>`, row first -- the same two numbers
+  ;; :grid/separate-row-and-column-gap writes as longhands.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; gap: 24px 8px\"><div>a</div><div>b</div><div>c</div><div>d</div></div>"}
+
+ {:id :grid/auto-rows-beyond-the-template
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 60px; grid-template-rows: 20px; grid-auto-rows: 40px\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :grid/implicit-rows-stretch-to-a-definite-height
+  :group :grid
+  ;; A definite container height with no `fr` row: the explicit 30px track
+  ;; keeps its size and the two implicit `auto` rows share the rest.
+  :html "<div style=\"display: grid; grid-template-columns: 60px; grid-template-rows: 30px; height: 200px\"><div>a</div><div>b</div><div>c</div></div>"}
+
+ {:id :grid/auto-row-beside-an-fr-row
+  :group :grid
+  :html "<div style=\"display: grid; grid-template-columns: 60px; grid-template-rows: auto 1fr; height: 200px\"><div>a</div><div>b</div></div>"}
+
+ {:id :grid/inline-grid-with-auto-tracks
+  :group :grid
+  :html "<p>before <span style=\"display: inline-grid; grid-template-columns: auto auto\"><span>aaa</span><span>bb</span></span> after</p>"}
  ;; ---- stacking: what is ON TOP where boxes overlap ---------------------
  ;;
  ;; The paint-order axis asks both sides which element is at a sample point
