@@ -24,7 +24,14 @@
    shift from the box's own normal position, affecting painting only,
    never layout -- see relative-offset/layout-children-block; currently
    scoped to plain block-flow children only, not yet a flex/grid item,
-   an honest, documented scope-cut); opacity (multiplicatively inherited); background/
+   an honest, documented scope-cut); 2D `transform` (translate/scale/
+   rotate/skew/matrix and the Z-only 3D spellings, with `transform-origin`
+   -- likewise paint-only, applied to a whole subtree's draw ops and never
+   to a box, on ANY display type; see the `---- CSS transforms ----`
+   section and apply-element-transform for the exact subset, for why a
+   list containing an unmodelled function is dropped whole, and for the
+   two things real CSS does that this does not);
+   opacity (multiplicatively inherited); background/
    background-color; borders; overflow+scroll-top/scroll-left clipping;
    form-control value/checked/selected-option-label projection; text input
    caret/selection; grid item explicit placement via `grid-column`/
@@ -1313,6 +1320,12 @@
    :text-decoration (style node :text-decoration)
    :text-align (style node :text-align)
    :text-transform (style node :text-transform)
+   ;; `transform`/`transform-origin` are read RAW: they are function lists
+   ;; and position pairs, not lengths, and the one place that parses them
+   ;; (transform-list-matrix / transform-origin-point) needs the element's
+   ;; own already-laid-out border box to resolve a percentage against.
+   :transform (style node :transform)
+   :transform-origin (style node :transform-origin)
    :white-space (or (style node :white-space) (when (= :pre (:tag node)) "pre"))
    :text-overflow (style node :text-overflow)
    :overflow-wrap (or (style node :overflow-wrap) (style node :word-wrap))
@@ -8998,6 +9011,352 @@
      :draw (vec (concat box-shadow-draws rect border-draws outline-draws below-draws semantic
                         clip-push draw clip-pop legend-draw above-draws))})))
 
+;; ---- CSS transforms ------------------------------------------------------
+;;
+;; A transform is a PAINT-time operation, and the whole of this section
+;; exists downstream of layout for that reason. Nothing here is allowed to
+;; reach a box's `:box` -- see apply-element-transform, which rewrites a
+;; subtree's `:draw` ops and hands `:box`, `:float/escaped`, the collapsed
+;; margins and every other layout-facing key back untouched. That is not a
+;; simplification, it is the property real CSS has: a following sibling of a
+;; `transform: translateX(50px)` box stays exactly where the UNtransformed
+;; box left it, the parent is exactly as tall as it would have been, and a
+;; float inside is still where flow put it.
+;;
+;; The second property this section is written around: a PERCENTAGE in
+;; `translate` resolves against the ELEMENT's own border box, not the
+;; containing block -- the one place in CSS where a percentage looks inward.
+;; That is why transform-length takes the element's own `w`/`h` as its basis
+;; where every other percentage in this file takes the containing block's.
+
+(def ^:private identity-matrix
+  "CSS's 2D matrix, in its own `matrix(a, b, c, d, e, f)` order, i.e. the
+   affine map `(x, y) -> (a*x + c*y + e, b*x + d*y + f)`."
+  [1.0 0.0 0.0 1.0 0.0 0.0])
+
+(defn- matrix*
+  "`m1` THEN `m2`, i.e. ordinary matrix product m1 x m2, which is the order
+   a `transform` list composes in: measured in Brave,
+   `translate(10px, 10px) scale(2)` computes to `matrix(2, 0, 0, 2, 10, 10)`
+   (the translation untouched by the scale) while `scale(2)
+   translate(10px, 10px)` computes to `matrix(2, 0, 0, 2, 20, 20)` (the
+   translation scaled by it). The leftmost function is the OUTERMOST."
+  [[a1 b1 c1 d1 e1 f1] [a2 b2 c2 d2 e2 f2]]
+  [(+ (* a1 a2) (* c1 b2))
+   (+ (* b1 a2) (* d1 b2))
+   (+ (* a1 c2) (* c1 d2))
+   (+ (* b1 c2) (* d1 d2))
+   (+ (* a1 e2) (* c1 f2) e1)
+   (+ (* b1 e2) (* d1 f2) f1)])
+
+(defn- round-4
+  "Four decimal places, which is what the oracle itself reports (a 45deg
+   rotation of a 100x20 box gives 84.8528, not 84.85281374238569). Keeps
+   float noise out of draw-op coordinates without pretending transforms
+   produce integers -- they do not, and rounding them to integers would put
+   a rotation 0.5px out before anything downstream saw it."
+  [v]
+  (/ (Math/round (* (double v) 10000.0)) 10000.0))
+
+(defn- transform-number
+  "A bare <number> argument (`scale(2)`, `matrix(2, 0, 0, 2, 10, 10)`), or
+   nil when the token is not one."
+  [v]
+  (let [s (str/trim (str v))]
+    (when (re-matches #"[-+]?(?:[0-9]*\.)?[0-9]+(?:[eE][-+]?[0-9]+)?" s)
+      (parse-dbl s nil))))
+
+(defn- transform-length
+  "A <length-percentage> argument, as a DOUBLE, resolved against `basis` --
+   which for every transform function that takes one is the element's OWN
+   border-box dimension (see this section's header comment).
+
+   `px` and `%` and a unitless zero, and nothing else. An `em`/`rem`/`vw`
+   length returns nil, which makes transform-list-matrix drop the whole
+   declaration: this file's general length reader (explicit-length) would
+   happily read `2em` as 2 PIXELS via parse-int's leading-digit-run, and a
+   silently 8x-too-small translation is a worse answer than an honestly
+   absent one."
+  [v basis]
+  (let [s (str/trim (str v))]
+    (cond
+      (str/blank? s) nil
+      (str/ends-with? s "%") (when basis
+                               (some-> (transform-number (subs s 0 (dec (count s))))
+                                       (* basis 0.01)))
+      (str/ends-with? s "px") (transform-number (subs s 0 (- (count s) 2)))
+      :else (when-let [n (transform-number s)] (when (zero? n) 0.0)))))
+
+(defn- transform-angle
+  "An <angle> argument in RADIANS. `deg`/`rad`/`grad`/`turn` and a unitless
+   zero; nil otherwise. `grad` is tested before `rad` because it ends in
+   it."
+  [v]
+  (let [s (str/trim (str v))
+        n (fn [drop-n scale]
+            (some-> (transform-number (subs s 0 (- (count s) drop-n))) (* scale)))]
+    (cond
+      (str/blank? s) nil
+      (str/ends-with? s "grad") (n 4 (/ Math/PI 200.0))
+      (str/ends-with? s "deg") (n 3 (/ Math/PI 180.0))
+      (str/ends-with? s "rad") (n 3 1.0)
+      (str/ends-with? s "turn") (n 4 (* 2.0 Math/PI))
+      :else (when-let [bare (transform-number s)] (when (zero? bare) 0.0)))))
+
+(defn- transform-function-matrix
+  "One `transform` function as a matrix, or nil when this engine does not
+   model it -- see transform-list-matrix for what nil then does to the
+   whole declaration.
+
+   The 2D functions are all here, including `matrix()` (six numbers is the
+   canonical form the others reduce to, and it was measured against Brave
+   like the rest: `matrix(2, 0, 0, 2, 10, 10)` on a 100x20 box reports
+   (-40, 0, 200, 40), the same box `translate(10px, 10px) scale(2)` does).
+
+   The Z-only 3D functions -- `translate3d`'s third argument, `translateZ`,
+   `scale3d`'s third, `scaleZ`, `rotateZ` -- are accepted as their 2D
+   projections, because without a `perspective` that projection IS what a
+   browser reports: measured, `translate3d(10px, 20px, 30px)` puts the box
+   at (10, 20) exactly as `translate(10px, 20px)` does.
+
+   DELIBERATELY ABSENT, and returning nil rather than an approximation:
+   `matrix3d`, `perspective`, `rotate3d`, `rotateX`, `rotateY`. Each of
+   those genuinely changes the 2D projection of the box, so there is no
+   honest 2D matrix for them, and this engine has no 3D pipeline to put
+   them in. The related `transform-style`, `backface-visibility` and
+   `perspective-origin` properties are not read at all for the same
+   reason."
+  [fname args w h]
+  (let [arg (fn [i] (nth args i nil))
+        n (count args)]
+    (case fname
+      "translate" (let [tx (transform-length (arg 0) w)
+                        ty (if (> n 1) (transform-length (arg 1) h) 0.0)]
+                    (when (and tx ty) [1.0 0.0 0.0 1.0 tx ty]))
+      "translatex" (when-let [tx (transform-length (arg 0) w)]
+                     [1.0 0.0 0.0 1.0 tx 0.0])
+      "translatey" (when-let [ty (transform-length (arg 0) h)]
+                     [1.0 0.0 0.0 1.0 0.0 ty])
+      "translatez" (when (transform-length (arg 0) nil) identity-matrix)
+      "translate3d" (let [tx (transform-length (arg 0) w)
+                          ty (transform-length (arg 1) h)]
+                      (when (and tx ty (= n 3)) [1.0 0.0 0.0 1.0 tx ty]))
+      "scale" (let [sx (transform-number (arg 0))
+                    sy (if (> n 1) (transform-number (arg 1)) sx)]
+                (when (and sx sy) [sx 0.0 0.0 sy 0.0 0.0]))
+      "scalex" (when-let [sx (transform-number (arg 0))]
+                 [sx 0.0 0.0 1.0 0.0 0.0])
+      "scaley" (when-let [sy (transform-number (arg 0))]
+                 [1.0 0.0 0.0 sy 0.0 0.0])
+      "scalez" (when (transform-number (arg 0)) identity-matrix)
+      "scale3d" (let [sx (transform-number (arg 0))
+                      sy (transform-number (arg 1))]
+                  (when (and sx sy (= n 3) (transform-number (arg 2)))
+                    [sx 0.0 0.0 sy 0.0 0.0]))
+      ("rotate" "rotatez") (when-let [a (transform-angle (arg 0))]
+                             (let [c (Math/cos a) s (Math/sin a)]
+                               [c s (- s) c 0.0 0.0]))
+      "skew" (let [ax (transform-angle (arg 0))
+                   ay (if (> n 1) (transform-angle (arg 1)) 0.0)]
+               (when (and ax ay)
+                 [1.0 (Math/tan ay) (Math/tan ax) 1.0 0.0 0.0]))
+      "skewx" (when-let [ax (transform-angle (arg 0))]
+                [1.0 0.0 (Math/tan ax) 1.0 0.0 0.0])
+      "skewy" (when-let [ay (transform-angle (arg 0))]
+                [1.0 (Math/tan ay) 0.0 1.0 0.0 0.0])
+      "matrix" (when (= n 6)
+                 (let [vs (mapv transform-number args)]
+                   (when (every? some? vs) vs)))
+      nil)))
+
+(def ^:private transform-function-pattern
+  ;; No nesting: an argument containing its own parens (`calc(...)`, `var()`
+  ;; the cascade could not substitute) does not match, so the declaration is
+  ;; dropped whole rather than half-read.
+  #"([a-zA-Z][a-zA-Z0-9]*)\s*\(([^()]*)\)")
+
+(defn- transform-list-matrix
+  "A whole `transform` declaration as one matrix, or nil for `none`, for an
+   empty/unparseable value, and -- deliberately -- for a list containing ANY
+   function this engine does not model (see transform-function-matrix).
+
+   Dropping the WHOLE declaration on one unknown function, rather than
+   composing the ones it did recognize, is the honest reading: a list is a
+   single composed transform, and applying three of its four functions
+   produces a box that is confidently in the wrong place. Reporting the
+   untransformed box at least says, truthfully, that this engine did not
+   transform it."
+  [v w h]
+  (let [s (str/trim (str v))]
+    (when-not (or (str/blank? s) (= "none" s))
+      (let [ms (re-seq transform-function-pattern s)]
+        (when (and (seq ms)
+                   ;; every character of the value has to be accounted for by
+                   ;; the functions matched, or something unrecognized is in
+                   ;; there (`transform: translateX(5px) garbage`)
+                   (str/blank? (reduce (fn [acc [whole _ _]] (str/replace acc whole "")) s ms)))
+          (reduce (fn [acc [_ fname argstr]]
+                    (if-let [m (transform-function-matrix
+                                (str/lower-case fname)
+                                (mapv str/trim (str/split (str/trim argstr) #","))
+                                w h)]
+                      (matrix* acc m)
+                      (reduced nil)))
+                  identity-matrix ms))))))
+
+(defn- transform-origin-point
+  "`transform-origin` resolved to a point in the element's own border box,
+   defaulting to its centre (`50% 50%`, CSS's initial value -- measured in
+   Brave, `getComputedStyle` reports `50px 10px` for a 100x20 box and
+   `57px 17px` for the same box with 5px padding and a 2px border, i.e. the
+   BORDER box, which is the box this engine's `:node` op already reports).
+
+   Percentages are of the border box, keywords resolve to 0/50/100%, the
+   two components may be written in either order when both are keywords
+   (`bottom right` = `right bottom`), and a third (Z) component is accepted
+   and ignored -- it has no effect without a 3D pipeline. An unresolvable
+   component falls back to the centre rather than to zero, so a
+   `transform-origin` this engine cannot read leaves the transform where
+   CSS's own default would have put it."
+  [v w h]
+  (let [toks (->> (str/split (str/trim (str v)) #"\s+")
+                  (remove str/blank?)
+                  (map str/lower-case)
+                  vec)
+        horiz #{"left" "right"}
+        vert #{"top" "bottom"}
+        [tx ty] (case (count toks)
+                  0 ["center" "center"]
+                  1 [(first toks) "center"]
+                  ;; either order, but only keywords disambiguate it
+                  (if (or (vert (first toks)) (horiz (second toks)))
+                    [(second toks) (first toks)]
+                    [(first toks) (second toks)]))
+        resolve-1 (fn [t basis kw-0 kw-100]
+                    (cond
+                      (= t "center") (* 0.5 basis)
+                      (= t kw-0) 0.0
+                      (= t kw-100) (double basis)
+                      :else (or (transform-length t basis) (* 0.5 basis))))]
+    [(resolve-1 tx w "left" "right")
+     (resolve-1 ty h "top" "bottom")]))
+
+(defn- transformable?
+  "Real CSS applies `transform` to TRANSFORMABLE elements: everything with
+   a box except a non-replaced INLINE box and a table column/column-group.
+
+   Measured in Brave, and the reason this predicate exists rather than
+   being assumed: `<span style=\"transform: translateX(30px)\">` inside a
+   sentence computes `matrix(1, 0, 0, 1, 30, 0)` and does NOT move -- its
+   box is reported at exactly the x an untransformed span sits at. Applying
+   the transform there would have moved a box every browser leaves alone.
+   The corpus case that does measure an inline is `:transform/
+   on-an-inline-block`, an `inline-block`, which IS transformable."
+  [tag st]
+  (let [d (:display st)]
+    (and (not (contains? #{:col :colgroup} tag))
+         (not (contains? #{"contents" "none" "table-column" "table-column-group"} d))
+         (or (contains? inline-atomic-tags tag)              ; replaced / form control
+             (contains? inline-atomic-displays d)            ; inline-block / -flex / -grid
+             (if d
+               (not= "inline" d)
+               (not (contains? inline-level-tags tag)))))))
+
+(defn- transform-ops
+  "Maps a subtree's draw ops through `m`.
+
+   This engine's draw ops are AXIS-ALIGNED: a `:rect`/`:node`/`:clip` is
+   an x/y/w/h, and a `:text` is an origin plus a font size. There is no
+   rotated-quad primitive here or in this engine's hosts, so the mapping is:
+
+   - a RECT-shaped op becomes the axis-aligned bounding box of its
+     transformed corners. For a translate, a scale, or any other
+     axis-aligned matrix that is EXACT. For a rotation or a skew it is
+     exact for the `:node` op -- `getBoundingClientRect`, which is what
+     the conformance harness compares and what a hit-tester wants, reports
+     that same bounding box -- and an over-covering approximation for a
+     background/border fill, which will paint the bounding box where a
+     browser paints a rotated rectangle inside it.
+   - a TEXT op is placed at its transformed origin, with its font size
+     scaled by sqrt(|det m|), the matrix's uniform scale factor. That
+     factor is EXACT for a uniform scale (`scale(2)` -> 2), for a rotation
+     and for a skew (both 1, and neither changes glyph size); it is a
+     compromise for an anisotropic scale (`scale(2, 3)` -> 2.449), because
+     a font size is one scalar and there is no anisotropic text here.
+     Glyphs are never rotated -- the position is the true transformed
+     position of the text's origin, the shaping is not.
+
+   Nothing is scoped to the ops of one element: the WHOLE subtree is mapped,
+   which is what makes nested transforms compose the way they do in CSS
+   (measured: a `translateX(10px)` box inside a `scale(2)` box reports the
+   inner translation doubled by the outer scale)."
+  [[a b c d e f] ops]
+  (let [px (fn [x y] (round-4 (+ (* a x) (* c y) e)))
+        py (fn [x y] (round-4 (+ (* b x) (* d y) f)))
+        scale (Math/sqrt (Math/abs (- (* a d) (* b c))))]
+    (mapv (fn [op]
+            (if (= :text (:draw/op op))
+              (let [x (:x op 0) y (:y op 0)]
+                (cond-> (assoc op :x (px x y) :y (py x y))
+                  (:font-size op) (update :font-size #(round-4 (* % scale)))))
+              (if (and (contains? op :x) (contains? op :y))
+                (let [x (:x op 0) y (:y op 0)
+                      w (:w op 0) h (:h op 0)
+                      xs [(px x y) (px (+ x w) y) (px x (+ y h)) (px (+ x w) (+ y h))]
+                      ys [(py x y) (py (+ x w) y) (py x (+ y h)) (py (+ x w) (+ y h))]
+                      x0 (apply min xs) y0 (apply min ys)]
+                  (cond-> (assoc op :x x0 :y y0)
+                    (contains? op :w) (assoc :w (round-4 (- (apply max xs) x0)))
+                    (contains? op :h) (assoc :h (round-4 (- (apply max ys) y0)))))
+                op)))
+          ops)))
+
+(defn- apply-element-transform
+  "Applies this element's own `transform` to what it just laid out, and to
+   NOTHING else.
+
+   `laid` is a layout result (`:box`, `:draw`, and for the block path the
+   collapsed margins / escaped floats / out-of-flow list). Only `:draw` is
+   rewritten. `:box` is handed back untransformed on purpose -- it is what
+   the parent's flow reads to place the next sibling and to size itself,
+   and a transform must not reach it (see this section's header).
+
+   What is NOT modelled, each for a reason rather than by omission:
+
+   - A transformed element establishes a STACKING CONTEXT in real CSS. It
+     does not here; z-index handling (layout-absolute-children) is
+     unchanged, so a transformed box does not lift its positioned
+     descendants out of their existing painting order.
+   - A transformed element is also a CONTAINING BLOCK for its absolutely
+     positioned descendants, and measurably so: in Brave a
+     `position: absolute; left: 5px; top: 5px` child of a static
+     `transform: translate(20px, 10px)` box lands at (25, 15), while the
+     same child of an untransformed static box escapes to the initial
+     containing block. This engine already lands that child at (25, 15) --
+     but for an unrelated reason, not because of this section: every block
+     box here anchors its own out-of-flow children (layout-block hands its
+     padding box straight to layout-absolute-children with no
+     positioned-ancestor check at all), so the containing-block question
+     never reaches a `position` test. The right answer by the wrong route
+     is still worth stating out loud, because the day that broader
+     simplification is fixed, THIS behaviour has to be added back
+     deliberately."
+  [st tag laid]
+  (let [{:keys [x y w h]} (:box laid)]
+    (if-not (and (:transform st) (transformable? tag st))
+      laid
+      (if-let [m (transform-list-matrix (:transform st) w h)]
+        (if (= m identity-matrix)
+          laid
+          (let [[ox oy] (transform-origin-point (:transform-origin st) w h)
+                ;; the transform is about the origin POINT, so it is
+                ;; conjugated by the translation that puts that point at 0,0
+                cx (+ x ox) cy (+ y oy)
+                about (matrix* (matrix* [1.0 0.0 0.0 1.0 cx cy] m)
+                               [1.0 0.0 0.0 1.0 (- cx) (- cy)])]
+            (update laid :draw #(transform-ops about %))))
+        laid))))
+
 (defn layout-node
   "`intruding` (optional, 8th argument) is the float band of the formatting
    context this node takes part in, in absolute coordinates -- see
@@ -9135,7 +9494,17 @@
                                 :overflow-wrap overflow-wrap)
                tag (:tag node)
                children (laid-out-children theme node)]
-           (cond
+           ;; ---- the one place a `transform` is applied ----
+           ;; Wrapping the WHOLE dispatch, rather than each branch, is what
+           ;; makes `transform` work on a block, a flex/grid container, a
+           ;; table, a form control and an atomic inline alike -- every one
+           ;; of them returns the same `{:box :draw}` shape here, and
+           ;; apply-element-transform rewrites only the `:draw` half. See
+           ;; its docstring (and the section above it) for why `:box` is
+           ;; deliberately left alone.
+           (apply-element-transform
+            st tag
+            (cond
              ;; `display: contents` generates NO box -- see
              ;; splice-display-contents, which has already promoted this
              ;; element's children into its parent's flow and emptied it.
@@ -9216,7 +9585,7 @@
 
              :else
              (layout-block theme x y avail-width opacity inherited st (assoc node :children children)
-                           intruding)))))
+                           intruding))))))
 
      :else
      (recur theme x y avail-width opacity inherited (str node) intruding))))
