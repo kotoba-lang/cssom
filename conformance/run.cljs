@@ -170,7 +170,7 @@
     // bold and its italic faces are proportional, so one table cannot
     // stand in for the others (an <em> measured 7.0/char here against the
     // browser's 10.28).
-    var advances = { normal: {}, bold: {}, italic: {} };
+    var advances = { normal: {}, bold: {}, italic: {}, control: {} };
     [['normal', 'normal', 'normal'],
      ['bold', 'bold', 'normal'],
      ['italic', 'normal', 'italic']].forEach(function (spec) {
@@ -182,6 +182,18 @@
         advances[spec[0]][code] = probe.getBoundingClientRect().width / 20;
       }
     });
+    // The CONTROL face. Form controls do not inherit the page font: this
+    // browser computes `Arial 13.3333px` for an <input> inside a monospace
+    // container, so a control's intrinsic width can only be computed
+    // against metrics measured in that font -- which the engine now asks
+    // for by naming the family in its own UA defaults.
+    probe.style.cssText = 'white-space:pre;' + getComputedStyle(document.createElement('input')).font;
+    probe.style.font = '400 13.3333px Arial';
+    for (var code = 32; code <= 126; code++) {
+      var ch = String.fromCharCode(code);
+      probe.textContent = new Array(21).join(ch);
+      advances.control[code] = probe.getBoundingClientRect().width / 20;
+    }
     probe.remove();
     out['__advances__'] = advances;
     var pre = document.createElement('pre');
@@ -362,11 +374,14 @@
                      {:width width
                       :theme {:padding 0
                               :gap 0
-                              :measure-text (fn [text font-size weight style & _]
-                                              (let [advance (cond (= "bold" weight) (:bold char-w)
+                              :measure-text (fn [text font-size weight style family]
+                                              (let [control? (= "Arial" family)
+                                                    advance (cond control? (:control char-w)
+                                                                  (= "bold" weight) (:bold char-w)
                                                                   (= "italic" style) (:italic char-w)
                                                                   :else (:normal char-w))]
-                                                (* (/ (or font-size 14) 14)
+                                                (* (/ (or font-size (if control? 13.3333 14))
+                                                      (if control? 13.3333 14))
                                                    (reduce + 0 (map advance (str text))))))}})))
 
 (defn- engine-lines
@@ -577,7 +592,8 @@
                     (fn [ch] (get-in advances [face (keyword (str (.charCodeAt ch 0)))] 8.4)))
       char-w {:normal (advance-for :normal)
               :bold (advance-for :bold)
-              :italic (advance-for :italic)}
+              :italic (advance-for :italic)
+              :control (advance-for :control)}
       _ (println (str "metrics: per-character advance table measured in the oracle ("
                       (count (:normal advances)) " chars x normal/bold/italic)\n"))
       results (vec (map-indexed (fn [i c]

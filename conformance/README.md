@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 140/142 = 99%. Geometry: 417/493 element boxes (85%),
-115/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
+**Line structure: 140/142 = 99%. Geometry: 421/493 element boxes (85%),
+118/150 cases with every box in agreement**, on a corpus of 150. The corpus has grown
 34 → 98 cases. The series so far: 27/32 = 84% → 30/32 = 94% → 82/91 = 90%
 (corpus tripled) → 91/98 = 93% (tables implemented). A percentage that
 falls when the corpus grows is the corpus doing its job. Per group:
@@ -283,6 +283,32 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round twelve: form controls do not inherit the page font
+
+`input w +7` had sat in the residual for six rounds with a plausible story
+attached to it. Measured directly instead: an `<input>` inside a
+`font-family: monospace; font-size: 14px` container computes to
+**`Arial 13.3333px`** in Chrome — controls do not inherit the page font at
+all — with `padding: 2px; border: 2px` of their own (a `<button>` gets
+`6px` horizontal and `1px` vertical padding; a checkbox is a bare 13×13
+square with `margin: 3px 3px 3px 4px` and no padding or border).
+
+So the answer to "which side is wrong" was: the ENGINE, and not in the way
+the number suggested — it was not 7px of arithmetic error but a missing UA
+rule. The engine now carries that font and box as UA defaults, names the
+family so a host can measure it (the harness measures a fourth face for
+it), and sizes a control's content box by its font-size rather than by a
+line box. Two general box-model bugs fell out of the same work: neither
+block nor control height added the border, which `box-sizing: content-box`
+puts outside the content box in both axes.
+
+input 0/9 → 5/9 boxes, geometry 84% → 85%, cases fully clean 115 → 118.
+
+Still open: a `<button>`'s intrinsic width is measured in the inherited
+font rather than the control font, leaving it ~14px narrow, and an atomic
+inline's own margins are not applied (which is why the checkbox sits 4px
+left of the browser's).
 
 ### Round eleven: rowspan, and the rule behind it
 

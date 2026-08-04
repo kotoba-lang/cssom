@@ -1330,8 +1330,12 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         button-rect (first (filter #(= :button (:tag %)) ops))]
-    (is (= 200 (:w button-rect))
-        "an explicit :width must win outright, exactly like real CSS flex-basis:auto falling back to an explicit width first")))
+    (is (= 216 (:w button-rect))
+        "an explicit :width must win outright, exactly like real CSS
+         flex-basis:auto falling back to an explicit width first. 200 of
+         CONTENT plus the button's own UA box (6px padding each side, 2px
+         border each side) is a 216px border box -- content-box sizing,
+         and the UA padding/border a browser gives a <button>")))
 
 (deftest flex-item-shrink-to-fit-still-clamps-to-available-space
   (let [[div doc] (dom/create-element dom/empty-document :div)
@@ -4285,8 +4289,11 @@
         bg-rect (first (filter #(and (= :rect (:draw/op %)) (not (:border? %))) ops))
         border-rects (filterv #(and (= :rect (:draw/op %)) (:border? %)) ops)]
     (is (= (:bg layout/default-theme) (:color bg-rect)))
-    (is (= 0 (count border-rects))
-        "no border-width was ever set -- zero border rects, exactly like an unstyled <div>")))
+    (is (= 4 (count border-rects))
+        "an <input> paints the 2px border its UA stylesheet gives it -- one
+         rect per edge. This asserted ZERO borders while this engine gave
+         controls no UA box at all; a browser draws one, and the control
+         was 8px narrower than the browser's for the same reason")))
 
 (deftest select-and-textarea-also-get-border-and-background-painting
   (doseq [tag [:select :textarea]]
@@ -4406,8 +4413,9 @@
         "an empty value has nothing to select -- stale selection-start/end must clamp to [0,0], not paint a highlight against the placeholder's own characters")
     (is (= 0 (:caret caret-op))
         "the collapsed [0,0] range still paints a real caret, at the start of the (empty) value")
-    (is (= 4 (:x caret-op))
-        "the caret must sit at the box's own inset (position 0 of the empty value), not offset into the placeholder text")))
+    (is (= 2 (:x caret-op))
+        (str "the caret must sit at the box's own inset (position 0 of the
+         empty value), not offset into the placeholder text." "\n         ;; The control's own UA box changed with the platform defaults\n         ;; (padding 4 -> 2, border 0 -> 2, font 14 -> 13 Arial): a browser\n         ;; does not inherit the page font into a form control, and gives\n         ;; it its own padding and border. These numbers follow that box;\n         ;; the behaviour under test is unchanged."))))
 
 (deftest input-selection-on-a-non-empty-value-is-unaffected-by-this-fix
   (let [ops (input-ops {:value "hello" :placeholder "Search" :start "1" :end "3"})
@@ -4434,8 +4442,8 @@
                                                 :theme {:measure-text fake-char-measure}})))
         at-3 (first (filter :caret? (input-ops {:value "hello" :start "3" :end "3"
                                                 :theme {:measure-text fake-char-measure}})))]
-    (is (= 4 (:x at-0)) "just the control's own inset, zero characters in")
-    (is (= (+ 4 (* 3 7)) (:x at-3)) "inset plus 3 characters at 7px each")))
+    (is (= 2 (:x at-0)) "just the control's own inset, zero characters in")
+    (is (= (+ 2 (* 3 7)) (:x at-3)) "inset plus 3 characters at 7px each")))
 
 (deftest input-caret-x-offset-falls-back-to-the-average-char-width-heuristic
   ;; With no :measure-text configured (every pre-existing caller), the
@@ -4443,7 +4451,7 @@
   ;; estimate this fn's own selection-width calculation already used --
   ;; not simply stay at the box edge like before this fix.
   (let [caret-op (first (filter :caret? (input-ops {:value "hello" :start "3" :end "3"})))]
-    (is (= (+ 4 (* 3 (long (* 0.6 (:font-size layout/default-theme))))) (:x caret-op)))))
+    (is (= (+ 2 (* 3 (long (* 0.6 (:font-size layout/default-theme))))) (:x caret-op)))))
 
 (deftest input-selection-reversed-indices-normalize-to-a-valid-forward-range
   ;; A real, if unusual, corner case: selection-start > selection-end
@@ -5124,10 +5132,13 @@
         input-op (first (filter #(and (= :node (:draw/op %)) (= :input (:tag %))) ops))]
     (is (= 8 (:y input-op))
         "the control sits at the top of the line box it made taller")
-    (is (= 22 (:y (first t)))
+    (is (= 15 (:y (first t)))
         "and the label text is pushed down so BOTH sit on one baseline:
-         the control's bottom edge (8 + 28) and the text's own baseline
-         (22 + 14) are both y=36 -- real CSS `vertical-align: baseline`")
+         the control's bottom edge (8 + 21) and the text's own baseline
+         (15 + 14) are both y=29 -- real CSS `vertical-align: baseline`.
+         The control is 24 tall rather than 28 because it now carries the
+         UA box a browser gives it (13px Arial, 2px padding, 2px border)
+         instead of inheriting the page font")
     (is (< (:x (first t)) (:x input-op))
         "label first, control after it, on that one line")
     (is (< (:w input-op) 200)

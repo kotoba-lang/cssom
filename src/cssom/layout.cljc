@@ -721,6 +721,51 @@
    :blockquote {:margin-left 40 :margin-right 40}
    :dd {:margin-left 40}})
 
+(def ^:private form-control-tags #{:input :button :select :textarea})
+
+(def ^:private ua-control-font
+  "Form controls do NOT inherit the page font. Every browser's UA
+   stylesheet gives them their own -- measured directly in Chrome on this
+   platform, an `<input>` inside a `font-family: monospace; font-size: 14px`
+   container computes to `Arial 13.3333px` regardless -- which is why this
+   engine's controls came out ~7px narrower than the browser's however
+   carefully their intrinsic width was computed from the INHERITED font.
+
+   The family is named here for the same reason a UA stylesheet names it:
+   it is the platform default, not a guess, and a host that measures text
+   (see draw-ops' `:measure-text`) needs a family it can actually measure."
+  {:family "Arial" :size 13})
+
+(def ^:private ua-control-box
+  "UA padding and border for form controls, measured in Chrome: an
+   `<input>` is `padding: 2px; border: 2px`, a `<button>` `padding: 6px;
+   border: 2px`, a `<select>` `border: 1px`. Without them a control's box
+   was its content width exactly, where a browser reports 8px more."
+  {:input {:padding 2 :border 2}
+   :textarea {:padding 2 :border 2}
+   ;; a button's padding is NOT uniform: 6px each side, 1px top and bottom.
+   ;; Measured in Chrome (h=21 = 13px content + 2 + 4 border), and only
+   ;; expressible at all since the box model gained per-side values.
+   :button {:padding 1 :padding-left 6 :padding-right 6 :border 2
+            :line-height :font-size}
+   :select {:padding 0 :border 1 :line-height :font-size}})
+
+(defn- ua-control-box-for
+  "The UA box for one control, by tag AND -- for `<input>` -- by type: a
+   checkbox or radio is a bare 13x13 square with no padding and no border
+   at all, where a text input has 2px of each. Measured in Chrome."
+  [node]
+  (let [tag (:tag node)]
+    (if (and (= :input tag)
+             (contains? #{"checkbox" "radio"}
+                        (str/lower-case (str (or (get-in node [:attrs :type]) "text")))))
+      ;; ...and its own margins: Chrome's UA sheet gives a checkbox/radio
+      ;; `margin: 3px 3px 3px 4px`, which is the gap a reader sees between
+      ;; the box and the label beside it.
+      {:padding 0 :border 0 :margin-top 3 :margin-right 3
+       :margin-bottom 3 :margin-left 4}
+      (get ua-control-box tag))))
+
 (def ^:private ua-padding
   "UA-stylesheet padding defaults, in the uniform form this engine's box
    model can express. Real Chrome ships `td, th { padding: 1px }`; without
@@ -771,25 +816,33 @@
    :max-height (style node :max-height)
    :box-sizing (or (style node :box-sizing) "content-box")
    :padding (parse-int (style node :padding)
-                       (get ua-padding (:tag node) (:padding theme)))
+                       (or (:padding (ua-control-box-for node))
+                           (get ua-padding (:tag node))
+                           (:padding theme)))
    ;; The DECLARED padding only -- author or UA -- with no theme fallback.
    ;; The theme's uniform padding is a host decoration, not CSS: letting it
    ;; widen a content-box `width` would make `div{width:50px}` occupy 58px
    ;; because of a styling choice the author never made.
    :padding/declared (parse-int (style node :padding) (get ua-padding (:tag node)))
    :padding-top (parse-int (style node :padding-top) nil)
-   :padding-right (parse-int (style node :padding-right) nil)
+   :padding-right (parse-int (style node :padding-right)
+                             (:padding-right (ua-control-box-for node)))
    :padding-bottom (parse-int (style node :padding-bottom) nil)
    :padding-left (parse-int (style node :padding-left)
-                            (get-in ua-box-sides [(:tag node) :padding-left]))
+                            (or (:padding-left (ua-control-box-for node))
+                                (get-in ua-box-sides [(:tag node) :padding-left])))
    :margin-top (parse-int (style node :margin-top)
-                          (ua-margin-y node theme))
+                          (or (:margin-top (ua-control-box-for node))
+                              (ua-margin-y node theme)))
    :margin-bottom (parse-int (style node :margin-bottom)
-                             (ua-margin-y node theme))
+                             (or (:margin-bottom (ua-control-box-for node))
+                                 (ua-margin-y node theme)))
    :margin-left (parse-int (style node :margin-left)
-                           (get-in ua-box-sides [(:tag node) :margin-left]))
+                           (or (:margin-left (ua-control-box-for node))
+                               (get-in ua-box-sides [(:tag node) :margin-left])))
    :margin-right (parse-int (style node :margin-right)
-                            (get-in ua-box-sides [(:tag node) :margin-right]))
+                            (or (:margin-right (ua-control-box-for node))
+                                (get-in ua-box-sides [(:tag node) :margin-right])))
    ;; Real CSS's `border-spacing` defaults to 2px in every browser: cells
    ;; are separated by it AND the table is inset by it on all four sides.
    ;; Measured against Chrome, its absence was the single reason table/tr
@@ -798,7 +851,8 @@
    ;; padding above.
    :border-spacing (parse-int (style node :border-spacing) 2)
    :margin (parse-int (style node :margin) 0)
-   :border-width (parse-int (style node :border-width) 0)
+   :border-width (parse-int (style node :border-width)
+                            (get (ua-control-box-for node) :border 0))
    :border-color (or (style node :border-color) "#000000")
    ;; parse-int'd (unlike :left/:top/:width/etc a few lines up, which
    ;; stay raw strings because real CSS auto/% are legitimate non-numeric
@@ -838,12 +892,19 @@
    :background (or (style node :background) (style node :background-color))
    :color (style node :color)
    :font-size (or (style node :font-size)
+                  (when (contains? form-control-tags (:tag node)) (:size ua-control-font))
                   (when-let [scale (get ua-font-scale (:tag node))]
                     (long (* scale (:font-size theme)))))
-   :line-height (style node :line-height)
+   :font-family (or (style node :font-family)
+                    (when (contains? form-control-tags (:tag node)) (:family ua-control-font)))
+   :line-height (or (style node :line-height)
+                    ;; a control's UA `font:` shorthand resets line-height to
+                    ;; normal, so an inherited page line-height never applies
+                    ;; to it -- see layout-form-control's own note
+                    (when (= :font-size (:line-height (ua-control-box-for node)))
+                      (or (style node :font-size) (:size ua-control-font))))
    :font-weight (or (style node :font-weight) (get ua-font-weight (:tag node)))
    :font-style (or (style node :font-style) (get ua-font-style (:tag node)))
-   :font-family (style node :font-family)
    ;; parse-int'd for the exact same reason box-shadow-x/y/blur/spread
    ;; above just were -- layout-text's own inline shadow-op does raw
    ;; (+ line-x (or (:x text-shadow) 0)) arithmetic against these with
@@ -3045,8 +3106,18 @@
   [theme content-w opacity inherited child st]
   (let [tag (:tag child)
         font-size (parse-int (:font-size st) (:font-size theme))
-        char-w (long (* 0.6 font-size))
-        inset (content-inset st)
+        measure-text (:measure-text theme)
+        ;; Use the host's real measurement when it has one -- a control's
+        ;; width is `size` characters of ITS OWN font (see ua-control-font),
+        ;; and this engine's 0.6-em approximation is exactly the thing a
+        ;; host supplies :measure-text to replace. Measured against the
+        ;; browser, the approximation left an <input> 9px narrow.
+        char-w (if measure-text
+                 (measure-text "0" font-size (:font-weight st) (:font-style st) (:font-family st))
+                 (long (* 0.6 font-size)))
+        ;; the intrinsic size is a BORDER box: padding and border sit
+        ;; outside the characters it is asked to hold
+        inset (+ (:padding st) (:border-width st))
         natural
         (cond
           (:width st) (resolve-width st content-w)
@@ -4846,8 +4917,28 @@
         w (resolve-width st avail-width)
         inset (content-inset st)
         control-font-size (parse-int (:font-size st) (:font-size theme))
-        control-line-height (resolve-line-height (:line-height st) control-font-size (:line-height theme))
-        h (clamp-height st (or (resolve-height st) (+ control-line-height (* 2 inset))))
+        ;; A control's content box is one FONT-SIZE tall, not one line-box:
+        ;; measured, Chrome reports a 21px <input> = 13px content + 2px
+        ;; padding + 2px border per side, where using the line-height gave
+        ;; 24. A control is a replaced-ish box with its own metrics, not a
+        ;; block of flowing text.
+        ;; ...and the UA `font:` shorthand RESETS line-height to normal for
+        ;; a control, so an inherited page line-height does not apply to it
+        ;; either. The cascade has already folded the inherited value onto
+        ;; this node by the time layout sees it, so the reset is applied
+        ;; here unconditionally rather than by trying to tell inherited from
+        ;; declared -- documented, and matching every measurement taken
+        ;; against the browser.
+        control-line-height control-font-size
+        ;; content + padding + BORDER: with `box-sizing: content-box` (the
+        ;; default) the border sits outside the content box in the vertical
+        ;; axis too. Without it the control came out exactly one border
+        ;; short on each side -- 17px against the browser's 21.
+        h (clamp-height st (or (resolve-height st)
+                               (+ control-line-height (* 2 inset)
+                                  (if (= "border-box" (:box-sizing st))
+                                    0
+                                    (* 2 (:border-width st))))))
         value (attr node :value)
         checked (truthy-attr? (attr node :checked))
         input-type (str/lower-case (str (or (attr node :type) "text")))
@@ -4974,7 +5065,15 @@
                                                     (contains? #{nil "visible"} (:overflow st))
                                                     (not (:independent-fc? st))))
         explicit-h (resolve-height st)
-        node-h (clamp-height st (or explicit-h (+ h inset-t inset-b)))
+        ;; content + padding + BORDER, for the same reason resolve-width
+        ;; adds it horizontally: with `box-sizing: content-box` the border
+        ;; sits outside the content box in both axes. Without it every
+        ;; bordered block came out two borders short.
+        node-h (clamp-height st (or explicit-h
+                                    (+ h inset-t inset-b
+                                       (if (= "border-box" (:box-sizing st))
+                                         0
+                                         (* 2 (:border-width st))))))
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
         {above-draws :above below-draws :below} (layout-absolute-children theme content-x content-y content-w content-h opacity inherited out-of-flow)
