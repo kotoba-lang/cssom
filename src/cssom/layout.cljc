@@ -941,6 +941,8 @@
    :visibility (style node :visibility)
    :justify-content (or (style node :justify-content) "flex-start")
    :align-items (or (style node :align-items) "stretch")
+   :flex-grow (parse-dbl (style node :flex-grow) 0.0)
+   :flex-shrink (parse-dbl (style node :flex-shrink) 1.0)
    :flex-direction (or (style node :flex-direction) "row")
    :flex-wrap (or (style node :flex-wrap) "nowrap")
    :grid-template-columns (style node :grid-template-columns)
@@ -3395,7 +3397,37 @@
       (let [{:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw opacity inherited st in-flow measured)
             node-h (or (resolve-height st) (+ cross-total (* 2 inset)))]
         {:box-w w :box-h node-h :draws draws})
-      (let [main-sizes (mapv (fn [m] (if column? (:h (:box m)) (:w (:box m)))) measured)
+      (let [base-sizes (mapv (fn [m] (if column? (:h (:box m)) (:w (:box m)))) measured)
+            ;; ---- flex-grow / flex-shrink ----
+            ;; Real flexbox distributes the line's FREE SPACE across the
+            ;; items: positive free space by `flex-grow`, negative by
+            ;; `flex-shrink` weighted by each item's own base size. This
+            ;; engine froze every item at its base size, so `flex-grow: 1`
+            ;; did nothing at all (the most common flex idiom on the real
+            ;; web) and over-wide items overflowed instead of shrinking --
+            ;; measured against the browser as `div w +8` and `div x +50`
+            ;; across ten boxes.
+            avail-main (if column? (or (explicit-length (:height st)) 0) cw)
+            gaps-main (* gap (max 0 (dec (count base-sizes))))
+            free (- avail-main (reduce + 0 base-sizes) gaps-main)
+            item-sts (mapv #(when (map? %) (node-style % theme)) in-flow)
+            grows (mapv #(or (:flex-grow %) 0.0) item-sts)
+            shrinks (mapv #(or (:flex-shrink %) 1.0) item-sts)
+            main-sizes
+            (cond
+              (and (pos? free) (pos? (reduce + 0 grows)) (pos? avail-main))
+              (let [total (reduce + 0 grows)]
+                (mapv (fn [sz g] (+ sz (* free (/ g total)))) base-sizes grows))
+
+              (and (neg? free) (pos? avail-main))
+              (let [weights (mapv * shrinks base-sizes)
+                    total (reduce + 0 weights)]
+                (if (pos? total)
+                  (mapv (fn [sz w] (max 0 (+ sz (* free (/ w total))))) base-sizes weights)
+                  base-sizes))
+
+              :else base-sizes)
+
             cross-sizes (mapv (fn [m] (if column? (:w (:box m)) (:h (:box m)))) measured)
             auto-cross (if (seq cross-sizes) (apply max 0 cross-sizes) 0)
             cross-content (or (explicit-length (if column? (:width st) (:height st))) auto-cross)
@@ -3430,6 +3462,17 @@
                                                (not column?))
                                 m))
                             in-flow measured)
+            ;; An item resized on the main axis is laid out again at that
+            ;; size, so its own content wraps against the real width. This
+            ;; runs AFTER the align-items:stretch pass, which re-measures at
+            ;; the container width and would otherwise undo it -- the bug
+            ;; that made `flex-grow: 1` look unimplemented even once the
+            ;; distribution was right.
+            measured (mapv (fn [child m base sz]
+                             (if (or (= base sz) column?)
+                               m
+                               (measure-child theme (long sz) opacity inherited child false)))
+                           in-flow measured base-sizes main-sizes)
             offsets (place-main-axis (:justify-content st) main-sizes gap main-content)
             draws (mapcat
                    (fn [m off]

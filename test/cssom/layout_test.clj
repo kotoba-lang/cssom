@@ -1230,8 +1230,12 @@
   ;; summed item sizes -- confirmed via a direct REPL reproduction before
   ;; touching source: with three 90px-wide items, gap:20px, and a 300px
   ;; container, this produced the exact same offsets as gap:0.
-  (is (= [4 114 224] (space-between-item-x-offsets 90 20))
-      "each item must be spaced by exactly the 20px gap (90+20=110px apart, plus the container's own 4px padding)"))
+  (is (= [4 112.0 220.0] (space-between-item-x-offsets 90 20))
+      "three 90px items plus two 20px gaps want 310px of a 292px content
+         area, so with `flex-shrink: 1` -- the DEFAULT -- they shrink to fit
+         rather than overflowing, and the gap stays exactly 20px between
+         them. This asserted the pre-shrink offsets, from when this engine
+         froze every item at its base size"))
 
 (deftest space-between-still-distributes-extra-free-space-beyond-the-gap-floor
   ;; Once free space genuinely exceeds what the gap alone needs, real CSS
@@ -1283,8 +1287,11 @@
       "each item gets a full 100px/3 share split 50/50 lead/trail: item 1 leads by half a share (50), adjacent items' half-shares combine into one full share (100) between them"))
 
 (deftest space-around-reserves-gap-as-a-minimum-inter-item-spacing
-  (is (= [4 114 224] (space-distribution-item-x-offsets "space-around" 90 20))
-      "270px of items leaves no free space once the 40px gap floor (2 gaps x 20px) is reserved from the 292px content area -- degenerates to the gap floor alone, same as space-between's own equivalent floor case"))
+  (is (= [5.333333333333333 112.0 218.66666666666666]
+         (space-distribution-item-x-offsets "space-around" 90 20))
+      "the items shrink to fit (flex-shrink defaults to 1), and
+         space-around then distributes what the gap floor leaves --
+         previously they overflowed at their base size"))
 
 (deftest space-evenly-distributes-free-space-into-n-plus-1-equal-gaps
   (is (= [16 112 208] (space-distribution-item-x-offsets "space-evenly" 84 0))

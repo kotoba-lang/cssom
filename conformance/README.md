@@ -47,8 +47,8 @@ and its per-tag breakdown pointed straight at the causes.
 
 ## Result — 2026-08-04
 
-**Line structure: 183/190 = 96%. Geometry: 597/719 element boxes (83%),
-155/200 cases with every box in agreement**, on a corpus grown 150 → 200.
+**Line structure: 183/190 = 96%. Geometry: 599/719 element boxes (83%),
+156/200 cases with every box in agreement**, on a corpus of 200.
 
 That geometry number is one point BELOW the previous round's 87%, and it is
 the right trade: see "the font-metrics model" below. The corpus has grown
@@ -286,6 +286,24 @@ Not implemented, and named: floats that appear AFTER other content in their
 container (v1 places floats at the container's top, the shape real markup
 almost always uses), floats stacking vertically when they do not fit side by
 side, and `clear`.
+
+### Round eighteen: flex-grow and flex-shrink
+
+Real flexbox distributes a line's FREE SPACE across its items — positive by
+`flex-grow`, negative by `flex-shrink` weighted by each item's base size.
+This engine froze every item at its base size, so `flex-grow: 1` (the most
+common flex idiom on the real web) did nothing at all and over-wide items
+overflowed instead of shrinking.
+
+The distribution was the easy half. The bug that made it *look*
+unimplemented after it was written: the `align-items: stretch` pass
+re-measures each item at the CONTAINER width, which silently undid the main
+-axis sizing. The re-measure at the final main size now runs after it.
+`flex/grow-fills-the-row` went from 1/3 boxes to exact.
+
+Two unit tests that pinned the old no-shrink behaviour are updated: three
+90px items plus two 20px gaps want 310px of a 292px content area, and with
+`flex-shrink: 1` — the default — they shrink to fit rather than overflow.
 
 ### Round seventeen: an inline box is its OWN font's height
 
