@@ -9620,3 +9620,241 @@
   ;; is 42, six preserved characters, where this engine said 28.
   (is (= [:pre 0 0 42 20]
          (tm-box :pre "<pre style=\"display:inline-block; margin:0\">   ind</pre>"))))
+;; ---- CSS multi-column layout --------------------------------------------
+;;
+;; Every expectation below is a number a real Blink browser produced for
+;; the same markup at this engine's own font-size 14 / line-height 20 (the
+;; conformance corpus's own wrapper declarations -- the SAME shapes at the
+;; browser default 16px balance differently, because there a line box is
+;; taller than these blocks' declared height and unbreakable content
+;; forces the column taller). See cssom.layout's multicol section for the
+;; rules and for the one thing this engine deliberately does not do:
+;; fragment a block across a column boundary.
+
+(defn- multicol-build
+  "A `.mc` container div holding one `.b<i>` div per entry in `blocks`,
+   each carrying `text` so the line axis has something to place."
+  [blocks]
+  (fn [doc root]
+    (let [[mc doc] (dom/create-element doc :div)
+          doc (dom/append-child doc root mc)
+          doc (dom/set-attribute doc mc :class "mc")]
+      (reduce (fn [doc [i {:keys [class text]}]]
+                (let [[b doc] (dom/create-element doc :div)
+                      doc (dom/append-child doc mc b)
+                      doc (dom/set-attribute doc b :class (or class (str "b" i)))
+                      [t doc] (dom/create-text-node doc (or text "x"))]
+                  (dom/append-child doc b t)))
+              doc
+              (map-indexed vector blocks)))))
+
+(deftest multicol-balances-four-blocks-two-and-two
+  ;; Brave, `width:300px; column-count:2; column-gap:20px` over four 30px
+  ;; blocks: 140px columns at x 0 and 160, filled two and two, and the
+  ;; container 60 tall -- the balanced height, not the 120 of one column.
+  (let [[_root mc a b c d]
+        (cascaded-boxes ".mc{width:300px;column-count:2;column-gap:20px} .mc>div{height:30px}"
+                        (multicol-build (repeat 4 {})))]
+    (is (= [300 60] [(:w mc) (:h mc)]))
+    (is (= [{:x 0 :y 0 :w 140 :h 30} {:x 0 :y 30 :w 140 :h 30}
+            {:x 160 :y 0 :w 140 :h 30} {:x 160 :y 30 :w 140 :h 30}]
+           (mapv #(select-keys % [:x :y :w :h]) [a b c d])))))
+
+(deftest multicol-balancing-cuts-only-where-the-content-can-be-cut
+  ;; THREE 30px blocks in two columns balance to 60, not to the 45 a naive
+  ;; `total / count` would give: 45 is not a place this content can be cut,
+  ;; and the smallest height that fits it in two columns is 60. Measured in
+  ;; Brave (which reaches the same 60 when the blocks cannot be split, i.e.
+  ;; under `break-inside: avoid`; without it a browser cuts the middle
+  ;; block, which this engine deliberately does not -- see the section
+  ;; header in cssom.layout).
+  (let [[_root mc a b c]
+        (cascaded-boxes (str ".mc{width:300px;column-count:2;column-gap:20px} "
+                             ".mc>div{height:30px;break-inside:avoid}")
+                        (multicol-build (repeat 3 {})))]
+    (is (= 60 (:h mc)))
+    (is (= [[0 0] [0 30] [160 0]] (mapv (juxt :x :y) [a b c])))))
+
+(deftest multicol-column-width-derives-the-used-count
+  ;; No `column-count` at all: the used count is how many `column-width`
+  ;; columns plus gaps fit the available inline size -- floor((300 + 10) /
+  ;; (100 + 10)) = 2 -- and the columns are then as wide as the space
+  ;; really allows (145), not the 100 that was asked for.
+  (let [[_root _mc a b]
+        (cascaded-boxes ".mc{width:300px;column-width:100px;column-gap:10px} .mc>div{height:30px}"
+                        (multicol-build (repeat 2 {})))]
+    (is (= [{:x 0 :w 145} {:x 155 :w 145}]
+           (mapv #(select-keys % [:x :w]) [a b])))))
+
+(deftest multicol-column-width-wider-than-the-box-is-one-column
+  (let [[_root _mc a]
+        (cascaded-boxes ".mc{width:300px;column-width:400px;column-gap:10px} .mc>div{height:20px}"
+                        (multicol-build (repeat 1 {})))]
+    (is (= [0 300] [(:x a) (:w a)]))))
+
+(deftest multicol-column-count-and-width-together-take-the-smaller
+  ;; `column-count:2; column-width:60px` in 300px with a 10px gap: four
+  ;; 60px columns would fit, and the count caps it at two.
+  (let [[_root _mc a b]
+        (cascaded-boxes (str ".mc{width:300px;column-count:2;column-width:60px;column-gap:10px} "
+                             ".mc>div{height:20px}")
+                        (multicol-build (repeat 2 {})))]
+    (is (= [{:x 0 :w 145} {:x 155 :w 145}]
+           (mapv #(select-keys % [:x :w]) [a b])))))
+
+(deftest multicol-gap-normal-is-one-em-not-zero
+  ;; `column-gap: normal` on a multicol box is 1em -- 14px at this
+  ;; engine's own base size -- where the same keyword on a grid or flex
+  ;; container is 0. Measured in Brave: 143px columns, i.e. a 14px gap.
+  (let [[_root _mc a b]
+        (cascaded-boxes ".mc{width:300px;column-count:2} .mc>div{height:30px}"
+                        (multicol-build (repeat 2 {})))]
+    (is (= [{:x 0 :w 143} {:x 157 :w 143}]
+           (mapv #(select-keys % [:x :w]) [a b])))))
+
+(deftest multicol-gap-percentage-resolves-against-the-content-width
+  ;; `column-gap: 10%` of a 300px box is 30px, not the 10 a bare
+  ;; leading-digit read would give. Measured in Brave: 135px columns.
+  (let [[_root _mc a b]
+        (cascaded-boxes ".mc{width:300px;column-count:2;column-gap:10%} .mc>div{height:20px}"
+                        (multicol-build (repeat 2 {})))]
+    (is (= [{:x 0 :w 135} {:x 165 :w 135}]
+           (mapv #(select-keys % [:x :w]) [a b])))))
+
+(deftest multicol-gap-shorthand-feeds-the-column-gap
+  ;; `gap: 40px` -- one property, three box types.
+  (let [[_root _mc a b]
+        (cascaded-boxes ".mc{width:300px;column-count:2;gap:40px} .mc>div{height:20px}"
+                        (multicol-build (repeat 2 {})))]
+    (is (= [{:x 0 :w 130} {:x 170 :w 130}]
+           (mapv #(select-keys % [:x :w]) [a b])))))
+
+(deftest multicol-columns-shorthand-sets-both-halves-in-either-order
+  (let [boxes (fn [decl]
+                (mapv #(select-keys % [:x :w])
+                      (drop 2 (cascaded-boxes (str ".mc{width:300px;" decl ";column-gap:10px} "
+                                                   ".mc>div{height:20px}")
+                                              (multicol-build (repeat 2 {}))))))]
+    (is (= [{:x 0 :w 145} {:x 155 :w 145}] (boxes "columns:2 100px")))
+    (is (= [{:x 0 :w 145} {:x 155 :w 145}] (boxes "columns:100px 2")))
+    (is (= [{:x 0 :w 145} {:x 155 :w 145}] (boxes "columns:140px"))
+        "a lone length is the width half, and derives the count")))
+
+(deftest multicol-columns-divide-the-content-box-not-the-border-box
+  ;; `width: 300px; padding: 10px` is 300 of CONTENT (content-box sizing)
+  ;; inside a 320px border box, so the columns are 140 wide -- and they
+  ;; start at x=10, inside the padding, which is the half that would be
+  ;; wrong if the columns divided the border box. Measured in Brave:
+  ;; x=10/w=140 and x=170/w=140, in a 320x50 box.
+  (let [[_root mc a b]
+        (cascaded-boxes ".mc{width:300px;padding:10px;column-count:2;column-gap:20px} .mc>div{height:30px}"
+                        (multicol-build (repeat 2 {})))]
+    (is (= [320 50] [(:w mc) (:h mc)]))
+    (is (= [{:x 10 :y 10 :w 140} {:x 170 :y 10 :w 140}]
+           (mapv #(select-keys % [:x :y :w]) [a b])))))
+
+(deftest multicol-a-definite-height-overflows-into-extra-columns
+  ;; The height is a CEILING on the balanced column height, so content
+  ;; that does not fit makes MORE columns than were asked for and they
+  ;; overflow the box's own right edge. Measured in Brave: a 200px
+  ;; `height:40px` two-column box holding three 40px blocks puts the third
+  ;; at x=220, past the box.
+  (let [[_root mc a b c]
+        (cascaded-boxes ".mc{width:200px;height:40px;column-count:2;column-gap:20px} .mc>div{height:40px}"
+                        (multicol-build (repeat 3 {})))]
+    (is (= [200 40] [(:w mc) (:h mc)]))
+    (is (= [[0 0] [110 0] [220 0]] (mapv (juxt :x :y) [a b c])))
+    (is (= 90 (:w a)))))
+
+(deftest multicol-fill-auto-fills-each-column-before-the-next
+  ;; `column-fill: auto` does not balance: it fills to the box's own
+  ;; height. 60px tall, three 30px blocks -> two in the first column, one
+  ;; in the second.
+  (let [[_root _mc a b c]
+        (cascaded-boxes (str ".mc{width:300px;height:60px;column-count:2;column-gap:20px;"
+                             "column-fill:auto} .mc>div{height:30px}")
+                        (multicol-build (repeat 3 {})))]
+    (is (= [[0 0] [0 30] [160 0]] (mapv (juxt :x :y) [a b c])))))
+
+(deftest multicol-fill-auto-without-a-height-is-one-column
+  (let [[_root mc a b c]
+        (cascaded-boxes (str ".mc{width:300px;column-count:2;column-gap:20px;column-fill:auto} "
+                             ".mc>div{height:30px}")
+                        (multicol-build (repeat 3 {})))]
+    (is (= 90 (:h mc)))
+    (is (= [[0 0] [0 30] [0 60]] (mapv (juxt :x :y) [a b c])))))
+
+(deftest multicol-column-span-all-interrupts-the-columns
+  ;; The content before the spanner is balanced into its own row of
+  ;; columns, the spanner is one full-width block below it, and the
+  ;; content after starts a fresh row under that.
+  (let [[_root mc a s b]
+        (cascaded-boxes (str ".mc{width:300px;column-count:2;column-gap:20px} .mc>div{height:20px} "
+                             ".sp{column-span:all}")
+                        (multicol-build [{} {:class "sp"} {}]))]
+    (is (= 60 (:h mc)))
+    (is (= [{:x 0 :y 0 :w 140} {:x 0 :y 20 :w 300} {:x 0 :y 40 :w 140}]
+           (mapv #(select-keys % [:x :y :w]) [a s b])))))
+
+(deftest multicol-direct-inline-content-breaks-between-its-lines
+  ;; The one fragmentation this engine does perform: a multicol box's own
+  ;; text wraps at the COLUMN's inline size and its lines flow into the
+  ;; next column. Three 20px lines in two columns balance to 40 -- two
+  ;; lines then one.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [mc doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root mc)
+        doc (dom/set-attribute doc mc :class "mc")
+        [t doc] (dom/create-text-node doc "one two three four five six seven eight nine ten")
+        doc (dom/append-child doc mc t)
+        doc (css/apply-cascade doc (css/parse-rules ".mc{width:300px;column-count:2;column-gap:20px}"))
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})
+        box (first (filter #(and (= :node (:draw/op %)) (= "mc" (:class %))) ops))
+        lines (sort-by (juxt :y :x) (distinct (map #(select-keys % [:x :y])
+                                                   (filter #(= :text (:draw/op %)) ops))))]
+    ;; FOUR lines here, where the browser wraps the same words into three:
+    ;; this engine estimates a character advance where the conformance
+    ;; harness feeds it the oracle's measured one (see that harness's
+    ;; `:measure-text`). What is asserted is the COLUMN behaviour, which is
+    ;; the same either way -- the lines are broken at the column's 140px,
+    ;; not the box's 300, and they flow into the second column.
+    (is (= 40 (:h box))
+        "the balanced height: four 20px lines in two columns")
+    (is (= [{:x 0 :y 0} {:x 160 :y 0} {:x 0 :y 20} {:x 160 :y 20}] lines)
+        "two lines in each column, the second column at the column pitch")))
+
+(deftest multicol-does-not-apply-to-an-inline-box
+  ;; Measured in Brave: `<span style="column-count:2">` gets no columns --
+  ;; the properties apply to block containers, and an inline box is not
+  ;; one.
+  (let [[_root a b]
+        (cascaded-boxes ".mc{column-count:2;column-gap:20px;display:inline} .mc>div{height:20px}"
+                        (multicol-build (repeat 2 {})))]
+    (is (= [[0 0] [0 20]] (mapv (juxt :x :y) [a b]))
+        "stacked, not columned")))
+
+(deftest multicol-column-rule-is-painted-in-the-gap-and-takes-no-space
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [mc doc] (dom/create-element doc :div)
+        doc (dom/append-child doc root mc)
+        doc (dom/set-attribute doc mc :class "mc")
+        doc (reduce (fn [doc _]
+                      (let [[b doc] (dom/create-element doc :div)
+                            doc (dom/append-child doc mc b)]
+                        (dom/set-attribute doc b :class "b")))
+                    doc (range 2))
+        doc (css/apply-cascade doc (css/parse-rules
+                                    (str ".mc{width:300px;column-count:2;column-gap:20px;"
+                                         "column-rule:4px solid #888888} .b{height:30px}")))
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})
+        boxes (filterv #(= :node (:draw/op %)) ops)
+        rule (first (filter #(and (= :rect (:draw/op %)) (= "#888888" (:color %))) ops))]
+    (is (= [{:x 0 :w 140} {:x 160 :w 140}]
+           (mapv #(select-keys % [:x :w]) (drop 2 boxes)))
+        "the columns are exactly where they are without a rule")
+    (is (= {:x 148 :y 0 :w 4 :h 30} (select-keys rule [:x :y :w :h]))
+        "centred in the 20px gap, which it does not widen")))

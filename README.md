@@ -38,6 +38,7 @@ docstrings over any prose that disagrees with them.
 | Inline flow | implemented (`layout-inline-run`) — text and inline-level elements share line boxes, wrap as one unit, collapse whitespace across fragments, share one baseline |
 | Flexbox | `flex-direction`/`flex-wrap`/`justify-content`/`align-items`/`gap` |
 | Grid | fixed/`fr` tracks, `repeat()`, `minmax()`, named areas, explicit + auto placement |
+| Multi-column | `column-count`/`column-width`/`column-gap` (incl. `normal` = 1em and percentages)/`column-rule`/`column-fill`/`column-span: all`/`columns` — balanced, with a definite height spilling into extra columns. A block is never fragmented across a boundary (it moves whole); direct inline content breaks between its lines |
 | Positioning | `absolute`/`fixed` (containing-block anchored, `z-index` ordered), `relative` (block-flow children only) |
 | Generated content | `::before`/`::after`, implicit list markers, CSS counters |
 | Hit testing | a `:node` op's box is what `getBoundingClientRect` reports; its optional `:hit` rect list is where a click lands, and the two differ for a wrapped inline box, for overflowing lines, and for table rows/row groups (which are never hit) — see `cssom.layout`'s ns docstring |
