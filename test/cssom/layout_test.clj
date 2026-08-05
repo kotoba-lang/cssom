@@ -7090,7 +7090,18 @@
         [_div input] (block-boxes [[:div {} "a " [:input {:value "hi"}] " b"]])]
     (is (== 22 (:w empty-select)))
     (is (= :input (:tag input)))
-    (is (= 21 (:h input)))))
+    (is (== 21.3333 (:h input))
+        "21.3333 rather than the browser's 21 in THIS test only, and it is
+         the default `font-metrics` approximation showing, not the control
+         box. These boxes are built with no host hooks at all, so a
+         control's `line-height: normal` content area is the default
+         `ascent = font-size, descent = 0.2em` -- 13.3333 + 2 -- where a
+         real font's is 12 + 3 = 15. It used to come out at exactly 21
+         because ua-control-font was TRUNCATED to 13 and the two errors
+         cancelled; the size is now the browser's own 13.3333 (see
+         ua-control-font), so the approximation shows its own 0.33.
+         Any host with real metrics -- dom-gpu's WebGL/WebGPU hosts, the
+         conformance oracle -- gets 12 + 3 and reports the browser's 21.")))
 
 ;; ---- display types: CSS-declared tables, and `display: contents` ----
 ;;
@@ -7532,11 +7543,16 @@
 ;; cssom.layout keeps its documented `ascent = font-size, descent = 0.2em`
 ;; approximation and there is nothing to check against a browser.
 
+;; `:x-height` is the ink top of a lowercase `x` in the same face, measured
+;; the same way on 2026-08-05 (canvas `actualBoundingBoxAscent`), and it
+;; scales as linearly as the other two: monospace is 4.53125 at 10px,
+;; 6.34375 at 14 and 10.875 at 24, i.e. 0.453125em every time. It is what
+;; `vertical-align: middle` centres against.
 (def ^:private brave-faces
-  {:normal {:ascent 12 :descent 3 :ref 14}
-   :bold {:ascent 14 :descent 4 :ref 14}
-   :italic {:ascent 14 :descent 4 :ref 14}
-   :control {:ascent 12 :descent 3 :ref 13.3333}})
+  {:normal {:ascent 12 :descent 3 :x-height 6.34375 :ref 14}
+   :bold {:ascent 14 :descent 4 :x-height 7.875 :ref 14}
+   :italic {:ascent 14 :descent 4 :x-height 7.65625 :ref 14}
+   :control {:ascent 12 :descent 3 :x-height 6.912333965301514 :ref 13.3333}})
 
 (def ^:private brave-theme
   {:padding 0 :gap 0 :font-size 14 :line-height 20
@@ -7546,7 +7562,8 @@
                                                   (= "italic" style) :italic
                                                   :else :normal))
                          k (/ (or font-size (:ref f)) (:ref f))]
-                     {:ascent (* k (:ascent f)) :descent (* k (:descent f))}))})
+                     {:ascent (* k (:ascent f)) :descent (* k (:descent f))
+                      :x-height (* k (:x-height f))}))})
 
 (defn- metric-ops
   "draw-ops for an inline run laid out with the measured faces, in a
@@ -7622,13 +7639,14 @@
   ;; owners the ATOMIC's box instead, which is what made every <label>
   ;; around a control 6px too tall and 3px too high.
   (let [boxes (metric-boxes [[:label {} "Name " [:input {}]] " after"])]
-    (is (= [:label 2 15] (second boxes))
-        "y=2 rather than Brave's 3 for the one reason left in the control
-         box: ua-control-font charges 13px where the browser computes
-         13.3333, so the control's internal baseline lands at 14 instead of
-         15. That 0.33px is deliberately still there -- it cancels an
-         opposite error in the intrinsic WIDTH model, and fixing either
-         alone makes the result worse (see ua-control-font)")
+    (is (= [:label 3 15] (second boxes))
+        "y=3, which is Brave's own number. It was 2 until 2026-08-05 for
+         the one reason left in the control box: ua-control-font charged
+         13px where the browser computes 13.3333, so the control's internal
+         baseline landed at 14 instead of 15. That 0.33px was one half of a
+         pair of cancelling errors and could not move alone; both halves
+         moved together when the average-advance metric turned out to be
+         measurable (see avg-advance / max-advance)")
     (is (= 21 (last (first boxes)))
         "and the line box is the input's 21, since the control's own
          internal baseline (15) reaches further down than the strut's")))
@@ -7705,16 +7723,76 @@
         "...where a BOTTOM-aligned box of the same size pushes the baseline
          20px down instead, because the line grew above it")))
 
-(deftest vertical-align-middle-is-still-unmodelled-and-says-so
-  ;; A pin of a documented scope cut, not a claim: `middle` centres the box
-  ;; on `baseline + x-height/2`, and `font-metrics` reports no x-height (see
-  ;; vertical-align-shift). Brave puts this line at 20.828125 with the span
-  ;; 0.828125 lower than baseline-aligned; this engine leaves it on the
-  ;; baseline. Asserted so the day an x-height hook arrives, this test is
-  ;; the one that fails and points at it.
-  (is (= (metric-boxes ["base " [:span {:font-size 24} "top"] " end"])
-         (metric-boxes ["base " [:span {:vertical-align "middle" :font-size 24} "top"] " end"]))
-      "middle still lays out exactly as baseline"))
+(deftest vertical-align-middle-centres-the-box-on-half-the-parents-x-height
+  ;; This test used to pin the OPPOSITE -- `middle` laying out exactly as
+  ;; `baseline` -- as a documented scope cut, and said it would be the test
+  ;; that fails the day an x-height hook arrives. It arrived on 2026-08-05
+  ;; (font-metrics' `:x-height`), so here is the measurement it was waiting
+  ;; for.
+  ;;
+  ;; Every number below is Brave 151 at this harness's own frame (800px,
+  ;; monospace 14px / line-height 20px), probed on 2026-08-05. The parent's
+  ;; x-height there is 6.34375, so `middle` puts each box's midpoint
+  ;; 3.171875px above the baseline -- and the line box that comes out of it
+  ;; is 20.828125px tall for every one of the three inline cases, which is
+  ;; the signature of the rule: whatever the box's own size, its midpoint
+  ;; lands in the same place and the line grows only underneath it.
+  ;;
+  ;;   child           baseline                middle
+  ;;   14px span       line 20,   top 2        line 20.828125, top 2.828125
+  ;;   10px span       line 21,   top 5        line 20.828125, top 4.828125
+  ;;   24px span       line 24,   top -3       line 20.828125, top -2.171875
+  ;;   20px inline-blk line 26,   top 0        line 20.828125, top 0.828125
+  ;;
+  ;; Note the 10px child moves UP and the 24px child moves DOWN: `middle` is
+  ;; not a direction, it is a fixed point.
+  (let [mid (fn [attrs] (metric-boxes ["base " [:span (assoc attrs :vertical-align "middle")
+                                                "top"] " end"]))
+        base (fn [attrs] (metric-boxes ["base " [:span attrs "top"] " end"]))]
+    (is (not= (base {:font-size 24}) (mid {:font-size 24}))
+        "middle no longer lays out as baseline")
+    ;; The engine's own numbers, and where they differ from Brave's and why.
+    ;; A 14px child is the one case where `brave-theme` hands over the
+    ;; measured face unscaled (k = 1), so this one is exact:
+    (is (= [[:div 0 21] [:span 2.828125 15.0]] (mid {}))
+        "a same-size child: 2.828125 down, exactly Brave's -- and a 21px
+         line where Brave reports 20.828125, which is this file's
+         long-standing `:h` ceil (see inline-line-metrics), not the shift")
+    (is (= [[:div 0 20] [:span 2 15]] (base {}))
+        "...against 20/2 on the baseline, so the shift itself is 0.828125")
+    ;; A 24px child is scaled from the 14px face by brave-theme, so its
+    ;; ascent/descent are 20.571/5.143 where Brave's real ones are 21/5;
+    ;; that 0.43 is the linear-scaling residual this theme documents, and it
+    ;; is the whole difference between -2.171875 and this:
+    (let [[[_ _ h] [_ y]] (mid {:font-size 24})]
+      (is (= 21 h) "line box within a pixel of Brave's 20.828125")
+      (is (< -3.0 y -2.0) "and a 24px child moves DOWN, to Brave's -2.171875"))
+    (let [[[_ _ h] [_ y]] (mid {:font-size 10})
+          [[_ _ _] [_ by]] (base {:font-size 10})]
+      (is (= 21 h))
+      (is (< y by) "...where a 10px child moves UP rather than down")
+      (is (== 0.171875 (- by y))
+          "by exactly the 0.171875 Brave moves it -- the box's ABSOLUTE
+           position is 5.2567 against Brave's 4.828125 only because
+           brave-theme scales the 14px face down to a 8.571px ascent where
+           the real 10px face is 9, which is this theme's documented linear
+           residual and not the shift"))))
+
+(deftest vertical-align-middle-centres-an-atomic-inline-the-same-way
+  ;; The same fixed point for a box that brings its own baseline: an
+  ;; inline-block's midpoint goes 3.171875px above the parent's baseline
+  ;; too, so its `baseline-offset` is `h/2 + x-height/2` and nothing about
+  ;; what is inside it matters. Measured in Brave at the same frame: a 20px
+  ;; inline-block reports `top: 0.828125` on a 20.828125px line, against
+  ;; `top: 0` on a 26px line when it sits on the baseline.
+  (let [box (fn [va] (->> (metric-ops ["base " [:span (cond-> {:display "inline-block"
+                                                               :width 10 :height 20}
+                                                       va (assoc :vertical-align va))] " end"])
+                          (filter #(and (= :node (:draw/op %)) (= :span (:tag %))))
+                          first))]
+    (is (= 0 (:y (box nil))) "on the baseline its bottom edge is the baseline")
+    (is (= 0.828125 (:y (box "middle")))
+        "and `middle` puts it 0.828125 down, exactly Brave's number")))
 
 (deftest a-lone-inline-element-still-gets-a-real-inline-box
   ;; `<td><a href="/x">link</a></td>` reports the <a> at (0, 2, 28, 15) in
