@@ -813,6 +813,255 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-one: where a line is allowed to break
+
+The line breaker had no model of a break OPPORTUNITY at all. It would
+break between any two tokens, and `white-space: nowrap` never reached the
+inline path in the first place — `inline-flow-candidate?` refused every
+non-`normal` value, so a paragraph with one `nowrap` child fell apart into
+block rows.
+
+Measured on this round's own merge base (`782d555`, round forty already
+in), because round forty landed on main while this one was in flight and
+its numbers are not this one's to claim:
+
+```
+                    LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
+before   547/556    1933/1973  555/581                   14462/14514  563/581     27733/27736
+after    548/556    1942/1973  559/581                   14490/14514  569/581     27733/27736
+```
+
+On the commit this branch was actually cut from (`eb9dca9`, before round
+forty) the same change reads 546 -> 547, 1926 -> 1935 / 549 -> 553,
+14450 -> 14478 / 561 -> 567 -- the same six cases either side, which is
+what says the two rounds do not overlap.
+
+**Six cases changed in the whole 581-case op dump**, all in the intended
+direction, the same six before and after the merge:
+`:overflow/nowrap-inline-blocks-do-not-wrap`,
+`:text/nowrap-inline-inside-a-wrapping-paragraph`,
+`:text/overflow-wrap-break-word-keeps-min-content` and
+`:generated/before-display-block-makes-its-own-line` now match the oracle
+exactly; `:position/sticky-right-in-a-horizontal-scroller` stopped
+wrapping (what is left of it is `sticky` in the inline axis, which this
+round did not touch); and `:sizing/overflow-hidden-releases-the-flex-floor`
+gave up an overflow hit region it should never have had.
+
+#### `nowrap` collapses whitespace exactly as `normal` does
+
+That is the whole reason it can be admitted here, and the guard that
+excluded it said the opposite: *"`pre`/`pre-wrap`/`pre-line`/`nowrap` each
+mean the run must preserve or re-interpret newlines and runs of spaces"*.
+Three of those four do. `nowrap` changes exactly one thing — whether a
+collapsed space is a place to break — and that is a line-breaker question,
+not a tokenizer one. So the old `#{nil "normal"}` test became two
+predicates that ask the two questions separately (`collapsing-white-space`
+and `soft-wrappable-white-space?`), and `nowrap` passes the first.
+
+Measured in Brave 151 on 2026-08-06, in the harness's own 14px monospace /
+20px line page, `alphaalpha<span style="white-space:nowrap"> betabeta
+</span>` at 120px puts `betabeta` at x=77 on one line: the leading space
+inside the nowrap span is collapsed to a single 7px space and rendered,
+and only the break at it is gone.
+
+#### Which element's `white-space` governs a break
+
+Two rules, and neither is guessable from the other. Nine shapes decided
+them, all at 120px unless stated:
+
+| markup | lines |
+|---|---|
+| `alphaalpha<span nowrap> betabeta</span>` | ONE — the space is the span's |
+| `alphaalpha<span> betabeta</span>` | two |
+| `alphaalpha <span normal>betabeta</span>` in a **nowrap div** | ONE — the space is the div's, and the normal span does not rescue it |
+| the same with `betabeta gammagamma` in the span | breaks before `gammagamma` — that space IS the span's |
+| `alphaalpha<span nowrap>xx </span> betabeta` | two — the span forbids, the div permits, they collapse to one that permits |
+| `alphaalpha <span nowrap> betabeta</span>` | two — the mirror image, same answer |
+| two 40px inline-blocks, no whitespace at all, 60px box | two — an atomic boundary is an opportunity with no space in it |
+| the same inside `<span nowrap>` | ONE |
+| the same with `nowrap` on the FIRST inline-block only | two |
+
+So: **a collapsible space is an opportunity when the element containing it
+permits one**, several collapsing runs are an opportunity if ANY of them
+does, and **a boundary with no space is an opportunity only at an atomic
+inline**, where the NEAREST COMMON ANCESTOR governs it. The last is what
+distinguishes `nowrap` on one side of a boundary from `nowrap` on the box
+around both, and the engine's owner stacks already carry exactly the
+information it needs.
+
+`inline-tokens` was already tracking `:space-style` — which run's font the
+space is drawn in — and that answers the first rule almost for free. It
+does **not** answer the third: `:space-style` keeps the FIRST contributor
+while the opportunity ORs every one of them, and rows five and six above
+are the two spellings that force the two to be tracked separately.
+
+#### A text boundary with no space is not a break, and `<wbr>` was working by accident
+
+The corollary cost a case and paid for a better one. `abcdefgh<span>ijkl
+</span>` in a 60px box is ONE line in Brave — 84px of text overflowing —
+and so is the same run split across two spans. This engine broke at every
+inline box edge, because it broke between any two tokens.
+
+Closing that broke `:wrap/wbr-is-a-break-opportunity`, which the corpus
+note said this engine got right *"by treating the unknown element as an
+inline that splits the text into two runs"* — i.e. by the same accident.
+`<wbr>` now emits a fragment of its own, and it is **unconditional**:
+measured, `aaaaaaa<wbr>bbbbbbb` in an 80px box is 40 tall both plainly and
+under `white-space: nowrap`, where a literal U+200B in the same two places
+is 40 and **20**. A `<wbr>` is not a zero-width space, and `nowrap`
+suppresses one and not the other. It reports no box either
+(`getClientRects()` is empty), which is why it never becomes a piece.
+
+#### The unit a line packs is a cluster, not a token
+
+Suppressing an opportunity is not enough on its own. Measured, `alpha
+<span nowrap>beta gamma delta epsilon</span> zeta` at 120px is 60 tall
+with the span **alone on line two at 168px wide, overflowing** — the
+browser gives up the line rather than the run. Testing one token at a time
+keeps `epsilon` on line one, because each of the span's own words fits
+where it stands.
+
+So the wrap test measures the whole UNBREAKABLE CLUSTER a token begins:
+itself plus every following token with no opportunity in front of it. Two
+folds over the token stream produce it, and the arithmetic is arranged so
+that **a cluster of one reduces to exactly the `open-adv + ww + tail-adv`
+this function always tested**. That identity is the safety property: on
+every stream this engine saw before `nowrap` arrived, the new test is the
+old test.
+
+#### `overflow-wrap: break-word` does not make a box narrower
+
+The distinction the case is named for, and it needed the half of
+shrink-to-fit this file never had. Real CSS is `min(max-content,
+max(min-content, available))`; `atomic-intrinsic-width` ended at
+`min(content-w, natural)`, so an atomic inline in a container narrower
+than its own content was simply squeezed to the container — and then
+`break-word`, which the engine already honoured for line breaking, broke
+the word to fit the width it had just been given.
+
+A 15-character word in a `display: inline-block` inside a 60px block, and
+the same word at `width: min-content` inside a 200px one:
+
+| | box | at `min-content` |
+|---|---|---|
+| (no break property) | 105x20 | 105x20 |
+| `overflow-wrap: break-word` | **105x20** | **105x20** |
+| `word-break: break-all` | 60x40 | 7x300 |
+| `overflow-wrap: anywhere` | 60x40 | 7x300 |
+
+Two pairs of numbers saying the same thing twice. `break-word` breaks a
+word that has nowhere else to go once a width is chosen; it does not
+change what the box asks for. Nine more shapes fix the floor's own shape:
+
+| in a 60px block | box |
+|---|---|
+| `aaaaaaa bbbbbbb` | 60x40 — min-content 49 < 60 |
+| `aaaaaaaaaaaa bbbbbbbbbbbb` | 84x40 — the longest WORD, not the text |
+| the 15-char word with `overflow: hidden` | 105x20 |
+| ...with `padding: 5px` | 115x30 |
+| ...with `max-width: 40px` | 40x20 |
+| ...with `white-space: nowrap`, four words | 105x20 |
+| ...wrapped around a `<div>` | 105x20 |
+| `<button>` with the same one-word label | 111.2x15 |
+| `<select>` / `<input size=20>` / `<img width=200>` | 134 / 153 / 200 |
+
+The last two rows are why a box whose content cannot break at all — a
+replaced element, a form control, an inline-flex/-grid sizing itself from
+its own children, or any `white-space` that forbids a soft wrap — is its
+own floor and is simply not clamped.
+
+#### A block-level `::before` is a box, not the first thing on a line
+
+`with-generated-content` merged every `::before` with the text after it
+into a single run, which is right for the numbered-list idiom it was
+written for and wrong the moment the pseudo-element declares a display.
+Eight spellings on a 300px `<p style="margin:0">tail</p>`:
+
+| | `<p>` |
+|---|---|
+| `::before { content:"head"; display:block }` | 300x40, `tail` at y=22 |
+| `::before { content:"head" }` | 300x20 |
+| `::before { content:"head"; display:inline-block }` | 300x20 |
+| `::before { content:"head"; display:flex }` | 300x40 |
+| `::before { content:"head"; display:block; height:30px }` | 300x50 |
+| `::after { content:"foot"; display:block }` | 300x40, `tail` at y=2 |
+| both block spellings at once | 300x60, `tail` at y=22 |
+| `::before { content:""; display:block }` | 300x20 |
+
+It is not `block` that matters but inline-LEVEL-ness — `flex` makes its
+own row too — and the last row is why the rule is applied to the merge
+rather than to the layout: an empty block `::before` has no line box, and
+making it a row of its own would have reported 40.
+
+#### A harness defect, and the engine half it was hiding
+
+The two `nowrap` scroller cases were still losing 10 paint points after
+their geometry went clean, and the cause was not in the engine's layout at
+all. cssom.layout's own comment at the clip emitter says that *"a line that
+overflows a box which CLIPS is not hit outside it"* and that the engine
+expresses this with `:clip` push/pop ops which *"every hit-tester that
+reads `:node` ops already tracks"*. `browser.session/hit-nodes` does. **This
+harness did not** — it read one half of the engine's answer and charged the
+engine for the other.
+
+Measured, a 300px inline-block in a `width: 200px; overflow: auto` box at
+x=240: `visible` answers the span, and `auto`, `hidden`, `scroll`, `clip`
+and `overflow-x: auto` all answer neither the span nor the box.
+
+Tracking the clips in `engine-topmost-at` — a fold rather than a filter,
+because clip state is order-dependent — turned those 10 points from
+`none -> span` into `none -> div`, and named the second half, which IS the
+engine's: a box's `:node` op is emitted BEFORE its own clip-push (it has
+to be, the clip is for its content), so the overflow region attached to it
+survives its own clip and answers clicks in space the box does not
+occupy. A clipping box now gets no overflow region at all.
+
+**The harness change is not a thumb on the scale**, and the proof is a run
+of the modified harness against the UNMODIFIED engine at this round's base
+commit: line structure 546/556, geometry 1926/1973 with 549/581 clean and
+computed style 27735/27740 — **identical to the baseline on all three**.
+Paint moved by exactly +2 points and +1 case
+(`:overflow/x-auto-reserves-height-only`), which is the only place in the
+corpus where a clip was already being ignored on its own.
+
+#### What was measured and deliberately not implemented
+
+Four break opportunities, each recorded at `inline-line-breaker` with the
+numbers a future round will need, because each needs something this file
+does not have rather than a line there:
+
+- **`&shy;`** (U+00AD) — `super&shy;califragilistic` at 90px is 40 tall,
+  breaking after `super` with a **visible hyphen** and putting a 105px
+  second line in a 90px box; the same word without it is 20 tall, and so
+  is the same markup under `hyphens: none`. What is missing is not the
+  opportunity but the inserted glyph: a break here changes the text that
+  is measured and painted, and a piece in this file is a substring of its
+  token.
+- **`hyphens: auto`** — `hyphenation example` at 70px with `lang="en"` is
+  60 tall against 40 without, Chromium's own dictionary splitting
+  `hyphen-ation`. Not derivable from the text at any width.
+- **`text-wrap: balance`** — not an opportunity at all but a different
+  ALGORITHM; this loop is greedy by construction. `alpha beta gamma delta
+  epsilon` at 200px is 40 tall BOTH ways, and only the lines differ
+  (`alpha beta gamma` / `delta epsilon` against `alpha beta gamma delta` /
+  `epsilon`). The geometry axis cannot see it; the line axis can.
+- **`white-space: break-spaces`** never reaches the line breaker, and
+  neither do `pre-wrap` and `pre-line`. Measured, a 60px box holding `aa`,
+  six spaces and `bb` is 60x40 with the same word positions under BOTH
+  `break-spaces` and `pre-wrap` — that content does not discriminate them,
+  and finding content that does is the first step of implementing either.
+
+And one cluster left alone on purpose. `:text/white-space-pre-keeps-
+leading-spaces`, `:text/tab-in-pre-advances-to-the-next-eight-column-stop`
+and `:text/tab-size-four-in-pre` are red for a reason that is not in this
+repository: `htmldom` collapses whitespace at parse time on an
+HTML-structural rule, so `<span style="white-space: pre">   indented
+</span>` reaches layout as `" indented"` and the characters are gone
+before cssom can measure them. cssom's own half is implemented and
+asserted in `<pre>` form, where they survive — 63 / 35 / 42, the browser's
+numbers exactly. Fixing it means making htmldom defer collapsing to
+layout, which changes the text every corpus case sees, and belongs in a
+round where nothing else is measuring.
 ### Round forty: three divergences, one missing capability
 
 `width: min-content | max-content | fit-content` behaving as `auto`, flex
