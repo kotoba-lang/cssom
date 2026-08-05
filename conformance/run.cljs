@@ -35,7 +35,7 @@
      nbb --classpath \"src:<dom-gpu>/src:<htmldom>/src\" conformance/run.cljs \\
        [--browser <path to Brave/Chrome binary>] [--width 800] \\
        [--only <id substring>] [--debug-geometry] [--debug-style] \\
-       [--ledger <path to append a result entry to>]"
+       [--debug-paint] [--ledger <path to append a result entry to>]"
   (:require ["node:child_process" :as cp]
             ["node:fs" :as fs]
             ["node:os" :as os]
@@ -63,6 +63,7 @@
         "--only" (recur (drop 2 args) (assoc out :only (second args)))
         "--debug-geometry" (recur (rest args) (assoc out :debug-geometry true))
         "--debug-style" (recur (rest args) (assoc out :debug-style true))
+        "--debug-paint" (recur (rest args) (assoc out :debug-paint true))
         (recur (rest args) out))
       out)))
 
@@ -1416,7 +1417,14 @@
    the `below`/`above` bands before emitting -- so reading it back is the
    honest question: `given what this engine told a host to paint, what
    would a user click?` A separate re-implementation of stacking here would
-   test my model of the engine rather than the engine."
+   test my model of the engine rather than the engine.
+
+   `:hit` is read for the same reason: the engine, not the harness,
+   decides where an element answers a click. An op with `:hit` is hit at a
+   point in one of ITS rects rather than in the border box, `[]` meaning
+   `not a hit-test candidate at all` -- see cssom.layout's ns docstring
+   for the three measured cases where the two differ. Deriving that here
+   instead would, again, test my model of the engine."
   [ops x y]
   (let [;; Both sides wrap the case, and neither wrapper is an answer: the
         ;; browser page puts the markup in a `.kotoba-case` div and the
@@ -1447,8 +1455,12 @@
          ;; `engine-lines`' replaced-box test earlier the same day; this is
          ;; the paint-order axis's copy of it.
          (filter #(and (= :node (:draw/op %))
-                       (<= (:x %) x) (< x (+ (:x %) (:w %)))
-                       (<= (:y %) y) (< y (+ (:y %) (:h %)))
+                       (if-let [hit (:hit %)]
+                         (some (fn [r] (and (<= (:x r) x) (< x (+ (:x r) (:w r)))
+                                            (<= (:y r) y) (< y (+ (:y r) (:h r)))))
+                               hit)
+                         (and (<= (:x %) x) (< x (+ (:x %) (:w %)))
+                              (<= (:y %) y) (< y (+ (:y %) (:h %)))))
                        (not= :document (:tag %))
                        (not (contains? wrapper-ids (:id %)))))
          last
@@ -1508,11 +1520,13 @@
       (:oracle/blind c)
       {:id (:id c) :group (:group c) :status :unscorable :geo geo :sty sty :paint paint
        :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)
+       :engine-ops (:boxes-ops rendered) :oracle-hits (:hits oracle-data)
        :detail "oracle cannot see generated content" :expected lines :actual mine}
 
       (= lines mine)
       {:id (:id c) :group (:group c) :status :pass :geo geo :sty sty :paint paint
-       :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)}
+       :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)
+       :engine-ops (:boxes-ops rendered) :oracle-hits (:hits oracle-data)}
 
       ;; The boxes travel with EVERY outcome, not just :pass. They used to
       ;; be attached only on :pass, which meant `--debug-geometry` printed
@@ -1521,6 +1535,7 @@
       :else
       {:id (:id c) :group (:group c) :status :fail :geo geo :sty sty :paint paint
        :oracle-boxes (:boxes oracle-data) :engine-boxes (:boxes rendered)
+       :engine-ops (:boxes-ops rendered) :oracle-hits (:hits oracle-data)
        :expected lines :actual mine})))
 
 ;; ---- report ----
@@ -1626,6 +1641,20 @@
                                             ((juxt :tag :x :y :w :h) %))
                                          (:oracle-boxes r))))
       (println "  engine:" (pr-str (mapv (juxt :tag :x :y :w :h) (:engine-boxes r))))))
+  ;; `--debug-paint` prints, for every case with a paint-order
+  ;; disagreement, the two things that produce one: the engine's `:node`
+  ;; ops IN EMITTED ORDER (which is the paint order, and therefore the
+  ;; hit-test order read backwards) and every sampled point with what each
+  ;; side said. Without the ORDER a paint-order residual is unreadable --
+  ;; the boxes it is made of usually all agree, which is the axis's whole
+  ;; point.
+  (when (:debug-paint (parse-args *command-line-args*))
+    (doseq [r results :when (seq (:diffs (:paint r)))]
+      (println "PAINT" (:id r))
+      (println "  ops:" (pr-str (mapv (juxt :tag :x :y :w :h)
+                                      (filter #(= :node (:draw/op %)) (:engine-ops r)))))
+      (doseq [{:keys [x y oracle engine]} (:diffs (:paint r))]
+        (println (str "  (" x "," y ") oracle " oracle " engine " engine)))))
   (doseq [r results]
     (println (str (pad-right (name (:status r)) 16)
                   (pad-right (str (:id r)) 48)

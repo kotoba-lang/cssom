@@ -69,6 +69,37 @@
    area on that baseline (layout-inline-run's owner-fragments), never the
    line box and never the box of whatever it contains.
 
+   ---- an element's BOX and its HIT REGION are two different things ----
+
+   A `:node` draw-op's `:x`/`:y`/`:w`/`:h` are the element's BORDER BOX --
+   the one rectangle `getBoundingClientRect` reports. That is NOT always
+   where a browser delivers a click, and the two diverge in three measured
+   ways (Brave 151, 2026-08-05):
+
+   - a WRAPPED INLINE box reports the union of its fragments and is hit
+     only INSIDE them. `<p style=\"width:200px\">alpha beta gamma <b>delta
+     epsilon</b> zeta eta</p>` gives the `<b>` client rects
+     `[119,1,33.7,18]` and `[0,22,46.8,18]` and a bounding rect
+     `[0,1,152.7,39]`; `elementFromPoint(80, 4)` -- inside the union,
+     inside neither fragment -- answers `p`, not `b`.
+   - OVERFLOWING inline content is hit OUTSIDE the border box, per line.
+     `<p style=\"width:80px\">short aaaaaaaaaaaaaaaaaaaa tail</p>` is 80
+     wide and hit out to x=140 on its middle line (the one that overflows)
+     and only to x=80 on the two that do not.
+   - a TABLE ROW or ROW GROUP is never hit at all, background or no
+     background: measured with `background` set on both `<tbody>` and both
+     `<tr>`s, `elementsFromPoint` anywhere in that table returns
+     `td, table` or `table` alone -- never `tr`, never `tbody`.
+
+   So a `:node` op carries an OPTIONAL `:hit`: a vector of rects that
+   REPLACES `:x`/`:y`/`:w`/`:h` for hit testing, `[]` meaning \"not a
+   hit-test candidate\". Absent -- the overwhelmingly common case, and the
+   only shape that existed before -- means the border box is the hit
+   region. Keeping the box and the hit region as separate keys is what
+   lets both be right at once: widening the box to cover the overflow
+   would have made every `getBoundingClientRect` comparison wrong to fix
+   the hit test, and the conformance corpus scores both.
+
    Bounded, documented cuts remain, each at the fn that owns it:
    `<svg>`/`<canvas>`/`<video>`/`<iframe>` are still not inline-level,
    because this engine cannot render them at all (inline-atomic-tags);
@@ -1001,28 +1032,60 @@
                              out))]
               (mapv (juxt :text :x)
                     (bidi-reorder-pieces (= "rtl" direction) placed)))))]
-    {:box {:x x :y y :w w :h h}
-     :draw (vec (mapcat
-                 (fn [i line]
-                   (let [line-x (+ x padding (align-offset line))
-                         line-y (+ y padding (* i line-height))]
-                     (mapcat
-                      (fn [[run-text run-dx]]
-                        (let [run-x (+ line-x run-dx)
-                              base (cond-> {:text run-text :font-size font-size :opacity opacity}
-                                     font-weight (assoc :font-weight font-weight)
-                                     font-style (assoc :font-style font-style)
-                                     font-family (assoc :font-family font-family))
-                              shadow-op (when (and (:color text-shadow) (not= "none" (:color text-shadow)))
-                                          (assoc base :draw/op :text
-                                                 :x (+ run-x (or (:x text-shadow) 0))
-                                                 :y (+ line-y (or (:y text-shadow) 0))
-                                                 :color (:color text-shadow)))
-                              main-op (cond-> (assoc base :draw/op :text :x run-x :y line-y :color color)
-                                        text-decoration (assoc :text-decoration text-decoration))]
-                          (if shadow-op [shadow-op main-op] [main-op])))
-                      (visual-runs line))))
-                 (range) lines))}))
+    (cond->
+     {:box {:x x :y y :w w :h h}
+      :draw (vec (mapcat
+                  (fn [i line]
+                    (let [line-x (+ x padding (align-offset line))
+                          line-y (+ y padding (* i line-height))]
+                      (mapcat
+                       (fn [[run-text run-dx]]
+                         (let [run-x (+ line-x run-dx)
+                               base (cond-> {:text run-text :font-size font-size :opacity opacity}
+                                      font-weight (assoc :font-weight font-weight)
+                                      font-style (assoc :font-style font-style)
+                                      font-family (assoc :font-family font-family))
+                               shadow-op (when (and (:color text-shadow) (not= "none" (:color text-shadow)))
+                                           (assoc base :draw/op :text
+                                                  :x (+ run-x (or (:x text-shadow) 0))
+                                                  :y (+ line-y (or (:y text-shadow) 0))
+                                                  :color (:color text-shadow)))
+                               main-op (cond-> (assoc base :draw/op :text :x run-x :y line-y :color color)
+                                         text-decoration (assoc :text-decoration text-decoration))]
+                           (if shadow-op [shadow-op main-op] [main-op])))
+                       (visual-runs line))))
+                  (range) lines))}
+      ;; ---- the lines that stick OUT of the box ----
+      ;;
+      ;; `w` above is clamped to `avail-width`, which is right: a browser's
+      ;; `getBoundingClientRect` reports the clamped box too. But the
+      ;; content is still painted where it was measured, and a browser HITS
+      ;; it there -- per line, not per element. Measured in Brave on
+      ;; `<p style="width:80px">short aaaaaaaaaaaaaaaaaaaa tail</p>`, whose
+      ;; box is 80x60: `elementFromPoint` answers `p` out to x=139 on the
+      ;; middle line (the long word, which does not fit and overflows to
+      ;; 140) and stops at the box edge on the two lines that do fit.
+      ;;
+      ;; So the overflow travels as its own key, in the same coordinate
+      ;; space as `:draw`, and the block that owns this text turns it into
+      ;; the `:hit` region of its `:node` op (layout-children-block ->
+      ;; layout-block). It is emitted only when a line really does overflow,
+      ;; so every non-overflowing text node -- almost all of them -- carries
+      ;; nothing extra. It is NOT propagated past the block that owns the
+      ;; lines: measured in the same browser, `<div style="width:80px">
+      ;; <p style="white-space:nowrap">alpha beta gamma</p></div>` has
+      ;; `elementsFromPoint` return `p` alone at x=100 -- the `<div>` is not
+      ;; in the stack, so a descendant's overflow is not its ancestor's hit
+      ;; region.
+      (some #(> (line-w %) content-w) lines)
+      (assoc :ink/lines
+             (vec (map-indexed
+                   (fn [i line]
+                     {:x (+ x padding (align-offset line))
+                      :y (+ y padding (* i line-height))
+                      :w (line-w line)
+                      :h line-height})
+                   lines))))))
 
 ;; ---- per-node computed style bag ----
 
@@ -6682,9 +6745,21 @@
    width so a cell's contents (including inline flow, nested blocks, form
    controls) behave exactly as they would anywhere else.
 
-   `<tr>` and the cells keep their own `:node` draw-ops, so hit testing,
-   the accessibility projection and click routing see a real table
-   structure rather than a flat pile of text.
+   `<tr>` and the cells keep their own `:node` draw-ops, so the
+   accessibility projection and anything reading the box tree see a real
+   table structure rather than a flat pile of text.
+
+   A ROW and a ROW GROUP are not HIT-TEST candidates, though, so both
+   carry `:hit []` (see the ns docstring's box-vs-hit-region section).
+   This is measured, not assumed, and it is not \"they have no
+   background\": with `background` set on the `<tbody>` AND on both
+   `<tr>`s and `border-spacing: 6px` to open real gaps between them,
+   Brave's `elementsFromPoint` over every point of that table returns
+   `td, table` inside a cell and `table` alone everywhere else -- `tr`
+   and `tbody` appear in neither, at any point, painted background and
+   all. A row's own painted background IS hit, but as the TABLE. Without
+   this the two corpus cases with a `border-spacing` gap under a sampled
+   point reported `tbody` where the browser reports `table`.
 
    Reached BY DISPLAY, not by tag (see layout-node's dispatch and
    table-part-display): `<div style=\"display: table\">` gets this same
@@ -6955,6 +7030,10 @@
                  row-op (when-not anonymous
                           (merge {:draw/op :node :id (:node/id row) :tag row-tag
                                   :x row-x :y row-y :w row-w :h row-h
+                                  ;; a row is not a hit-test candidate --
+                                  ;; see layout-table's docstring for the
+                                  ;; measurement
+                                  :hit []
                                   :class (attr row :class) :listeners (listeners row)
                                   :opacity opacity}
                                  (style-passthrough rst)))
@@ -7066,6 +7145,8 @@
                           (merge {:draw/op :node :id (:node/id g) :tag (:tag g)
                                   :x (+ content-x lead-x) :y y
                                   :w (max 0 (- content-w lead-x trail-x)) :h (max 0 (- h spacing))
+                                  ;; nor is a row GROUP -- same measurement
+                                  :hit []
                                   :class (attr g :class) :listeners (listeners g)
                                   :opacity opacity}
                                  (style-passthrough (node-style g theme))))
@@ -8792,11 +8873,21 @@
    clicks. Each element gets ONE node op spanning the union of its
    fragments, plus one background rect PER LINE (a two-line link's
    background follows both line boxes rather than filling the rectangle
-   around them). The single union node op for a wrapped inline box is an
-   honest, documented approximation of real CSS's per-fragment box list:
-   it over-covers the ragged edge of a multi-line inline box for hit
-   testing, and is exactly right for the single-line case that is by far
-   the common one.
+   around them).
+
+   The union box is the right BOX and the wrong HIT REGION, so a wrapped
+   inline box now carries both (see the ns docstring's `:hit` section).
+   `getBoundingClientRect` on a two-line `<b>` really is the union -- so
+   the geometry axis wants it -- while `elementFromPoint` inside that
+   union but outside both fragments answers the CONTAINING BLOCK.
+   Measured in Brave on `<p style=\"width:200px\">alpha beta gamma
+   <b>delta epsilon</b> zeta eta</p>`: the `<b>`'s two client rects are
+   `[119,1,33.7,18]` and `[0,22,46.8,18]`, its bounding rect is
+   `[0,1,152.7,39]`, and all five points the paint-order corpus samples
+   in that case sit in the union and in neither fragment -- the whole of
+   that case's residual. `:hit` is attached only when there IS more than
+   one fragment; a single-fragment inline box's union IS its fragment,
+   and saying so twice would cost every op in the common case.
 
    Padding, border and margin on an inline box ARE applied, and the rects
    that arrive here already carry them: the horizontal ones moved the pen
@@ -8827,6 +8918,8 @@
                        :x x0 :y y0 :w (- x1 x0) :h (- y1 y0)
                        :class (attr node :class) :listeners (listeners node)
                        :opacity opacity}
+                      (when (next fragments)
+                        {:hit (mapv #(select-keys % [:x :y :w :h]) fragments)})
                       (style-passthrough st))))
            ordered)))))
 
@@ -8926,6 +9019,13 @@
       (loop [ls lines
              y (+ content-y padding)
              text-draws []
+             ;; the lines that do not fit the band they were laid in, for
+             ;; the owning block's `:hit` region -- same rule and same
+             ;; measurement as layout-text's `:ink/lines`, which is where
+             ;; it is documented. A line here overflows when a single
+             ;; unbreakable piece is wider than `inner-w`; the breaker
+             ;; cannot do anything about that and neither can a browser.
+             ink []
              rects {}]
         (if-let [line (first ls)]
           (let [{line-h :h baseline-off :baseline line-pieces :pieces}
@@ -9104,6 +9204,9 @@
                  ;; (see inline-line-metrics).
                  line-pieces)]
             (recur (rest ls) (+ y line-h) (into text-draws line-draws)
+                   (if (> (:w line) inner-w)
+                     (conj ink {:x base-x :y y :w (:w line) :h line-h})
+                     ink)
                    ;; the <br>'s own zero-width box, at the end of the line
                    ;; it terminates -- the same content-area box on the
                    ;; same baseline every other inline element on this line
@@ -9116,9 +9219,10 @@
                    ;; own docstring for the measurement.
                    (owner-fragments rects (:break-owners line) 0
                                     (+ base-x (if rtl? 0 (:w line))) 0 opacity nil nil)))
-          {:draw (into (inline-owner-ops theme rects) text-draws)
-           :h (+ (- y content-y) padding)
-           :out-of-flow (finish-oof rects)})))))
+          (cond-> {:draw (into (inline-owner-ops theme rects) text-draws)
+                   :h (+ (- y content-y) padding)
+                   :out-of-flow (finish-oof rects)}
+            (seq ink) (assoc :ink/lines ink)))))))
 
 ;; ---- block-in-inline ----
 
@@ -9560,6 +9664,44 @@
                                 ;; the browser's x=7 w=70).
                                 (if (or (seq intruding) (some floated? children)) 1 2))
          y content-y draws [] floats (vec intruding)
+         ;; Float draws are accumulated APART from the in-flow ones and
+         ;; concatenated after them, because CSS's painting order is not
+         ;; document order here: CSS 2.1 Appendix E paints in-flow,
+         ;; non-positioned block-level boxes (step 3) BEFORE non-positioned
+         ;; floats (step 4), so a float painted at the point in the child
+         ;; list where it was WRITTEN disappears under the background of
+         ;; every later block sibling whose box extends beneath it -- which
+         ;; is every one of them, since a float does not shorten a sibling's
+         ;; box, only its line boxes.
+         ;;
+         ;; Measured in Brave on `<div style="width:300px"><div
+         ;; style="float:left;width:80px;height:30px;background:#fcc">L</div>
+         ;; <p style="background:#cfc">alpha ...</p></div>`: the float's
+         ;; pink is what is visible (and what `elementFromPoint` answers)
+         ;; over x 0..79, and the `<p>`'s green begins at x=80. This engine
+         ;; painted the float first and the `<p>` over it, so the float was
+         ;; invisible wherever the two overlapped, and the paint-order axis
+         ;; charged all five of :float/float-right-block-with-width's
+         ;; sample points to it.
+         ;;
+         ;; Appendix E puts in-flow INLINE content (step 5) above floats
+         ;; again, which this does not model: the whole of a block child's
+         ;; op run -- its background AND its text -- goes in one band. That
+         ;; is inert in practice because the float band (float-band) is
+         ;; what narrows the line boxes in the first place, so in-flow text
+         ;; in this engine does not overlap a float it can see. Where it
+         ;; can not -- a float escaping into a formatting context that did
+         ;; not narrow for it -- the float now covers that text, which is
+         ;; the same trade the background fix makes and the smaller of the
+         ;; two errors.
+         fdraws []
+         ;; The lines of THIS block's own inline content that overflow it,
+         ;; in the same coordinate space as `draws` (see layout-text's
+         ;; `:ink/lines`). Only a DIRECT text child or inline run puts
+         ;; anything here -- a nested block owns its own lines and its own
+         ;; `:node` op, and a browser agrees: measured, an ancestor is not
+         ;; in `elementsFromPoint`'s stack over a descendant's overflow.
+         ink []
          height 0 prev-mb 0 first? true out-mt 0 oof []]
     (if-let [child (first remaining)]
       (cond
@@ -9610,7 +9752,7 @@
         ;; return for the half that is.
         (absolute? theme child)
         (let [cst (node-style child theme)]
-          (recur (rest remaining) y draws floats height prev-mb first? out-mt
+          (recur (rest remaining) y draws floats fdraws ink height prev-mb first? out-mt
                  (conj oof {:node child
                             :x (+ content-x (margin-side cst :left))
                             :y (+ y (if first? 0 prev-mb) (margin-side cst :top))})))
@@ -9639,9 +9781,10 @@
           ;; `prev-mb`, not `first?`. A float neither separates its
           ;; siblings nor stops their margins collapsing through it.
           (recur (rest remaining) y
-                 (into draws (translate-ops (+ fx fml) (+ fy fmt) (:draw m)))
+                 draws
                  (conj floats {:x fx :y fy :w mw :h mh :right? right?})
-                 height prev-mb first? out-mt oof))
+                 (into fdraws (translate-ops (+ fx fml) (+ fy fmt) (:draw m)))
+                 ink height prev-mb first? out-mt oof))
 
         (and (map? child) (:inline/run child))
         (let [run (:inline/run child)
@@ -9663,7 +9806,7 @@
               gap-before (if first? 0 prev-mb)
               run-y (+ y gap-before)
               [bl br] (float-band floats content-x content-w run-y)
-              {:keys [draw h] run-oof :out-of-flow}
+              {:keys [draw h] run-oof :out-of-flow run-ink :ink/lines}
               (layout-inline-run theme bl run-y (max 0 (- br bl))
                                  opacity inherited run)
               advance (+ gap-before h (:gap theme))]
@@ -9675,7 +9818,9 @@
           ;; the same list this loop's own out-of-flow branch feeds, in
           ;; document order, and layout-absolute-children reads the
           ;; per-entry containing block from there.
-          (recur (rest remaining) (+ y advance) (into draws draw) floats (+ height advance) 0 false out-mt
+          (recur (rest remaining) (+ y advance) (into draws draw) floats fdraws
+                 (into ink run-ink)
+                 (+ height advance) 0 false out-mt
                  (into oof run-oof)))
 
         :else
@@ -9848,13 +9993,29 @@
               draw (if (and cst (= "relative" (:position cst)))
                      (let [[dx dy] (relative-offset cst content-w nil)]
                        (translate-ops dx dy shifted))
-                     shifted)]
-          (recur (rest remaining) (+ y advance) (into draws draw) (into floats escaped)
+                     shifted)
+              ;; A TEXT child's overflowing lines belong to THIS block --
+              ;; it is the one with a `:node` op, and CSS wraps a bare text
+              ;; child in an anonymous block that has no identity of its
+              ;; own. An ELEMENT child never carries `:ink/lines` out of
+              ;; layout-block, so this branch cannot pick up a grandchild's
+              ;; overflow by accident. Shifted by exactly what `draw` was.
+              child-ink (when-let [ls (:ink/lines laid)]
+                          (let [[rx ry] (if (and cst (= "relative" (:position cst)))
+                                          (relative-offset cst content-w nil)
+                                          [0 0])]
+                            (mapv #(-> % (update :x + auto-dx rx)
+                                       (update :y + gap-before ry))
+                                  ls)))]
+          (recur (rest remaining) (+ y advance) (into draws draw) (into floats escaped) fdraws
+                 (if child-ink (into ink child-ink) ink)
                  (+ height advance) mb* false
                  (if (and first? collapse-top?) mt* out-mt)
                  oof)))
       ;; ^ closes: if / recur / let / cond
-      {:draw draws
+      {:draw (if (seq fdraws) (into draws fdraws) draws)
+       ;; see the `ink` loop binding
+       :ink/lines ink
        ;; A container grows to hold its floats ONLY when it establishes a
        ;; formatting context (see `contains-floats?`). Otherwise the float
        ;; escapes it -- measured in Brave, a plain `<div style="width:200px">`
@@ -10534,7 +10695,7 @@
                              (contains? #{"left" "right"} (:float st))
                              (contains? #{"absolute" "fixed"} (:position st)))
         {:keys [draw h out-of-flow] :margin/keys [collapsed-top collapsed-bottom]
-         escaped-floats :float/escaped}
+         escaped-floats :float/escaped own-ink :ink/lines}
         (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
                                content-w opacity inherited node-children
                                collapse-top? collapse-bottom? contains-floats?
@@ -10597,9 +10758,36 @@
         outline-draws (or (outline-ops st x y node-w node-h opacity) [])
         bg (default-bg (:tag node) st theme)
         rect (when bg [{:draw/op :rect :x x :y y :w node-w :h node-h :color bg :tag (:tag node) :opacity opacity}])
+        ;; ---- this box's HIT REGION, when it is not its box ----
+        ;;
+        ;; Its own inline content is hit where it was PAINTED, which is
+        ;; outside the border box on any line that overflowed (see
+        ;; layout-text's `:ink/lines` for the measurement). The border box
+        ;; stays first in the list, so the region is the box PLUS the
+        ;; overflow rather than the overflow instead of it, and `:hit` is
+        ;; attached only when a line really does stick out -- an ordinary
+        ;; box is hit in its box and says nothing extra.
+        ;;
+        ;; A line that overflows a box which CLIPS is not hit outside it:
+        ;; measured in Brave, the same nowrap paragraph in an
+        ;; `overflow: hidden` parent stops being hit at exactly the parent's
+        ;; edge. This engine expresses that with the `:clip` ops below, and
+        ;; every hit-tester that reads `:node` ops already tracks them
+        ;; (browser.session/hit-nodes) -- so the region is left unclipped
+        ;; here for the same reason the draw ops are: the clip is a
+        ;; separate op stream, and applying it twice would clip a box's own
+        ;; content against its own edge.
+        overflow-hits (when (seq own-ink)
+                        (into [{:x x :y y :w node-w :h node-h}]
+                              (filter #(or (< (:x %) x)
+                                           (> (+ (:x %) (:w %)) (+ x node-w))
+                                           (< (:y %) y)
+                                           (> (+ (:y %) (:h %)) (+ y node-h))))
+                              own-ink))
         semantic [(merge {:draw/op :node :id (:node/id node) :tag (:tag node) :x x :y y :w node-w :h node-h
                           :class (attr node :class) :listeners (listeners node)
                           :opacity opacity}
+                         (when (next overflow-hits) {:hit overflow-hits})
                          (style-passthrough st))]
         ;; BOTH axes, not either: the clip op below is a whole-box RECT
         ;; with no axis of its own, so a box that clips on only one axis

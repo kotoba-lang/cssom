@@ -10,7 +10,7 @@ and **computed style**.
 nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljs \
   [--browser "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"] \
   [--width 800] [--only inline/] [--ledger path/to/ledger.edn] \
-  [--debug-geometry] [--debug-style]
+  [--debug-geometry] [--debug-style] [--debug-paint]
 ```
 
 ## Why line structure and not pixels
@@ -803,6 +803,126 @@ an `<li>`'s marker inside the item's own line, where a browser's
 out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
+
+### Round thirty-one: an element's box and its hit region are two different things
+
+The paint-order axis was at **9202/9234, 356/370 clean**, and its whole
+residual sat on one question the axis had never asked out loud: a `:node`
+draw-op's `:x`/`:y`/`:w`/`:h` had to be both the box a browser *reports*
+and the region a browser *clicks*, and those are not the same rectangle.
+Three measurements say so, all taken in Brave 151 over CDP before anything
+was changed.
+
+**A wrapped inline box is hit only inside its fragments.** `<p style=
+"width:200px">alpha beta gamma <b>delta epsilon</b> zeta eta</p>` gives the
+`<b>` client rects `[119,1,33.7,18]` and `[0,22,46.8,18]`, a bounding rect
+of `[0,1,152.7,39]`, and answers `elementFromPoint(80, 4)` — inside that
+union, inside neither fragment — with **`p`**. `inline-owner-ops` emitted
+the union and documented it as "an honest, documented approximation of real
+CSS's per-fragment box list"; the geometry axis wanted exactly that union
+(`getBoundingClientRect` *is* the union) and the paint-order axis was
+charging all five of `:wrap/inline-element-straddles-break`'s sample points
+to it, plus two of `:wrap/link-wraps-across-two-lines`' and one of
+`:page/login-form`'s.
+
+**Overflowing inline content is hit outside the box, per line.**
+`<p style="width:80px">short aaaaaaaaaaaaaaaaaaaa tail</p>` reports an
+80×60 box and is hit out to **x=140 on its middle line** — the long word,
+which does not fit — and stops at x=80 on the two lines that do. So it is
+not `scrollWidth` and it is not a rectangle around the element: it is the
+lines themselves. Eleven points (`:text/nowrap-in-narrow-box`,
+`:text/white-space-pre-in-a-narrow-box`, `:wrap/single-word-longer-than-
+line`) were the engine reporting **nothing** where the browser reports the
+paragraph.
+
+**A table row and row group are never hit at all.** Not "they have no
+background": measured with `background` set on the `<tbody>` *and* on both
+`<tr>`s and `border-spacing: 6px` opening real gaps between the rows,
+`elementsFromPoint` over every point of that table returns `td, table`
+inside a cell and `table` alone everywhere else. Neither `tr` nor `tbody`
+appears at any point. A row's painted background *is* hit — as the table.
+
+**The fix is a second key, not a wider box.** A `:node` op now carries an
+optional `:hit`: a vector of rects that replaces `:x`/`:y`/`:w`/`:h` for
+hit testing, `[]` meaning "not a hit-test candidate". Absent — the
+overwhelmingly common case — means the border box, so nothing that reads
+`:node` ops today changes shape. Widening the box instead would have made
+every `getBoundingClientRect` comparison wrong to fix the hit test, and
+this corpus scores both: **geometry did not move at all** (1335/1335, 370
+clean, byte-identical residual).
+
+A fourth cause was ordinary paint order rather than a hit region.
+**A float was painted under its own siblings.** CSS 2.1 Appendix E paints
+in-flow block-level boxes (step 3) *before* non-positioned floats (step 4),
+and this engine emitted a float's ops at the point in the child list where
+it was written — so a following `<p>`'s background covered it whole, which
+is every ordinary use of a float, because a float narrows a sibling's line
+boxes and not its border box. Measured with real backgrounds on both: the
+float's colour is what is visible over its own width and what
+`elementFromPoint` answers there. `layout-children-block` now accumulates
+float draws in their own band and concatenates them after the in-flow ones.
+Appendix E puts in-flow *inline* content (step 5) above floats again, which
+this still does not model — the whole of a block child's op run goes in one
+band — and that is inert here because `float-band` is what narrows the line
+boxes in the first place, so in-flow text does not overlap a float it can
+see. Five points, all of `:float/float-right-block-with-width`.
+
+**Result**, same corpus, same commit either side:
+
+| axis | before | after |
+|---|---|---|
+| line structure | 356/356 | 356/356 |
+| geometry (boxes) | 1335/1335 | 1335/1335 |
+| geometry (clean cases) | 370/370 | 370/370 |
+| paint order | 9202/9234 | **9227/9234** |
+| paint order (clean cases) | 356/370 | **364/370** |
+| computed style | 18687/18763 | 18687/18763 |
+
+`--debug-paint` was added alongside `--debug-geometry`/`--debug-style`, and
+prints for every disagreeing case the engine's `:node` ops **in emitted
+order** with each sampled point. Without the order a paint-order residual
+is unreadable, because the boxes it is made of usually all agree — which is
+the axis's entire point.
+
+#### The seven that are left, and why they are not converged
+
+All seven are boundary points where the two sides are within about one
+pixel of each other, from two causes, and **neither is a paint-order
+error**. They are listed here rather than fixed because fixing either one
+would mean breaking something that is currently right.
+
+Four are **this engine flooring a fractional layout position**, inside the
+geometry axis's own 2px tolerance and therefore invisible to it:
+`:page/article-paragraphs` puts its first `<p>` at y=38 where Brave says
+38.75 (an `<h1>`'s `0.67em` bottom margin on a 28px font is 18.76px), and
+the sample point is at y=80.3 — inside the browser's box, one third of a
+pixel outside the engine's. `:page/table-of-contents` (40 vs 40.609) and
+`:page/login-form` (40 vs 40.422) are the same shape;
+`:form/textarea-with-rows` is the mirror, an engine box 0.86px *taller*
+than the browser's, from the fractional font metrics the harness's own
+`:font-metrics` hook already documents. Rounding these is a layout change
+that moves every UA margin in the corpus, which is the geometry axis's
+subject and not this one's.
+
+Three are **the oracle's own leading-edge slop**, and this one is worth
+writing down because it is not in any spec. Scanned at 1/64px, Brave's
+`elementFromPoint` answers a box's **top** edge exactly one CSS pixel
+early and its **bottom** edge exactly: two stacked 30px divs switch at
+**29.0156**, two stacked 30.5px divs at **29.5156**, and a 40px inline
+whose box is `y=9..51` is hit from **8.0156** to **51.0000**. It is a
+constant one pixel — not font-relative, not box-type-relative, not
+affected by fractional position — and the left/right edges have no slop at
+all. `:inline/em-strong-code` (point 0.9px above the `<code>`),
+`:form/input-inside-a-table-cell` (0.3px above the `<input>`) and
+`:page/login-form` are inside it. Modelling it would mean shifting every
+element's hit region one pixel up, so `browser.session/node-at` would
+deliver every real click one pixel above the box it belongs to — a
+regression in the actual product to win three points against one browser's
+implementation detail. It stays measured and unmodelled.
+
+`:page/login-form`'s single point changed *kind* rather than count: it was
+`form -> label`, the union box over-claiming a 36px-tall rectangle, and is
+now `label -> form`, a 0.42px rounding at a fragment's bottom edge.
 
 ### Round thirty: `direction: rtl` inside a line, and the coincidence that was not one
 
@@ -2146,7 +2266,12 @@ whole harness, so a paint-order regression could not fail anything.
 
 The axis samples a 5x5 grid of interior points per case and asks each side
 which element is at that point: `document.elementFromPoint` in the browser,
-and in the engine the LAST `:node` draw-op whose box contains the point.
+and in the engine the LAST `:node` draw-op whose HIT REGION contains the
+point — its `:hit` rects when it has them, its box otherwise. That
+distinction is round thirty-one's; before it the box was the only answer a
+`:node` op could give, and three quarters of this axis's residual was the
+places where a browser's reported box and its hit region are different
+rectangles.
 Reading the emitted op vector back is deliberate — that vector *is* the
 engine's paint order, so the question asked is "given what this engine told
 a host to paint, what would a user click?". Re-deriving stacking inside the
