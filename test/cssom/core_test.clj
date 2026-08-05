@@ -3156,3 +3156,271 @@
     (is (= "red" (:color text-op))
         "the child's real, painted text color must be the parent's red,
          not the literal string \"inherit\" and not a default fallback")))
+
+
+;; ---- `em` / `rem` resolution and the computed font size ----
+;;
+;; Every number asserted below was measured in Brave 151 on 2026-08-05, on a
+;; page whose container is `font-size: 14px` -- the shape the conformance
+;; corpus uses -- unless the test says otherwise.
+
+(defn- nest
+  "A nest of <div class=\"l0\">/<div class=\"l1\">/... , outermost first, one
+   per entry in `decls`, cascaded against a stylesheet built from those
+   declarations. Returns each element's resolved `:style/*` map, outermost
+   first. Declarations go through real rules rather than a `style=` attr
+   because an inline style enters this namespace as `:style-inline`, which
+   `kotoba-lang/htmldom` writes and this test namespace has no dependency
+   on."
+  ([decls] (nest decls {}))
+  ([decls opts]
+   (let [[ids doc] (reduce (fn [[ids doc] i]
+                             (let [[id doc] (dom/create-element doc :div)
+                                   doc (dom/set-attribute doc id :class (str "l" i))
+                                   doc (if-let [parent (peek ids)]
+                                         (dom/append-child doc parent id)
+                                         (dom/set-root doc id))]
+                               [(conj ids id) doc]))
+                           [[] dom/empty-document]
+                           (range (count decls)))
+         sheet (->> decls
+                    (map-indexed (fn [i d] (when d (str ".l" i " { " d " }"))))
+                    (remove nil?)
+                    (clojure.string/join "\n"))
+         doc (css/apply-cascade doc (css/parse-rules sheet) opts)]
+     (mapv (fn [id]
+             (into {} (keep (fn [[k v]] (when (= "style" (namespace k)) [(keyword (name k)) v])))
+                   (get-in doc [:nodes id :attrs])))
+           ids))))
+
+(deftest em-compounds-down-the-tree-rather-than-resolving-against-one-base
+  ;; Brave: three nested `font-size: 1.5em` inside a 14px page report 21,
+  ;; 31.5 and 47.25. This is the measurement that decides the whole design
+  ;; -- a single `:base-font-size` that every `em` resolved against would
+  ;; give 21 three times over.
+  (let [[a b c d] (nest ["font-size: 14px" "font-size: 1.5em"
+                         "font-size: 1.5em" "font-size: 1.5em"])]
+    (is (= 14 (:font-size a)))
+    ;; 21 rather than 21.0: an integral result is normalised back to a long
+    ;; (see `as-length`), because this namespace's own `<n>px` coercion
+    ;; always produced longs and everything downstream compares with `=`.
+    (is (= 21 (:font-size b)))
+    (is (= 31.5 (:font-size c)))
+    (is (= 47.25 (:font-size d)))))
+
+(deftest font-sizes-own-em-is-the-parents-size-every-other-em-is-its-own
+  ;; The one fact a "resolve everything against one number" design gets
+  ;; wrong. Brave on `<div style="font-size:2em; margin-top:1em;
+  ;; padding-left:1em; width:10em">` inside 14px: font-size 28, margin-top
+  ;; 28, padding-left 28, width 280 -- the font-size's own em is the
+  ;; parent's 14, every other em on that element is this element's own 28.
+  (let [[_ el] (nest ["font-size: 14px"
+                      "font-size: 2em; margin-top: 1em; padding-left: 1em; width: 10em"])]
+    (is (= 28 (:font-size el)))
+    (is (= 28 (:margin-top el)))
+    (is (= 28 (:padding-left el)))
+    (is (= 280 (:width el)))))
+
+(deftest an-em-length-resolves-against-an-inherited-font-size-not-a-declared-one
+  ;; Brave: a div with no size of its own inside a 28px parent reports
+  ;; margin-top 28px for `margin-top: 1em`. The layout table this replaced
+  ;; could only see the element's OWN declared size and gave it the base --
+  ;; the conformance harness charged that to the cascade as
+  ;; `:cascade/inherited-font-size-chain`.
+  (let [[_ _ el] (nest ["font-size: 14px" "font-size: 2em" "margin-top: 1em"])]
+    (is (= 28 (:margin-top el)))))
+
+(deftest rem-is-the-root-elements-size-not-the-parents
+  ;; Brave, with `<html>` at its default 16: inside a 28px div,
+  ;; `font-size: 1rem` reports 16px and `padding: 0.5rem` reports 8px. Here
+  ;; the root element is the outermost div and declares 14, so rem is 14.
+  (let [[_ _ el] (nest ["font-size: 14px" "font-size: 2em"
+                        "font-size: 1rem; padding-top: 0.5rem"])]
+    (is (= 14 (:font-size el)))
+    (is (= 7 (:padding-top el)))))
+
+(deftest a-percentage-font-size-is-the-parents-size-and-compounds
+  ;; Brave: 150% of 14 is 21, then 50% of THAT is 10.5, and a `1em` margin
+  ;; on the inner element is 10.5 -- a percentage participates in the chain
+  ;; exactly like an em.
+  (let [[_ a b] (nest ["font-size: 14px" "font-size: 150%"
+                       "font-size: 50%; margin-top: 1em"])]
+    (is (= 21 (:font-size a)))
+    (is (= 10.5 (:font-size b)))
+    (is (= 10.5 (:margin-top b)))))
+
+(deftest a-percentage-on-any-other-property-is-left-completely-alone
+  ;; `margin-top: 50%` measured 400px in an 800px box -- half the containing
+  ;; BLOCK, not half a font size. Resolving it here would be a category
+  ;; error, so it passes through untouched for layout to deal with.
+  (let [[_ el] (nest ["font-size: 14px" "margin-top: 50%"])]
+    (is (= "50%" (:margin-top el)))))
+
+(deftest smaller-and-larger-are-the-parents-size-over-and-times-1-2-and-compound
+  ;; Brave: `smaller` of 14 is 11.6667, a second `smaller` inside it is
+  ;; 9.72222, and `larger` of 14 is 16.8.
+  (let [[_ a b] (nest ["font-size: 14px" "font-size: smaller" "font-size: smaller"])
+        [_ c] (nest ["font-size: 14px" "font-size: larger"])]
+    (is (< (abs (- 11.6667 (:font-size a))) 0.0005))
+    (is (< (abs (- 9.72222 (:font-size b))) 0.0005))
+    (is (< (abs (- 16.8 (:font-size c))) 0.0005))))
+
+(deftest an-absolute-font-size-keyword-is-left-unresolved-rather-than-guessed
+  ;; Brave reports `font-size: medium` as 13px on a monospace page and 16px
+  ;; on a proportional one: the keyword table is keyed on the default font
+  ;; of the family in use, which this cascade cannot know. Left exactly as
+  ;; the author wrote it, and NOT allowed to poison the chain -- the
+  ;; descendant's `1em` resolves against the last size that was real.
+  (let [[_ a b] (nest ["font-size: 14px" "font-size: medium" "margin-top: 1em"])]
+    (is (= "medium" (:font-size a)))
+    (is (= 14 (:margin-top b)))))
+
+(defn- ua-doc
+  "`tags` as children of a 14px root <div>, cascaded with no author CSS at
+   all, so only the UA sheet speaks. Returns `[doc ids]`."
+  [tags]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-attribute doc root :class "root")
+        doc (dom/set-root doc root)
+        [ids doc] (reduce (fn [[ids doc] tag]
+                            (let [[id doc] (dom/create-element doc tag)]
+                              [(conj ids id) (dom/append-child doc root id)]))
+                          [[] doc]
+                          tags)]
+    [(css/apply-cascade doc (css/parse-rules ".root { font-size: 14px }")) ids]))
+
+(deftest the-ua-sheets-own-em-resolves-against-the-inherited-size-then-against-itself
+  ;; Brave inside a 14px page: an `<h3>` reports font-size 16.38 (1.17em of
+  ;; the inherited 14) and margin-block 16.38 (1em of its OWN 16.38, not of
+  ;; the 14 it inherited). An `<h5>` reports 11.62 and 19.4054 (0.83em and
+  ;; 1.67 of that), which is the pair that makes the two-reference-sizes
+  ;; rule impossible to fake with one number.
+  (let [[doc [h3 h5 p]] (ua-doc [:h3 :h5 :p])
+        at (fn [id k] (get-in doc [:nodes id :attrs (keyword "style" (name k))]))]
+    (is (< (abs (- 16.38 (at h3 :font-size))) 0.005))
+    (is (< (abs (- 16.38 (at h3 :margin-top))) 0.005))
+    (is (< (abs (- 11.62 (at h5 :font-size))) 0.005))
+    (is (< (abs (- 19.4054 (at h5 :margin-top))) 0.005))
+    (is (= 14 (at p :margin-top)) "a <p> is a plain 1em of the inherited 14")))
+
+(deftest a-ua-em-follows-an-author-font-size-that-beats-the-ua-one
+  ;; Brave: `<h3 style="font-size:10px">` reports margin-block 10px -- the
+  ;; UA's `1em` resolves against the size that WON the cascade, not against
+  ;; the UA's own 1.17em.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [h3 doc] (dom/create-element doc :h3)
+        doc (dom/append-child doc root h3)
+        doc (css/apply-cascade doc (css/parse-rules "h3 { font-size: 10px }"))]
+    (is (= 10 (get-in doc [:nodes h3 :attrs :style/font-size])))
+    (is (= 10 (get-in doc [:nodes h3 :attrs :style/margin-top])))))
+
+(deftest a-nested-list-has-its-ua-margins-cancelled-and-a-top-level-one-does-not
+  ;; Chrome's own `:is(ul,ol) ul { margin-block: 0 }`, spelled out as plain
+  ;; descendant selectors. Measured on
+  ;; `<ul><li>a<ul><li>b</li></ul></li></ul>`: the inner <ul> reports
+  ;; margin-block 0px where the outer reports 14px, and the <li> below it
+  ;; sits at y=20 rather than y=34.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-attribute doc root :class "root")
+        doc (dom/set-root doc root)
+        [outer doc] (dom/create-element doc :ul)
+        doc (dom/append-child doc root outer)
+        [li doc] (dom/create-element doc :li)
+        doc (dom/append-child doc outer li)
+        [inner doc] (dom/create-element doc :ul)
+        doc (dom/append-child doc li inner)
+        doc (css/apply-cascade doc (css/parse-rules ".root { font-size: 14px }"))]
+    (is (= 14 (get-in doc [:nodes outer :attrs :style/margin-top])))
+    (is (= 0 (get-in doc [:nodes inner :attrs :style/margin-top]))
+        "the descendant rule wins on specificity, exactly as in a browser")))
+
+(deftest an-author-margin-still-beats-the-nested-list-cancellation
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [outer doc] (dom/create-element doc :ul)
+        doc (dom/append-child doc root outer)
+        [inner doc] (dom/create-element doc :ul)
+        doc (dom/append-child doc outer inner)
+        doc (css/apply-cascade doc (css/parse-rules "ul ul { margin-top: 5px }"))]
+    (is (= 5 (get-in doc [:nodes inner :attrs :style/margin-top])))))
+
+(deftest a-control-gets-the-ua-control-font-size-whatever-it-inherits
+  ;; Brave: an `<input>` inside a `font-size: 30px` div still reports
+  ;; 13.3333px -- a control's UA font is absolute, not inherited.
+  (let [[doc [input button]] (ua-doc [:input :button])]
+    (is (< (abs (- 13.3333 (get-in doc [:nodes input :attrs :style/font-size]))) 0.0005))
+    (is (< (abs (- 13.3333 (get-in doc [:nodes button :attrs :style/font-size]))) 0.0005))))
+
+(deftest an-author-em-on-a-control-is-the-inherited-size-not-the-ua-control-size
+  ;; Brave: `<input style="font-size:2em">` in a 14px page reports 28, not
+  ;; 26.6666 -- a font-size's `em` is always the PARENT's computed size,
+  ;; never the size this element would otherwise have had.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-attribute doc root :class "root")
+        doc (dom/set-root doc root)
+        [input doc] (dom/create-element doc :input)
+        doc (dom/append-child doc root input)
+        doc (css/apply-cascade doc (css/parse-rules ".root { font-size: 14px } input { font-size: 2em }"))]
+    (is (= 28 (get-in doc [:nodes input :attrs :style/font-size])))))
+
+(deftest a-radio-carries-its-own-ua-margins-not-a-checkboxs
+  ;; Brave 151, 2026-08-05: a checkbox is `margin: 3px 3px 3px 4px` and a
+  ;; radio is `3px 3px 0 5px`. This engine gave the radio the checkbox's
+  ;; four numbers; once the UA sheet became a cascade origin the harness
+  ;; charged those four values to the cascade, which is what this fixes.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [cb doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc cb :type "checkbox")
+        doc (dom/append-child doc root cb)
+        [radio doc] (dom/create-element doc :input)
+        doc (dom/set-attribute doc radio :type "radio")
+        doc (dom/append-child doc root radio)
+        doc (css/apply-cascade doc [])
+        sides (fn [id] (mapv #(get-in doc [:nodes id :attrs (keyword "style" (name %))])
+                             [:margin-top :margin-right :margin-bottom :margin-left]))]
+    (is (= [3 3 3 4] (sides cb)))
+    (is (= [3 3 0 5] (sides radio)))))
+
+(deftest base-font-size-opt-starts-the-chain-and-is-replaced-by-the-first-declaration
+  ;; What a caller who supplies nothing gets, stated as a test: the default
+  ;; is this engine's own base size (see default-base-font-size for why it
+  ;; is not CSS's 16), and the moment anything declares a size the opt stops
+  ;; mattering at all.
+  (let [margin (fn [decl opts]
+                 (let [[root doc] (dom/create-element dom/empty-document :div)
+                       doc (dom/set-attribute doc root :class "root")
+                       doc (dom/set-root doc root)
+                       [p doc] (dom/create-element doc :p)
+                       doc (dom/append-child doc root p)
+                       doc (css/apply-cascade doc (css/parse-rules (or decl "")) opts)]
+                   (get-in doc [:nodes p :attrs :style/margin-top])))]
+    (is (= css/default-base-font-size (margin nil {})))
+    (is (= 32 (margin nil {:base-font-size 32})))
+    (is (= 20 (margin ".root { font-size: 20px }" {:base-font-size 32}))
+        "a declared size replaces the base immediately")))
+
+(deftest an-em-line-height-computes-to-a-length-and-a-unitless-one-stays-a-factor
+  ;; Brave: `line-height: 1.5em` on a 14px div computes to 21px and a CHILD
+  ;; inherits that computed 21px; `line-height: 1.5` stays the factor 1.5,
+  ;; which each element re-multiplies by its own size. Only the first is
+  ;; this step's business -- a unitless line-height is not a length.
+  (let [[_ a] (nest ["font-size: 14px" "line-height: 1.5em"])
+        [_ b] (nest ["font-size: 14px" "line-height: 1.5"])]
+    (is (= 21 (:line-height a)))
+    (is (= "1.5" (:line-height b))
+        "untouched, and untouched means the raw token -- this namespace
+         has never numerically coerced a bare fractional value, and a
+         unitless line-height is the one place that is exactly right")))
+
+(deftest a-custom-propertys-own-em-is-left-to-whatever-substitutes-it
+  ;; `--gap: 1em` is a raw token list, not a length on THIS element: real
+  ;; CSS resolves it where the `var()` lands. Resolving it here would give
+  ;; the wrong number whenever the two elements differ in size, so the
+  ;; custom property passes through and the substituted value is what gets
+  ;; resolved -- against the element that used it.
+  (let [[_ _ el] (nest ["font-size: 14px" "--gap: 1em"
+                        "font-size: 2em; margin-top: var(--gap)"])]
+    (is (= 28 (:margin-top el))
+        "1em of the USER's 28, not of the 14 where it was declared")))

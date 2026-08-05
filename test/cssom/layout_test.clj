@@ -8942,7 +8942,7 @@
 
 (deftest a-figure-gets-the-same-side-margins-as-a-blockquote
   ;; `:page/article-with-figure`. `figure { margin: 1em 40px }` is one UA
-  ;; rule and this engine had half of it: the 1em was in ua-margin-scale
+  ;; rule and this engine had half of it: the 1em was a layout table
   ;; from the start, the 40px indent was in no table at all. Measured in
   ;; Brave inside the case's own 300px article -- figure (40, 220), and
   ;; this engine had (0, 300), which the figure's <img> and <figcaption>
@@ -8975,7 +8975,7 @@
   ;; was invisible.
   ;;
   ;; The `inset` border STYLE is not modelled (this engine draws one solid
-  ;; border, see ua-em-box), so what is pinned here is the box, not the
+  ;; border, see ua-tag-box), so what is pinned here is the box, not the
   ;; bevel.
   (let [[hr] (block-boxes [[:hr {}]])]
     (is (= 2 (:h hr)) "1px of border on the top edge and 1px on the bottom")
