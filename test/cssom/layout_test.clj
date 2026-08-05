@@ -10008,3 +10008,188 @@
         "the columns are exactly where they are without a rule")
     (is (= {:x 148 :y 0 :w 4 :h 30} (select-keys rule [:x :y :w :h]))
         "centred in the 20px gap, which it does not widen")))
+
+;; ---- table: caption-side, and a cell's own declared width ----------------
+;;
+;; Every number below was measured in the same headless Brave 151 the
+;; conformance harness drives, on 2026-08-05, before any of it was
+;; implemented. `tm-boxes` renders through the real htmldom -> cssom.core ->
+;; cssom.layout pipeline at 7px/char, which is what that browser's
+;; monospace face actually advances at 14px, so the two are directly
+;; comparable and the assertions below are the browser's own numbers
+;; wherever the engine reaches them exactly.
+
+(deftest caption-side-bottom-puts-the-caption-after-the-rows
+  ;; Brave: table 200x46, caption [0 26 200 20], tbody/tr [2 2 196 22],
+  ;; td [2 2 97 22] and [101 2 97 22]. The caption is INSIDE the table's
+  ;; height on both sides -- the table is 46 tall either way -- so a
+  ;; following block does not move; what moves is which end each part sits
+  ;; at. This engine placed the caption at the top whatever `caption-side`
+  ;; said, which is 12 boxes wrong across the two corpus cases that use it.
+  (is (= [[:table 0 0 200 46] [:caption 0 26 200 20]
+          [:tbody 2 2 196 22] [:tr 2 2 196 22]
+          [:td 2 2 97 22] [:td 101 2 97 22]]
+         (tm-boxes (str "<table style=\"width: 200px; caption-side: bottom\">"
+                        "<caption>Cap</caption><tr><td>a</td><td>b</td></tr></table>")))))
+
+(deftest caption-side-top-is-the-initial-value-and-is-unchanged
+  ;; The other half of the same measurement, and the regression guard: the
+  ;; top case is what this engine always did, and it must still be exact.
+  ;; Brave: caption [0 0 200 20], rows at y=22.
+  (is (= [[:table 0 0 200 46] [:caption 0 0 200 20]
+          [:tbody 2 22 196 22] [:tr 2 22 196 22]
+          [:td 2 22 97 22] [:td 101 22 97 22]]
+         (tm-boxes (str "<table style=\"width: 200px\">"
+                        "<caption>Cap</caption><tr><td>a</td><td>b</td></tr></table>")))))
+
+(deftest caption-side-inherits-from-an-ancestor
+  ;; `caption-side` is an inherited property, and the element that READS it
+  ;; is the table, which is usually not the one that declared it. Measured
+  ;; in Brave: a `caption-side: bottom` on a wrapping `<div>` moves the
+  ;; caption of a `<table>` that declares nothing.
+  (is (= [:caption 0 26 200 20]
+         (nth (tm-boxes (str "<div style=\"caption-side: bottom\">"
+                             "<table style=\"width: 200px\"><caption>Cap</caption>"
+                             "<tr><td>a</td><td>b</td></tr></table></div>"))
+              2))))
+
+(deftest a-percentage-cell-width-sizes-its-column-against-the-space-left-for-columns
+  ;; Brave, `<table style="width:300px"><tr><td style="width:25%">a</td>
+  ;; <td>b</td></tr></table>`: td [2 2 73.5 22] and [77.5 2 220.5 22].
+  ;; 73.5 is 25% of 294 -- the 300px content width MINUS all three 2px
+  ;; border-spacings -- and NOT 25% of 300, nor 25% of anything plus the
+  ;; cell's own padding. The declared column then holds still while the
+  ;; other one absorbs the whole surplus.
+  ;;
+  ;; This engine read the percentage only as a max-content DEMAND and then
+  ;; grew both columns in proportion to it, giving 68 and 31 with the
+  ;; second cell starting at x=267 -- 11 paint-order sample points and 2
+  ;; boxes wrong.
+  (is (= [[:table 0 0 300 26] [:tbody 2 2 296 22] [:tr 2 2 296 22]
+          [:td 2 2 74 22] [:td 78 2 220 22]]
+         (tm-boxes (str "<table style=\"width: 300px\">"
+                        "<tr><td style=\"width: 25%\">a</td><td>b</td></tr></table>"))))
+  ;; `border-spacing: 10px` moves the basis with it: 25% of 270 = 67.5 in
+  ;; Brave, which is how the basis was identified as "what is left for the
+  ;; columns" rather than the table's content width.
+  (is (= [:td 10 10 68 22]
+         (nth (tm-boxes (str "<table style=\"width: 300px; border-spacing: 10px\">"
+                             "<tr><td style=\"width: 25%\">a</td><td>b</td></tr></table>"))
+              3)))
+  ;; and `border-collapse: collapse` has no spacing at all, so the basis is
+  ;; the whole 300: Brave gives 75 / 225, exactly.
+  (is (= [[:table 0 0 300 22] [:tbody 0 0 300 22] [:tr 0 0 300 22]
+          [:td 0 0 75 22] [:td 75 0 225 22]]
+         (tm-boxes (str "<table style=\"width: 300px; border-collapse: collapse\">"
+                        "<tr><td style=\"width: 25%\">a</td><td>b</td></tr></table>")))))
+
+(deftest a-length-cell-width-sizes-the-CELL-and-its-padding-adds-outside-it
+  ;; The other half of the rule, and the reason a percentage cannot be
+  ;; treated the same way. Brave: `width: 100px` on a `<td>` gives a 102px
+  ;; column (the declared 100 plus the UA's own 1px padding on each side,
+  ;; ordinary `content-box` arithmetic), `padding: 8px` gives 116, and the
+  ;; column the length did NOT declare takes the remainder.
+  (is (= [[:td 2 2 102 22] [:td 106 2 192 22]]
+         (subvec (tm-boxes (str "<table style=\"width: 300px\">"
+                                "<tr><td style=\"width: 100px\">a</td><td>b</td></tr></table>"))
+                 3)))
+  (is (= [:td 2 2 116 36]
+         (nth (tm-boxes (str "<table style=\"width: 300px\">"
+                             "<tr><td style=\"width: 100px; padding: 8px\">a</td>"
+                             "<td>b</td></tr></table>"))
+              3))))
+
+(deftest a-declared-cell-width-is-floored-at-its-COLUMNs-min-content-width
+  ;; Brave: `<td style="width:10px">averylongword</td>` is 93 -- 13
+  ;; characters at 7px plus the 1px UA padding on each side -- not 12. The
+  ;; floor is the COLUMN's, not the declaring cell's: a `width: 50px` cell
+  ;; in row 1 whose column holds `averylongcellword` (17 chars) in row 2
+  ;; comes out 121 in both rows.
+  (is (= [:td 2 2 93 22]
+         (nth (tm-boxes (str "<table style=\"width: 300px\"><tr>"
+                             "<td style=\"width: 10px\">averylongword</td>"
+                             "<td>b</td></tr></table>"))
+              3)))
+  (is (= [[:td 2 2 121 22] [:td 125 2 173 22]]
+         (subvec (tm-boxes (str "<table style=\"width: 300px\">"
+                                "<tr><td style=\"width: 50px\">a</td><td>b</td></tr>"
+                                "<tr><td>averylongcellword</td><td>d</td></tr></table>"))
+                 3 5))))
+
+(deftest a-cell-fills-its-column-rather-than-resolving-its-own-width-again
+  ;; A cell's declared width has already been spent on sizing the column,
+  ;; and the cell's BOX is then the column. Measured in Brave: the 25% cell
+  ;; above reports 73.5 -- the column -- where resolving 25% a second time
+  ;; against the 73px column gives 21; and `width: 500px` in a 200px table
+  ;; reports the column it ended up in, not the 502 it asked for.
+  ;;
+  ;; The fix DROPS the declaration rather than writing the column width
+  ;; back as one: a column width is routinely fractional (50.5625 for
+  ;; `go <b>now</b>`), and a fractional declared length goes through an
+  ;; integer parse that truncated the cell to 50 and wrapped its content
+  ;; onto a second line.
+  (let [[_ _ _ td] (tm-boxes (str "<table style=\"width: 300px\">"
+                                  "<tr><td style=\"width: 25%\">a</td><td>b</td></tr></table>"))]
+    (is (= 74 (nth td 3)) "the cell is its column, not 25% of it"))
+  ;; The shape the write-back spelling broke. Under the oracle's OWN
+  ;; per-character advances -- where bold monospace is proportional on this
+  ;; system, so nothing is integral -- Brave reports this table 72.5625
+  ;; wide with a 50.5625 column, and writing that column back as a declared
+  ;; length truncated it to 50 and wrapped `now` onto a second line (5
+  ;; boxes wrong, table/tbody/tr/td +20 tall and the `<b>` moved). At the
+  ;; flat 7px/char this helper uses the same shape is integral, so what is
+  ;; asserted here is the CONSEQUENCE the truncation had: one line, and a
+  ;; cell exactly as wide as its content.
+  (is (= [[:table 0 0 66 26] [:tbody 2 2 62 22] [:tr 2 2 62 22]
+          [:td 2 2 44 22] [:b 24 3 21 16] [:td 48 2 16 22]]
+         (tm-boxes "<table><tr><td>go <b>now</b></td><td>ok</td></tr></table>"))
+      "one line, and a cell with no declared width takes its column exactly")
+  ;; The half-pixel this engine does lose, pinned rather than hidden: the
+  ;; 25% column is 73.5 and Brave gives the other one 220.5, while
+  ;; distribute-excess hands out whole pixels and leaves 220 at x=78
+  ;; against Brave's 77.5. Inside the geometry axis's 2px tolerance, and it
+  ;; is the ONE place these shapes are not exact.
+  (is (= [:td 78 2 220 22]
+         (nth (tm-boxes (str "<table style=\"width: 300px\">"
+                             "<tr><td style=\"width: 25%\">a</td><td>bb</td></tr></table>"))
+              4))))
+
+(deftest a-col-width-and-a-cell-width-on-the-same-column-take-the-larger
+  ;; Measured in Brave, both directions: `<col style="width:80px">` against
+  ;; a `<td style="width:200px">` gives a 202px column, and the mirror pair
+  ;; (`<col>` 200 against a `<td>` 80) gives 200.
+  ;; Selected by TAG rather than by index: htmldom synthesises the
+  ;; `<colgroup>` a real parser inserts around a bare `<col>`, so the
+  ;; number of boxes ahead of the cells depends on a change in another
+  ;; repo.
+  (let [tds (fn [html] (filterv #(= :td (first %)) (tm-boxes html)))]
+    (is (= [[:td 2 2 202 22] [:td 206 2 92 22]]
+           (tds (str "<table style=\"width: 300px\">"
+                     "<col style=\"width: 80px\"><col>"
+                     "<tr><td style=\"width: 200px\">a</td><td>b</td></tr></table>"))))
+    (is (= [[:td 2 2 200 22] [:td 204 2 94 22]]
+           (tds (str "<table style=\"width: 300px\">"
+                     "<col style=\"width: 200px\"><col>"
+                     "<tr><td style=\"width: 80px\">a</td><td>b</td></tr></table>"))))))
+
+(deftest an-auto-width-table-still-shrink-wraps-around-a-declared-cell-width
+  ;; The regression guard for the locking above: a declared width must not
+  ;; make an AUTO table stretch. Brave: `<table><tr><td style="width:120px">
+  ;; wide</td><td>rest</td></tr></table>` is 158 wide with columns 122 and
+  ;; 30, which is what this engine already produced through the max-content
+  ;; path and must still produce through the declared one.
+  (is (= [[:table 0 0 158 26] [:tbody 2 2 154 22] [:tr 2 2 154 22]
+          [:td 2 2 122 22] [:td 126 2 30 22]]
+         (tm-boxes (str "<table><tr><td style=\"width: 120px\">wide</td>"
+                        "<td>rest</td></tr></table>")))))
+
+(deftest an-undeclared-column-still-takes-the-surplus-in-proportion-to-its-demand
+  ;; Locking one column must not change how the others share what is left.
+  ;; Brave, three cells with the middle one at `width: 100px` in a 300px
+  ;; table: 66.078 / 102 / 123.922 -- the 190px remainder split between
+  ;; `aa` (16px of demand) and `cccc` (30px) in exactly 16:30.
+  (is (= [[:td 2 2 66 22] [:td 70 2 102 22] [:td 174 2 124 22]]
+         (subvec (tm-boxes (str "<table style=\"width: 300px\"><tr><td>aa</td>"
+                                "<td style=\"width: 100px\">bb</td>"
+                                "<td>cccc</td></tr></table>"))
+                 3))))

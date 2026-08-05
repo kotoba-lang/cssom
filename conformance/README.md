@@ -10,8 +10,17 @@ and **computed style**.
 nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljs \
   [--browser "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"] \
   [--width 800] [--only inline/] [--ledger path/to/ledger.edn] \
-  [--debug-geometry] [--debug-style] [--debug-paint]
+  [--debug-geometry] [--debug-style] [--debug-paint] \
+  [--dump-ops path/to/ops.txt]
 ```
+
+`--dump-ops` writes every case's `:node` ops, in emitted order, to a plain
+text file made to be `diff`ed between two commits. The scoreboard cannot
+answer "did this change break anything" — it is four sums over 501 cases,
+and a sum hides an exchange. This corpus has already been bitten by one: a
+5/5 → 0/5 regression on the table group went unnoticed in a round where
+three other cases improved by as much. Diffing two dumps names every case
+whose boxes moved, in both directions.
 
 ## Why line structure and not pixels
 
@@ -803,6 +812,167 @@ an `<li>`'s marker inside the item's own line, where a browser's
 out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
+
+### Round thirty-four: the table cluster — `caption-side`, and a cell's own declared width
+
+Four of the corpus's five table-group residuals were one cluster, and all
+four are closed. Everything below was measured in the same headless Brave
+151 the harness drives, on probe pages built to the harness's own page
+shell, **before** anything was implemented.
+
+**`caption-side: bottom` did nothing.** `layout-table`'s docstring said so
+("a caption is laid out as an ordinary block row above the rows, never
+below"), and the property is not rare — it cost 12 boxes across two cases
+and 4 paint-order points. Measured: the caption is in the TABLE WRAPPER
+box, which is what a `<table>` element's own box is on both sides. It
+spans the table's whole BORDER-box width and sits outside its border and
+padding, at whichever end `caption-side` names, and the table's HEIGHT is
+the same either way — a `width:200px; border:6px; padding:9px` table with
+a `Cap` caption is 200x76 in both, with the caption at y=0 or y=56 and the
+rows at y=37 or y=17. So a following block does not move; what moves is
+which end each part sits at. `caption-side` also INHERITS: declared on a
+wrapping `<div>`, it moves the caption of a `<table>` that declares
+nothing (measured), so it is carried down `inherited` like any other
+inherited property rather than read off the table alone.
+
+**A cell's declared `width` sized nothing.** The engine read it only as a
+max-content DEMAND and then grew every column in proportion to its demand,
+so `<table style="width:300px"><tr><td style="width:25%">a</td><td>b</td>`
+came out 68 and 31 with the second cell starting at x=267, against Brave's
+73.5 and 220.5 at x=2 and x=77.5. Two rules, and neither is guessable from
+the other:
+
+- **A length sizes the CELL; a percentage sizes the COLUMN.** `width:
+  100px` on a `<td>` gives a 102px column — the declared 100 plus the UA's
+  1px padding each side, ordinary `content-box` arithmetic, and `padding:
+  8px` gives 116 and `border: 3px` gives 108. `width: 25%` gives 73.5,
+  which is 25% of **294** exactly — the content width minus all three 2px
+  border-spacings — and not 25% of anything plus padding. Moving the
+  spacing moves the basis with it (`border-spacing: 10px` → 67.5 = 25% of
+  270; `border-collapse: collapse` → 75 = 25% of the whole 300), which is
+  how the basis was identified as "what is left for the columns" rather
+  than the table's content width.
+- **The declared width is floored at the COLUMN's min-content width, not
+  the declaring cell's.** `width: 10px` on a cell holding `averylongword`
+  is 93; a `width: 50px` cell in row 1 whose column holds
+  `averylongcellword` in row 2 is 121 in both rows.
+
+A declared column then HOLDS while the others absorb the surplus — the
+`locked` set `distribute-excess` already had for `<col>` widths, now fed
+from cells as well. Where both a `<col>` and a cell declare, the larger
+wins (measured both directions: `<col>` 80 against a `<td>` 200 gives 202,
+and the mirror gives 200).
+
+And a third thing the first two exposed: **a cell FILLS its column**. Its
+own declared width has already been spent on sizing the column, and
+resolving it a second time against that column applied it twice — the 25%
+cell reported a 21px box inside its own 73px column. Brave reports the
+column (73.5), and reports 185 for a `width: 500px` cell in a 200px table.
+The declaration is DROPPED rather than overwritten with the column width:
+a column width is routinely fractional (50.5625 for `go <b>now</b>`) and
+writing one back as a declared length goes through an integer parse that
+truncated the cell to 50 and wrapped its content onto a second line. That
+spelling cost 5 boxes in `:table/cell-with-inline-content` to fix 2
+elsewhere, and the per-case op diff below is what caught it.
+
+**`empty-cells` is not implemented, and is measured to be unscorable
+here.** The same table with `hide` and with `show` gives identical boxes
+to three decimals in Brave (128.625 / 59.375 with cell borders, 153.813 /
+34.188 with backgrounds), and `elementFromPoint` answers `td` over the
+empty cell either way. The property changes which pixels are FILLED, and
+no axis here compares a fill. Its one-point paint-order residual is a
+different thing entirely, and not a table thing: **Brave hit-tests every
+element from one pixel above and left of its box.** Swept at 0.05px, a
+`td` at y=4..26 answers `table` at y=3.00 and `td` from y=3.05, and stops
+at y=26.00 exactly; the same 1px slop appears on a `<p>` in a padded
+`<div>` and on a bare `<span>`, in x as well as y. This engine's own
+half-open `[x, x+w)` test is the honest answer to the question the axis
+asks, so nothing was changed for it — it is recorded beside the case.
+
+**The fifth was not a cssom bug and was fixed where it lived.** `htmldom`
+did not synthesise the `<colgroup>` a real parser inserts around a bare
+`<col>`, so the corpus reported one box Brave has and this side had not,
+plus 14 computed-style values it could not zip against anything. Measured
+in Brave and fixed in `htmldom.core/maybe-insert-implied-table-structure`:
+consecutive bare `<col>`s share ONE synthesised group, and one that
+arrives after a row group gets a group of its own BESIDE it. That repo's
+own tree-shape corpus went 137/137 → **139/139** with two new cases, and
+its attribute axis 404/405 → **421/422** — the new case was the first with
+an inline style on an otherwise bare element, and exposed that the axis
+was reporting a phantom `width` attribute for every `:style/width` key,
+because `name` erases the namespace that identifies one.
+
+| axis | before | after |
+|---|---|---|
+| line structure | 540/553 | **542/553** |
+| geometry (boxes) | 1823/1959 | **1843/1959** |
+| geometry (clean cases) | 502/576 | **505/576** |
+| paint order (points) | 13936/14389 | **13956/14389** |
+| paint order (clean cases) | 524/576 | **527/576** |
+| computed style (values) | 27483/27528 | 27483/27528 |
+| computed style (clean cases) | 556/576 | 556/576 |
+
+799 tests / 1834 assertions, 0 failures (789/1817 before, +10 for this
+change); 0 lint errors and the same 25 pre-existing warnings, all in
+`test/`. Downstream, against this branch: browser 754 / 0, dom-gpu 130 / 0,
+htmldom 178 / 0.
+
+Not one table entry is left in either layout residual. The htmldom fix does
+not show in this table because it landed first and its pin has not moved
+yet; measured on the 501-case corpus either side of it, it took geometry
+1722/1766 → 1723/1766 (472 → 473 clean) and turned the 14 EXCLUDED
+`element-count-mismatch` computed-style values into 14 comparable ones that
+all agree.
+
+#### `--dump-ops`, and the exchange it caught
+
+The scoreboard cannot answer *did this change break anything*: it is four
+sums over 501 cases, and a sum hides an exchange. So this round added
+`--dump-ops <file>`, which writes every case's `:node` ops in EMITTED
+order to a plain text file made to be `diff`ed between two commits, and
+the two dumps either side of this change name **exactly three** cases of
+576: `:table/caption-side-bottom`, `:table/cell-percentage-width` and
+`:page/data-table-with-caption-and-foot`, all three moving onto Brave's
+numbers, and **nothing else in the corpus moved at all** — no op added, no
+op removed, no coordinate changed. The htmldom fix adds exactly one line to
+exactly one more case (`colgroup 2 2 296 22`, which is Brave's box for it
+to the pixel).
+
+That is also how the write-back spelling of the cell-fills-its-column fix
+was caught: the net geometry score went UP while
+`:table/cell-with-inline-content` silently went 6/6 → 1/6.
+
+#### Scope cuts, each with the number a fix will need
+
+- **A `<table>`'s declared width is its BORDER box in Blink**, whatever
+  `box-sizing` says, and `resolve-width` gives it the ordinary content-box
+  treatment. `width:200px; border:6px solid; padding:9px` is 200 wide in
+  Brave with 166 of rows inside it; this engine makes it 230 with the same
+  166 of rows — every y is right, and only the outer width (and therefore
+  a caption's) is 2x(border+padding) too big. Left alone because it is a
+  different rule from anything this round is about, it moves every
+  bordered table at once, and no corpus case has a table with both a
+  declared width and a border.
+- **A percentage cell width on an AUTO-width table is left to the
+  max-content path.** It is circular, and Brave does something this engine
+  does not model: `<table><tr><td style="width:25%">a</td><td>b</td>` is
+  42px wide overall with columns 9 and 27, and 25% of anything in sight is
+  none of those numbers.
+- **A declared width is not capped by what the other columns need.**
+  `width: 500px` in a 200px table gives 185 in Brave — the other column
+  keeps its 9px min-content and the declared one takes the rest — where
+  this engine leaves 502 and lets the proportional scale-down handle the
+  overflow, which is what it did before.
+- **A `colspan` cell contributes no declared column width**, exactly as it
+  contributes no max-content one. `<td colspan="2" style="width:50%">` over
+  a 300px table gives its two columns 73 and 73 (146 = 50% of 292, split
+  evenly).
+- **A percentage beats a length in the same column**, whichever is larger:
+  `width: 20%` in row 1 against `width: 200px` in row 2 gives 58.797 = 20%
+  of 294, not 202. Here the two are simply maxed.
+- **`distribute-excess` hands out whole pixels**, so the column Brave
+  leaves at 220.5 comes out 220 at x=78 against 77.5. Inside the geometry
+  axis's 2px tolerance, and the one place these shapes are not exact.
 
 ### Round thirty-three: the corpus grows 501 → 576, and the paint axis was asking the wrong question
 
