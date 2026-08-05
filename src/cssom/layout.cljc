@@ -5928,7 +5928,16 @@
 
 (defn- layout-flex-wrap-row
   [theme cx cy cw cross-avail opacity inherited st in-flow measured wrap-reverse? margins]
-  (let [gap (:gap st)
+  ;; THE TWO GAP AXES ARE SEPARATE HERE TOO. This read the single `:gap`
+  ;; for both, which made `row-gap`/`column-gap` -- and the second half of
+  ;; `gap: <row> <column>` -- do nothing on a flex container, while a grid
+  ;; two lines of code away honoured all three. Measured in Brave (2026-08-05):
+  ;; `flex-wrap: wrap; row-gap: 12px; column-gap: 8px` over two 120px items in
+  ;; a 200px box is 52px tall with the second line at y=32; this engine had 40
+  ;; and y=20. Wrap mode is always ROW direction, so the MAIN gap is
+  ;; `column-gap` and the CROSS gap (between lines) is `row-gap`.
+  (let [gap (:column-gap st)
+        cross-gap (:row-gap st)
         ;; Wrap mode is always ROW direction (see the align-items comment
         ;; below), so `:main` is the horizontal pair and `:cross` the
         ;; vertical one. Both are reserved in full -- a flex item's margins
@@ -5971,11 +5980,11 @@
         stretch-lines? (and cross-avail (pos? n-rows)
                             (contains? #{"stretch" "normal"} align-content))
         row-cross-sizes (if stretch-lines?
-                          (let [total (+ (reduce + 0 natural-cross) (* gap (max 0 (dec n-rows))))
+                          (let [total (+ (reduce + 0 natural-cross) (* cross-gap (max 0 (dec n-rows))))
                                 extra (max 0 (quot (- cross-avail total) n-rows))]
                             (mapv #(+ % extra) natural-cross))
                           natural-cross)
-        total-cross (+ (reduce + 0 row-cross-sizes) (* gap (max 0 (dec n-rows))))
+        total-cross (+ (reduce + 0 row-cross-sizes) (* cross-gap (max 0 (dec n-rows))))
         ;; `flex-wrap: wrap-reverse` reverses the CROSS axis: the first
         ;; line is laid at the far edge and each subsequent one above it,
         ;; and (see flip-cross-align at each item below) `flex-start`
@@ -5986,7 +5995,7 @@
         ;; Reflecting the FINISHED offsets about the container's cross size
         ;; is the same move mirror-main-offsets makes on the main axis.
         cross-span (max total-cross (or cross-avail 0))
-        row-cross-offsets (let [forward (place-main-axis align-content row-cross-sizes gap cross-span)]
+        row-cross-offsets (let [forward (place-main-axis align-content row-cross-sizes cross-gap cross-span)]
                             (if wrap-reverse?
                               (mapv (fn [off sz] (- cross-span off sz)) forward row-cross-sizes)
                               forward))
@@ -6097,7 +6106,13 @@
         cx (+ x (:margin st) inset)
         cy (+ y (:margin st) inset)
         cw (max 0 (- w (* 2 inset)))
-        gap (:gap st)
+        ;; The MAIN-axis gap, which is `column-gap` for a row container and
+        ;; `row-gap` for a column one -- the axis names are physical, not
+        ;; flex-relative. This read the single `:gap` (parse-int of the
+        ;; whole shorthand, so `gap: 6px 18px` came back 6 and both
+        ;; longhands were ignored outright); see layout-flex-wrap-row's own
+        ;; note for the Brave measurement.
+        gap (if column? (:row-gap st) (:column-gap st))
         ;; A COLUMN item's cross axis is its WIDTH, and a cross axis is
         ;; only filled when it stretches: under any other alignment the
         ;; item is fit-content, exactly like a row item's main size. Both
@@ -6476,6 +6491,16 @@
    `<tr style=\"display: block\">` is not, and a run of bare cells with no
    row around them gets the anonymous row box CSS generates for it.
 
+   ROW-GROUP ORDER IS NOT SOURCE ORDER. A table's rows are laid out header
+   group first, then the row groups, then the footer group, whatever order
+   the author wrote them in -- `<tfoot>` before `<tbody>` is idiomatic HTML
+   (it lets a UA paint the footer before it has streamed the body) and it
+   renders LAST. Measured in Brave (2026-08-05),
+   `<table><tfoot><tr><td>foot</td></tr></tfoot><tbody><tr><td>body</td>
+   </tr></tbody></table>` puts `tfoot` at y=26 and `tbody` at y=2; this
+   engine had them the other way round, in source order. The partition
+   below is stable, so order WITHIN a bucket is still document order.
+
    Scope-cut, deliberate: a NON-cell child of a table (a stray `<div>` with
    its ordinary block display) is dropped rather than wrapped in the
    anonymous cell real CSS would generate for it -- the same thing this
@@ -6501,8 +6526,16 @@
 
                :else [acc pending])))
          [[] []]
-         (:children node))]
-    (vec (flush acc pending))))
+         (:children node))
+        rows (vec (flush acc pending))
+        bucket (fn [{:keys [group]}]
+                 (case (and group (table-part-display theme group))
+                   "table-header-group" 0
+                   "table-footer-group" 2
+                   1))]
+    (vec (concat (filter #(= 0 (bucket %)) rows)
+                 (filter #(= 1 (bucket %)) rows)
+                 (filter #(= 2 (bucket %)) rows)))))
 
 (defn- table-cells [theme row]
   (vec (filter #(= "table-cell" (table-part-display theme %)) (:children row))))
@@ -6635,14 +6668,40 @@
    shrink-to-fit direction is table-column-widths' own proportional
    scale-DOWN, which this deliberately does not duplicate. The rounding
    remainder goes to the last column so the columns add up to `target`
-   exactly rather than leaving a 1px seam."
-  [widths target]
-  (let [total (reduce + 0 widths)]
-    (if (or (empty? widths) (not (pos? total)) (<= target total))
-      widths
-      (let [grown (mapv #(long (* target (/ % (double total)))) widths)
-            short (- target (reduce + 0 grown))]
-        (update grown (dec (count grown)) + short)))))
+   exactly rather than leaving a 1px seam.
+
+   `locked` is the set of column indices a `<col>`/`<colgroup>` gave an
+   explicit width: those keep it and the surplus goes to the rest. A
+   declared column width is a declaration, not a preference -- measured in
+   Brave (2026-08-05), `<table style=\"width:300px\"><col style=\"width:200px\">
+   <col><tr><td>a</td><td>b</td></tr></table>` is 200 + 94, where growing
+   both in proportion to their demand gave this engine 281 + 13. When
+   EVERY column is locked the proportional hand-out still applies -- see
+   table-fixed-column-widths, which relies on exactly that."
+  ([widths target] (distribute-excess widths target #{}))
+  ([widths target locked]
+   (let [total (reduce + 0 widths)
+         free (remove locked (range (count widths)))
+         free-total (reduce + 0 (map #(nth widths %) free))]
+     (cond
+       (or (empty? widths) (not (pos? total)) (<= target total)) widths
+
+       ;; nothing to grow but the locked columns: the all-declared case,
+       ;; which real CSS does stretch.
+       (or (empty? free) (not (pos? free-total)))
+       (let [grown (mapv #(long (* target (/ % (double total)))) widths)
+             short (- target (reduce + 0 grown))]
+         (update grown (dec (count grown)) + short))
+
+       :else
+       (let [locked-total (- total free-total)
+             free-target (- target locked-total)
+             grown (reduce (fn [ws c]
+                             (assoc ws c (long (* free-target
+                                                  (/ (nth widths c) (double free-total))))))
+                           (vec widths) free)
+             short (- target (reduce + 0 grown))]
+         (update grown (last free) + short))))))
 
 (defn- table-fixed-column-widths
   "`table-layout: fixed`: the columns are sized from the `<col>` elements
@@ -6951,7 +7010,10 @@
         widths (if fixed?
                  widths
                  (distribute-excess widths (- content-w (* spacing (max 0 (dec n-cols)))
-                                              lead-x trail-x)))
+                                              lead-x trail-x)
+                                    ;; a column a `<col>` gave a width KEEPS it;
+                                    ;; only the auto ones absorb the surplus.
+                                    (into #{} (keep-indexed (fn [i w] (when w i)) col-widths))))
         col-offsets (vec (reductions (fn [acc cw] (+ acc cw spacing))
                                      lead-x
                                      widths))

@@ -2029,4 +2029,398 @@
   :group :text
   ;; `visibility: hidden` still occupies space, unlike `display: none`.
   :html "<div style=\"width: 400px\"><div style=\"visibility: hidden; height: 20px\">gone</div><div style=\"height: 20px\">after</div></div>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; MULTI-COLUMN (added 2026-08-05). Entirely new territory: `column-count`
+ ;; appears nowhere in src/, and the only `column-gap` there is the GRID/
+ ;; FLEX longhand. These cases say how large that gap is rather than
+ ;; asserting it exists.
+ ;; ---------------------------------------------------------------------
+
+ {:id :multicol/column-count-two-balances
+  :group :multicol
+  ;; 300px across a 20px gap is two 140px columns; four 30px blocks
+  ;; balance two-and-two, so `c` starts a new column at x=160,y=0.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div><div style=\"height: 30px\">c</div><div style=\"height: 30px\">d</div></div>"}
+
+ {:id :multicol/column-count-three
+  :group :multicol
+  :html "<div style=\"width: 320px; column-count: 3; column-gap: 10px\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div><div style=\"height: 20px\">c</div></div>"}
+
+ {:id :multicol/column-width-derives-the-count
+  :group :multicol
+  ;; No `column-count`: the used count is how many `column-width` columns
+  ;; plus gaps fit the available inline size -- 300/(100+10) rounds to 2.
+  :html "<div style=\"width: 300px; column-width: 100px; column-gap: 10px\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div></div>"}
+
+ {:id :multicol/column-gap-normal-is-1em
+  :group :multicol
+  ;; `column-gap: normal` on a multicol box is 1em -- 14px here, unlike
+  ;; the 0 it means on a grid or flex container.
+  :html "<div style=\"width: 300px; font-size: 14px; column-count: 2\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div></div>"}
+
+ {:id :multicol/column-rule-takes-no-space
+  :group :multicol
+  ;; A column rule is painted INSIDE the gap and does not widen it, so the
+  ;; columns are exactly where they are without one.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px; column-rule: 4px solid #888\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div></div>"}
+
+ {:id :multicol/a-block-splits-across-the-column-boundary
+  :group :multicol
+  ;; The control for the case below: with no `break-inside`, the 20px
+  ;; block straddling the 40px column boundary is FRAGMENTED -- part at the
+  ;; bottom of column 1, the rest at the top of column 2 -- and
+  ;; getBoundingClientRect reports the union of the fragments, so its box
+  ;; spans both columns.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :multicol/break-inside-avoid-moves-the-whole-block
+  :group :multicol
+  ;; The same block with `break-inside: avoid` moves whole into column 2
+  ;; instead of splitting.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 20px; break-inside: avoid\">b</div></div>"}
+
+ {:id :multicol/column-span-all-interrupts-the-columns
+  :group :multicol
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"height: 20px\">a</div><h3 style=\"column-span: all; margin: 0; height: 20px\">H</h3><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :multicol/text-flows-into-the-column-width
+  :group :multicol
+  ;; The LINE axis's own view of multicol: the lines are broken at the
+  ;; COLUMN's inline size (140px), not the container's 300px.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\">one two three four five six seven eight nine ten</div>"}
+
+ {:id :multicol/fixed-height-adds-columns-sideways
+  :group :multicol
+  ;; A multicol box with a definite height and more content than fits
+  ;; overflows in the INLINE direction, past its own right edge.
+  :html "<div style=\"width: 200px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 40px\">a</div><div style=\"height: 40px\">b</div><div style=\"height: 40px\">c</div></div>"}
+
+ {:id :multicol/column-fill-auto-fills-the-first-column
+  :group :multicol
+  ;; `column-fill: auto` fills each column to the box's height before
+  ;; starting the next, instead of balancing.
+  :html "<div style=\"width: 300px; height: 60px; column-count: 2; column-gap: 20px; column-fill: auto\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div><div style=\"height: 30px\">c</div></div>"}
+
+ {:id :multicol/padding-is-outside-the-columns
+  :group :multicol
+  ;; The columns divide the CONTENT box: 300 - 2*10 padding = 280, less a
+  ;; 20px gap, is two 130px columns starting at x=10.
+  :html "<div style=\"width: 300px; padding: 10px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div></div>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; position: sticky. The corpus had one case, and it covered the
+ ;; unscrolled default -- which layout.cljc is explicitly right about. A
+ ;; sticky box can be STUCK with no scrolling at all if it is anchored to
+ ;; the far edge of a scrollport it starts below, which is what these
+ ;; measure.
+ ;; ---------------------------------------------------------------------
+
+ {:id :position/sticky-bottom-is-stuck-at-scroll-zero
+  :group :position
+  ;; The sticky box's flow position (y=100) is below the 60px scrollport,
+  ;; so `bottom: 0` pulls it UP to sit on the scrollport's bottom edge --
+  ;; a stuck sticky box that needs no scroll to observe.
+  :html "<div style=\"width: 300px; height: 60px; overflow: auto\"><div style=\"height: 100px\">a</div><div style=\"position: sticky; bottom: 0; height: 20px\">s</div><div style=\"height: 40px\">b</div></div>"}
+
+ {:id :position/sticky-is-clamped-by-its-containing-block
+  :group :position
+  ;; Same pull, but the sticky box may not leave its containing block:
+  ;; `bottom: 0` asks for y=40 and the 60px-tall parent starting at y=80
+  ;; allows only y=80.
+  :html "<div style=\"width: 300px; height: 60px; overflow: auto\"><div style=\"height: 80px\">a</div><div style=\"height: 60px\"><div style=\"height: 20px\">x</div><div style=\"position: sticky; bottom: 0; height: 20px\">s</div></div><div style=\"height: 100px\">b</div></div>"}
+
+ {:id :overflow/nowrap-inline-blocks-do-not-wrap
+  :group :overflow
+  ;; The control for :position/sticky-right-in-a-horizontal-scroller
+  ;; below: the same two inline-blocks WITHOUT the sticky, so that case's
+  ;; delta can be attributed to `sticky` and not to `white-space: nowrap`
+  ;; inside a scroll container.
+  :html "<div style=\"width: 200px; overflow: auto; white-space: nowrap\"><span style=\"display: inline-block; width: 300px\">a</span><span style=\"display: inline-block; width: 40px\">s</span></div>"}
+
+ {:id :position/sticky-right-in-a-horizontal-scroller
+  :group :position
+  ;; The same mechanism in the inline axis: an inline-block whose flow x
+  ;; is past the scrollport's right edge is pulled back to it.
+  :html "<div style=\"width: 200px; overflow: auto; white-space: nowrap\"><span style=\"display: inline-block; width: 300px\">a</span><span style=\"display: inline-block; position: sticky; right: 0; width: 40px\">s</span></div>"}
+
+ {:id :position/sticky-with-no-inset-never-moves
+  :group :position
+  ;; A sticky box with NO inset property has no anchor edge and is
+  ;; therefore always at its flow position, scrolled or not.
+  :html "<div style=\"width: 300px; height: 60px; overflow: auto\"><div style=\"height: 100px\">a</div><div style=\"position: sticky; height: 20px\">s</div><div style=\"height: 40px\">b</div></div>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; Interactive / metadata elements: what a UA renders without any script.
+ ;; ---------------------------------------------------------------------
+
+ {:id :interactive/details-closed-shows-only-the-summary
+  :group :interactive
+  ;; LINE-AXIS BLIND, for the `text-overflow: ellipsis` reason applied to a
+  ;; different mechanism: measured in Brave (2026-08-05) a CLOSED <details>
+  ;; still LAYS OUT its content -- the <p> reports a real 300x20 box at
+  ;; y=34 and a Range reads "Body" out of it -- and merely never PAINTS it
+  ;; (Chromium hides `::details-content` with `content-visibility: hidden`,
+  ;; not `display: none`; the <details> box itself is 20px tall either
+  ;; way). This engine emits draw-ops, so a box it does not paint is a box
+  ;; it cannot report. Comparing the two on text compares a DOM to a
+  ;; rendering. Geometry and paint order still score, and the box-count
+  ;; difference that leaves is the finding.
+  :oracle/blind true
+  :html "<div style=\"width: 300px\"><details><summary>More</summary><p>Body</p></details><div style=\"height: 20px\">after</div></div>"}
+
+ {:id :interactive/details-open-shows-the-body
+  :group :interactive
+  :html "<div style=\"width: 300px\"><details open><summary>More</summary><p>Body</p></details><div style=\"height: 20px\">after</div></div>"}
+
+ {:id :interactive/details-with-no-summary
+  :group :interactive
+  ;; A `<details>` with no `<summary>` gets a UA-generated one; its own
+  ;; children are still hidden while closed.
+  :oracle/blind true
+  :html "<div style=\"width: 300px\"><details><p>Body</p></details><div style=\"height: 20px\">after</div></div>"}
+
+ {:id :interactive/summary-is-a-block
+  :group :interactive
+  ;; `<summary>` computes to `display: list-item` in the UA sheet, so it
+  ;; is a full-width block row, not an inline.
+  :html "<div style=\"width: 300px\"><details open><summary>More</summary><span>tail</span></details></div>"}
+
+ {:id :interactive/dialog-without-open-is-not-rendered
+  :group :interactive
+  :html "<div style=\"width: 300px\"><dialog>Hidden</dialog><div style=\"height: 20px\">after</div></div>"}
+
+ {:id :interactive/dialog-open-is-a-bordered-block
+  :group :interactive
+  ;; An open non-modal `<dialog>` is absolutely positioned, `width:
+  ;; fit-content`, `margin: auto`, with the UA's `border: solid` and
+  ;; `padding: 1em`.
+  :html "<div style=\"width: 300px; position: relative; height: 80px\"><dialog open>Hi</dialog></div>"}
+
+ {:id :interactive/template-generates-nothing
+  :group :interactive
+  ;; `<template>` content is a separate DocumentFragment: it is not in the
+  ;; rendered tree at all, and the `<template>` element itself is
+  ;; `display: none`.
+  :html "<div style=\"width: 300px\"><template><p>never</p></template><div style=\"height: 20px\">after</div></div>"}
+
+ {:id :interactive/hidden-attribute-is-display-none
+  :group :interactive
+  :html "<div style=\"width: 300px\"><div hidden>gone</div><div style=\"height: 20px\">after</div></div>"}
+
+ {:id :interactive/display-beats-the-hidden-attribute
+  :group :interactive
+  ;; `[hidden] { display: none }` is a UA rule, so any author `display`
+  ;; wins on specificity and the element renders.
+  :html "<div style=\"width: 300px\"><div hidden style=\"display: block; height: 20px\">shown</div><div style=\"height: 20px\">after</div></div>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; Tables: the parts the existing 25 cases never entered.
+ ;; ---------------------------------------------------------------------
+
+ {:id :table/nested-table-in-a-cell
+  :group :table
+  :html "<table style=\"width: 300px; border-collapse: collapse\"><tr><td>outer<table style=\"width: 100px; border-collapse: collapse\"><tr><td>in</td><td>ner</td></tr></table></td><td>right</td></tr></table>"}
+
+ {:id :table/caption-side-bottom
+  :group :table
+  :html "<table style=\"width: 200px; caption-side: bottom\"><caption>Cap</caption><tr><td>a</td><td>b</td></tr></table>"}
+
+ {:id :table/colgroup-span-sizes-two-columns
+  :group :table
+  :html "<table style=\"width: 300px\"><colgroup span=\"2\" style=\"width: 60px\"></colgroup><colgroup><col style=\"width: 120px\"></colgroup><tr><td>a</td><td>b</td><td>c</td></tr></table>"}
+
+ {:id :table/table-layout-fixed-overflowing-content
+  :group :table
+  ;; `table-layout: fixed` sizes columns from the first row alone and does
+  ;; NOT widen for content, so the long cell overflows its column.
+  :html "<table style=\"width: 200px; table-layout: fixed\"><tr><td style=\"width: 40px\">averylongunbreakableword</td><td>b</td></tr></table>"}
+
+ {:id :table/empty-cells-hide
+  :group :table
+  ;; `empty-cells: hide` suppresses the BORDER and background of an empty
+  ;; cell under `border-separate`; the cell still occupies its slot.
+  :html "<table style=\"width: 200px; border-spacing: 4px; empty-cells: hide\"><tr><td style=\"border: 2px solid #888\">a</td><td style=\"border: 2px solid #888\"></td></tr></table>"}
+
+ {:id :table/tfoot-renders-after-tbody
+  :group :table
+  ;; Written before the `<tbody>`, painted after it: row-group order is
+  ;; thead, tbody, tfoot regardless of source order.
+  :html "<table style=\"width: 200px\"><tfoot><tr><td>foot</td></tr></tfoot><tbody><tr><td>body</td></tr></tbody></table>"}
+
+ {:id :table/col-width-sizes-a-column
+  :group :table
+  ;; A bare `<col>` with no `<colgroup>` around it. Two separate things are
+  ;; measured: whether the declared 200px survives the table's surplus
+  ;; hand-out, and whether the parser synthesises the implicit
+  ;; `<colgroup>` a real HTML parser inserts (Brave reports one box for it,
+  ;; htmldom does not -- an htmldom finding, not a cssom one).
+  :html "<table style=\"width: 300px\"><col style=\"width: 200px\"><col><tr><td>a</td><td>b</td></tr></table>"}
+
+ {:id :table/cell-percentage-width
+  :group :table
+  :html "<table style=\"width: 300px\"><tr><td style=\"width: 25%\">a</td><td>b</td></tr></table>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; Intrinsic sizes, and min/max clamps where a flex or grid item is what
+ ;; is being clamped.
+ ;; ---------------------------------------------------------------------
+
+ {:id :sizing/min-width-on-a-flex-item
+  :group :sizing
+  ;; The item would shrink below 80; `min-width` floors it and the other
+  ;; item absorbs the loss.
+  :html "<div style=\"width: 200px; display: flex\"><div style=\"flex: 1; min-width: 150px\">a</div><div style=\"flex: 1\">b</div></div>"}
+
+ {:id :sizing/max-width-on-a-flex-item
+  :group :sizing
+  :html "<div style=\"width: 300px; display: flex\"><div style=\"flex: 1; max-width: 60px\">a</div><div style=\"flex: 1\">b</div></div>"}
+
+ {:id :sizing/min-width-auto-floors-a-flex-item
+  :group :sizing
+  ;; A flex item's `min-width` is `auto`, which resolves to its
+  ;; MIN-CONTENT size -- the reason a long unbreakable word makes a flex
+  ;; row overflow instead of shrinking.
+  :html "<div style=\"width: 200px; display: flex\"><div style=\"flex: 1\">averylongunbreakableword</div><div style=\"flex: 1\">b</div></div>"}
+
+ {:id :sizing/overflow-hidden-releases-the-flex-floor
+  :group :sizing
+  ;; `overflow: hidden` changes the automatic minimum size to zero, so the
+  ;; same item now shrinks as asked.
+  :html "<div style=\"width: 200px; display: flex\"><div style=\"flex: 1; overflow: hidden\">averylongunbreakableword</div><div style=\"flex: 1\">b</div></div>"}
+
+ {:id :sizing/max-width-on-a-grid-item
+  :group :sizing
+  :html "<div style=\"width: 300px; display: grid; grid-template-columns: 1fr 1fr\"><div style=\"max-width: 40px\">a</div><div>b</div></div>"}
+
+ {:id :sizing/min-width-min-content
+  :group :sizing
+  :html "<div style=\"width: 300px\"><div style=\"width: min-content\">alpha beta</div></div>"}
+
+ {:id :sizing/width-max-content
+  :group :sizing
+  :html "<div style=\"width: 300px\"><div style=\"width: max-content\">alpha beta</div></div>"}
+
+ {:id :sizing/width-fit-content
+  :group :sizing
+  ;; `fit-content` is min(max-content, max(min-content, available)) -- 300
+  ;; is wider than the max-content here, so this is the max-content size.
+  :html "<div style=\"width: 300px\"><div style=\"width: fit-content\">alpha beta</div></div>"}
+
+ {:id :sizing/fit-content-clamped-by-the-container
+  :group :sizing
+  :html "<div style=\"width: 60px\"><div style=\"width: fit-content\">alpha beta gamma</div></div>"}
+
+ {:id :sizing/max-width-percentage
+  :group :sizing
+  :html "<div style=\"width: 300px\"><div style=\"max-width: 40%; height: 20px\">a</div></div>"}
+
+ {:id :sizing/min-height-on-a-flex-item-cross-axis
+  :group :sizing
+  :html "<div style=\"width: 300px; display: flex; align-items: flex-start\"><div style=\"min-height: 50px\">a</div><div>b</div></div>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; gap, across the three box types that take one.
+ ;; ---------------------------------------------------------------------
+
+ {:id :gap/percentage-column-gap-on-a-grid
+  :group :gap
+  ;; A percentage gap resolves against the container's own content-box
+  ;; size in that axis: 10% of 300 is 30.
+  :html "<div style=\"width: 300px; display: grid; grid-template-columns: 1fr 1fr; column-gap: 10%\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :gap/percentage-row-gap-on-a-grid
+  :group :gap
+  ;; The BLOCK axis is the cyclic one: measured in Brave, a 10% row gap on
+  ;; a 40px-tall auto-height grid is 4px -- resolved against the grid's own
+  ;; content height, arrived at by laying the grid out once with a zero
+  ;; gap. This engine reads "10%" through parse-int and gets 10px, which is
+  ;; the same defect as the inline-axis case above, not a second one.
+  :html "<div style=\"width: 300px; display: grid; grid-template-columns: 1fr; row-gap: 10%\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :gap/row-gap-between-flex-lines
+  :group :gap
+  :html "<div style=\"width: 200px; display: flex; flex-wrap: wrap; row-gap: 12px; column-gap: 8px\"><div style=\"width: 120px; height: 20px\">a</div><div style=\"width: 120px; height: 20px\">b</div></div>"}
+
+ {:id :gap/gap-on-a-multicol-box
+  :group :gap
+  ;; `gap`'s column half is the multicol gap too -- one property, three
+  ;; box types.
+  :html "<div style=\"width: 300px; column-count: 2; gap: 40px\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :gap/gap-shorthand-two-values-on-a-flex-row
+  :group :gap
+  :html "<div style=\"width: 300px; display: flex; flex-wrap: wrap; gap: 6px 18px\"><div style=\"width: 100px; height: 20px\">a</div><div style=\"width: 100px; height: 20px\">b</div><div style=\"width: 100px; height: 20px\">c</div></div>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; Scroll containers.
+ ;; ---------------------------------------------------------------------
+
+ {:id :overflow/auto-reserves-no-gutter-in-this-oracle
+  :group :overflow
+  ;; Written expecting a divergence and finding none, which is the result.
+  ;; A classic scrollbar takes its width out of the scroll container's
+  ;; CONTENT box and this engine reserves nothing; measured in Brave 151
+  ;; headless on macOS (2026-08-05) the browser reserves nothing either --
+  ;; overlay scrollbars -- so the inner block is the full 200px on both
+  ;; sides. Platform-dependent by nature: on a classic-scrollbar oracle
+  ;; this case and the two below would all diverge by the gutter width,
+  ;; which is exactly what they are here to catch.
+  :html "<div style=\"width: 200px; height: 40px; overflow: auto\"><div style=\"height: 100px\">a</div></div>"}
+
+ {:id :overflow/hidden-reserves-nothing
+  :group :overflow
+  :html "<div style=\"width: 200px; height: 40px; overflow: hidden\"><div style=\"height: 100px\">a</div></div>"}
+
+ {:id :overflow/x-auto-reserves-height-only
+  :group :overflow
+  :html "<div style=\"width: 200px; height: 40px; overflow-x: auto; overflow-y: hidden\"><div style=\"width: 400px; height: 20px\">a</div></div>"}
+
+ {:id :overflow/nested-scroll-containers
+  :group :overflow
+  :html "<div style=\"width: 240px; height: 60px; overflow: auto\"><div style=\"height: 120px\"><div style=\"width: 200px; height: 40px; overflow: auto\"><div style=\"height: 90px\">inner</div></div></div></div>"}
+
+ {:id :overflow/on-a-flex-item
+  :group :overflow
+  :html "<div style=\"width: 300px; display: flex\"><div style=\"flex: 1; height: 40px; overflow: auto\"><div style=\"height: 90px\">a</div></div><div style=\"flex: 1\">b</div></div>"}
+
+ {:id :overflow/scroll-always-reserves
+  :group :overflow
+  ;; `overflow: scroll` reserves the gutter even with nothing to scroll.
+  :html "<div style=\"width: 200px; height: 40px; overflow: scroll\"><div style=\"height: 10px\">a</div></div>"}
+
+ ;; ---------------------------------------------------------------------
+ ;; Real-page composites. A failure here attributes nothing on its own --
+ ;; read the isolating cases above for the cause.
+ ;; ---------------------------------------------------------------------
+
+ {:id :page/sidebar-and-main
+  :group :page
+  :composite true
+  ;; The nav is a real `<ul>`, so its list markers put this on the same
+  ;; footing as :page/nested-lists-in-nav -- LINE-AXIS BLIND, no Range
+  ;; reaches a marker. Geometry and paint order still score, and they are
+  ;; what the case is for.
+  :oracle/blind true
+  :html "<div style=\"width: 400px; display: flex; gap: 12px\"><nav style=\"width: 100px; flex: none\"><ul style=\"margin: 0; padding-left: 16px\"><li>One</li><li>Two</li></ul></nav><main style=\"flex: 1; min-width: 0\"><h2 style=\"margin: 0\">Title</h2><p>Body text here.</p></main></div>"}
+
+ {:id :page/sticky-header-over-scrolling-content
+  :group :page
+  :composite true
+  :html "<div style=\"width: 300px; height: 80px; overflow: auto\"><header style=\"position: sticky; top: 0; height: 20px; background: #eee\">Head</header><p style=\"margin: 0\">One</p><p style=\"margin: 0\">Two</p><p style=\"margin: 0\">Three</p><p style=\"margin: 0\">Four</p></div>"}
+
+ {:id :page/card-list-with-images-and-captions
+  :group :page
+  :composite true
+  :html "<div style=\"width: 400px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px\"><figure style=\"margin: 0\"><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"40\" height=\"30\"><figcaption>One</figcaption></figure><figure style=\"margin: 0\"><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"40\" height=\"30\"><figcaption>Two</figcaption></figure><figure style=\"margin: 0\"><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"40\" height=\"30\"><figcaption>Three</figcaption></figure></div>"}
+
+ {:id :page/two-column-article
+  :group :page
+  :composite true
+  :html "<article style=\"width: 320px; column-count: 2; column-gap: 20px\"><h3 style=\"margin: 0; column-span: all\">Head</h3><p style=\"margin: 0\">One two three.</p><p style=\"margin: 0\">Four five six.</p></article>"}
+
+ {:id :page/data-table-with-caption-and-foot
+  :group :page
+  :composite true
+  :html "<table style=\"width: 300px; caption-side: bottom; border-collapse: collapse\"><caption>Totals</caption><tfoot><tr><td>Sum</td><td>3</td></tr></tfoot><thead><tr><th>Item</th><th>N</th></tr></thead><tbody><tr><td>a</td><td>1</td></tr><tr><td>b</td><td>2</td></tr></tbody></table>"}
 ]
