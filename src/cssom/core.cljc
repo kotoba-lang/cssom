@@ -1020,6 +1020,43 @@
    3 [0 1 2 1]
    4 [0 1 2 3]})
 
+;; ---- the CSS-wide keywords ----
+
+(def ^:private css-wide-keywords
+  "The four CSS-wide keywords (CSS Cascading and Inheritance Level 4 SS7),
+   which every property accepts and which mean the same thing on all of
+   them. Only `inherit` used to be handled here -- the other three were
+   stored as the literal string, which no downstream reader recognizes, so
+   `text-align: initial` reached `cssom.layout` as the word \"initial\" and
+   `margin: revert` left the author's own `margin: 0` standing.
+
+   Measured in Brave 151 on 2026-08-05, in the corpus's own 14px monospace
+   page, on a `<p>` inside a `<div>` that declared color/font-size/
+   font-weight/font-style/text-align, with and without an author rule on
+   the `<p>` itself:
+
+   | keyword   | inherited property (`color`) | non-inherited (`display`) | UA-declared (`p`'s `margin`) |
+   |-----------|------------------------------|---------------------------|------------------------------|
+   | `initial` | black -- NOT the parent's    | `inline` -- NOT the UA `block` | 0 -- NOT the UA 1em |
+   | `unset`   | the parent's green           | `inline` (= initial)      | 0 (= initial)                |
+   | `revert`  | the parent's green           | `block` (the UA value)    | 14px (the UA 1em)            |
+   | `inherit` | the parent's green           | the parent's own value    | the parent's own value       |
+
+   The `initial` row is why this cannot be done by simply forgetting the
+   declaration: a `<p style=\"display: initial\">` must report `inline`,
+   and dropping the declaration would leave the UA sheet's `block`
+   standing. `initial` has to WRITE a value (see `initial-values`), and it
+   is the only one of the four that has to."
+  {"inherit" :inherit "initial" :initial "unset" :unset "revert" :revert})
+
+(defn- css-wide-keyword
+  "The CSS-wide keyword `value` names (`:inherit`/`:initial`/`:unset`/
+   `:revert`), or nil. Case-insensitive and whitespace-trimmed, matching
+   how every other keyword value in this file is compared."
+  [value]
+  (when (string? value)
+    (get css-wide-keywords (str/lower-case (str/trim value)))))
+
 (defn- expand-box-side-shorthand
   "Expands a `margin`/`padding` shorthand into its four per-side longhands
    using real CSS's own 1-to-4 value rule: one value applies to all four
@@ -1101,7 +1138,22 @@
                             (re-matches calc-pattern %)
                             (re-matches var-ref-pattern %)
                             (and (= "margin" prop)
-                                 (= "auto" (str/lower-case %))))
+                                 (= "auto" (str/lower-case %)))
+                            ;; A CSS-wide keyword is admitted as the SOLE
+                            ;; token, which is the only place real CSS
+                            ;; allows one: `margin: 1px revert` is invalid,
+                            ;; `margin: revert` resets all four longhands.
+                            ;; Expanding matters because the longhands are
+                            ;; what the cascade compares -- measured, an
+                            ;; unexpanded `style="margin: revert"` left the
+                            ;; author's own `p.rv { margin: 0 }` longhands
+                            ;; standing and reported 0 where Brave reports
+                            ;; the UA's 14px (`:cascade/revert-drops-to-
+                            ;; the-user-agent-value`). The keyword rides
+                            ;; through to `resolve-style-for`, which is
+                            ;; where all four are resolved, independently,
+                            ;; against whatever each side reverts TO.
+                            (and (= 1 n) (css-wide-keyword %)))
                        tokens))
       {(keyword prop) (parse-style-value (tokens 0))
        (keyword (str prop "-top")) (parse-style-value t)
@@ -3766,16 +3818,162 @@
 
     :else value))
 
-(defn- inherit-keyword?
-  "True when `value` is the CSS-wide `inherit` keyword (case-insensitive,
-   ignoring surrounding whitespace, matching how every other keyword value
-   in this file is compared -- see resolve-style-for's own docstring for
-   why a winning `inherit` declaration is removed from the resolved map
-   rather than stored as the literal string \"inherit\"). `initial`/`unset`/
-   `revert` are deliberately NOT handled here -- an honest, documented
-   scope-cut, not an oversight."
-  [value]
-  (and (string? value) (= "inherit" (str/lower-case (str/trim value)))))
+;; ---- resolving the CSS-wide keywords ----
+;;
+;; The keywords themselves are recognized much earlier in this file
+;; (`css-wide-keywords`/`css-wide-keyword`), because
+;; `expand-box-side-shorthand` has to admit one as a whole-declaration
+;; token. What they RESOLVE to needs `parent-node-id`, so it lives here.
+
+(def ^:private inherited-properties
+  "The properties that INHERIT, of those this engine models -- which is the
+   whole of what `unset` needs to know (`unset` is `inherit` on an
+   inherited property and `initial` on every other one).
+
+   Measured rather than recalled, in Brave 151 on 2026-08-05: each property
+   was set to a non-default value on a `<div>` and to `unset` on a `<span>`
+   inside it, and the span was read back. Everything listed here kept the
+   div's value; `vertical-align` -- the one that looks like it belongs and
+   does not -- came back `baseline`, and is therefore absent.
+
+   A property NOT listed here is treated as non-inherited, which is the
+   conservative direction: `unset` then resolves to the property's initial
+   value, which is what an unlisted property's initial value already was
+   before this table existed."
+  #{:color :font :font-family :font-size :font-style :font-weight :font-variant
+    :font-stretch :line-height :letter-spacing :word-spacing :text-align
+    :text-indent :text-transform :text-shadow :white-space :word-break
+    :overflow-wrap :word-wrap :tab-size :hyphens :direction :visibility
+    :cursor :quotes :list-style :list-style-type :list-style-position
+    :list-style-image :border-collapse :border-spacing :caption-side
+    :empty-cells :orphans :widows :writing-mode :text-orientation})
+
+(def ^:private initial-values
+  "CSS's own initial value for the properties whose initial value is not
+   the same as ABSENCE in this engine's representation -- i.e. every
+   property the user-agent stylesheet declares (where dropping the
+   declaration would leave the UA value standing, and `initial` must beat
+   it), plus the inherited properties (where dropping would inherit).
+
+   Every entry measured in Brave 151 on 2026-08-05 by setting the property
+   to `initial` on an element inside an ancestor that declared a different
+   value, and reading `getComputedStyle` back -- see `css-wide-keywords`
+   for the table and the page.
+
+   NOT here, and each for a reason that is not 'not got to yet':
+
+   - `font-size`. Its initial value is the keyword `medium`, whose pixel
+     value is keyed on the DEFAULT font of the family in use: measured
+     13px on the corpus's monospace page and 16px on the same page with
+     `font-family: Arial`. That is the same family-keyed table that keeps
+     the absolute font-size keywords out of `resolve-font-size` (see its
+     own docstring), and this engine has no font-family model to key it
+     on. `font-size: initial` therefore drops, and inherits -- wrong, and
+     wrong in a way that is one measurement away from being right if a
+     family model ever arrives.
+   - `font-family`. Its initial value is the browser's own default family,
+     which is a user preference and not a CSS value at all: measured
+     `\"Hiragino Kaku Gothic ProN\"` on this machine. This sheet has no
+     font-family rule to beat, so `font-family: initial` drops and
+     inherits -- the same cut as `font-size`, for the same missing model.
+   - The uniform `:margin`/`:padding` keys this engine emits alongside the
+     four longhands (see `expand-box-side-shorthand`). They are not CSS
+     properties, and absence is exactly what they should say when no
+     uniform value survives -- their readers already fall back.
+   - Anything else. A property with no entry drops, which is CSS's initial
+     value for every non-inherited property that the UA sheet does not
+     declare. Adding an entry is only ever needed to beat the UA sheet or
+     to stop an inherited property inheriting."
+  {:color "#000000"
+   :font-weight "normal"
+   :font-style "normal"
+   :display "inline"
+   :text-align "start"
+   :vertical-align "baseline"
+   :white-space "normal"
+   :text-transform "none"
+   :text-indent 0
+   :letter-spacing "normal"
+   :word-spacing 0
+   :line-height "normal"
+   :visibility "visible"
+   :list-style-type "disc"
+   :direction "ltr"
+   :border-collapse "separate"
+   :border-spacing 0
+   :caption-side "top"
+   :empty-cells "show"
+   :word-break "normal"
+   :overflow-wrap "normal"
+   :tab-size 8
+   :cursor "auto"
+   :text-shadow "none"
+   :margin-top 0 :margin-right 0 :margin-bottom 0 :margin-left 0
+   :padding-top 0 :padding-right 0 :padding-bottom 0 :padding-left 0})
+
+(def ^:private drop-declaration
+  "The sentinel `resolve-css-wide-keyword` returns for 'this property has
+   no value here' -- distinct from nil, which is a value a declaration can
+   legitimately resolve to."
+  ::drop)
+
+(defn- parent-computed-value
+  "The value the PARENT element resolved for `property`, read off the
+   `:style/*` attrs `style-element` has already written -- which is what
+   makes `inherit` answerable at all. `apply-cascade` walks top-down, so
+   by the time any element resolves, its parent's attrs are final.
+
+   Returns `drop-declaration` when there is no document, no parent, or the
+   parent resolved nothing for this property. All three are the same
+   honest answer for a different reason: a parent that declared nothing
+   for a NON-inherited property computed that property's initial value,
+   which is exactly what dropping the declaration yields; and a parent
+   that declared nothing for an INHERITED one is itself inheriting, which
+   dropping also reproduces, because absence is how this engine spells
+   'look further up' (see `resolve-style-for`'s docstring). The standalone
+   `computed-style` path has no styled ancestors at all and therefore gets
+   initial values throughout -- stated here rather than discovered."
+  [document node property]
+  (or (when document
+        (when-let [parent-id (parent-node-id document (:node/id node))]
+          (get-in document [:nodes parent-id :attrs (keyword "style" (name property))])))
+      drop-declaration))
+
+(defn- resolve-css-wide-keyword
+  "Resolves one CSS-wide keyword to the value it stands for, or
+   `drop-declaration`.
+
+   `lower-entries` is the cascade entries for this same property from
+   origins BELOW the one the keyword was declared in, already sorted --
+   which is all `revert` needs: real CSS's `revert` rolls the cascade back
+   to the previous ORIGIN, and with two origins (see `ua-origin` /
+   `author-origin`) an author's `revert` is 'resolve this property using
+   the user-agent declarations alone'. Measured in Brave 151, 2026-08-05:
+   `p.rv { margin: 0 }` with `style=\"margin: revert\"` reports 14px top
+   and bottom (the UA `p { margin: 1em 0 }`) and 0 left and right (no UA
+   declaration, so the initial value) -- the author rule is gone, not
+   merely outranked.
+
+   A `revert` with nothing below it degrades to `unset`, per the spec's
+   own definition, and so does a `revert` inside the lowest origin -- this
+   sheet has no CSS-wide keyword in it, so that branch is reachable only
+   from a host that supplies its own UA rules."
+  [document node property keyword-kind lower-entries]
+  (case keyword-kind
+    :inherit (parent-computed-value document node property)
+    :initial (get initial-values property drop-declaration)
+    :unset (resolve-css-wide-keyword document node property
+                                     (if (contains? inherited-properties property)
+                                       :inherit
+                                       :initial)
+                                     nil)
+    :revert (if-let [{:keys [value]} (last lower-entries)]
+              (if-let [nested (css-wide-keyword value)]
+                (resolve-css-wide-keyword document node property
+                                          (if (= :revert nested) :unset nested)
+                                          nil)
+                value)
+              (resolve-css-wide-keyword document node property :unset nil))))
 
 ;; ---- the user-agent stylesheet ----
 ;;
@@ -4536,26 +4734,35 @@
    own FIRST pass either, which must not let any @container rule contribute
    before container widths are even known).
 
-   The CSS-wide `inherit` keyword (see `inherit-keyword?`): a winning
-   declaration whose value is `inherit` is REMOVED from the resulting map
-   rather than stored as the literal string \"inherit\" -- storing it
-   verbatim was a real, previously-unfixed bug (an extremely common author
-   idiom, `color: inherit`, silently rendered fully transparent/invisible
-   text downstream, since no color parser recognizes the word \"inherit\"
-   as a color). Removing the property from the map lets the SAME
+   The CSS-wide keywords -- `inherit`, `initial`, `unset`, `revert` (see
+   `css-wide-keywords` for the browser measurements that separate them,
+   and `resolve-css-wide-keyword` for the resolution): a winning
+   declaration whose value is one of the four never reaches the resulting
+   map as the literal string. Storing it verbatim was a real bug -- an
+   extremely common author idiom, `color: inherit`, silently rendered
+   fully transparent/invisible text downstream, since no color parser
+   recognizes the word \"inherit\" as a color -- and the same was true of
+   the other three until 2026-08-05.
+
+   `inherit` reads the PARENT's resolved value straight off its
+   `:style/*` attrs (`parent-computed-value`), which works for a
+   non-inherited property (`padding-left: inherit` under a
+   `padding-left: 40px` parent now reports 40, where dropping it reported
+   0 -- measured against Brave, `:cascade/inherit-on-a-non-inherited-
+   property`) as well as for an inherited one. When the parent resolved
+   nothing, the property is dropped instead, which lets the SAME
    already-existing `(or (:prop st) (:prop inherited))` fallback
-   `cssom.layout` already applies for every genuinely-inherited CSS
-   property (color/font-*/line-height/text-*/white-space) do the real
-   inheriting at layout time, for free -- exactly as if this element's
-   stylesheet/inline rules had never mentioned that property at all, which
-   is precisely what `inherit` should look like to a descendant lookup.
-   For a NON-inherited property (e.g. `display`), this only stops the
-   literal-string corruption -- it does not make `cssom.layout` treat that
-   property as inherited, since no per-property fallback exists for it
-   there; genuinely forcing inheritance for non-inherited properties is an
-   honest, documented scope-cut, not attempted here. `initial`/`unset`/
-   `revert` are separately, deliberately not handled at all (same
-   scope-cut)."
+   `cssom.layout` applies for genuinely-inherited properties do the real
+   inheriting at layout time -- and is also, for a non-inherited property,
+   exactly the initial value the parent itself computed.
+
+   `initial` WRITES the property's initial value (`initial-values`) rather
+   than dropping it, because dropping would leave the user-agent
+   stylesheet's value standing: a `<p style=\"display: initial\">` reports
+   `inline` in a browser, not the UA's `block`. `unset` is `inherit` on an
+   inherited property (`inherited-properties`) and `initial` on every
+   other. `revert` rolls the cascade back to the previous ORIGIN, which is
+   why the entries below the winner are kept rather than discarded."
   ([document rules node pseudo-element]
    (resolve-style-for document rules node pseudo-element nil nil))
   ([document rules node pseudo-element counters]
@@ -4633,13 +4840,28 @@
                                                 :layer max-layer-priority
                                                 :order idx})
                                              (inline-style node)))]
-     (let [m (reduce (fn [m {:keys [property value]}]
-                        (if (inherit-keyword? value)
-                          (dissoc m property)
-                          (assoc m property value)))
-                      {}
-                      (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
-                               (concat ua-declarations declarations inline-declarations)))]
+     (let [sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
+                           (concat ua-declarations declarations inline-declarations))
+           ;; Grouped per property rather than reduced straight into a map,
+           ;; because `revert` needs the LOSING entries too -- it rolls the
+           ;; cascade back to the previous origin rather than to nothing.
+           ;; `sort-by` is stable and `group-by` preserves input order
+           ;; within each group, so the last entry of each group is the
+           ;; same winner the old straight reduce ended on.
+           m (reduce-kv
+              (fn [m property entries]
+                (let [{:keys [value] :as winner} (peek entries)]
+                  (if-let [kind (css-wide-keyword value)]
+                    (let [resolved (resolve-css-wide-keyword
+                                    document node property kind
+                                    (when (= :revert kind)
+                                      (filterv #(< (:origin %) (:origin winner)) entries)))]
+                      (if (= drop-declaration resolved)
+                        m
+                        (assoc m property resolved)))
+                    (assoc m property value))))
+              {}
+              (group-by :property sorted))]
        (if (contains? m :content)
          (let [resolved (resolve-content-value node counters (:content m))]
            (if (nil? resolved)

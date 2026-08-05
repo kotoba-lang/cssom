@@ -3081,15 +3081,25 @@
 
 ;; ---- CSS-wide `inherit` keyword ----
 
-(deftest inherit-keyword-removes-the-property-instead-of-storing-the-literal-string
+(deftest inherit-keyword-resolves-to-the-parents-value-instead-of-storing-the-literal-string
   ;; Real bug this guards: `color: inherit` (an extremely common real-world
   ;; author idiom) previously stored the literal string "inherit" as the
   ;; winning declaration's value -- no downstream color parser recognizes
   ;; "inherit" as a color, so it silently rendered fully transparent,
   ;; invisible text. Confirmed via direct REPL reproduction before touching
-  ;; source. Fixed by removing the property from the resolved map instead,
-  ;; letting cssom.layout's own already-existing per-property
-  ;; `(or (:prop st) (:prop inherited))` fallback do the real inheriting.
+  ;; source.
+  ;;
+  ;; The first fix REMOVED the property instead, leaving cssom.layout's own
+  ;; `(or (:prop st) (:prop inherited))` fallback to do the inheriting.
+  ;; That is right for an inherited property and WRONG for a non-inherited
+  ;; one, which has no such fallback -- measured against Brave 151 on
+  ;; 2026-08-05, `<div style="padding-left:40px"><p style="padding-left:
+  ;; inherit">` reports 40px in the browser and reported 0 here. So
+  ;; `inherit` now reads the parent's already-resolved value off its
+  ;; :style/* attrs (`parent-computed-value`), for every property alike.
+  ;; The value therefore APPEARS on the child, where it used to be absent;
+  ;; what layout renders is unchanged, and `computed-style` is no longer
+  ;; silent about it.
   (let [[root doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc root)
         [child doc] (dom/create-element doc :span)
@@ -3097,10 +3107,23 @@
         rules (css/parse-rules "div { color: red } span { color: inherit }")
         doc (css/apply-cascade doc rules)]
     (is (= "red" (get-in doc [:nodes root :attrs :style/color])))
-    (is (nil? (get-in doc [:nodes child :attrs :style/color]))
+    (is (= "red" (get-in doc [:nodes child :attrs :style/color]))
         "the winning `inherit` declaration must NOT leave the literal
-         string \"inherit\" on the node -- absent, so layout's own
-         inherited-value fallback can take over")))
+         string \"inherit\" on the node -- it resolves to the parent's
+         own value")))
+
+(deftest inherit-keyword-drops-when-the-parent-resolved-nothing
+  ;; The other half of `parent-computed-value`: a parent with no value of
+  ;; its own leaves the property absent, which is both the initial value
+  ;; for a non-inherited property and the way this engine spells "look
+  ;; further up" for an inherited one.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "span { color: inherit }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes child :attrs :style/color])))))
 
 (deftest inherit-keyword-is-case-insensitive-and-tolerates-surrounding-whitespace
   (let [[root doc] (dom/create-element dom/empty-document :div)
@@ -3109,7 +3132,7 @@
         doc (dom/append-child doc root child)
         rules (css/parse-rules "div { color: green } span { color:  InHeRiT  }")
         doc (css/apply-cascade doc rules)]
-    (is (nil? (get-in doc [:nodes child :attrs :style/color])))))
+    (is (= "green" (get-in doc [:nodes child :attrs :style/color])))))
 
 (deftest inherit-keyword-loses-to-a-later-more-specific-declaration-like-any-other-value
   ;; Sanity check that this fix doesn't special-case `inherit` OUTSIDE the
@@ -3133,8 +3156,12 @@
         doc (dom/append-child doc mid leaf)
         rules (css/parse-rules "div { color: blue } section { color: inherit } span { color: inherit }")
         doc (css/apply-cascade doc rules)]
-    (is (nil? (get-in doc [:nodes leaf :attrs :style/color])))
-    (is (nil? (get-in doc [:nodes mid :attrs :style/color])))))
+    ;; The top-down walk means `section` is resolved before `span`, so the
+    ;; blue `section` inherited from `div` is already on the node by the
+    ;; time `span` reads it -- the chain carries a value now rather than an
+    ;; absence (see inherit-keyword-resolves-to-the-parents-value... above).
+    (is (= "blue" (get-in doc [:nodes leaf :attrs :style/color])))
+    (is (= "blue" (get-in doc [:nodes mid :attrs :style/color])))))
 
 (deftest inherit-keyword-resolves-through-the-real-layout-pipeline-to-the-parents-actual-color
   ;; End-to-end confirmation through the real cascade -> DOM -> layout
@@ -3156,6 +3183,89 @@
     (is (= "red" (:color text-op))
         "the child's real, painted text color must be the parent's red,
          not the literal string \"inherit\" and not a default fallback")))
+
+
+;; ---- CSS-wide `initial` / `unset` / `revert` ----
+;;
+;; Every expectation below was measured in Brave 151 on 2026-08-05, in the
+;; conformance corpus's own 14px page -- see `css-wide-keywords` in
+;; src/cssom/core.cljc for the table those measurements produced.
+
+(defn- wide-keyword-doc
+  "A <div> parent carrying `parent-decls` and a <p> child carrying
+   `child-decls`, cascaded. Returns the child's resolved :style/* map. A
+   `<p>` on purpose: it is the tag the user-agent sheet declares a margin
+   and a display for, which is what separates `initial` from `unset` from
+   `revert`."
+  [parent-decls child-decls]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :class "parent")
+        [child doc] (dom/create-element doc :p)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules (str ".parent { " parent-decls " } p { " child-decls " }"))
+        doc (css/apply-cascade doc rules {:base-font-size 14})]
+    (into {} (filter (fn [[k _]] (= "style" (namespace k)))) (get-in doc [:nodes child :attrs]))))
+
+(deftest initial-keyword-writes-the-css-initial-value-and-beats-the-ua-sheet
+  ;; Brave: `<p style="display: initial">` reports `inline`, NOT the UA
+  ;; sheet's `block`, and `text-align: initial` under a `text-align:
+  ;; center` parent reports `start`. Dropping the declaration -- what
+  ;; `inherit` does -- would report `block` and `center` respectively.
+  (let [st (wide-keyword-doc "text-align: center"
+                             "display: initial; text-align: initial; margin-top: initial")]
+    (is (= "inline" (:style/display st)))
+    (is (= "start" (:style/text-align st)))
+    (is (= 0 (:style/margin-top st)))))
+
+(deftest unset-keyword-is-inherit-on-inherited-and-initial-on-everything-else
+  ;; Brave, same page: `color: unset` under a green parent reports green;
+  ;; `display: unset` reports `inline` (the initial value, not the UA
+  ;; `block`); `padding-left: unset` under a 40px parent reports 0.
+  (let [st (wide-keyword-doc "color: #008000; padding-left: 40px"
+                             "color: unset; display: unset; padding-left: unset")]
+    (is (= "#008000" (:style/color st)))
+    (is (= "inline" (:style/display st)))
+    (is (= 0 (:style/padding-left st)))))
+
+(deftest revert-keyword-rolls-back-to-the-user-agent-origin
+  ;; Brave: `p { margin: 0 }` plus `margin: revert` reports 14px top and
+  ;; bottom (the UA `p { margin: 1em 0 }` at this page's 14px) and 0 left
+  ;; and right (no UA declaration there, so the initial value). The author
+  ;; rule is GONE, not outranked -- which is why the losing entries have to
+  ;; survive as far as `resolve-css-wide-keyword`.
+  (let [st (wide-keyword-doc "" "margin: 0; margin: revert")]
+    (is (= 14 (:style/margin-top st)))
+    (is (= 14 (:style/margin-bottom st)))
+    (is (= 0 (:style/margin-left st)))
+    (is (= 0 (:style/margin-right st))))
+  ;; And a property the UA sheet says nothing about reverts to initial.
+  (let [st (wide-keyword-doc "" "color: red; color: revert")]
+    (is (nil? (:style/color st)))))
+
+(deftest revert-keyword-keeps-the-ua-display-where-initial-would-not
+  ;; The pair that makes `revert` a different keyword from `initial` on the
+  ;; same declaration: Brave reports `block` for `display: revert` on a
+  ;; `<p>` and `inline` for `display: initial`.
+  (is (= "block" (:style/display (wide-keyword-doc "" "display: inline-block; display: revert"))))
+  (is (= "inline" (:style/display (wide-keyword-doc "" "display: inline-block; display: initial")))))
+
+(deftest css-wide-keyword-in-a-box-shorthand-expands-to-all-four-longhands
+  ;; The shorthand has to expand or the longhands an author rule already
+  ;; wrote survive underneath it -- which is exactly what left
+  ;; `:cascade/revert-drops-to-the-user-agent-value` reporting 0.
+  (let [st (wide-keyword-doc "" "margin: 8px; margin: initial")]
+    (is (= [0 0 0 0] [(:style/margin-top st) (:style/margin-right st)
+                      (:style/margin-bottom st) (:style/margin-left st)]))))
+
+(deftest css-wide-keyword-is-only-a-keyword-as-the-whole-declaration
+  ;; `margin: 1px revert` is not valid CSS, and admitting the keyword
+  ;; per-token would make it look like one. Left unexpanded, as this
+  ;; expander already leaves `margin: 1px solid 3px dashed` -- so the UA
+  ;; sheet's own `p { margin-top: 1em }` (14 at this base size) survives
+  ;; untouched, where an expansion would have written 1 or reverted.
+  (let [st (wide-keyword-doc "" "margin: 1px revert")]
+    (is (= 14 (:style/margin-top st)))))
 
 
 ;; ---- `em` / `rem` resolution and the computed font size ----
