@@ -784,8 +784,59 @@
       "a blank value is not suffering overflow/underflow, so it matches :in-range like real HTML5"))
 
 (deftest disabled-out-of-range-control-matches-neither-pseudo-class
-  (is (nil? (range-check-doc {:type "number" :min "1" :max "10" :value "15" :disabled "disabled"}))
-      "constraint validation (and so :in-range/:out-of-range) does not apply to a disabled control"))
+  ;; The answer is the USER-AGENT grey, not nil: neither author rule
+  ;; matched (which is what this test is about), and the UA sheet's own
+  ;; `input:disabled { color: #545454 }` -- measured in Brave 151 on
+  ;; 2026-08-05 -- then stands, exactly as it does in a browser. Before
+  ;; that rule existed this read nil for the same reason.
+  (is (= "#545454" (range-check-doc {:type "number" :min "1" :max "10" :value "15" :disabled "disabled"}))
+      "constraint validation (and so :in-range/:out-of-range) does not apply
+       to a disabled control -- neither author rule wins, leaving the UA
+       disabled colour"))
+
+;; ---- the user-agent sheet's `:disabled` colours ----
+
+(defn- control-color
+  "`tag`'s resolved colour with `attrs` on it, cascaded against no author
+   CSS at all -- so what comes back is the user-agent sheet's own answer."
+  [tag attrs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc tag)
+        doc (reduce (fn [d [k v]] (dom/set-attribute d el k v)) doc attrs)
+        doc (dom/append-child doc root el)]
+    (get-in (css/apply-cascade doc []) [:nodes el :attrs :style/color])))
+
+(deftest disabled-controls-take-one-of-three-user-agent-colours
+  ;; Measured in Brave 151 on 2026-08-05, every control in the page twice,
+  ;; once bare and once `disabled`. THREE distinct greys, keyed on the
+  ;; control's type -- an engine with one of them would be wrong about the
+  ;; other two.
+  (is (= "#545454" (control-color :input {:disabled "disabled"})))
+  (is (= "#545454" (control-color :input {:type "number" :disabled "disabled"})))
+  (is (= "#545454" (control-color :textarea {:disabled "disabled"})))
+  (is (= "#808080" (control-color :select {:disabled "disabled"})))
+  (is (= "rgba(16, 16, 16, 0.3)" (control-color :button {:disabled "disabled"})))
+  (is (= "rgba(16, 16, 16, 0.3)" (control-color :input {:type "submit" :disabled "disabled"})))
+  ;; and the negatives, each of which a coarser rule would get wrong
+  (is (nil? (control-color :input {})) "an enabled control is not greyed")
+  (is (nil? (control-color :input {:readonly "readonly"}))
+      "readonly is not disabled -- Brave reports plain black")
+  (is (nil? (control-color :p {:disabled "disabled"}))
+      "`disabled` on a non-control does nothing"))
+
+(deftest disabled-colour-follows-a-disabled-fieldset-not-just-the-attribute
+  ;; The rule is `:disabled`, not `[disabled]`: Brave greys an <input>
+  ;; inside a <fieldset disabled> that has no attribute of its own.
+  (let [[root doc] (dom/create-element dom/empty-document :form)
+        doc (dom/set-root doc root)
+        [fs doc] (dom/create-element doc :fieldset)
+        doc (dom/set-attribute doc fs :disabled "disabled")
+        doc (dom/append-child doc root fs)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/append-child doc fs el)
+        doc (css/apply-cascade doc [])]
+    (is (= "#545454" (get-in doc [:nodes el :attrs :style/color])))))
 
 ;; ---- radio button groups honor real form ownership, not the literal
 ;; :form attribute string (https://html.spec.whatwg.org/multipage/input.html

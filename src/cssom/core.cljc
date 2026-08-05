@@ -4203,6 +4203,35 @@
      `<div style=\"display:table\">` reports `border-spacing: 0px` where
      `<table>` reports 2px. Defaulting every table-displayed box to 2 put
      phantom spacing into every CSS-declared table.
+   - The `:disabled` colours, measured in Brave 151 on 2026-08-05 by
+     putting every control in the page twice, once bare and once
+     `disabled`, and reading `color` back. There are THREE of them, not
+     one, and which one applies is keyed on the control's `type`:
+
+       input, textarea                                rgb(84, 84, 84)
+       button, input type=button/submit/reset/color   rgba(16, 16, 16, .3)
+       select                                         rgb(128, 128, 128)
+
+     `:disabled` and not `[disabled]`: an `<input>` inside a
+     `<fieldset disabled>` reports the same grey with no attribute of its
+     own, which is exactly what `disabled-control?` already computes.
+     `readonly` is NOT this -- a readonly input reports plain black -- and
+     neither is `disabled` on a non-control (a `<p disabled>` is black).
+     `input[type=\"range\"]:disabled` measures rgb(197, 197, 197) and is
+     deliberately absent: the range control has no text to colour here and
+     this engine draws no track, so the value would be unobservable.
+
+     What is deliberately NOT here, though it was measured at the same
+     time: the ENABLED control colours. An `<input>` inside a
+     `color: #ff0000` div reports BLACK in a browser -- a control does not
+     inherit the page's colour -- and this engine inherits it. Writing
+     `input, textarea, select { color: #000000 }` would fix that and would
+     also hard-code black into every host theme that renders through this
+     cascade, including the dark one `cssom.layout`'s own theme draws (the
+     conformance corpus paints its text `#e6ebf5`). The real UA value is
+     the system colour `fieldtext`, and this sheet has no system-colour
+     model; landing it needs one, not a hex constant.
+
    - `[hidden] { display: none }` is attribute PRESENCE and does not look
      at the value. Measured in Brave 151, 2026-08-05: `hidden=\"false\"`,
      `hidden=\"\"` and `hidden=\"hidden\"` all report `display: none` and
@@ -4277,6 +4306,11 @@
   pre { white-space: pre }
   a[href] { color: #0000EE }
   hr { color: #808080 }
+  input:disabled, textarea:disabled { color: #545454 }
+  select:disabled { color: #808080 }
+  button:disabled, input[type=\"button\"]:disabled,
+  input[type=\"submit\"]:disabled, input[type=\"reset\"]:disabled,
+  input[type=\"color\"]:disabled { color: rgba(16, 16, 16, 0.3) }
 
   table { border-spacing: 2px }
   td, th { padding: 1px }
