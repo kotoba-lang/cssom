@@ -825,6 +825,34 @@
   (is (nil? (control-color :p {:disabled "disabled"}))
       "`disabled` on a non-control does nothing"))
 
+(deftest dialog-gets-the-user-agent-padding-and-border
+  ;; Measured in Brave 151 on 2026-08-05 in the corpus's own 14px page:
+  ;; `padding` 14px on all four sides (`1em`), `border-top-width` 3px
+  ;; (`border: solid`, i.e. `medium`), style solid. As four padding
+  ;; LONGHANDS, because `padding: 1em` is not a length at declaration time
+  ;; and so expands to nothing but the uniform key -- which is invisible to
+  ;; every per-side reader, `getComputedStyle` included.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [d doc] (dom/create-element doc :dialog)
+        doc (dom/set-attribute doc d :open "")
+        doc (dom/append-child doc root d)
+        doc (css/apply-cascade doc [] {:base-font-size 14})
+        attrs (get-in doc [:nodes d :attrs])]
+    (is (= [14 14 14 14] [(:style/padding-top attrs) (:style/padding-right attrs)
+                          (:style/padding-bottom attrs) (:style/padding-left attrs)]))
+    (is (= 3 (:style/border-width attrs)))
+    (is (= "solid" (:style/border-style attrs)))
+    (is (= "block" (:style/display attrs))))
+  ;; and a dialog with no `open` is still `display: none`, which the sheet
+  ;; already said and the padding must not have disturbed
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [d doc] (dom/create-element doc :dialog)
+        doc (dom/append-child doc root d)
+        doc (css/apply-cascade doc [])]
+    (is (= "none" (get-in doc [:nodes d :attrs :style/display])))))
+
 (deftest disabled-colour-follows-a-disabled-fieldset-not-just-the-attribute
   ;; The rule is `:disabled`, not `[disabled]`: Brave greys an <input>
   ;; inside a <fieldset disabled> that has no attribute of its own.

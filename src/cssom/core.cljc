@@ -4274,7 +4274,36 @@
      sheet has no font-family rule at all and adding one is a separate
      measurement.
    - `input[type=\"radio\"]`'s own margins, `3px 3px 0 5px`, split out of
-     the checkbox rule they were wrongly sharing."
+     the checkbox rule they were wrongly sharing.
+   - `dialog`'s `padding: 1em` and `border: solid`, measured in Brave 151
+     on 2026-08-05: `padding` 14px on all four sides at this page's 14px,
+     `border-top-width` 3px (`solid`'s `medium`), `border-top-style`
+     solid. Written as four padding longhands, like `fieldset`, because
+     `padding: 1em` is not a length at declaration time and
+     `expand-box-side-shorthand` correctly declines to expand it -- which
+     leaves ONLY the uniform key, and everything that reads a per-side
+     padding (including `getComputedStyle`) then sees nothing. Together
+     these make the box exact in one dimension: Brave reports
+     `<dialog open>Hi</dialog>` as 48x54 and this engine drew 300x20,
+     which is now 300x54.
+
+   And the rest of `dialog`'s UA rule, measured at the same time and
+   deliberately NOT written, because writing it would remove the harness's
+   ability to see the divergence without removing the divergence:
+   `position: absolute; left: 0; right: 0; width: fit-content;
+   height: fit-content; margin: auto`. Brave puts that same dialog at
+   x=126 with width 48 inside a 300px `position: relative` parent, i.e.
+   `(300 - 48) / 2` on each side, and reports the auto margins as the used
+   126px. This engine cannot: `explicit-width`'s own docstring records
+   `fit-content` as a scope cut that behaves as `auto`, so the box stays
+   300 wide, the leftover space is zero, and `margin: auto` resolves to 0.
+   Measured with the declarations added: NOT ONE BOX MOVES, and the
+   computed-style axis loses four values -- `margin-left`/`margin-right`
+   go from a scored mismatch (0 against 126px) to EXCLUDED as
+   non-absolute, and `margin-top`/`margin-bottom`, which agree today at 0,
+   go from scored to excluded too. The order this wants is intrinsic
+   sizing first, then this declaration; see `explicit-width` for the two
+   facts that fix needs."
   "
   html, body, address, article, aside, blockquote, center, dd, details,
   dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form,
@@ -4353,6 +4382,9 @@
     margin-top: 0; margin-bottom: 0 }
   fieldset { padding-top: 0.35em; padding-right: 0.75em;
              padding-bottom: 0.625em; padding-left: 0.75em }
+  dialog { padding-top: 1em; padding-right: 1em;
+           padding-bottom: 1em; padding-left: 1em;
+           border-width: 3px; border-style: solid }
   ")
 
 (def ua-rules
