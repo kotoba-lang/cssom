@@ -12356,3 +12356,162 @@
                        "</span></div>")))
         "and the containing-block clamp holds in the inline axis too: the
          inner box may not leave the 100px inline-block it sits in")))
+;; ---- whitespace collapsing moved out of the parser (2026-08-06) --------
+;;
+;; kotoba-lang/htmldom used to collapse runs of spaces and tabs at PARSE
+;; time, on the reasoning that space collapsing was HTML-structural. It is
+;; not: measured in Brave 151, the browser's own DOM keeps every character
+;; (`<div>   a   b   </div>` gives `SP SP SP a SP SP SP b SP SP SP`) and
+;; collapses at layout time, from `white-space`, which is CSS.
+;;
+;; That parser now hands this file text verbatim, which is the whole reason
+;; `white-space: pre` on an element that is not a `<pre>` can work at all.
+;; The price is that EVERY corpus case's text changed, so the safety
+;; property below is the one that had to be asserted before anything else:
+;; under a COLLAPSING `white-space`, this file must produce byte-identical
+;; draw-ops from the verbatim text and from the text the old parser would
+;; have handed it.
+
+(defn- ops-of
+  [html]
+  (let [doc (html/parse-into-document html)
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc) {:width 200})))
+
+(defn- old-parser-collapse
+  "The rule htmldom applied at parse time until 2026-08-06: every run of
+   ASCII whitespace EXCEPT the newline becomes one space. Applied to the
+   source rather than to text nodes, which is the same thing for the shapes
+   below because none of them puts a run of whitespace in an attribute."
+  [html]
+  (str/replace html #"[ \t\f\r]+" " "))
+
+(deftest a-collapsing-white-space-lays-out-verbatim-text-identically
+  ;; The equivalence that makes deferring the collapse safe, stated over
+  ;; the whitespace idioms the conformance corpus is actually made of:
+  ;; runs between words, a newline in the source, indentation between block
+  ;; children, the whitespace-only text node between two inlines (which is
+  ;; what makes `<a>one</a>\n  <a>two</a>` render as `one two`), leading and
+  ;; trailing runs, and a tab.
+  ;;
+  ;; It holds for the reason the composition does: this file maps any
+  ;; whitespace run to one space, and a run the old parser had already
+  ;; shortened is still a run, so both sides land on the same single space.
+  (doseq [html ["<p>Hello   world</p>"
+                "<p>Hello\n   world  \n  again</p>"
+                "<div>\n  <p>a</p>\n  <p>b</p>\n</div>"
+                "<p><a>one</a>\n  <a>two</a></p>"
+                "<p>   leading and trailing   </p>"
+                "<p>a\t\tb</p>"
+                "<p>alpha <b>beta</b>   gamma <i>delta</i></p>"
+                "<div style=\"white-space: nowrap\">alpha   beta</div>"
+                "<ul>\n  <li>one</li>\n  <li>two</li>\n</ul>"
+                "<table>\n <tr>\n  <td>a</td>\n </tr>\n</table>"]]
+    (is (= (ops-of (old-parser-collapse html)) (ops-of html))
+        (str "collapsing white-space must not see the difference: " (pr-str html))))
+  ;; CONTROL, and the reason the assertion above is not vacuous: under a
+  ;; PRESERVING `white-space` the two inputs are genuinely different text
+  ;; and must lay out differently. If the parser were still collapsing,
+  ;; this pair would be equal and there would be nothing to preserve.
+  (let [pre "<div style=\"white-space: pre\">a   b</div>"]
+    (is (not= (ops-of (old-parser-collapse pre)) (ops-of pre))
+        "a preserving white-space DOES see the difference -- that is the point")))
+
+(defn- ws-boxes
+  "Every `:node` box, at the conformance page's own font model: 14px
+   monospace, 20px lines, and the 7px-per-character advance the harness
+   measures in the oracle and supplies through `:measure-text`. Without
+   that last part this file falls back to its own `0.6 * font-size` = 8px
+   heuristic and no measured browser number is comparable."
+  [html tag]
+  (let [doc (html/parse-into-document html)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc)
+                             {:width 800
+                              :theme (assoc layout/default-theme
+                                            :padding 0 :gap 0 :line-height 20 :font-size 14
+                                            :measure-text (fn [t & _] (* 7.0 (count t))))})]
+    (->> ops
+         (filter #(and (= :node (:draw/op %)) (= tag (:tag %))))
+         (map (fn [o] [(long (:w o)) (long (:h o))]))
+         last)))
+
+(deftest break-spaces-measures-its-spaces-and-pre-wrap-hangs-them
+  ;; The one difference between the two preserving-and-wrapping values,
+  ;; and the content that can see it. Every number read out of a real
+  ;; headless Brave 151 on 2026-08-06 BEFORE any of this was written, in
+  ;; the harness's own 14px monospace / 20px line page -- 7px a character,
+  ;; eight of them to a 60px box.
+  ;;
+  ;; The pairs are the point. A round that measured only `break-spaces`
+  ;; would have accepted the bottom two rows as evidence, and they are the
+  ;; shape an earlier round correctly reported as NOT discriminating: a
+  ;; space run that merely ends the line it sits on hangs the same way
+  ;; under both.
+  (are [expect ws html] (= expect (ws-boxes (str "<div style=\"width:60px;white-space:" ws "\">"
+                                                 html "</div>")
+                                            :div))
+    ;; the spaces themselves overflow -> the two values part company
+    [60 40] "break-spaces" "aa          "
+    [60 20] "pre-wrap"     "aa          "
+    [60 60] "break-spaces" "aa                    bb"
+    [60 40] "pre-wrap"     "aa                    bb"
+    ;; CONTROLS: a run that fits the line it ends hangs under both
+    [60 40] "break-spaces" "aa      bb"
+    [60 40] "pre-wrap"     "aa      bb"
+    [60 40] "break-spaces" "aaaa      bbbb"
+    [60 40] "pre-wrap"     "aaaa      bbbb"))
+
+(deftest every-preserving-white-space-keeps-a-newline
+  ;; `break-spaces` used to fall through to the collapsing branch, where its
+  ;; newline was collapsed away like any other whitespace and the box came
+  ;; out one line tall. Brave 151, 2026-08-06: 200x40 for all three
+  ;; preserving values and 200x20 for `normal`, which is the control that
+  ;; says the shape is measuring the newline and not something else.
+  (are [expect ws] (= expect (ws-boxes (str "<div style=\"width:200px" ws "\">aa\nbb</div>") :div))
+    [200 40] ";white-space:break-spaces"
+    [200 40] ";white-space:pre-wrap"
+    [200 40] ";white-space:pre-line"
+    [200 20] ""))
+
+(deftest a-tab-survives-every-preserving-white-space-and-no-collapsing-one
+  ;; `a<tab>b` in a shrink-to-fit box. Brave 151, 2026-08-06: 63px under
+  ;; `pre`, `pre-wrap` and `break-spaces` -- nine columns, to the next
+  ;; initial `tab-size: 8` stop -- and 21px under `pre-line` and `normal`,
+  ;; which collapse the tab to one space before it is ever measured.
+  ;; `break-spaces` was missing from the expanding set and read 21.
+  ;;
+  ;; This whole test is only REACHABLE because htmldom stopped collapsing
+  ;; at parse time: before that the tab was a space in every one of these.
+  (are [expect ws] (= expect (ws-boxes (str "<span style=\"display:inline-block" ws "\">a\tb</span>")
+                                       :span))
+    [63 20] ";white-space:pre"
+    [63 20] ";white-space:pre-wrap"
+    [63 20] ";white-space:break-spaces"
+    [21 20] ";white-space:pre-line"
+    [21 20] ""))
+
+(deftest a-preserved-leading-space-run-is-in-the-measured-width
+  ;; `   indented` in a shrink-to-fit box. Brave 151, 2026-08-06: 77px (11
+  ;; characters) under the three values that preserve spaces.
+  ;;
+  ;; SCOPE CUT, and it is the reason `pre-line` and `normal` are not in the
+  ;; `are` below. The browser reports **56px** for both -- eight characters,
+  ;; i.e. the leading space is not merely collapsed to one, it is REMOVED,
+  ;; which is CSS's own removal of collapsible whitespace at the start of a
+  ;; line. This file collapses but does not remove, and answers 63 (nine
+  ;; characters) for both.
+  ;;
+  ;; That divergence is PRE-EXISTING and is not what this round changed: at
+  ;; the base commit, with the old collapsing parser, `"   indented"`
+  ;; arrived as `" indented"` and measured the same 63. No corpus case
+  ;; samples it today. Closing it means removing line-leading collapsible
+  ;; whitespace in layout-text the way inline-tokens already does for the
+  ;; inline path, and the numbers a future round needs are here: 63 -> 56 on
+  ;; this shape, for `normal` and `pre-line` alike.
+  (are [expect ws] (= expect (ws-boxes (str "<span style=\"display:inline-block;white-space:" ws
+                                            "\">   indented</span>")
+                                       :span))
+    [77 20] "pre"
+    [77 20] "pre-wrap"
+    [77 20] "break-spaces"))
