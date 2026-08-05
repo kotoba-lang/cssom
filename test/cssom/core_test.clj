@@ -204,6 +204,57 @@
     (is (= {:outline-width 2 :outline-color "#ff0000"}
            (:rule/declarations (first rules))))))
 
+;; ---- `inset` shorthand expansion ----
+
+(deftest inset-shorthand-expands-into-the-four-bare-side-longhands
+  ;; `inset` is the shorthand for top/right/bottom/left, and its longhands
+  ;; are the BARE side names -- not `inset-top`, which is why it does not
+  ;; go through expand-box-side-shorthand. Before this it was stored
+  ;; verbatim under an :inset key nothing reads, so an absolutely
+  ;; positioned box declaring it fell back to its static position.
+  ;; Measured in Brave 151: a `position:absolute; inset:10px 20px` box in
+  ;; a 300x60 relative parent is at x=20 y=10 w=260 h=40, and this engine
+  ;; reported 0,0,7x20 (`:position/inset-shorthand` in the conformance
+  ;; corpus).
+  (let [rules (css/parse-rules "#f { inset: 10px 20px }")]
+    (is (= {:top 10 :right 20 :bottom 10 :left 20}
+           (:rule/declarations (first rules))))
+    (is (not (contains? (:rule/declarations (first rules)) :inset))
+        "no bare :inset key should remain -- it's fully expanded")))
+
+(deftest inset-shorthand-uses-the-same-one-to-four-value-rule
+  (is (= {:top 5 :right 5 :bottom 5 :left 5}
+         (:rule/declarations (first (css/parse-rules "#f { inset: 5px }")))))
+  (is (= {:top 1 :right 2 :bottom 3 :left 2}
+         (:rule/declarations (first (css/parse-rules "#f { inset: 1px 2px 3px }")))))
+  (is (= {:top 1 :right 2 :bottom 3 :left 4}
+         (:rule/declarations (first (css/parse-rules "#f { inset: 1px 2px 3px 4px }"))))))
+
+(deftest inset-shorthand-admits-auto-which-is-its-initial-value
+  ;; `inset: 0 auto` is a real authored form and `auto` is the property's
+  ;; own initial value, so it is expanded and travels as a raw string --
+  ;; exactly as a directly-declared `top: auto` already does.
+  (is (= {:top 0 :right "auto" :bottom 0 :left "auto"}
+         (:rule/declarations (first (css/parse-rules "#f { inset: 0 auto }"))))))
+
+(deftest inset-shorthand-declines-a-value-it-cannot-resolve
+  ;; Degrade, do not guess: a percentage is not resolvable at declaration
+  ;; time here (the same reason margin/padding decline one), so the
+  ;; shorthand is left for the generic path to store raw rather than
+  ;; expanded into four wrong pixel values.
+  (let [decls (:rule/declarations (first (css/parse-rules "#f { inset: 10% }")))]
+    (is (not (contains? decls :top)))
+    (is (contains? decls :inset))))
+
+(deftest inset-longhands-declared-separately-are-unaffected-by-shorthand-expansion
+  (is (= {:top 4 :left 8}
+         (:rule/declarations (first (css/parse-rules "#f { top: 4px; left: 8px }"))))))
+
+(deftest inset-shorthand-importance-applies-to-every-expanded-longhand
+  (let [rules (css/parse-rules "#f { inset: 3px !important }")]
+    (doseq [k [:top :right :bottom :left]]
+      (is (= true (get-in (first rules) [:rule/declaration-meta k :important?]))))))
+
 (deftest font-shorthand-expands-into-its-five-longhands
   ;; The confirmed repro: before this, font was never expanded at all --
   ;; stored verbatim as a single unrecognized :font key -- so a real,

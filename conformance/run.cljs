@@ -282,8 +282,17 @@
           // Only the case's own subtree is comparable; a point that lands
           // on the page chrome around it says nothing about the engine.
           if (hit !== root && !root.contains(hit)) { skipped++; continue; }
+          // The tag alone cannot tell two overlapping boxes apart, and
+          // stacking is mostly a question about two <div>s. The author's
+          // own `class` is the one identity BOTH sides can read off the
+          // same markup -- the engine puts `:class (attr node :class)` on
+          // every `:node` op already -- so it travels with the tag and is
+          // compared beside it. `className` is an SVGAnimatedString on an
+          // <svg>, hence the typeof guard.
           hits.push({ x: vr.width * fx, y: vr.height * fy,
-                      tag: hit === root ? null : hit.tagName.toLowerCase() });
+                      tag: hit === root ? null : hit.tagName.toLowerCase(),
+                      cls: (hit === root || typeof hit.className !== 'string' ||
+                            !hit.className) ? null : hit.className });
         }
       }
       out[root.id] = { words: words, boxes: boxes, styles: styles,
@@ -1424,7 +1433,24 @@
    point in one of ITS rects rather than in the border box, `[]` meaning
    `not a hit-test candidate at all` -- see cssom.layout's ns docstring
    for the three measured cases where the two differ. Deriving that here
-   instead would, again, test my model of the engine."
+   instead would, again, test my model of the engine.
+
+   `:pointer-events` and `:visibility` are read for the SAME reason, and
+   not reading them was this axis's own defect for its whole life. The
+   engine puts both keys on every `:node` op precisely so that a
+   hit-tester can skip the op (`style-passthrough`'s docstring says so),
+   and BOTH of the engine's real hit-testers already do:
+   `browser.session/node-at` and dom-gpu's `retained` host each drop an op
+   whose `:pointer-events` is `none` or whose `:visibility` is
+   `hidden`/`collapse` before taking the topmost. This harness did not, so
+   it was asking a question no consumer of the engine asks, and it charged
+   the engine for two behaviours the engine has right: measured on
+   `:stacking/pointer-events-none-falls-through` and
+   `:stacking/visibility-hidden-is-not-hit`, 40 sample points where Brave
+   answers the box UNDERNEATH the transparent one and the engine's own
+   hosts would too. Reading the two keys is not re-deriving stacking here
+   -- it is reading one more field of the answer the engine already
+   emitted, exactly like `:hit`."
   [ops x y]
   (let [;; Both sides wrap the case, and neither wrapper is an answer: the
         ;; browser page puts the markup in a `.kotoba-case` div and the
@@ -1455,6 +1481,10 @@
          ;; `engine-lines`' replaced-box test earlier the same day; this is
          ;; the paint-order axis's copy of it.
          (filter #(and (= :node (:draw/op %))
+                       ;; the same two skips both real hit-testers apply,
+                       ;; see this fn's docstring
+                       (not= "none" (:pointer-events %))
+                       (not (contains? #{"hidden" "collapse"} (:visibility %)))
                        (if-let [hit (:hit %)]
                          (some (fn [r] (and (<= (:x r) x) (< x (+ (:x r) (:w r)))
                                             (<= (:y r) y) (< y (+ (:y r) (:h r)))))
@@ -1464,18 +1494,25 @@
                        (not= :document (:tag %))
                        (not (contains? wrapper-ids (:id %)))))
          last
-         :tag)))
+         (#(when % [(:tag %) (let [c (:class %)] (when (seq c) c))])))))
+
+(defn- hit-label
+  "How a hit prints and compares: the tag, plus the author's `class` when
+   there is one. `[:div \"a\"]` reads as `div.a`."
+  [[tag cls]]
+  (if cls (str (name tag) "." cls) (name tag)))
 
 (defn- paint-order-agreement
   [oracle-hits ops]
-  (reduce (fn [acc {:keys [x y tag]}]
+  (reduce (fn [acc {:keys [x y tag cls]}]
             (let [mine (engine-topmost-at ops x y)
-                  want (some-> tag keyword)]
+                  want (when tag [(keyword tag) cls])]
               (if (= want mine)
                 (update acc :agree inc)
                 (-> acc
                     (update :diffs conj {:x (long x) :y (long y)
-                                         :oracle (or want :none) :engine (or mine :none)})))))
+                                         :oracle (if want (hit-label want) "none")
+                                         :engine (if mine (hit-label mine) "none")})))))
           {:agree 0 :total (count oracle-hits) :diffs []}
           oracle-hits))
 
