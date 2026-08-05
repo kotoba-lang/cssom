@@ -19,8 +19,12 @@
    against the container's own `grid-template-areas` quoted-string template,
    and auto-placement for everything else — see layout-grid for the exact
    subset and its documented limitations; position:absolute (left/top/
-   right/bottom anchored against the containing block) with z-index
-   stacking; position:relative (top/left/right/bottom as a direct pixel
+   right/bottom anchored against the containing block); CSS 2.1 Appendix
+   E's STACKING order -- what creates a stacking context, which level a
+   box paints at inside its nearest one, and whether a context confines
+   its positioned descendants or lets them escape (see the
+   `---- stacking contexts and paint order ----` section, which carries
+   the measured browser table for all three); position:relative (top/left/right/bottom as a direct pixel
    shift from the box's own normal position, affecting painting only,
    never layout -- see relative-offset/layout-children-block; currently
    scoped to plain block-flow children only, not yet a flex/grid item,
@@ -2117,6 +2121,51 @@
    :right (style node :right)
    :bottom (style node :bottom)
    :z-index (parse-int (style node :z-index) 0)
+   ;; The DECLARED `z-index`, with `auto` and "unauthored" kept apart from
+   ;; the integer 0 -- which `:z-index` above cannot do, because its own
+   ;; fallback IS 0. The distinction is the whole of CSS's stacking
+   ;; confinement rule and it is measurable in one declaration: a
+   ;; `position: relative` box with `z-index: auto` is NOT a stacking
+   ;; context and a `z-index: 5` descendant of it competes in the ROOT
+   ;; context, while the same box with `z-index: 0` IS one and confines
+   ;; the 5. Measured in Brave 151 on exactly that pair -- `section` for
+   ;; the first, `article` for the second, at all 20 interior sample
+   ;; points. See stacking-context?/stack-level.
+   :z-index/declared (when-not (= "auto" (some-> (style node :z-index) str str/trim str/lower-case))
+                       (parse-int (style node :z-index) nil))
+   ;; ---- the properties that make an element a STACKING CONTEXT ----
+   ;;
+   ;; All read RAW, because every one of them is asked the same
+   ;; keyword-shaped question -- "is this at a non-initial value" -- and
+   ;; none of them is a length this file otherwise resolves. See
+   ;; stacking-context? for the measured table.
+   :filter (style node :filter)
+   :backdrop-filter (style node :backdrop-filter)
+   :clip-path (style node :clip-path)
+   :perspective (style node :perspective)
+   :transform-style (style node :transform-style)
+   :isolation (style node :isolation)
+   :mix-blend-mode (style node :mix-blend-mode)
+   :will-change (style node :will-change)
+   :contain (style node :contain)
+   :content-visibility (style node :content-visibility)
+   :view-transition-name (style node :view-transition-name)
+   ;; The individual transform properties, which are stacking-context
+   ;; triggers in their own right: measured, `rotate: 0deg` lifts a box
+   ;; over a later overlapping sibling exactly as `transform` does.
+   ;; Nothing in this file APPLIES them yet -- they are read here for the
+   ;; stacking question alone, which is why they do not appear beside
+   ;; `:transform` above.
+   :rotate (style node :rotate)
+   :scale (style node :scale)
+   :translate (style node :translate)
+   ;; Set by laid-out-children on the children of a flex or grid
+   ;; container. `z-index` applies to a flex/grid ITEM without `position`
+   ;; (CSS Flexbox SS5.4 / Grid SS6), and the item itself cannot know: only
+   ;; its parent's `display` decides. Measured, `z-index: 2` on a flex
+   ;; item lifts it over a later item that overlaps it, where the same
+   ;; declaration on an ordinary static block does nothing at all.
+   :stack-item? (boolean (attr node :kotoba/stack-item))
    :width (or (style node :width) (presentational-size node :width))
    :height (or (style node :height) (presentational-size node :height))
    :min-width (style node :min-width)
@@ -2517,6 +2566,325 @@
    :justify-content (:justify-content st)
    :align-items (:align-items st)
    :flex-wrap (:flex-wrap st)})
+
+;; ---- stacking contexts and paint order (CSS 2.1 Appendix E) -------------
+;;
+;; Everything above this point paints in DOCUMENT order: a box's ops are
+;; emitted where the box was written, so a later sibling covers an earlier
+;; one. That is Appendix E's step 3 and it is right for the majority of a
+;; page, but it is only one of seven layers, and the ones it leaves out are
+;; the ones authors reach for on purpose -- `position`, `z-index`,
+;; `opacity`, `transform`. Before this section a `position: relative` box
+;; did not rise above a later overlapping sibling at all, and a `z-index`
+;; was consulted only among a box's own out-of-flow children.
+;;
+;; The whole layer is implemented as ONE mechanism, and it is worth naming
+;; because it is not the obvious one. A box that paints in the positioned
+;; band does not paint in its parent's op run at all; it paints in its
+;; nearest ancestor STACKING CONTEXT's, which may be many levels up. So
+;; the ops cannot simply be reordered where they are produced -- they have
+;; to travel. They travel as a marked SPAN in the op vector itself
+;; (`:stack` push/pop, exactly like the `:clip` pair already there): the
+;; box wraps its own whole op run, every ancestor concatenates it
+;; untouched (translate-ops and transform-ops both leave an op with no
+;; `:x`/`:y` alone, which is why the marker carries neither), and the
+;; first ancestor that IS a stacking context extracts every span it can
+;; see, sorts them by level, and splices them back in the two places
+;; Appendix E puts them. absorb-stacking-contexts is that step.
+;;
+;; Riding in the op vector rather than in a `:paint/hoist` return key is
+;; what keeps this from touching layout-flex, layout-grid, layout-table,
+;; layout-multicol and layout-inline-run at all: every one of them already
+;; concatenates its children's `:draw`, so every one of them already
+;; carries the spans correctly without knowing they exist.
+;;
+;; Two consequences worth stating out loud:
+;;
+;; - A span must never leave `draw-ops`. Both real hosts (`dom-gpu`'s
+;;   webgl/webgpu painters, `browser.session`) dispatch on `:draw/op` with
+;;   a `case` and no default, so an unabsorbed marker is a thrown
+;;   exception, not a mis-paint. `draw-ops` therefore absorbs at the root
+;;   unconditionally -- the root element is a stacking context in CSS
+;;   anyway -- and absorb-stacking-contexts removes every marker it sees
+;;   by construction.
+;; - The nesting is real. A `position: relative; z-index: auto` box paints
+;;   in the positioned band but is NOT a stacking context, so its own
+;;   positioned descendants belong to the same ancestor context it does.
+;;   That is why the extraction FLATTENS: a span found inside another span
+;;   becomes its sibling rather than staying nested inside it.
+
+(def ^:private will-change-stacking-properties
+  "The `will-change` values that make an element a stacking context.
+
+   CSS Will Change SS3: naming a property whose non-initial value would
+   create one creates one up front. Blink's answer to `would` is narrower
+   than a spec reading suggests, and this set is the measured one (Brave
+   151, 2026-08-05, one `will-change` per probe on a box that a later
+   overlapping sibling would otherwise cover):
+
+     transform  opacity  filter  perspective  position  contain   -> lifts
+     z-index  top  color                                          -> does not
+
+   `z-index` is the interesting negative: its non-initial value plainly
+   creates a stacking context on a positioned box, and Blink still does
+   not create one for `will-change: z-index`. Recorded as measured rather
+   than argued with."
+  #{"transform" "opacity" "filter" "backdrop-filter" "perspective"
+    "clip-path" "transform-style" "isolation" "mix-blend-mode" "contain"
+    "content-visibility" "position" "view-transition-name"
+    "rotate" "scale" "translate" "mask" "mask-image"})
+
+(def ^:private containment-stacking-values
+  "The `contain` keywords that make an element a stacking context, i.e.
+   the ones that include LAYOUT or PAINT containment. Measured in Brave:
+   `paint`, `layout`, `strict` and `content` all lift a box over a later
+   overlapping sibling; `size` and `style` do not."
+  #{"paint" "layout" "strict" "content"})
+
+(defn- non-initial?
+  "True when a raw cascade value is present and is not the property's own
+   initial keyword -- the shape every stacking-context trigger below is
+   asked in. Numbers count as present (the cascade resolves
+   `perspective: 100px` to the number 100 before this file sees it)."
+  [v initial]
+  (cond
+    (number? v) true
+    (nil? v) false
+    :else (let [s (str/trim (str/lower-case (str v)))]
+            (and (seq s) (not= s initial)))))
+
+(defn- positioned?
+  "`position` other than `static`. Not the same question as `absolute?`
+   (which asks whether the box leaves normal flow): a `position: relative`
+   box is in flow AND positioned, and that combination is the single most
+   common reason a box paints above a later sibling."
+  [st]
+  (contains? #{"relative" "absolute" "fixed" "sticky"} (:position st)))
+
+(defn- stacking-context?
+  "Whether this box establishes a stacking context -- i.e. whether its
+   positioned descendants are CONFINED to it or escape past it to a
+   higher one.
+
+   Measured in Brave 151 on 2026-08-05, twice over: once as `does this
+   trigger lift a box above a LATER overlapping in-flow sibling` (25
+   interior points per shape) and once as `does this trigger on a wrapper
+   confine a z-index: 5 descendant against a z-index: 2 sibling of the
+   wrapper` (20 points per shape). The two questions have different
+   answers for exactly one input -- a positioned box with `z-index: auto`
+   lifts but does not confine -- and that one difference is why they are
+   two functions here rather than one.
+
+   Creates one (both probes agree unless noted):
+
+     position: fixed | sticky                    (whatever the z-index)
+     position: relative | absolute + an INTEGER z-index (auto does not)
+     a flex/grid ITEM with an integer z-index
+     opacity < 1                                 (0.999999 does; 1 does not)
+     transform / rotate / scale / translate != none
+     filter != none                              (even `opacity(1)`)
+     backdrop-filter != none
+     clip-path != none
+     perspective != none
+     transform-style: preserve-3d
+     isolation: isolate
+     mix-blend-mode != normal
+     contain: paint | layout | strict | content
+     content-visibility: auto | hidden
+     view-transition-name
+     will-change: <see will-change-stacking-properties>
+
+   Does NOT create one, each of which was probed because a spec reading
+   suggests it might:
+
+     overflow: hidden            -- clips, does not stack
+     container-type: inline-size | size
+     contain: size | style
+     will-change: z-index | top | color
+     z-index on a `position: static` box
+
+   `container-type` is the one that departs from the specs as written:
+   css-contain gives a size container `layout` containment, and `contain:
+   layout` DOES create a stacking context here, yet Brave lifts nothing
+   for `container-type: inline-size` and confines nothing either (measured
+   on both probes). Followed the browser."
+  [st]
+  (boolean
+   (or (contains? #{"fixed" "sticky"} (:position st))
+       (and (or (positioned? st) (:stack-item? st))
+            (some? (:z-index/declared st)))
+       (< (:opacity st) 1.0)
+       (non-initial? (:transform st) "none")
+       (non-initial? (:rotate st) "none")
+       (non-initial? (:scale st) "none")
+       (non-initial? (:translate st) "none")
+       (non-initial? (:filter st) "none")
+       (non-initial? (:backdrop-filter st) "none")
+       (non-initial? (:clip-path st) "none")
+       (non-initial? (:perspective st) "none")
+       (non-initial? (:view-transition-name st) "none")
+       (= "preserve-3d" (some-> (:transform-style st) str str/lower-case str/trim))
+       (= "isolate" (some-> (:isolation st) str str/lower-case str/trim))
+       (non-initial? (:mix-blend-mode st) "normal")
+       (contains? #{"auto" "hidden"}
+                  (some-> (:content-visibility st) str str/lower-case str/trim))
+       (some containment-stacking-values
+             (some-> (:contain st) str str/lower-case (str/split #"\s+") set))
+       (some will-change-stacking-properties
+             (some-> (:will-change st) str str/lower-case (str/split #"\s*,\s*")
+                     (->> (map str/trim)) set)))))
+
+(defn- stack-level
+  "The level this box paints at inside its nearest ancestor stacking
+   context, or `nil` when it paints in normal flow (Appendix E steps 3-5)
+   and therefore stays exactly where document order put it.
+
+   A non-nil level means step 6 or 7 -- above ALL non-positioned in-flow
+   content of that context, which is what makes `position: relative`
+   alone lift a box over a later sibling. A NEGATIVE level means step 2:
+   above the context's own background and below everything else in it.
+
+   `auto` and `0` produce the same level on purpose. Appendix E paints
+   `z-index: 0` stacking contexts and `z-index: auto` positioned
+   descendants in the SAME step, tie-broken by tree order, and that is
+   measured: with an earlier `z-index: 0` box and a later `auto` one the
+   later wins, and with the two swapped the later wins again. They differ
+   only in whether they CONFINE (see stacking-context?), never in where
+   they paint."
+  [st]
+  (cond
+    (positioned? st) (or (:z-index/declared st) 0)
+    (and (:stack-item? st) (some? (:z-index/declared st))) (:z-index/declared st)
+    (stacking-context? st) 0
+    :else nil))
+
+(defn- with-stack-level
+  "Wraps a box's whole op run in the `:stack` span that carries it up to
+   its nearest ancestor stacking context. Deliberately carries no `:x`/
+   `:y`: translate-ops and transform-ops both key off those, so a marker
+   with neither survives every coordinate rewrite between here and the
+   context that absorbs it."
+  [level ops]
+  (-> [{:draw/op :stack :stack/op :push :stack/level level}]
+      (into ops)
+      (conj {:draw/op :stack :stack/op :pop})))
+
+(defn- split-stack-spans
+  "Separates `ops` into the ops that stay put and the hoisted groups.
+
+   FLATTENS: a span found inside another span is returned as its SIBLING,
+   not left nested inside it. That is not a convenience -- it is the rule.
+   A `position: relative; z-index: auto` box paints in the positioned
+   band without being a stacking context, so its own positioned
+   descendants belong to whatever context IT belongs to, and the measured
+   pair says so: with two such wrappers nested, a `z-index: 5` box three
+   levels down still beats a `z-index: 2` sibling of the outermost
+   wrapper.
+
+   `:seq` is the push index, i.e. document order, and it is what breaks
+   ties between two groups at the same level."
+  [ops]
+  (loop [ops (seq ops) base [] open [] groups [] n 0]
+    (if-let [op (first ops)]
+      (if (= :stack (:draw/op op))
+        (if (= :push (:stack/op op))
+          (recur (rest ops) base
+                 (conj open {:level (:stack/level op) :seq n :draw []})
+                 groups (inc n))
+          (let [done (peek open)
+                open (pop open)]
+            (recur (rest ops) base open (conj groups done) n)))
+        (if (seq open)
+          (recur (rest ops) base (update-in open [(dec (count open)) :draw] conj op) groups n)
+          (recur (rest ops) (conj base op) open groups n)))
+      ;; An unbalanced push cannot happen (with-stack-level is the only
+      ;; writer and always pairs), but closing them here rather than
+      ;; dropping their ops means a future bug loses paint order, not
+      ;; content.
+      {:base base :groups (into groups (reverse open))})))
+
+(defn- absorb-stacking-contexts
+  "Appendix E, as one splice: every `:stack` span this element can see is
+   pulled out of its op run, sorted by level (ties by document order), and
+   put back in the two places the algorithm puts them --
+
+     step 1  this element's own background, borders and `:node` op
+     step 2  child contexts with a NEGATIVE level
+     steps 3-5  its in-flow content, exactly where it already was
+     steps 6-7  child contexts with level >= 0
+
+   The `:node` op is the splice point for step 1/2 because it is this
+   engine's proxy for the element's own box: it is what both real
+   hit-testers and the conformance harness read, so `after the node op`
+   is what `above this element's own background` means here. Measured on
+   the pair that discriminates it: a `z-index: -1` child of a `position:
+   relative; z-index: 0` parent is answered as the CHILD in Brave (it is
+   above the parent's own blue background), and the same child of a
+   parent without the `z-index: 0` is answered as the PARENT (it sank
+   past the parent entirely into the root context, where the parent's
+   background is ordinary step-3 content painted over it). One
+   declaration apart, opposite answers, and this splice point is the only
+   thing that produces both.
+
+   Removes every marker it sees, which is what lets `draw-ops` guarantee
+   none reaches a host."
+  [ops own-id]
+  (if-not (some #(= :stack (:draw/op %)) ops)
+    (vec ops)
+    (let [{:keys [base groups]} (split-stack-spans ops)
+          sorted (sort-by (juxt :level :seq) groups)
+          {below true above false} (group-by #(neg? (:level %)) sorted)
+          own (first (keep-indexed (fn [i op]
+                                     (when (and (= :node (:draw/op op)) (= own-id (:id op))) i))
+                                   base))
+          ;; No own `:node` op means no step-1 boundary to sit above, so
+          ;; the negative band goes at the very front -- the honest answer
+          ;; for the one caller that has none (draw-ops on a tree whose
+          ;; root emits no node op).
+          split (if own (inc own) 0)]
+      (vec (concat (subvec base 0 split)
+                   (mapcat :draw below)
+                   (subvec base split)
+                   (mapcat :draw above))))))
+
+(defn- skip-painted-contents
+  "`content-visibility: hidden`: the element paints its OWN background and
+   border and its contents paint nothing and answer nothing.
+
+   Measured in Brave 151 on `<section style=\"content-visibility: hidden;
+   background: #eee\"><article style=\"background: #f00\">inner</article>
+   </section>`: all 25 interior sample points answer the `<section>`, and
+   the `<article>` still reports a real 800x60 box that a `Range` reads
+   `inner` out of. So this is not `display: none` and it is not a box-tree
+   change at all -- layout runs, the boxes exist, and only the paint and
+   the hit-testing of the SUBTREE are skipped.
+
+   Both halves are expressed on the ops the subtree already produced, in
+   the two channels this engine already has for them: `:opacity 0` (the
+   same multiplicative accumulator `visibility: hidden` uses) so a real
+   painter draws nothing, and `:hit []` (`not a hit-test candidate at
+   all`) so both real hit-testers and the conformance harness skip the
+   op. The element's own ops -- everything up to and including its own
+   `:node` op -- are untouched, which is what keeps its own background
+   painted and its own box clickable.
+
+   Not modelled, and it is the reason the property exists: real
+   `content-visibility: hidden` SKIPS the subtree's layout too (its size
+   comes from `contain-intrinsic-size`, not from its contents). This
+   engine lays the contents out and then declines to paint them, which
+   gives the right picture and the wrong reason -- and, for this corpus,
+   the right numbers on all four axes, because Brave reports the real
+   800x60 inner box here anyway."
+  [ops own-id]
+  (let [own (first (keep-indexed (fn [i op]
+                                   (when (and (= :node (:draw/op op)) (= own-id (:id op))) i))
+                                 ops))
+        after (if own (inc own) 0)]
+    (into (vec (take after ops))
+          (map (fn [op]
+                 (cond-> (assoc op :opacity 0)
+                   (= :node (:draw/op op)) (assoc :hit []))))
+          (drop after ops))))
 
 (defn- explicit-length
   "Defensively coerces an OPTIONAL, already-cascade-resolved style value to a
@@ -6023,13 +6391,37 @@
    LAID OUT with the `\u2022 ` marker with-implicit-list-markers adds
    (`\u2022 one` -> 35px), so every item was 14px wider than the box it
    had just been given and wrapped to two lines -- a cell reporting the
-   browser's exact width and twice its height."
+   browser's exact width and twice its height.
+
+   It is also where a flex/grid ITEM is marked as one. `z-index` applies
+   to an item without `position` (CSS Flexbox SS5.4, Grid SS6) and an
+   element cannot see that about itself -- only its parent's `display`
+   decides. Marked HERE rather than in layout-flex/layout-grid because
+   this is the one place that has both the parent and the final child
+   list, `display: contents` promotion included: a `display: contents`
+   child of a flex container promotes its own children to flex items, and
+   splice-display-contents has already done that by the time this marks
+   them. Measured, `z-index: 2` on a flex item lifts it over a later item
+   that overlaps it, where the identical declaration on an ordinary
+   static block does nothing at all (`:stacking/z-index-on-a-static-box-
+   is-ignored`, which is that control)."
   [theme node]
-  (splice-display-contents
-   theme
-   (with-nested-list-margins
-    node
-    (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node)))))))
+  (let [kids (splice-display-contents
+              theme
+              (with-nested-list-margins
+               node
+               (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))))
+        ;; The cascade's own value, read directly rather than through
+        ;; node-style: this function is on the intrinsic-sizing path as
+        ;; well as the layout one and runs many times per element, and no
+        ;; UA rule in `cssom.core`'s sheet produces `flex` or `grid` for
+        ;; any tag -- so the author declaration (a stylesheet rule or an
+        ;; inline style, both of which apply-cascade folds onto
+        ;; `:style/display`) is the whole answer here.
+        display (get-in node [:attrs :style/display])]
+    (if (contains? #{"flex" "inline-flex" "grid" "inline-grid"} display)
+      (mapv #(if (map? %) (assoc-in % [:attrs :kotoba/stack-item] true) %) kids)
+      kids)))
 
 (declare inline-fragments inline-tokens inline-flow-candidate? inline-flow-text?
          inline-inherited
@@ -11465,23 +11857,22 @@
    documented cut this file already makes elsewhere, e.g. `hsl()`'s
    hue-unit scoping).
 
-   Returns `{:below :above}` rather than one flat, sorted vector -- real
-   bug this guards: a negative `z-index` on a positioned element must
-   paint BEHIND its stacking context's own in-flow content (this is the
-   entire, well-known point of a negative z-index -- pinning an element
-   behind its container's other children), but `layout-block` used to
-   splice this function's ENTIRE output after in-flow content
-   unconditionally, regardless of z sign. Confirmed via direct REPL
-   reproduction before touching source: a `z-index: -1` absolutely
-   positioned red box painted LAST (topmost) over an in-flow green
-   sibling instead of behind it. `layout-block` now interleaves `:below`
-   right after its own background/border/outline (before in-flow
-   content) and keeps `:above` where the old, single splice point sat --
-   still simplistic versus real CSS's full stacking-context algorithm
-   (no separate treatment for 0-vs-auto vs explicit-positive z-index, no
-   nested stacking contexts of their own), but correctly resolves the
-   one case that was silently backwards. Ties within each group still
-   sort by `:z` ascending, same as before."
+   Returns ONE vector, in document order, and sorts nothing. It used to
+   return `{:below :above}` and sort each band by `:z` -- its own
+   half-sized stacking model, written when there was no other. There is
+   now: every one of these children is positioned, so every one of them
+   came back from layout-node already wrapped in its own `:stack` span
+   carrying its level, and the nearest ancestor stacking context sorts
+   them (see absorb-stacking-contexts). Sorting here as well would be
+   wrong, not merely redundant: the containing block is not the stacking
+   context, so `z-index: 5` and `z-index: 2` boxes anchored to DIFFERENT
+   containing blocks have to meet in a common ancestor to be compared at
+   all, and a local sort by `:z` cannot see that. Measured on the pair
+   that discriminates it -- a `z-index: 5` box inside a `position:
+   relative; z-index: auto` wrapper beats a `z-index: 2` sibling of the
+   wrapper in Brave, and loses to it as soon as the wrapper declares
+   `z-index: 0`. Document order is preserved because it is what breaks
+   ties at equal levels."
   ;; `children` are the `{:node :x :y}` entries layout-children-block's own
   ;; out-of-flow branch produced: `:x`/`:y` are that box's STATIC POSITION,
   ;; the place the normal flow would have put it, and they are deliberately
@@ -11603,12 +11994,9 @@
                               dy (cond top (+ pad-y top)
                                        bottom (+ pad-y (- pad-h h bottom))
                                        :else content-y)]
-                          {:z (or (:z-index cst) 0) :draw (translate-ops dx dy (:draw m))}))
-                      children)
-        sorted (sort-by :z placed)
-        {below true above false} (group-by #(neg? (:z %)) sorted)]
-    {:below (vec (mapcat :draw below))
-     :above (vec (mapcat :draw above))}))
+                          (translate-ops dx dy (:draw m))))
+                      children)]
+    (vec (mapcat identity placed))))
 
 (defn- option-label
   [node value]
@@ -12591,7 +12979,7 @@
         out-of-flow (if (and (zero? scroll-x) (zero? scroll-y))
                       out-of-flow
                       (mapv #(-> % (update :x + scroll-x) (update :y + scroll-y)) out-of-flow))
-        {above-draws :above below-draws :below} (layout-absolute-children theme pad-x pad-y pad-w pad-h opacity inherited out-of-flow)
+        oof-draws (layout-absolute-children theme pad-x pad-y pad-w pad-h opacity inherited out-of-flow)
         box-shadow-draws (or (box-shadow-ops st x y node-w node-h opacity) [])
         border-draws (or (border-ops st x y node-w node-h opacity) [])
         outline-draws (or (outline-ops st x y node-w node-h opacity) [])
@@ -12699,20 +13087,23 @@
      ;; goes right after border-draws -- it paints OUTSIDE the box, on
      ;; top of everything else this element paints.
      ;;
-     ;; below-draws (negative z-index positioned children) is spliced in
-     ;; HERE, right after this element's own background/border/outline
-     ;; but before its in-flow content -- see layout-absolute-children's
-     ;; own docstring for the real bug this fixes (a negative z-index
-     ;; child previously always painted on TOP of in-flow content,
-     ;; backwards from real CSS stacking order). above-draws (z-index >=
-     ;; 0) keeps the original splice point, after in-flow content.
+     ;; oof-draws (this box's absolutely/fixed positioned children) goes
+     ;; at the END, unsorted and undivided. It used to arrive pre-split
+     ;; into a negative-z band spliced before the in-flow content and a
+     ;; non-negative one spliced after, which was this file's whole
+     ;; stacking model. It is not any more: each of those children is now
+     ;; wrapped in its own `:stack` span and travels to the nearest
+     ;; ancestor STACKING CONTEXT, which is generally not this box -- see
+     ;; absorb-stacking-contexts, which is what re-splits them (and which
+     ;; puts the negative band after this element's own `:node` op rather
+     ;; than before it, the one-declaration-apart pair measured there).
      ;; `legend-draw` goes with the in-flow content, not with the border it
      ;; sits in: a legend paints ON TOP of the fieldset's border (that is
      ;; the whole visual point of the notch), and it is NOT clipped by an
      ;; `overflow` on the fieldset because it is outside the content box --
      ;; hence outside clip-push/clip-pop.
-     :draw (vec (concat box-shadow-draws rect border-draws outline-draws below-draws semantic
-                        clip-push draw clip-pop legend-draw above-draws))})))
+     :draw (vec (concat box-shadow-draws rect border-draws outline-draws semantic
+                        clip-push draw clip-pop legend-draw oof-draws))})))
 
 ;; ---- CSS transforms ------------------------------------------------------
 ;;
@@ -13266,8 +13657,8 @@
                                 :caption-side (or (:caption-side st)
                                                   (:caption-side inherited)))
                tag (:tag node)
-               children (laid-out-children theme node)]
-           ;; ---- the one place a `transform` is applied ----
+               children (laid-out-children theme node)
+               ;; ---- the one place a `transform` is applied ----
            ;; Wrapping the WHOLE dispatch, rather than each branch, is what
            ;; makes `transform` work on a block, a flex/grid container, a
            ;; table, a form control and an atomic inline alike -- every one
@@ -13275,9 +13666,32 @@
            ;; apply-element-transform rewrites only the `:draw` half. See
            ;; its docstring (and the section above it) for why `:box` is
            ;; deliberately left alone.
-           (apply-element-transform
-            st tag
-            (cond
+           ;;
+           ;; ---- and the one place STACKING is applied ----
+           ;; The same argument, for the same reason: whatever the box
+           ;; turned out to be, its ops are one `:draw` vector by the time
+           ;; they reach here, so both halves of the stacking rule can be
+           ;; stated once for every kind of box.
+           ;;
+           ;;   ABSORB -- if this element is a stacking context, every
+           ;;   `:stack` span its descendants sent up stops here and is
+           ;;   spliced into Appendix E's order.
+           ;;   WRAP   -- if this element paints in the positioned band
+           ;;   (step 2, 6 or 7), its own whole op run becomes a span and
+           ;;   travels to whatever context absorbs it.
+           ;;
+           ;; Absorb before wrap: a box can be both (a `position:
+           ;; relative; z-index: 5` box confines its descendants AND
+           ;; travels itself), and the descendants it confines belong
+           ;; inside the span it hands upward.
+           ;;
+           ;; After apply-element-transform, not before, so a transformed
+           ;; subtree's spans carry the transformed coordinates -- the
+           ;; markers themselves ride through transform-ops untouched
+               ;; because they carry no `:x`/`:y`.
+               laid (apply-element-transform
+                     st tag
+                     (cond
              ;; `display: contents` generates NO box -- see
              ;; splice-display-contents, which has already promoted this
              ;; element's children into its parent's flow and emptied it.
@@ -13397,9 +13811,24 @@
                                     (style-passthrough st))]
                             draws))})
 
-             :else
-             (layout-block theme x y avail-width opacity inherited st (assoc node :children children)
-                           intruding))))))
+                       :else
+                       (layout-block theme x y avail-width opacity inherited st (assoc node :children children)
+                                     intruding)))
+               ;; Before the absorb, so a positioned descendant that is
+               ;; about to be hoisted is silenced too -- it cannot escape
+               ;; this element in any case (`content-visibility: hidden`
+               ;; is itself a stacking context, measured) but it can move
+               ;; within it.
+               laid (if (= "hidden" (some-> (:content-visibility st) str str/lower-case str/trim))
+                      (update laid :draw #(skip-painted-contents % (:node/id node)))
+                      laid)
+               laid (if (stacking-context? st)
+                      (update laid :draw #(absorb-stacking-contexts % (:node/id node)))
+                      laid)
+               level (stack-level st)]
+           (if level
+             (update laid :draw #(with-stack-level level %))
+             laid))))
 
      :else
      (recur theme x y avail-width opacity inherited (str node) intruding))))
@@ -13479,4 +13908,13 @@
          theme (assoc (merge default-theme (:theme opts))
                       :viewport {:x x :y y :w width :h (:height opts)})
          inherited {:color (:fg theme) :font-size (:font-size theme)}]
-     (:draw (layout-node theme x y width 1.0 inherited tree)))))
+     ;; The root absorb. The root element IS a stacking context in CSS,
+     ;; and this is also the guarantee that no `:stack` marker ever
+     ;; reaches a host: both real painters (`dom-gpu`'s webgl/webgpu,
+     ;; `browser.session`) dispatch on `:draw/op` with a `case` and no
+     ;; default clause, so a marker that escaped here would throw rather
+     ;; than mis-paint. absorb-stacking-contexts removes every span it
+     ;; sees, and this call sees the whole document.
+     (-> (layout-node theme x y width 1.0 inherited tree)
+         :draw
+         (absorb-stacking-contexts (:node/id tree))))))
