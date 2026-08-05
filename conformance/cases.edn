@@ -3017,34 +3017,46 @@
   ;; its <p> is at x=5 w=300.
   :html "<div style=\"width: 300px; border-inline-start: 5px solid #000\"><p style=\"margin: 0\">p</p></div>"}
 
- ;; ---- replaced elements this engine has no box for ----
- ;; `inline-atomic-tags` is `#{:img :input :button :select :textarea}` and
- ;; its docstring says why `:svg`/`:canvas`/`:video`/`:audio`/`:iframe`
- ;; are deliberately absent: "this engine has no rendering for any of
- ;; them, so giving them an inline box would place an empty rectangle in
- ;; the middle of a sentence rather than fix anything." These five put a
- ;; number on that scope cut, and the number is not "an empty rectangle":
- ;; a browser RESERVES 300x150 for every one of them whether it can decode
- ;; the content or not, and this engine lays each one out as a BLOCK that
- ;; fills its container and is 0px tall -- so a page with a <canvas> in it
- ;; is 150px shorter here than anywhere else, and a <canvas> in a sentence
- ;; breaks the sentence in two.
+ ;; ---- replaced elements and their default size ----
+ ;; These five used to say `inline-atomic-tags` had no box for
+ ;; `:svg`/`:canvas`/`:video`/`:iframe`, on that set's own reasoning:
+ ;; "this engine has no rendering for any of them, so giving them an
+ ;; inline box would place an empty rectangle in the middle of a sentence
+ ;; rather than fix anything." The number they put on it answered that: a
+ ;; browser cannot render them either and RESERVES 300x150 for every one
+ ;; of them anyway, so the objection was answered by the box being the
+ ;; RIGHT empty rectangle. All five AGREE now (2026-08-06) -- see
+ ;; `replaced-content-size` in cssom.layout for the sizing algorithm and
+ ;; the Brave measurements behind it, and the `iframe` rule in
+ ;; cssom.core's UA stylesheet for the 4px that separates 304x154 from
+ ;; 300x150.
  ;;
- ;; The <img> cases beside them measure the other half: an intrinsic
- ;; RATIO, which this engine has never had to read because every image in
- ;; the corpus until now was a 1x1 GIF with both dimensions declared. The
- ;; image here is a 40x20 SVG as a data URI, so the 2:1 ratio is a
- ;; property of the resource rather than of the attributes.
+ ;; The <img> cases beside them measure the other half, which is NOT
+ ;; fixed and is the scope line of that round: an intrinsic RATIO, which
+ ;; this engine has never had to read because every image in the corpus
+ ;; until now was a 1x1 GIF with both dimensions declared. The image here
+ ;; is a 40x20 SVG as a data URI, so the 2:1 ratio is a property of the
+ ;; resource rather than of the attributes -- and a resource's own size is
+ ;; a property of the bytes at the far end of a URL, which this engine has
+ ;; no loader, no decoder and no image draw-op for. See
+ ;; `replaced-intrinsic-size`, which is where a host-supplied hook of the
+ ;; same shape as `:measure-text` would deliver one.
 
  {:id :replaced/img-intrinsic-size
   :group :replaced
-  ;; Brave: 40x20, from the resource alone. Engine: 0x0.
+  ;; Brave: 40x20, from the resource alone. Engine: 0x0, and 0x0 is right
+  ;; for what this engine knows -- measured, a bare <img> and an <img>
+  ;; whose src 404s are BOTH 0x0 in Brave, so the divergence here is
+  ;; entirely "the data URI decodes to 40x20" and not the box model.
   :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\"></div>"}
 
  {:id :replaced/img-width-only-keeps-the-ratio
   :group :replaced
   ;; Brave: 200x100 -- the declared width and the resource's 2:1 ratio.
-  ;; Engine: 200x0, i.e. the width alone.
+  ;; Engine: 200x0, i.e. the width alone. The ratio machinery to solve the
+  ;; other axis EXISTS (replaced-content-size does exactly this for a
+  ;; <canvas>); what is missing is only the resource's size to build a
+  ;; ratio from.
   :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\" style=\"width: 200px\"></div>"}
 
  {:id :replaced/img-height-only-keeps-the-ratio
@@ -3071,41 +3083,55 @@
  {:id :replaced/canvas-default-size
   :group :replaced
   ;; Brave: 300x150, HTML's own default canvas size, in a 400x156 line.
-  ;; Engine: a 400x0 block in a 400x0 parent.
+  ;; AGREES. It was a 400x0 block in a 400x0 parent until 2026-08-06.
   :html "<div style=\"width: 400px\"><canvas></canvas></div>"}
 
  {:id :replaced/canvas-attributes-size-it
   :group :replaced
-  ;; Brave: 80x40. Its pair above says the 300x150 is a DEFAULT rather
-  ;; than a constant; this one says the attributes are read at all.
+  ;; Brave: 80x40, and AGREES. Its pair above says the 300x150 is a
+  ;; DEFAULT rather than a constant; this one says the attributes are read
+  ;; at all -- and a <canvas>'s are its BITMAP, not a presentational hint,
+  ;; which is measurable: with these same attributes and a CSS
+  ;; `width: 200px` Brave says 200x100 for a canvas (the 2:1 ratio solves
+  ;; the height) and 200x40 for a <video> or an <img>.
   :html "<div style=\"width: 400px\"><canvas width=\"80\" height=\"40\"></canvas></div>"}
 
  {:id :replaced/canvas-in-a-sentence
   :group :replaced
-  ;; What the block treatment costs on the LINE axis, not just the box:
+  ;; What the block treatment cost on the LINE axis, not just the box:
   ;; Brave keeps `before <canvas> after` on one line with the canvas an
-  ;; atomic inline at x=49 y=4 w=20 h=10 sitting on the baseline, and
-  ;; this engine puts `before` and `after` on two lines with a 400px-wide
-  ;; block between them.
+  ;; atomic inline at x=49 y=4 w=20 h=10 sitting on the baseline, where
+  ;; this engine put `before` and `after` on two lines with a 400px-wide
+  ;; block between them. AGREES since 2026-08-06, and it is the case that
+  ;; makes the atomic-inline half a separate finding from the size half:
+  ;; an element can reserve the right box and still break the sentence.
   :html "<div style=\"width: 400px\">before <canvas width=\"20\" height=\"10\"></canvas> after</div>"}
 
  {:id :replaced/iframe-default-size
   :group :replaced
   ;; Brave: 304x154 -- the 300x150 default plus Chrome's UA
-  ;; `border: 2px inset` on all four sides.
+  ;; `border: 2px inset` on all four sides. AGREES. Measured alongside:
+  ;; `border: 0` on the same iframe gives 300x150 exactly, which is what
+  ;; says the default object size is a CONTENT size.
   :html "<div style=\"width: 400px\"><iframe></iframe></div>"}
 
  {:id :replaced/video-default-size
   :group :replaced
-  ;; Brave: 300x150.
+  ;; Brave: 300x150, and AGREES. Its difference from the <canvas> above
+  ;; is the whole shape of the sizing rule: a bare <video> has no
+  ;; intrinsic size at all, so `width: 200px` leaves it 150 tall where the
+  ;; canvas's own 2:1 bitmap makes it 100.
   :html "<div style=\"width: 400px\"><video></video></div>"}
 
  {:id :replaced/svg-without-attributes-is-300x150
   :group :replaced
-  ;; Brave: 300x150. An <svg> WITH width/height attributes is 60x30, but
-  ;; the default is the interesting half -- the same 300x150 as a canvas,
-  ;; which is CSS's own default sizing of a replaced element with no
-  ;; intrinsic size rather than an HTML per-element constant.
+  ;; Brave: 300x150, and AGREES. An <svg> WITH width/height attributes is
+  ;; 60x30, but the default is the interesting half -- the same 300x150 as
+  ;; a canvas, which is CSS's own default sizing of a replaced element
+  ;; with no intrinsic size rather than an HTML per-element constant. An
+  ;; <svg> with a `viewBox` is a third answer and a documented scope cut:
+  ;; measured, `viewBox="0 0 40 20"` in a 400px block is 400x200 there and
+  ;; 300x150 here -- an intrinsic RATIO with no intrinsic size.
   :html "<div style=\"width: 400px\"><svg></svg></div>"}
 
  ;; ---- stacking contexts, and what a browser will actually let you click ----
@@ -3496,40 +3522,65 @@
   :css ".ins li { list-style-position: inside }"}
 
  ;; ---- form controls with a UA box of their own ----
- ;; `ua-control-box` covers input/button/select/textarea. These five are
- ;; the ones it does not: two tags that are not controls at all here
- ;; (laid out as 400x0 blocks) and three <input> types that all come out
- ;; of the text-field rule at 153x21.
+ ;; `ua-control-box` covers input/button/select/textarea. These five were
+ ;; the ones it did not: two tags that were not controls at all here (laid
+ ;; out as 400x0 blocks) and three <input> types that all came out of the
+ ;; text-field rule at 153x21. Four of the five AGREE since 2026-08-06;
+ ;; the fifth (file) agrees on everything but its width, which is the one
+ ;; number in this group that is not a rule -- see below.
 
  {:id :form/progress-default-box
   :group :form
-  ;; Brave: 140x14, at y=2.797 on a 20px line. Engine: a 400x0 block.
+  ;; Brave: 140x14, at y=2.797 on a 20px line. AGREES (engine 2.8, which
+  ;; is the same 0.2em without Brave's 1/64 LayoutUnit flooring). It is
+  ;; `10em x 1em` and `vertical-align: -0.2em`, not a platform constant:
+  ;; measured at 8/14/28px the bar is 80x8, 140x14 and 280x28.
   :html "<div style=\"width: 400px\"><progress></progress></div>"}
 
  {:id :form/meter-default-box
   :group :form
-  ;; Brave: 70x14 -- half a progress bar, and a separate constant, which
-  ;; is why both are here.
+  ;; Brave: 70x14, and AGREES -- half a progress bar, which is why both
+  ;; are here, and it turned out to be `5em` against progress's `10em`
+  ;; rather than a separate constant.
   :html "<div style=\"width: 400px\"><meter></meter></div>"}
 
  {:id :form/input-range-default-box
   :group :form
   ;; Brave: 129x16 at x=2 y=2 -- a range input carries `margin: 2px` and
-  ;; no padding, where this engine gives every <input> the text field's
-  ;; 153x21 and its 1px/2px padding. (Those four padding values are the
-  ;; only cascade-attributed computed-style residual these cases add.)
+  ;; no padding, where this engine gave every <input> the text field's
+  ;; 153x21 and its 1px/2px padding. AGREES since 2026-08-06, and so does
+  ;; the computed-style axis (those four padding values used to be the
+  ;; only cascade-attributed residual these cases added). Its baseline is
+  ;; its bottom BORDER edge with the 2px bottom margin hanging below --
+  ;; measured by giving it `margin-bottom: 20px`, which does not move the
+  ;; box.
   :html "<div style=\"width: 400px\"><input type=\"range\"></div>"}
 
  {:id :form/input-color-default-box
   :group :form
-  ;; Brave: 50x27.
+  ;; Brave: 50x27, and AGREES. Its baseline is 6px up from its bottom
+  ;; edge, and moves with an explicit height (at `height: 50px` Brave
+  ;; puts it at 44) -- which is what separates it from the file input
+  ;; below, whose baseline does not move.
   :html "<div style=\"width: 400px\"><input type=\"color\"></div>"}
 
  {:id :form/input-file-default-box
   :group :form
   ;; Brave: 253x27 -- the width of the button plus its label text, so it
   ;; is a different KIND of number from the two fixed ones above and a
-  ;; single per-type constant table would not produce it.
+  ;; single per-type constant table would not produce it. That reading
+  ;; held up when it was measured (2026-08-06) and it is the one case in
+  ;; this group left OPEN on purpose. The HEIGHT is a rule and is
+  ;; implemented: 27 is the engine's own 21px <button> with 3px above and
+  ;; below, which is also where the control's baseline comes from (18 from
+  ;; the TOP, and unlike range's and color's it does NOT move when the
+  ;; height does -- measured at `height: 50px`). The WIDTH is not: the
+  ;; shadow <button> holding the browser's own localized "Choose File" is
+  ;; 87.141 wide and "No file chosen" in the UA control face is 84.484,
+  ;; which sum to 171.625 -- 81 short of 253 -- so the control also
+  ;; reserves a fixed filename column, and both strings are en-US. A 253
+  ;; in the engine would be a measurement of this machine's UI language.
+  ;; Engine: 145x27, i.e. the div agrees and the input's width does not.
   :html "<div style=\"width: 400px\"><input type=\"file\"></div>"}
 
  ;; ---- five singles, each in the group it belongs to ----
