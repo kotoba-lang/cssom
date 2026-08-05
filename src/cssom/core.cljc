@@ -3954,6 +3954,10 @@
   template { display: none }
   dialog:not([open]) { display: none }
 
+  th, button { text-align: center }
+  caption { text-align: -webkit-center }
+  option { padding: 0 2px 1px }
+
   b, strong, th, h1, h2, h3, h4, h5, h6 { font-weight: bold }
   address, cite, dfn, em, i, var { font-style: italic }
   sub { vertical-align: sub }
