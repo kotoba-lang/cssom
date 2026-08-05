@@ -9384,3 +9384,154 @@
               (:h inner)))]
     (is (= 80 (h "min-height:80px")))
     (is (= 20 (h "max-height:20px")))))
+
+;; ---- a nested flex container's own intrinsic (max-content) width ----
+;;
+;; A row flex container's preferred size is the SUM of its items plus the
+;; gaps -- they sit side by side -- where a block container's is the MAX of
+;; its children. This engine used to get the sum by accident: a flex item
+;; that declared no `display` still looked inline-level, so the whole set
+;; of them was measured as one inline RUN, which sums and counts no gap.
+;; The moment the cascade started writing the browser's own blockified
+;; `display: block` onto every flex item (CSS Display 3 SS2.7, see
+;; cssom.core) that accident stopped, which is why every item below
+;; declares `display: block` explicitly -- these tests build their document
+;; through the DOM API and never run the cascade, so they have to state the
+;; blockified value the cascade would have written.
+;;
+;; Every expected number was measured in Brave 151 on 2026-08-05 at
+;; 800px, monospace 14px (7px per character).
+
+(defn- nested-flex-inner-width
+  "Lays out `<div style=display:flex><div class=inner>...</div><div>c</div></div>`
+   where the inner container carries `inner-style` and holds one blockified
+   `<div>` per string in `labels`, and returns the inner container's own
+   width -- i.e. the shrink-to-fit width the intrinsic-sizing path gave it."
+  [inner-style labels]
+  (let [[outer doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc outer)
+        doc (dom/set-style doc outer {:display "flex"})
+        [inner doc] (dom/create-element doc :div)
+        doc (dom/append-child doc outer inner)
+        doc (dom/set-style doc inner (merge {:display "flex"} inner-style))
+        doc (reduce (fn [doc [label style]]
+                      (let [[item doc] (dom/create-element doc :div)
+                            doc (dom/append-child doc inner item)
+                            doc (dom/set-style doc item (merge {:display "block"} style))
+                            [t doc] (dom/create-text-node doc label)]
+                        (dom/append-child doc item t)))
+                    doc
+                    (map (fn [l] (if (vector? l) l [l nil])) labels))
+        [tail doc] (dom/create-element doc :div)
+        doc (dom/append-child doc outer tail)
+        doc (dom/set-style doc tail {:display "block"})
+        [t doc] (dom/create-text-node doc "c")
+        doc (dom/append-child doc tail t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc)
+                             {:width 800
+                              :theme {:padding 0 :gap 0
+                                      :measure-text (fn [text font-size _w _s _f]
+                                                      (* (count text) (/ (or font-size 14) 2.0)))}})
+        divs (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
+    ;; document, outer, inner, ... -- the inner container is the first div
+    ;; whose display is flex and whose width is not the full 800
+    ;; `long` because these tests hand draw-ops a :measure-text that
+    ;; returns a double, so a summed width arrives as 14.0 rather than 14
+    (long (:w (first (filter #(and (= "flex" (:display %)) (< (:w %) 800)) divs))))))
+
+(deftest a-row-flex-container-shrink-wraps-to-the-SUM-of-its-items-not-the-widest
+  ;; Brave: 14 for two 7px items, 49 for 14+28+7. The max rule a block
+  ;; container uses answers 7 and 28 -- one item -- which is what a nested
+  ;; flex container reported once its items stopped looking inline.
+  (is (= 14 (nested-flex-inner-width {} ["a" "b"])))
+  (is (= 49 (nested-flex-inner-width {} ["aa" "bbbb" "c"]))))
+
+(deftest a-row-flex-containers-intrinsic-width-counts-the-MAIN-axis-gap
+  ;; Brave: 24 = 7 + 10 + 7. The inline-run measurement this replaces
+  ;; counted no gap at all, so this was 14 however wide the gap was.
+  (is (= 24 (nested-flex-inner-width {:column-gap 10} ["a" "b"])))
+  ;; three items, so TWO gaps -- measured in Brave as 61, not derived here
+  (is (= 61 (nested-flex-inner-width {:column-gap 20} ["a" "b" "c"]))))
+
+(deftest a-COLUMN-flex-container-shrink-wraps-to-its-WIDEST-item
+  ;; Brave: 28 (`aaaa`), with or without a row-gap -- a column's gap is on
+  ;; the block axis and cannot widen it. Summing here (which the inline-run
+  ;; measurement did, for a column exactly as for a row) gave 35.
+  (is (= 28 (nested-flex-inner-width {:flex-direction "column"} ["aaaa" "b"])))
+  (is (= 28 (nested-flex-inner-width {:flex-direction "column" :row-gap 10} ["aaaa" "b"])))
+  (is (= 28 (nested-flex-inner-width {:flex-direction "column-reverse"} ["aaaa" "b"])))
+  (is (= 42 (nested-flex-inner-width {:flex-direction "row-reverse"} ["aa" "bbbb"]))
+      "a reversed ROW is still a row -- it sizes like its forward twin"))
+
+(deftest a-flex-items-own-margins-and-width-count-toward-the-containers-intrinsic-width
+  ;; Brave: 38 = (5 + 14 + 5) + 14, and 55 = 30 + 25. Both are per-item
+  ;; facts measure-child already knows; the sum is what makes them visible.
+  (is (= 38 (nested-flex-inner-width {} [["aa" {:margin-left 5 :margin-right 5}] "bb"])))
+  (is (= 55 (nested-flex-inner-width {} [["a" {:width 30}] ["b" {:width 25}]]))))
+
+(deftest a-wrapping-flex-containers-max-content-still-puts-every-item-on-one-line
+  ;; Brave: 42 = 14 + 28. max-content is what the box would need in order
+  ;; NOT to wrap, so `flex-wrap: wrap` does not change it.
+  (is (= 42 (nested-flex-inner-width {:flex-wrap "wrap"} ["aa" "bbbb"]))))
+
+(deftest the-intrinsic-width-rule-recurses-through-nested-flex-containers
+  ;; Brave, three levels deep: the innermost container is 28 (14 + 14), the
+  ;; middle one 35 (28 + 7). Reported 21 and 28 before -- each level lost
+  ;; one item's worth.
+  (let [[outer doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc outer)
+        doc (dom/set-style doc outer {:display "flex"})
+        [mid doc] (dom/create-element doc :div)
+        doc (dom/append-child doc outer mid)
+        doc (dom/set-style doc mid {:display "flex"})
+        [inner doc] (dom/create-element doc :div)
+        doc (dom/append-child doc mid inner)
+        doc (dom/set-style doc inner {:display "flex"})
+        doc (reduce (fn [doc label]
+                      (let [[item doc] (dom/create-element doc :div)
+                            doc (dom/append-child doc inner item)
+                            doc (dom/set-style doc item {:display "block"})
+                            [t doc] (dom/create-text-node doc label)]
+                        (dom/append-child doc item t)))
+                    doc ["aa" "bb"])
+        [sib doc] (dom/create-element doc :div)
+        doc (dom/append-child doc mid sib)
+        doc (dom/set-style doc sib {:display "block"})
+        [t doc] (dom/create-text-node doc "x")
+        doc (dom/append-child doc sib t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc)
+                             {:width 800
+                              :theme {:padding 0 :gap 0
+                                      :measure-text (fn [text font-size _w _s _f]
+                                                      (* (count text) (/ (or font-size 14) 2.0)))}})
+        flexes (filterv #(and (= :node (:draw/op %)) (= "flex" (:display %)) (< (:w %) 800)) ops)]
+    (is (= [35 28] (mapv #(long (:w %)) flexes)))))
+
+(deftest a-block-flex-item-still-takes-the-WIDEST-of-its-own-children
+  ;; The other half of the same rule, and the reason this is a branch on
+  ;; the box's own display rather than a change to block-max-content-width:
+  ;; Brave reports 35 (`alpha`) for a plain block flex item holding
+  ;; `<div>alpha</div><div>bb</div>`, not 49.
+  (let [[outer doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc outer)
+        doc (dom/set-style doc outer {:display "flex"})
+        [item doc] (dom/create-element doc :div)
+        doc (dom/append-child doc outer item)
+        doc (dom/set-style doc item {:display "block"})
+        doc (reduce (fn [doc label]
+                      (let [[c doc] (dom/create-element doc :div)
+                            doc (dom/append-child doc item c)
+                            doc (dom/set-style doc c {:display "block"})
+                            [t doc] (dom/create-text-node doc label)]
+                        (dom/append-child doc c t)))
+                    doc ["alpha" "bb"])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc)
+                             {:width 800
+                              :theme {:padding 0 :gap 0
+                                      :measure-text (fn [text font-size _w _s _f]
+                                                      (* (count text) (/ (or font-size 14) 2.0)))}})
+        blocks (filterv #(and (= :node (:draw/op %)) (= "block" (:display %)) (< (:w %) 800)) ops)]
+    (is (= 35 (long (:w (first blocks)))))))
