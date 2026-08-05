@@ -821,14 +821,24 @@ inline path in the first place — `inline-flow-candidate?` refused every
 non-`normal` value, so a paragraph with one `nowrap` child fell apart into
 block rows.
 
+Measured on this round's own merge base (`782d555`, round forty already
+in), because round forty landed on main while this one was in flight and
+its numbers are not this one's to claim:
+
 ```
                     LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
-before   546/556    1926/1973  549/581                   14450/14514  561/581     27735/27740
-after    547/556    1935/1973  553/581                   14478/14514  567/581     27735/27740
+before   547/556    1933/1973  555/581                   14462/14514  563/581     27733/27736
+after    548/556    1942/1973  559/581                   14490/14514  569/581     27733/27736
 ```
 
+On the commit this branch was actually cut from (`eb9dca9`, before round
+forty) the same change reads 546 -> 547, 1926 -> 1935 / 549 -> 553,
+14450 -> 14478 / 561 -> 567 -- the same six cases either side, which is
+what says the two rounds do not overlap.
+
 **Six cases changed in the whole 581-case op dump**, all in the intended
-direction: `:overflow/nowrap-inline-blocks-do-not-wrap`,
+direction, the same six before and after the merge:
+`:overflow/nowrap-inline-blocks-do-not-wrap`,
 `:text/nowrap-inline-inside-a-wrapping-paragraph`,
 `:text/overflow-wrap-break-word-keeps-min-content` and
 `:generated/before-display-block-makes-its-own-line` now match the oracle
