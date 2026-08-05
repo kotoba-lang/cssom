@@ -3849,7 +3849,43 @@
    uniform `:padding`/`:margin` reader should see. `input`/`button` state
    their four sides as longhands for exactly that reason: their shorthand's
    first token is the 1px BLOCK padding, and letting it land on the uniform
-   key would narrow every text field by the difference."
+   key would narrow every text field by the difference.
+
+   The measurements that travelled here with the rules, from the tables in
+   `cssom.layout` these replace -- each one is why a rule is here rather
+   than a plausible-looking guess:
+
+   - `td, th { padding: 1px }`: without it every table cell was 2px short
+     in each axis, which the conformance harness's geometry axis reported
+     as `td` 6/29.
+   - `figure { margin: 1em 40px }`: only the 1em half of it used to exist
+     (the vertical margin was in `ua-margin-scale` from the start while the
+     40px indent was nowhere), so a `<figure>` sat flush against its
+     article's content edge and was 80px too wide. Measured in Brave 151,
+     2026-08-05, on `:page/article-with-figure`'s own 300px article: the
+     browser puts the figure at x=40 with w=220 and this engine had x=0,
+     w=300, which the figure's `<img>` and `<figcaption>` then inherited
+     box for box -- six numbers from one missing declaration.
+   - `menu`/`dir` carry `<ul>`'s 40px indent and `display: block` because
+     they are the legacy list containers and are in Chrome's own rule.
+     Measured 2026-08-05 on a bare `<menu><li>a</li></menu>`:
+     `margin-block: 16px`, `padding-left: 40px`.
+   - `b, strong, th, h1..h6 { font-weight: bold }`: authors do not write
+     `b { font-weight: bold }`, the UA does, and without it `<b>`,
+     `<strong>`, `<th>` and every heading rendered in NORMAL weight.
+   - `sub { vertical-align: sub }` / `sup { vertical-align: super }`: an
+     author writes `<sub>`, never the declaration, so without them a
+     subscript and a superscript sat on the same baseline as the text
+     around them -- the entire visual point of both tags.
+   - `table { border-spacing: 2px }` is keyed on the TAG, not on being a
+     table: real CSS's initial value is 0, and measured in Brave a
+     `<div style=\"display:table\">` reports `border-spacing: 0px` where
+     `<table>` reports 2px. Defaulting every table-displayed box to 2 put
+     phantom spacing into every CSS-declared table.
+   - `[hidden] { display: none }` is attribute PRESENCE and does not look
+     at the value. Measured in Brave 151, 2026-08-05: `hidden=\"false\"`,
+     `hidden=\"\"` and `hidden=\"hidden\"` all report `display: none` and
+     `offsetHeight: 0`, against a bare `<div>`'s `block`/24."
   "
   html, body, address, article, aside, blockquote, center, dd, details,
   dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form,
@@ -3938,6 +3974,73 @@
 
 (def ^:private author-origin 1)
 
+(def ^:private ua-conditional-attrs
+  "Every HTML attribute any selector in `ua-stylesheet-text` tests -- read
+   off the parsed rules rather than restated, so adding a rule to the sheet
+   cannot silently invalidate the fast path in `ua-style-for` below.
+
+   Today: `#{:hidden :href :type}`."
+  (set (for [rule ua-rules
+             selector (:rule/selectors rule)
+             part (or (:selector/parts selector) [selector])
+             a (:selector/attrs part)]
+         (:attr/name a))))
+
+(def ^:private ua-sheet-is-tag-and-attr-only?
+  "Whether every selector in the sheet is a bare tag, or a tag plus an
+   attribute-PRESENCE-implying condition -- no class, id, pseudo-class,
+   `:not()`/`:is()`/`:where()`/`:has()`, and no combinator.
+
+   `ua-style-for`'s fast path rests on exactly this: if it holds, an
+   element carrying none of `ua-conditional-attrs` cannot match anything
+   beyond its own tag's rules, so its UA style is a precomputed map and
+   costs one lookup. A `:not([hidden])` or a `.foo` in the sheet would
+   break that reasoning, so it is CHECKED at load rather than remembered --
+   fail the check and every element takes the general path, which is
+   slower and still correct."
+  (every? (fn [rule]
+            (every? (fn [selector]
+                      (let [parts (or (:selector/parts selector) [selector])]
+                        (and (= 1 (count parts))
+                             (let [p (first parts)]
+                               (and (nil? (:selector/id p))
+                                    (empty? (:selector/classes p))
+                                    (empty? (:selector/pseudos p))
+                                    (nil? (:selector/pseudo-element p))
+                                    (empty? (:selector/not p))
+                                    (empty? (:selector/is p))
+                                    (empty? (:selector/where p))
+                                    (empty? (:selector/has p))
+                                    (nil? (:selector/combinator p)))))))
+                    (:rule/selectors rule)))
+          ua-rules))
+
+(defn- ua-style-of
+  "The general path: match every candidate rule and merge the winners in
+   specificity then source order."
+  [document node]
+  (->> (for [rule (ua-rules-for node)
+             selector (:rule/selectors rule)
+             :when (if document
+                     (matches? document node selector)
+                     (matches? node selector))]
+         {:declarations (:rule/declarations rule)
+          :sort-key [(specificity selector) (:rule/order rule)]})
+       (sort-by :sort-key)
+       (reduce (fn [m entry] (merge m (:declarations entry))) {})))
+
+(def ^:private ua-style-by-tag
+  "The UA style of an element that carries none of `ua-conditional-attrs`,
+   precomputed per tag. `cssom.layout` asks for this once per `node-style`
+   call and `node-style` runs many times per element over a layout pass
+   (measure, intrinsic width, then the real one), so the difference between
+   a lookup and a match-and-sort is the difference between a layout pass
+   and a noticeably slower one -- measured on the 357-case conformance
+   corpus, the general path alone cost +80% end to end."
+  (when ua-sheet-is-tag-and-attr-only?
+    (into {} (map (fn [tag] [tag (ua-style-of nil {:node/type :element :tag tag :attrs {}})]))
+          (remove nil? (keys ua-rules-by-tag)))))
+
 (defn ua-style-for
   "The user-agent declarations that apply to `node`, resolved among
    themselves by specificity, as a plain `{property value}` map.
@@ -3954,15 +4057,10 @@
    remove is the same knowledge written down twice."
   ([node] (ua-style-for nil node))
   ([document node]
-   (->> (for [rule (ua-rules-for node)
-              selector (:rule/selectors rule)
-              :when (if document
-                      (matches? document node selector)
-                      (matches? node selector))]
-          {:declarations (:rule/declarations rule)
-           :sort-key [(specificity selector) (:rule/order rule)]})
-        (sort-by :sort-key)
-        (reduce (fn [m entry] (merge m (:declarations entry))) {}))))
+   (if (and ua-style-by-tag
+            (not-any? #(contains? (:attrs node) %) ua-conditional-attrs))
+     (get ua-style-by-tag (:tag node) {})
+     (ua-style-of document node))))
 
 (defn- resolve-style-for
   "Cascade-resolves the declarations that target `pseudo-element` (nil for
