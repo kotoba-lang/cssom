@@ -924,6 +924,183 @@ implementation detail. It stays measured and unmodelled.
 `form -> label`, the union box over-claiming a 36px-tall rectangle, and is
 now `label -> form`, a 0.42px rounding at a fragment's bottom edge.
 
+### Round thirty-two: the corpus grows 370 → 441, into text, typography and selectors
+
+**Every number on this page fell, and that is the point.** All four axes
+were at 100% of what the 370-case corpus could ask — line 356/356, geometry
+1335/1335 boxes across 370/370 clean cases, paint order 9227/9234, computed
+style 18687/18763 — and **a corpus that scores 100% can no longer find
+defects**. Seventy-one cases were added in two areas the corpus had barely
+entered: text and typography (28 of them), and selectors, specificity and
+the cascade (43). The drop below is added coverage, not a regression:
+`src/` was **not touched**, and 735 tests / 1697 assertions and the linter
+are green and unchanged either side.
+
+| axis | 370 cases | 441 cases |
+|---|---|---|
+| line structure | 356/356 = **100%** | 411/425 = **97%** |
+| geometry (boxes) | 1335/1335 = **100%** | 1484/1521 = **98%** |
+| geometry (clean cases) | 370/370 | **416/441** |
+| paint order | 9227/9234 | **10952/11014** |
+| paint order (clean cases) | 364/370 | **422/441** |
+| computed style (values) | 18687/18763 | **21278/21362** |
+| computed style (cases with no cascade-attributed mismatch) | 369/370 | **434/441** |
+| cascade-attributed residual | **1** | **9** |
+
+Every case was measured in a real headless Brave 151 over CDP *before* it
+was added, and the first draft had to be thrown away for a reason worth
+recording: **five of the text cases passed while measuring nothing.** A
+`letter-spacing: 4px` on `alpha beta` inside a 120px box is 110px against a
+bare 70px, and *both* fit — so the case agreed with the browser about a
+property neither side had applied. Every width in the text group below is
+now a number at which the two answers must differ (100px for that one), and
+they were found by driving the shapes through the browser and reading the
+line boxes back, not by arithmetic.
+
+#### What the text group found — nine gaps, five causes
+
+- **`letter-spacing` and `word-spacing` never reach a text run's advance.**
+  Both are already in `cssom.layout`'s inherited set, so they arrive and are
+  then unused. Measured four ways: a wrap point (`alpha beta` at 100px is
+  two lines in Brave, one here), its mirror (a *negative* letter-spacing
+  makes 70px of text fit 60px — Brave one line, this engine two), an inline
+  box's own width (`<b letter-spacing:3px>wide</b>` is **42.69** against
+  **30.68**; `<b word-spacing:10px>one two</b>` is **64.14** against
+  **54.14**), and a shrink-to-fit box (**44** against **28**). Six cases.
+
+- **`text-indent` is not implemented at all** — the property does not appear
+  in `cssom.layout`. Four cases, and the shapes are chosen so the indent
+  changes what wraps rather than only where the first line starts, because
+  neither layout axis compares a text run's x. `160px`/`40px` is two lines
+  in Brave and one here; `text-indent: 50%` resolves against the *containing
+  block*; the property **inherits**, so a 60px indent declared on a wrapper
+  reaches the `<p>` inside it; and `hanging` inverts it — the same text is
+  **three** lines in Brave and two here. `each-line` re-applies after a
+  forced break, which the geometry axis reads directly as the `<br>` at
+  **x=65** against **x=35**.
+
+- **A tab is not one space, and `tab-size` is not read.** In a shrink-to-fit
+  `white-space: pre` box, `a<tab>b` is **63px** in Brave — nine columns, the
+  next multiple of the initial `tab-size: 8` — and **35px** at `tab-size: 4`.
+  This engine reports **21px** for both, i.e. three characters. The pair is
+  deliberate: one case alone cannot separate *the tab stop is wrong* from
+  *`tab-size` is ignored*. `white-space: pre` also drops leading spaces from
+  the measured width (**77** against **63**).
+
+- **Three break-opportunity mechanisms are missing, and one is applied too
+  eagerly.** A soft hyphen (U+00AD) is a break point under the initial
+  `hyphens: manual` — Brave breaks the word and the box is 40px tall against
+  20 here. `hyphens: auto` with `lang="en"` breaks `hyphenation` and gives 60
+  against 40. `text-wrap: balance` gives `alpha beta gamma` / `delta epsilon`
+  where a greedy breaker gives `alpha beta gamma delta` / `epsilon`.
+  `white-space: break-spaces` is one of the four *preserving* values, so its
+  newline survives — two lines in Brave, one here. And in the other
+  direction, `white-space: nowrap` on an **inline child** makes this engine
+  break either side of it: `alpha` / `beta gamma` / `delta` against Brave's
+  `alpha beta gamma` / `delta`.
+
+- **The three break keywords are treated as one, and one of them differs.**
+  `cssom.layout`'s `break?` is `#{"break-word" "anywhere" "break-all"}`, but
+  they part company exactly where a box is being **sized**: `anywhere` and
+  `break-all` let a long word break while its min-content width is computed,
+  so an inline-block takes the 60px on offer; `break-word` does **not**, so
+  the same box is **105px** and overflows. Brave: `60×20` with a `105×20`
+  span. This engine: `60×40` and `60×40`. The three cases are in the corpus
+  together because two of them agreeing is what makes the third one a
+  finding rather than a guess.
+
+- **`font-size`'s absolute keywords cost more than the font size.**
+  `resolve-font-size` returns nil for `large`/`x-large`/... on purpose (the
+  table is keyed on the default font of the *family*, which the cascade
+  cannot know — `large` is 16px in this page's monospace and 18 in a
+  proportional one). Measured, that unresolved value propagates: the UA
+  `p { margin: 1em 0 }` then resolves against 14px instead of 16, so the
+  margins are wrong too. Two of the nine cascade-attributed values. Its
+  contrast partner `font-size: larger` is a pure ratio off the parent, needs
+  no family table, and agrees exactly.
+
+- **`<q>` gets no quotation marks.** The oracle's per-word Ranges cannot see
+  generated content, so the *line* axis is blind here — but the `<q>`'s own
+  box is two characters wider each side and the geometry axis reads it
+  directly: **63** against **35**, and a nested `<q>` **91/35** at x **14/42**
+  against **35/7** at x **14/28**.
+
+#### And one margin rule, found sideways
+
+`:selector/empty-pseudo-class` was written to check that `p:empty` matches.
+It does — and the case failed anyway, on geometry and on 15 paint-order
+points. An empty block with no border or padding is **self-collapsing**: its
+own top and bottom margins collapse into one, that one then collapses with
+the next sibling's top margin, and with nothing to stop the set at the
+parent's top edge the whole of it escapes. Brave puts both children at
+**y=0** and the parent is **20px** tall; this engine leaves 14px inside and
+reports **34**. `:block/an-empty-block-collapses-through-itself` isolates it
+away from the selector.
+
+#### The selector and cascade axis: 43 cases, 5 divergences
+
+This is the axis with the most to lose from a corpus that cannot see it —
+the computed-style residual was **1 value** across 370 cases, and there were
+six selector cases in the whole corpus. Forty-three more went in:
+`:nth-child()` with a negative coefficient / `An+B` / `odd`/`even` / `of
+<selector>`, `:nth-of-type`, `:nth-last-child`, `:first-`/`:last-`/`:only-
+child`, `:first-of-type`, `:empty`, `:not()` with a selector list and with a
+nested pseudo-class, `:has()` in its descendant, direct-child and sibling
+forms, `+` and `~`, all six attribute operators plus the case-insensitive
+`i` flag, four specificity shapes, three importance-versus-inline-style
+shapes, and eight `var()`/shorthand/CSS-wide-keyword shapes.
+
+**Thirty-eight of the forty-three agree with Brave exactly**, which is a
+measurement and not a formality: it is the first evidence that the selector
+engine's An+B matching, its `:is()`-versus-`:where()` specificity split, its
+`:not()` argument specificity, its six attribute operators and its
+inline-versus-`!important` ordering are right, rather than merely present.
+Two of them also correct this file's own prose: `:is(.wrap section) p` and
+`p:not(:first-child)` are both named as out of scope in `cssom.core`'s
+docstring and both **work** (a control, `:is(.nomatch xyz) p`, correctly
+matches nothing) — the docstring is stale, not the engine incomplete.
+
+The five that diverge:
+
+| case | Brave | this engine |
+|---|---|---|
+| `:selector/nth-child-of-a-selector` | `2n+1 of .m` counts among the `.m` siblings only, so the first `.m` is bold | the `of` clause is not parsed; nothing matches |
+| `:selector/has-a-following-sibling` | `h2:has(~ p)` matches | the sibling-relative form is named as out of scope, and is |
+| `:cascade/inherit-on-a-non-inherited-property` | `padding-left: inherit` takes the parent's 40px | `inherit-keyword?` *removes* the declaration, which is right for an inherited property and gives 0 here |
+| `:cascade/initial-keyword-resets-to-the-css-initial-value` | `text-align: initial` is `start` | the literal string `initial` is stored |
+| `:cascade/revert-drops-to-the-user-agent-value` | `margin: revert` rolls the author origin back, so the UA `1em 0` returns | the literal string `revert` is stored and the author `margin: 0` stands |
+
+The last three are `cssom.core`'s own documented cut — `initial`/`unset`/
+`revert` are "deliberately NOT handled" — and the point of writing them into
+the corpus is that a documented cut and a measured one are different things.
+`revert` in particular needed an author rule to measure at all: with no
+author declaration to roll back, *ignoring* `revert` and *obeying* it both
+leave the UA margin standing, and the first draft of that case passed for
+exactly that reason.
+
+Two more are visible but not scorable, and the harness says so rather than
+scoring them: `color: var(--missing)` after a `color: #0000ff` leaves this
+engine's cascade holding the **empty string** (real CSS makes the whole
+declaration invalid at computed-value time and the property inherits), and
+`color: unset` is stored as the literal `unset`. They land in the excluded
+buckets as `absent` and `unparseable-color`, printed with their case ids.
+
+#### Not added, and why
+
+- **`text-decoration` and its `-thickness`/`-offset`/`-line` longhands.**
+  No axis reads them: decoration does not change a box, a line, or a hit
+  region, and the computed-style axis compares fourteen properties none of
+  which is a decoration. A case would be scored on everything except the
+  thing it was written for.
+- **`::first-line` and `::first-letter`.** Neither produces an element box,
+  so neither the geometry axis (which walks elements) nor the oracle's
+  element probe can see one.
+- **`font-variant: small-caps`.** It *is* scorable — Brave renders
+  `caps here` at 47px against a plain 63 — but the number comes from a
+  synthesized small-caps face whose advances the harness's per-character
+  probe does not measure, so the expected value would not reproduce on a
+  machine with a different `monospace`. Recorded here instead of pinned.
+
 ### Round thirty: `direction: rtl` inside a line, and the coincidence that was not one
 
 Round twenty-six left `direction: rtl` implemented at block level only, and
