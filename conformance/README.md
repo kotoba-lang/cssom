@@ -789,6 +789,112 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round twenty-eight: the border every content box was standing on
+
+`inset-side` — the whole engine's answer to *where does this box's content
+start* — counted the border only under `box-sizing: border-box`. Named as
+still-open by rounds twenty-five, twenty-six and twenty-seven, each time
+with the same reason for not doing it: it is one change to the box model
+rather than one UA reading, and it moves every bordered box on every page.
+
+**The rule, measured before anything was written.** `box-sizing` does not
+move the content edge. It decides what a *declared* `width`/`height`
+measures — the content box under `content-box`, the border box under
+`border-box` — and that question belongs to `resolve-width` /
+`used-block-height`, which already answered it correctly through
+`declared-inset-side`. Where the content *starts* is border + padding in
+from the border edge either way. Ten shapes in Brave 151 over CDP
+(2026-08-05), reading `getBoundingClientRect` and `clientLeft`/`clientWidth`
+side by side, all say the same thing:
+
+| shape | child lands at | `clientLeft` |
+|---|---|---|
+| `div{border:2px;padding:10px}` | x=12, w=376 of 400 | 2 |
+| `div{box-sizing:border-box;width:200px;border:2px;padding:10px}` | x=12, w=176 | 2 |
+| `div{width:200px;border:5px;padding:4px 8px 12px 16px}` | x=21, y=23, w=200 | 5 |
+| `div{display:flex;width:200px;border:3px;padding:7px}` | items at x=10, y=10 | 3 |
+| `div{display:grid;...;border:3px;padding:7px}` | items at x=10, y=10 | 3 |
+| `td{border:4px;padding:6px}` | child at x=10, y=24 | 4 |
+| `fieldset` (UA 2px border) | `<p>` at x=12.5 of the fieldset | 2 |
+
+Two neighbours it is **not**, both re-measured so the change would not
+swallow them:
+
+- **An absolutely positioned descendant's containing block is the PADDING
+  box** — border alone, padding *outside* it. `div{position:relative;
+  border:7px;padding:9px}` puts a `top:0;left:0` child at **x=7**, not
+  x=16. `layout-block` computes that separately (`pad-x`/`pad-y`) and it
+  stays separate.
+- **An `overflow` clip lands on the padding box too**, and this engine
+  clips at the border box: `div{width:100px;height:40px;overflow:hidden;
+  border:6px;padding:5px}` is a 122x62 border box reporting a 110x50
+  scrollport. Left alone and written up as a scope cut at the clip site —
+  it is a *paint* change where this is a *layout* change, and nothing in
+  the corpus scores a clip edge.
+
+**One place had to give the border back.** Under `border-collapse:
+collapse` a cell keeps only *half* of each grid line it sits between, and
+the column widths were built by ADDING the inner half to a natural width
+that was "content + padding, never border". With the border now in the
+natural width that double-counted, and `:table/border-collapse` went 5/5 →
+**0/5** — cells 15px wide where Brave says 11. Subtracting the *outer* half
+instead is the same rule against the corrected input, and restored it to
+5/5 exactly. It is the one thing in this round that a net score would have
+hidden: geometry read 1241 → 1239 with three cases improving.
+
+**Result.** Per-case old-vs-new box diff over all 341 cases, replaying the
+harness's own tag+nearest pairing: **four cases changed, three improved,
+none regressed**, and every box that moved landed on the oracle.
+
+| case | boxes | what moved |
+|---|---|---|
+| `:form/fieldset-and-legend` | 2/3 → **3/3** | `<p>` (12.5, 36.9, 775) → (14.5, 38.9, 771); Brave (14.5, 38.891, 771) |
+| `:position/absolute-containing-block-is-the-padding-box` | 2/3 → **3/3** | `<p>` (20, 34, 210) → (25, 39, 200); Brave (25, 39, 200) |
+| `:page/toolbar-with-auto-margin` | 4/5 → **5/5** | container h 32 → 34 (Brave 35), children +1px in |
+| `:page/card-with-absolute-badge` | 4/4 → 4/4 | `<h3>`/`<p>` (12, 28, 242) → (13, 29, 240) = Brave exactly; was already inside the 2px tolerance |
+
+Geometry **1241 → 1244** boxes, **318 → 321** clean cases; paint order
+**8424 → 8429** (the `p -> fieldset` cluster of 5 is gone, and nothing
+replaced it); line structure 326/328 and computed style 15678/17949
+unchanged, with per-case status identical on the line axis.
+
+Four probe shapes run through both engines to check the axes the corpus
+does not cover, before and after:
+
+| shape | before | after | Brave |
+|---|---|---|---|
+| `flex{width:200px;height:60px;border:5px;padding:8px}` | 226x76, item (8,8) | **226x86, item (13,13)** | 226x86, (13,13) |
+| same as `block` | 226x86, item (8,8,210) | **226x86, item (13,13,200)** | 226x86, (13,13,200) |
+| same as `grid` | h **60**, item (8,8) | h **60**, item **(13,13)** | h 86, (13,13) |
+| `overflow:hidden;border:6px;padding:5px` | item (5,5) | **item (11,11)** | (11,11) |
+
+The grid container's height is the one thing that did not move: `layout-grid`
+reads `resolve-height` straight into its own `node-h` instead of
+`used-block-height`, so a `content-box` grid with a declared height is still
+its content height rather than its border box. That was already true before
+this round and is untouched by it — named here rather than left to be
+rediscovered.
+
+**Tests.** Sixteen assertions across four tests changed answer, every one
+rewritten with the reason rather than with a new number, and every one of
+them a test that had been pinning the *wrong* value:
+
+- The three `fieldset`/`legend` tests carried Brave's real numbers in their
+  own comments — *"(Brave 14.5, one border out)"*, *"(Brave 38.891, again
+  one border out)"*, *"(Brave 771)"*, *"(Brave 24.891)"*, *"(Brave 6.891)"*.
+  All five now match Brave exactly, and the comments say so.
+- `grid-container-border-and-background-match-block-flex-convention`
+  asserted the old convention in prose: *"Content is inset by padding only
+  … border-width only offsets content when box-sizing: border-box."*
+  Re-measured on that exact shape (Brave: 112x22 container, item at (6,6));
+  the container is 22 tall here now, not 18, and the item is at (6,6).
+- The three input-caret tests moved 2 → 4, which is an `<input>`'s border
+  (2) plus its padding (2). The caret, the value text and the placeholder
+  were all being painted one border outside the box they belong to.
+
+665 tests / 1455 assertions, 0 failures; lint 0 errors, 23 warnings
+(unchanged).
+
 ### Round twenty-seven: `transform`, which changes what a box reports without changing where it is
 
 `transform` matched nothing in `src/` but `text-transform`, an unrelated
@@ -941,8 +1047,10 @@ Read off `getComputedStyle`, not inferred: those three report `border-box`
 and `<input>`/`<textarea>`/`<fieldset>`/`<legend>` report `content-box`
 (confirmed on `width: 200px`: button **200**, select **200**, input **208**,
 textarea **206**; this engine said 216 for the button). It matters twice.
-`inset-side` only counts the border for a border-box box, so a button's own
-label was painted at its **border** edge instead of one border plus one
+`inset-side` only counted the border for a border-box box *at the time of
+this round* (round twenty-eight removed that gate — it counts the border in
+both modes now), so a button's own label was painted at its **border** edge
+instead of one border plus one
 padding in — and the harness attributes a text op to the atomic inline
 whose box *contains* it, so a label sitting 3px above its own box leaked
 onto the surrounding line. That is the whole of
@@ -1023,6 +1131,8 @@ Still open, and named rather than left to be rediscovered:
   one UA reading, and it moves every bordered box on every page, so it
   belongs with whoever owns width/height resolution — not folded into a
   fieldset constant, which would fit this case and mislead the next.
+  **Closed by round twenty-eight**, exactly as described: both cases went
+  clean and nothing regressed.
 - **`:page/table-of-contents`' `a x +13.70625`** and
   `:table/cell-with-a-list`'s `li w +13.70625` are the same number and the
   same cause round twenty-four already named: this engine paints an
@@ -1192,8 +1302,9 @@ because a flex line distributes its free space through
 `place-main-axis-auto-margins` and not through this round's block-flow
 path; `inset-side` still omits the border for a content-box element, in
 both axes, which is what `position/absolute-containing-block-is-the-
-padding-box` measures; and a percentage height inside a flex or grid item
-resolves to `auto` rather than against the container.
+padding-box` measures (**closed by round twenty-eight**); and a percentage
+height inside a flex or grid item resolves to `auto` rather than against
+the container.
 
 ### Round twenty-one: the corpus grows 200 → 292
 

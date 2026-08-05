@@ -2271,18 +2271,30 @@
         by-edge (into {} (map (juxt :edge identity)) border-rects)
         [container child] (node-ops ops)]
     (is (= 100 (:w container)))
-    (is (= 18 (:h container)))                              ; content 10 + 2*padding(4)
+    ;; content 10 + 2*padding(4) + 2*border(2). The border used to be left
+    ;; out of both this height and the child's offset below, because
+    ;; content-inset only counted it under `box-sizing: border-box`. It
+    ;; counts in both modes now (see inset-side): `box-sizing` decides what
+    ;; a DECLARED width/height measures, not where the content box starts.
+    ;; Measured in Brave 2026-08-05 on this exact shape --
+    ;; `<div style="display:grid;grid-template-columns:50px;gap:0;
+    ;; padding:4px;border:2px solid;width:100px"><div style="height:10px">`
+    ;; -- container 112x22 with the item at (6, 6), i.e. border+padding in
+    ;; on both axes. (Brave's 112 against this engine's 100 is the separate,
+    ;; still-open gap that layout-grid reads `resolve-width` for its own
+    ;; box; the numbers pinned here are the ones this change moves.)
+    (is (= 22 (:h container)))
     (is (= 4 (count border-rects)))
     (is (= {:x 0 :y 0 :w 100 :h 2} (select-keys (:top by-edge) [:x :y :w :h])))
-    (is (= {:x 98 :y 0 :w 2 :h 18} (select-keys (:right by-edge) [:x :y :w :h])))
-    (is (= {:x 0 :y 16 :w 100 :h 2} (select-keys (:bottom by-edge) [:x :y :w :h])))
-    (is (= {:x 0 :y 0 :w 2 :h 18} (select-keys (:left by-edge) [:x :y :w :h])))
+    (is (= {:x 98 :y 0 :w 2 :h 22} (select-keys (:right by-edge) [:x :y :w :h])))
+    (is (= {:x 0 :y 20 :w 100 :h 2} (select-keys (:bottom by-edge) [:x :y :w :h])))
+    (is (= {:x 0 :y 0 :w 2 :h 22} (select-keys (:left by-edge) [:x :y :w :h])))
     (is (= "#445566" (:color bg-rect)))
-    (is (= {:x 0 :y 0 :w 100 :h 18} (select-keys bg-rect [:x :y :w :h])))
-    ;; Content is inset by padding only -- content-box box-sizing, the same
-    ;; content-inset convention every display mode in this file already
-    ;; uses (border-width only offsets content when box-sizing: border-box).
-    (is (= {:x 4 :y 4 :w 50 :h 10} (select-keys child [:x :y :w :h])))
+    (is (= {:x 0 :y 0 :w 100 :h 22} (select-keys bg-rect [:x :y :w :h])))
+    ;; Content is inset by border AND padding -- the browser's own
+    ;; `clientLeft`/`clientTop` on that shape is 2, the border, and its
+    ;; padding box then starts one padding further in.
+    (is (= {:x 6 :y 6 :w 50 :h 10} (select-keys child [:x :y :w :h])))
     (is (< (.indexOf ops bg-rect) (.indexOf ops (:top by-edge)))
         "background must paint BEFORE border -- the background rect spans
          the full box, including the border's own thin edge strips, so
@@ -5048,9 +5060,9 @@
         "an empty value has nothing to select -- stale selection-start/end must clamp to [0,0], not paint a highlight against the placeholder's own characters")
     (is (= 0 (:caret caret-op))
         "the collapsed [0,0] range still paints a real caret, at the start of the (empty) value")
-    (is (= 2 (:x caret-op))
+    (is (= 4 (:x caret-op))
         (str "the caret must sit at the box's own inset (position 0 of the
-         empty value), not offset into the placeholder text." "\n         ;; The control's own UA box changed with the platform defaults\n         ;; (padding 4 -> 2, border 0 -> 2, font 14 -> 13 Arial): a browser\n         ;; does not inherit the page font into a form control, and gives\n         ;; it its own padding and border. These numbers follow that box;\n         ;; the behaviour under test is unchanged."))))
+         empty value), not offset into the placeholder text." "\n         ;; The control's own UA box changed with the platform defaults\n         ;; (padding 4 -> 2, border 0 -> 2, font 14 -> 13 Arial): a browser\n         ;; does not inherit the page font into a form control, and gives\n         ;; it its own padding and border. These numbers follow that box;\n         ;; the behaviour under test is unchanged.\n         ;; 2 -> 4 with the border: an <input>'s content edge is its border\n         ;; (2px) plus its padding (2px) in from its border box, in both\n         ;; box-sizing modes -- measured in Brave 2026-08-05, `<input>`\n         ;; reports clientLeft 2 and padding-left 2px. content-inset used\n         ;; to charge only the padding for a content-box control, which put\n         ;; the caret, the value text and the placeholder one border\n         ;; outside the box they belong to."))))
 
 (deftest input-selection-on-a-non-empty-value-is-unaffected-by-this-fix
   (let [ops (input-ops {:value "hello" :placeholder "Search" :start "1" :end "3"})
@@ -5077,8 +5089,14 @@
                                                 :theme {:measure-text fake-char-measure}})))
         at-3 (first (filter :caret? (input-ops {:value "hello" :start "3" :end "3"
                                                 :theme {:measure-text fake-char-measure}})))]
-    (is (= 2 (:x at-0)) "just the control's own inset, zero characters in")
-    (is (= (+ 2 (* 3 7)) (:x at-3)) "inset plus 3 characters at 7px each")))
+    ;; The inset is 4, not 2: an <input>'s content edge is border (2) plus
+    ;; padding (2) in from its border box, in both box-sizing modes --
+    ;; measured in Brave 2026-08-05 (clientLeft 2, padding-left 2px).
+    ;; content-inset used to leave the border out for a content-box
+    ;; element, so every caret was painted one border to the left of the
+    ;; character it points at.
+    (is (= 4 (:x at-0)) "just the control's own inset, zero characters in")
+    (is (= (+ 4 (* 3 7)) (:x at-3)) "inset plus 3 characters at 7px each")))
 
 (deftest input-caret-x-offset-falls-back-to-the-average-char-width-heuristic
   ;; With no :measure-text configured (every pre-existing caller), the
@@ -5086,7 +5104,10 @@
   ;; estimate this fn's own selection-width calculation already used --
   ;; not simply stay at the box edge like before this fix.
   (let [caret-op (first (filter :caret? (input-ops {:value "hello" :start "3" :end "3"})))]
-    (is (= (+ 2 (* 3 (long (* 0.6 (:font-size layout/default-theme))))) (:x caret-op)))))
+    ;; 4 = the control's border (2) + padding (2); see the sibling test
+    ;; above for the measurement. Only the base offset moved, the
+    ;; per-character fallback under test did not.
+    (is (= (+ 4 (* 3 (long (* 0.6 (:font-size layout/default-theme))))) (:x caret-op)))))
 
 (deftest input-selection-reversed-indices-normalize-to-a-valid-forward-range
   ;; A real, if unusual, corner case: selection-start > selection-end
@@ -7477,9 +7498,12 @@
   ;; 18px lower than it would with no legend, and the fieldset is 18px
   ;; taller.
   ;;
-  ;; The x/y below are 2px less than Brave's and the width 4px more, for the
-  ;; border reason ua-control-box's closing paragraph names. The WIDTHS are
-  ;; this engine's own 0.6-em text model rather than Brave's monospace face
+  ;; The x/y below used to be 2px less than Brave's and the width 4px more,
+  ;; for the border reason ua-control-box's closing paragraph named: a
+  ;; content-box element's inset left its border out, and a <fieldset>'s UA
+  ;; border is 2px. inset-side counts the border in both box-sizing modes
+  ;; now, so these are Brave's own numbers. The WIDTHS are still this
+  ;; engine's own 0.6-em text model rather than Brave's monospace face
   ;; (this test builds its DOM directly, so there is no :measure-text host
   ;; hook) -- what is being pinned is that the legend SHRINK-WRAPS at all,
   ;; and by exactly its own 2px-per-side UA padding.
@@ -7493,10 +7517,11 @@
     (is (= 44 lw) "5 characters of this engine's own text model plus 2px of
                    UA padding per side -- shrink-wrapped, not the 775 a
                    block child of this fieldset would get (Brave: 39)")
-    (is (= 12.5 lx) "the fieldset's content edge (Brave 14.5, one border out)")
-    (is (< (abs (- 36.9 py)) 0.05)
-        "band 20 + padding-top 4.9 + the <p>'s own 14px margin (Brave
-         38.891, again one border out)")))
+    (is (= 14.5 lx) "the fieldset's content edge: margin 2 + border 2 +
+                     padding-left 10.5 (Brave 14.5, now matched exactly)")
+    (is (< (abs (- 38.9 py)) 0.05)
+        "border-top band 20 + padding-top 4.9 + the <p>'s own 14px margin
+         (Brave 38.891, now matched)")))
 
 (deftest a-legend-that-is-not-the-rendered-one-stays-in-the-flow
   ;; Four separate readings, each on its own shape:
@@ -7523,9 +7548,12 @@
     (is (= 2 (count legends)))
     (is (= 28 (nth lifted 3))
         "the lifted one shrink-wraps `One` (Brave 25)")
-    (is (< (abs (- 22.9 (nth in-flow 2))) 0.05)
+    ;; 22.9 -> 24.9 and 775 -> 771: the fieldset's 2px UA border now insets
+    ;; its content on every side, so an in-flow child starts one border
+    ;; lower and is two borders narrower. Both are Brave's own numbers.
+    (is (< (abs (- 24.9 (nth in-flow 2))) 0.05)
         "the second stays in the flow just below the band (Brave 24.891)")
-    (is (= 775.0 (nth in-flow 3))
+    (is (= 771.0 (nth in-flow 3))
         "and is a full-width block there, not shrink-wrapped (Brave 771)")
     (is (< (abs (- 65.65 (nth (box-for hidden :fieldset) 4))) 0.05)
         "a display:none legend leaves no band")
@@ -7544,8 +7572,10 @@
                             [:p {} "inside"]]])
         [_ lx ly] (box-for b :legend)]
     (is (< (abs (- 65.65 (nth (box-for b :fieldset) 4))) 0.05))
-    (is (= 12.5 lx))
-    (is (< (abs (- 4.9 ly)) 0.05)
+    ;; 12.5 -> 14.5 and 4.9 -> 6.9: the fieldset's own 2px UA border, which
+    ;; a content-box element's inset used to leave out. Brave 14.5 / 6.891.
+    (is (= 14.5 lx))
+    (is (< (abs (- 6.9 ly)) 0.05)
         "at the content top (Brave 6.891), not in the border band")))
 
 (deftest a-buttons-label-counts-its-markup-and-stays-on-one-line
