@@ -8289,3 +8289,158 @@
                              "transform:translateX(5px)}")
                         nest)]
     (is (= 15.0 (:x inner)))))
+
+;; ---- the UA stylesheet's remaining block boxes, and `aspect-ratio` ----
+;;
+;; Every number below was measured in Brave 151 over CDP on 2026-08-05,
+;; before the code that produces it was written; the case ids are the
+;; conformance corpus's own.
+
+(deftest a-figure-gets-the-same-side-margins-as-a-blockquote
+  ;; `:page/article-with-figure`. `figure { margin: 1em 40px }` is one UA
+  ;; rule and this engine had half of it: the 1em was in ua-margin-scale
+  ;; from the start, the 40px indent was in no table at all. Measured in
+  ;; Brave inside the case's own 300px article -- figure (40, 220), and
+  ;; this engine had (0, 300), which the figure's <img> and <figcaption>
+  ;; then inherited box for box.
+  (let [[figure] (block-boxes [[:figure {} "cap"]])]
+    (is (= [40 320] [(:x figure) (:w figure)])
+        "40px in on each side of a 400px container, not flush against it"))
+  ;; ...and everything inside it moves with it, which is where five of the
+  ;; case's six wrong numbers came from.
+  (let [[_figure caption] (block-boxes [[:figure {} [:figcaption {} "cap"]]])]
+    (is (= [40 320] [(:x caption) (:w caption)])
+        "a figcaption has no margin of its own; it is inside the figure's")))
+
+(deftest menu-is-a-list-container-with-a-lists-box
+  ;; `:block/menu-is-an-indented-list`. `<menu>` was already in
+  ;; list-container-tags for the nested-list margin cancellation while
+  ;; getting neither half of a list's own box. Brave: `margin: 1em 0` and
+  ;; `padding-left: 40px`, identical to `<ul>`.
+  (let [[menu item] (block-boxes [[:menu {} [:li {} "one"]]])
+        [ul ul-item] (block-boxes [[:ul {} [:li {} "one"]]])]
+    (is (= 40 (:x item)) "the 40px list indent")
+    (is (= [(:x ul) (:w ul) (:x ul-item)] [(:x menu) (:w menu) (:x item)])
+        "and the same box a <ul> gets, because it is the same UA rule")))
+
+(deftest an-hr-is-nothing-but-its-own-border
+  ;; `:block/hr-is-its-own-border`. An `<hr>` has no content: its whole box
+  ;; is a 1px border on each side inside `margin: 0.5em 0`. Measured in
+  ;; Brave, alone in a container, it is 2px tall -- this engine drew it 0px
+  ;; tall, so every block below an `<hr>` sat 2px high and the rule itself
+  ;; was invisible.
+  ;;
+  ;; The `inset` border STYLE is not modelled (this engine draws one solid
+  ;; border, see ua-em-box), so what is pinned here is the box, not the
+  ;; bevel.
+  (let [[hr] (block-boxes [[:hr {}]])]
+    (is (= 2 (:h hr)) "1px of border on the top edge and 1px on the bottom")
+    (is (= 400 (:w hr))))
+  ;; The half-em margin only shows against a smaller neighbour: a <p>'s own
+  ;; 1em is larger and collapses over it.
+  (let [[a hr b] (block-boxes [[:div {} "a"] [:hr {}] [:div {} "b"]])]
+    (is (= (+ (:y a) (:h a) 7) (:y hr)) "0.5em of 14px above")
+    (is (= (+ (:y hr) (:h hr) 7) (:y b)) "and below")))
+
+(deftest aspect-ratio-derives-the-height-from-the-width
+  ;; `:sizing/aspect-ratio-derives-the-height`. Brave: a
+  ;; `width: 120px; aspect-ratio: 3/1` block is 120x40 and its parent 40
+  ;; tall; this engine read no ratio at all and left it 20 (one line).
+  (let [[_root outer inner]
+        (cascaded-boxes ".outer{width:400px} .inner{width:120px;aspect-ratio:3 / 1}" nest)]
+    (is (= [0 0 120 40] (xywh inner)))
+    (is (= 40 (:h outer)) "and the parent grows to hold it")))
+
+(deftest aspect-ratio-has-nothing-to-solve-when-both-axes-are-declared
+  ;; `:sizing/aspect-ratio-loses-to-a-declared-height`. Brave: 120x70, not
+  ;; 120x40 -- a declared height is the height, ratio or no ratio.
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px} .inner{width:120px;height:70px;aspect-ratio:3 / 1}" nest)]
+    (is (= [120 70] [(:w inner) (:h inner)]))))
+
+(deftest aspect-ratio-derives-the-width-from-the-height
+  ;; `:sizing/aspect-ratio-derives-the-width`. The other direction, and the
+  ;; one that costs a block its fill-the-container width: Brave reports 180
+  ;; wide inside a 400px parent, not 400.
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px} .inner{height:60px;aspect-ratio:3 / 1}" nest)]
+    (is (= [180 60] [(:w inner) (:h inner)])))
+  ;; ...and with neither axis declared the inline axis still fills first,
+  ;; and only then does the ratio derive the block axis from it.
+  ;; `:sizing/aspect-ratio-with-no-width-at-all`.
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px} .inner{aspect-ratio:3 / 1}" nest)]
+    (is (= [400 133] [(:w inner) (:h inner)])
+        "400/3, which Brave reports as 133.328 and this engine floors")))
+
+(deftest aspect-ratio-reads-every-form-of-the-value
+  ;; `:sizing/aspect-ratio-auto-is-no-ratio`,
+  ;; `:sizing/aspect-ratio-auto-and-a-ratio`,
+  ;; `:sizing/aspect-ratio-single-number`. All four measured in Brave on a
+  ;; 120px block: `auto` leaves the height content-driven, `auto 3/1` and
+  ;; `3/1 auto` both behave as `3/1` on a non-replaced element, `1.5` is
+  ;; 1.5/1, and a degenerate `0/1` is not a ratio at all.
+  (let [h (fn [decl]
+            (let [[_root _outer inner]
+                  (cascaded-boxes (str ".outer{width:400px} .inner{width:120px;" decl "}") nest)]
+              (:h inner)))]
+    (is (= 20 (h "aspect-ratio:auto")) "one line, the content height")
+    (is (= 40 (h "aspect-ratio:auto 3 / 1")))
+    (is (= 40 (h "aspect-ratio:3 / 1 auto")))
+    (is (= 60 (h "aspect-ratio:2")) "<number> with the / half omitted is over 1")
+    (is (= 80 (h "aspect-ratio:1.5")))
+    (is (= 20 (h "aspect-ratio:0 / 1")) "a degenerate ratio is dropped, not divided by")))
+
+(deftest aspect-ratio-is-a-floor-under-the-content-not-a-ceiling-over-it
+  ;; `:sizing/aspect-ratio-yields-to-content`. A ratio-sized box with
+  ;; visible overflow has an automatic MINIMUM size in the
+  ;; ratio-dependent axis (CSS Sizing 4), so content taller than the ratio
+  ;; wins: measured in Brave, a `width: 40px; aspect-ratio: 3/1` box around
+  ;; a string that wraps to six lines is 144 tall there and 120 here (six
+  ;; 20px lines against six 24px ones -- the line height differs, the rule
+  ;; does not), never the 13 the ratio asks for.
+  (let [wrapping (fn [doc root]
+                   (let [[outer doc] (dom/create-element doc :div)
+                         doc (dom/append-child doc root outer)
+                         doc (dom/set-attribute doc outer :class "outer")
+                         [inner doc] (dom/create-element doc :div)
+                         doc (dom/append-child doc outer inner)
+                         doc (dom/set-attribute doc inner :class "inner")
+                         [t doc] (dom/create-text-node doc "a much longer content string here")]
+                     (dom/append-child doc inner t)))
+        [_root _outer inner]
+        (cascaded-boxes ".outer{width:400px} .inner{width:40px;aspect-ratio:3 / 1}" wrapping)]
+    (is (> (:h inner) 13) "the ratio does not truncate the content")
+    (is (= 40 (:w inner)) "and the declared width is untouched")))
+
+(deftest aspect-ratio-governs-the-box-that-box-sizing-names
+  ;; `:sizing/aspect-ratio-with-padding`. Measured in Brave on
+  ;; `width: 120px; aspect-ratio: 3/1; padding: 10px`: 140x60 with the
+  ;; default content-box (the ratio relates the 120x40 CONTENT boxes and
+  ;; the padding sits outside both) and 120x44 with border-box (the ratio
+  ;; relates the border boxes, giving 40, and the content's own 24 + 20 of
+  ;; padding then pushes it to 44 by the automatic minimum above).
+  (let [[_root _outer inner]
+        (cascaded-boxes ".outer{width:400px} .inner{width:120px;aspect-ratio:3 / 1;padding:10px}" nest)]
+    (is (= [140 60] [(:w inner) (:h inner)])))
+  (let [[_root _outer inner]
+        (cascaded-boxes (str ".outer{width:400px} "
+                             ".inner{width:120px;aspect-ratio:3 / 1;padding:10px;box-sizing:border-box}")
+                        nest)]
+    (is (= [120 40] [(:w inner) (:h inner)])
+        "at this engine's 20px line the ratio's 40 still clears the
+         content's 20 + 20 of padding, so 40 is both answers at once")))
+
+(deftest min-and-max-height-clamp-the-ratios-answer-like-any-other
+  ;; `:sizing/aspect-ratio-under-max-height`. Brave: the same 120px box is
+  ;; 80 tall under `min-height: 80px` and 20 tall under `max-height: 20px`
+  ;; -- the ratio produces a height, and the clamps then apply to it
+  ;; exactly as they apply to a declared or content-driven one.
+  (let [h (fn [decl]
+            (let [[_root _outer inner]
+                  (cascaded-boxes (str ".outer{width:400px} "
+                                       ".inner{width:120px;aspect-ratio:3 / 1;" decl "}")
+                                  nest)]
+              (:h inner)))]
+    (is (= 80 (h "min-height:80px")))
+    (is (= 20 (h "max-height:20px")))))
