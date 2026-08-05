@@ -11341,3 +11341,193 @@
     (is (every? #(zero? (:opacity %))
                 (filter #(and (= :text (:draw/op %)) (= "inner" (:text %))) ops))
         "including its text")))
+
+;; ---- intrinsic width keywords, flex min/max redistribution, <dialog> ----
+;;
+;; One missing capability under three symptoms. Every number below was
+;; measured in Brave 151 over CDP on 2026-08-06, in the conformance
+;; harness's own frame -- 14px monospace, a 20px line box, 7px per
+;; character -- which is what `tm-boxes` reproduces, so the assertions are
+;; the browser's own numbers and not this engine's approximation of them.
+
+(deftest width-min-content-max-content-and-fit-content
+  ;; `:sizing/min-width-min-content`, `:sizing/width-max-content`,
+  ;; `:sizing/width-fit-content`. All three behaved as `auto` and took the
+  ;; whole 300px container; the harness reported the min-content case at
+  ;; 12 paint points as well (`div -> none`), because a 300x20 box paints
+  ;; nowhere near where a 35x40 one does.
+  (let [w (fn [outer decl]
+            (nth (second (tm-boxes (str "<div style=\"width:" outer "px\">"
+                                        "<div style=\"width:" decl "\">alpha beta</div></div>")))
+                 3))]
+    (is (= 35 (w 300 "min-content")) "the longest word, wrapped onto two lines")
+    (is (= 70 (w 300 "max-content")) "the whole run on one line")
+    (is (= 70 (w 300 "fit-content")) "= max-content, since 300 is wider than it")
+    (is (= 300 (w 300 "auto"))
+        "CONTROL: an ordinary block still fills its containing block")
+    ;; fit-content is min(max-content, max(min-content, available)) --
+    ;; measured at five container widths: 300 -> 70, 60 -> 60, 50 -> 50,
+    ;; 40 -> 40, 20 -> 35.
+    (is (= 50 (w 50 "fit-content")) "narrower than max-content: the room")
+    (is (= 35 (w 20 "fit-content")) "narrower than min-content: min-content, overflowing")
+    (is (= 70 (w 20 "max-content")) "max-content never narrows, it overflows")
+    (is (= 35 (w 20 "min-content")) "nor does min-content")))
+
+(deftest an-intrinsic-keyword-is-a-content-size-in-both-box-sizing-modes
+  ;; The fact that decides where the resolution has to be WRITTEN: a
+  ;; declared length differs by the inset between the two modes and a
+  ;; keyword does not. Measured, `padding: 0 6px; border: 2px` over
+  ;; `alpha beta`: `max-content` is 86 either way, `70px` is 86 and 70.
+  (let [w (fn [decl mode]
+            (nth (second (tm-boxes (str "<div style=\"width:300px\"><div style=\"width:" decl
+                                        ";padding:0 6px;border:2px solid;box-sizing:" mode
+                                        "\">alpha beta</div></div>")))
+                 3))]
+    (is (= 86 (w "max-content" "content-box")))
+    (is (= 86 (w "max-content" "border-box"))
+        "the padding and border are added on top of an intrinsic size even here")
+    (is (= 51 (w "min-content" "content-box")) "35 + 16")
+    (is (= 86 (w "70px" "content-box")) "CONTROL: a declared length under content-box")
+    (is (= 70 (w "70px" "border-box")) "CONTROL: ...and the 16px it differs by under border-box")))
+
+(deftest min-content-descends-through-a-child-s-own-box
+  ;; Why min-content is a recursion and not the longest word in the
+  ;; subtree: measured, a `min-content` box holding
+  ;; `<div style="padding:0 10px">alpha beta</div>` is 55 -- the 35px word
+  ;; plus the CHILD's 20px of padding, which a word scan cannot see. And a
+  ;; child with a declared width contributes that width at min-content
+  ;; exactly as it does at max-content.
+  (let [w (fn [decl inner]
+            (nth (second (tm-boxes (str "<div style=\"width:300px\"><div style=\"width:" decl "\">"
+                                        inner "</div></div>")))
+                 3))]
+    (is (= 55 (w "min-content" "<div style=\"padding:0 10px\">alpha beta</div>")))
+    (is (= 90 (w "max-content" "<div style=\"padding:0 10px\">alpha beta</div>"))
+        "the same child at max-content, 70 + 20 -- the recursion is the same shape")
+    (is (= 35 (w "min-content" "<div>alpha beta</div><div>bb</div>"))
+        "the widest of the children's own min-contents")
+    (is (= 40 (w "min-content" "<div style=\"width:40px;height:5px\"></div>"))
+        "a declared width is the child's min-content too")
+    (is (= 40 (w "max-content" "<div style=\"width:40px;height:5px\"></div>"))
+        "and its max-content, the same number")
+    (is (= 300 (w "auto" "<div style=\"padding:0 10px\">alpha beta</div>"))
+        "CONTROL: none of this reaches a box that declared no keyword"))
+  ;; and the same child inside a bordered box: 40 + this box's own 2px,
+  ;; which is what Brave reports for both keywords
+  (is (= 42 (nth (second (tm-boxes (str "<div style=\"width:300px\"><div style=\"width:min-content;"
+                                        "border:1px solid\"><div style=\"width:40px;height:5px\">"
+                                        "</div></div></div>")))
+                 3))))
+
+(deftest a-clamped-flex-item-gives-its-surplus-back-to-the-line
+  ;; `:sizing/min-width-on-a-flex-item`, `:sizing/max-width-on-a-flex-item`
+  ;; -- reported by the harness as `div x +90` and `div w` off. The clamp
+  ;; reached the item's own box and never the LINE, so the clamped item was
+  ;; drawn at its clamped size while its sibling kept the size and offset
+  ;; the UNclamped distribution had given it: in a 200px row a
+  ;; `min-width: 150px` item was 150 wide with its neighbour at x=100,
+  ;; running 50px past the container.
+  (let [row (fn [w & items]
+              (->> (tm-boxes (str "<div style=\"width:" w "px;display:flex\">"
+                                  (apply str items) "</div>"))
+                   rest
+                   (mapv (fn [[_ x _ bw _]] [x bw]))))
+        item (fn [style label] (str "<div style=\"" style "\">" label "</div>"))]
+    (is (= [[0 150] [150 50]]
+           (row 200 (item "flex:1;min-width:150px" "a") (item "flex:1" "b")))
+        "the floored item's 100px of unspent room goes to its sibling")
+    (is (= [[0 60] [60 240]]
+           (row 300 (item "flex:1;max-width:60px" "a") (item "flex:1" "b")))
+        "and a capped item's surplus does too")
+    ;; The shape that says the loop is a LOOP. One pass proposes
+    ;; 100/100/100, freezes the first at 30 and offers its 70 to the other
+    ;; two (135/135) -- and only THEN is the second item's own maximum
+    ;; violated. Clamp-once reports 30/110/135 and drops 25px.
+    (is (= [[0 30] [30 110] [140 160]]
+           (row 300 (item "flex:1;max-width:30px" "a")
+                (item "flex:1;max-width:110px" "b") (item "flex:1" "c")))
+        "a second violation, visible only after the first freeze")
+    (is (= [[0 30] [30 200] [230 70]]
+           (row 300 (item "flex:1;max-width:30px" "a")
+                (item "flex:1;min-width:200px" "b") (item "flex:1" "c")))
+        "a MIN and a MAX violation in the same pass")
+    (is (= [[0 20] [20 280]]
+           (row 300 (item "flex:1;max-width:20px" "averylongunbrokenword")
+                (item "flex:1" "b")))
+        "an explicit maximum caps the AUTOMATIC min-content minimum too (§4.5)")
+    (is (= [[0 84] [84 216]]
+           (row 300 (item "flex:1;max-width:60px;padding:0 10px;border:2px solid" "a")
+                (item "flex:1" "b")))
+        "`max-width` limits the CONTENT box, so the 24px inset sits outside it")
+    (is (= [[0 60] [60 240]]
+           (row 300 (item "flex:1;max-width:60px;padding:0 10px;border:2px solid;box-sizing:border-box" "a")
+                (item "flex:1" "b")))
+        "...and the whole box under border-box")
+    (is (= [[0 150] [150 150]]
+           (row 300 (item "flex:1;max-width:500px" "a") (item "flex:1" "b")))
+        "CONTROL: a clamp nothing reaches changes nothing")
+    (is (= [[0 150] [150 150]]
+           (row 300 (item "flex:1" "a") (item "flex:1" "b")))
+        "CONTROL: and neither does no clamp at all")))
+
+(deftest a-column-flex-item-s-declared-min-height-redistributes-too
+  ;; The same rule on the block axis, and the reason it is written even
+  ;; though the AUTOMATIC minimum still is not: an author's `min-height` is
+  ;; a number, not a guess. Measured, a 200px-tall column of two `flex: 1`
+  ;; items with `min-height: 150px` on the first is 150 / 50.
+  (let [ys (->> (tm-boxes (str "<div style=\"width:200px;height:200px;display:flex;"
+                               "flex-direction:column\">"
+                               "<div style=\"flex:1;min-height:150px\">a</div>"
+                               "<div style=\"flex:1\">b</div></div>"))
+                rest
+                (mapv (fn [[_ _ y _ _]] y)))]
+    (is (= [0 150] ys) "the second item starts where the floored first one ends"))
+  (let [ys (->> (tm-boxes (str "<div style=\"width:200px;height:200px;display:flex;"
+                               "flex-direction:column\">"
+                               "<div style=\"flex:1\">a</div>"
+                               "<div style=\"flex:1\">b</div></div>"))
+                rest
+                (mapv (fn [[_ _ y _ _]] y)))]
+    (is (= [0 100] ys) "CONTROL: with no clamp the two split the column evenly")))
+
+(deftest an-open-dialog-is-an-absolutely-positioned-fit-content-box
+  ;; `:interactive/dialog-open-is-a-bordered-block`. The UA rule is
+  ;; `position: absolute; inset-inline: 0; width: fit-content;
+  ;; height: fit-content; margin: auto; border: solid; padding: 1em`, and
+  ;; the previous round measured that adding it while `fit-content` still
+  ;; behaved as `auto` moved NOT ONE BOX -- the dialog stayed 300 wide, so
+  ;; the leftover the auto margins split was zero. Measured in Brave: 48x54
+  ;; at x=126 = (300 - 48) / 2 inside a 300px `position: relative` parent.
+  (let [b (tm-boxes (str "<div style=\"width:300px;position:relative;height:80px\">"
+                         "<dialog open>Hi</dialog></div>"))]
+    (is (= [:div 0 0 300 80] (first b)) "the parent keeps its declared box")
+    (is (= [:dialog 126 0 48 54] (second b))
+        "14px of `Hi` + 28px of `padding: 1em` + 6px of `border: solid`, centred")
+    (is (= [[:div 0 0 300 0]]
+           (tm-boxes "<div style=\"width:300px\"><dialog>Hidden</dialog></div>"))
+        "CONTROL: a closed dialog is `display: none`, has no box at all, and
+         leaves its parent empty")))
+
+(deftest an-auto-margin-centres-an-absolutely-positioned-box
+  ;; The general rule the dialog is one instance of (CSS 2.1 §10.3.7 /
+  ;; §10.6.4), measured on a plain 70px box in a 300px `position: relative`
+  ;; parent -- both margins auto 115, only the start auto 230, only the end
+  ;; auto 0, neither 0 -- and on the block axis, a 20px box in a 60px
+  ;; parent with `top: 0; bottom: 0; margin: auto` at y=20.
+  (let [at (fn [style]
+             (second (tm-boxes (str "<div style=\"width:300px;position:relative;height:60px\">"
+                                    "<div style=\"position:absolute;" style "\">x</div></div>"))))]
+    (is (= [:div 115 0 70 20] (at "left:0;right:0;margin:auto;width:70px")))
+    (is (= [:div 230 0 70 20] (at "left:0;right:0;margin-left:auto;width:70px"))
+        "one auto margin takes the whole leftover")
+    (is (= [:div 0 0 70 20] (at "left:0;right:0;margin-right:auto;width:70px")))
+    (is (= [:div 125 0 70 20] (at "left:20px;right:0;margin:auto;width:70px"))
+        "the leftover is what is left BETWEEN the two insets")
+    (is (= [:div 0 20 70 20] (at "top:0;bottom:0;margin:auto;width:70px;height:20px"))
+        "the same rule on the block axis")
+    (is (= [:div 0 0 70 20] (at "left:0;right:0;width:70px"))
+        "CONTROL: with no auto margin `left` wins outright, as before")
+    (is (= [:div 0 0 70 20] (at "left:0;margin:auto;width:70px"))
+        "CONTROL: and an auto margin does nothing without BOTH insets")
+    (is (= [:div 0 0 300 20] (at "left:0;right:0;margin:auto"))
+        "CONTROL: a box with no width is STRETCHED, so there is no leftover")))
