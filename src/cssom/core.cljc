@@ -3951,6 +3951,8 @@
   colgroup { display: table-column-group }
   button, input, select, textarea { display: inline-block }
   [hidden] { display: none }
+  template { display: none }
+  dialog:not([open]) { display: none }
 
   b, strong, th, h1, h2, h3, h4, h5, h6 { font-weight: bold }
   address, cite, dfn, em, i, var { font-style: italic }

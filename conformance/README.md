@@ -804,6 +804,212 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round thirty-two: the corpus grows 370 → 431, into layout it had never entered
+
+All four axes were at or rounding to **100%** on the 370-case corpus —
+line structure 356/356, geometry 1335/1335 boxes across 370/370 cases,
+paint order 9227/9234, computed style 18687/18763. **A corpus that scores
+100% can no longer find defects.** Growing it is the only thing left that
+teaches anything, and the numbers are *expected* to fall: a fall that
+comes from coverage is a better measurement, not a regression.
+
+61 cases, every one of them measured in Brave 151 over CDP *before* it was
+added to the corpus. The territory was chosen by inventorying the case-id
+prefixes and then targeting what had no case at all.
+
+| axis | 370 cases | 431 cases |
+|---|---|---|
+| line structure | 356/356 = **100%** | 397/414 = **96%** |
+| geometry (boxes) | 1335/1335 = **100%** | 1507/1584 = **95%** |
+| geometry (clean cases) | 370/370 | 400/431 |
+| paint order (points) | 9227/9234 | 10703/10764 |
+| paint order (clean cases) | 364/370 | 414/431 |
+| computed style (values) | 18687/18763 | 22183/22273 |
+| computed style (clean cases) | 332/370 | 389/431 |
+| computed style (clean of a CASCADE mismatch) | 369/370 | 429/431 |
+
+The right column is *after* the four fixes below; without them it would be
+lower still. 736 unit tests / 1702 assertions, 0 failures either side; 0
+lint errors, the same 25 pre-existing warnings, all in `test/`.
+
+#### What the new cases cover
+
+**multi-column, 12 cases.** `column-count` appears nowhere in `src/`, and
+the only `column-gap` there is the grid/flex longhand — so these measure
+the size of the gap rather than assert one exists. `column-count`,
+`column-width` deriving the count, `column-gap: normal` (1em on a multicol
+box, unlike the 0 it means on a grid), `column-rule` taking no space,
+`break-inside: avoid` against a control that lets the block split,
+`column-span: all`, `column-fill: auto`, a definite height overflowing
+sideways, padding outside the columns, and text flowing at the *column's*
+inline size.
+
+**`position: sticky`, 4 cases.** The corpus had one, and it covered the
+unscrolled default — which `layout.cljc` is explicitly, correctly scoped
+out of. But a sticky box **is stuck with no scrolling at all** when it is
+anchored to the far edge of a scrollport it starts below, and that is what
+these use. No `:oracle/isolated` needed: the harness scrolls the *window*,
+and these anchor inside an inner scroll container, so the measurement does
+not depend on where the case sits on the page.
+
+**interactive elements, 9 cases.** `<details>` closed, open, and with no
+`<summary>`; `<dialog>` with and without `open`; `<template>`; the
+`hidden` attribute and an author `display` beating it.
+
+**tables, 8 cases.** Nested tables, `caption-side: bottom`, `<colgroup
+span>`, `table-layout: fixed` with overflowing content, `empty-cells`,
+`<tfoot>` written before `<tbody>`, a bare `<col>`, a percentage cell
+width.
+
+**intrinsic sizes and clamps, 10 cases.** `min-width`/`max-width` on flex
+and grid items, `min-content`/`max-content`/`fit-content` as `width`
+values, the automatic minimum size of a flex item and what `overflow:
+hidden` does to it.
+
+**`gap`, 5 cases**, across the three box types that take one: percentage
+gaps on both axes, `row-gap` between flex lines, `gap` on a multicol box,
+the two-value shorthand.
+
+**scroll containers, 7 cases**, and **5 real-page composites** (labelled
+`:composite`): a sidebar, a sticky header over scrolling content, a card
+grid, a two-column article, a data table with a caption and a foot.
+
+#### Four fixes the new cases found
+
+**1. A flex container read the single `:gap` for both axes.** `row-gap`,
+`column-gap`, and the second half of `gap: <row> <column>` all did nothing
+on a flex box, while a grid two lines away in the same `node-style` map
+honoured all three. Measured: `flex-wrap: wrap; row-gap: 12px;
+column-gap: 8px` over two 120px items in a 200px box is **52px** tall with
+the second line at **y=32** in Brave; this engine had 40 and y=20. And
+`gap: 6px 18px` on a flex row put the second item at **x=106** where Brave
+says 118 — the shorthand's row half used for the column axis, because
+`parse-int "6px 18px"` is 6. `layout-flex` now takes its main-axis gap
+from `column-gap`/`row-gap` by direction, and `layout-flex-wrap-row` takes
+its cross-axis gap from `row-gap`.
+
+**2. `distribute-excess` grew a column a `<col>` had DECLARED.** A table's
+surplus width is handed to its columns in proportion to their demand,
+which is right for automatic columns and wrong for declared ones.
+Measured: `<table style="width:300px"><col style="width:200px"><col>
+<tr><td>a</td><td>b</td></tr></table>` is **200 + 94** in Brave; this
+engine had **281 + 13**. Declared columns are now locked and the automatic
+ones absorb the surplus. When *every* column is declared the proportional
+hand-out still applies — `table-fixed-column-widths` relies on exactly
+that, and its own case is unchanged.
+
+**3. Row groups were laid out in SOURCE order.** `<tfoot>` before
+`<tbody>` is idiomatic HTML — it exists so a UA can paint the footer
+before it has streamed the body — and it renders **last**. Measured, Brave
+puts `tfoot` at y=26 and `tbody` at y=2; this engine had them the other
+way round. `table-rows` now partitions header/body/footer, stably, so
+order *within* a group is still document order.
+
+**4. Two UA rules the sheet was missing.** `template { display: none }`
+and `dialog:not([open]) { display: none }`. A closed `<dialog>` rendered
+its own text straight into the page — the text of a dialog nobody has
+opened, which is as visible a bug as this corpus has found in a while.
+
+#### The new divergences, grouped by cause
+
+**No multi-column implementation at all** — 11 cases, ~90 box mismatches,
+and the single largest cluster in the corpus. Columns are laid out as one
+stacked block column: `column-count: 2` over four 30px blocks is
+(0,0) (0,30) (160,0) (160,30) in Brave and (0,0) (0,30) (0,60) (0,90)
+here, and text wraps at the container's 300px rather than the column's
+140px. `column-span: all` is the one case that passes the line axis, by
+coincidence — the spanner is full-width either way.
+
+**No scroll-position-dependent sticky offset** — 2 cases. A `bottom: 0`
+sticky box whose flow position is below its scrollport is pulled **up** to
+sit on it (y=100 → **40**), and clamped by its containing block when that
+is what stops it (100 → **80**, not the 40 the inset asks for). The two
+unscrolled cases still agree, so the same round both confirms the existing
+scope-cut is correct *and* bounds it.
+
+**`width: min-content | max-content | fit-content` is treated as `auto`** —
+3 cases. `min-content` over "alpha beta" is **35px** in Brave and 300
+here; `max-content` and `fit-content` are **70** and 300. The intrinsic
+measurement itself already exists in `layout.cljc` — tables and flex items
+both use it — it is simply not wired to the `width` property. This is the
+cheapest-looking of the remaining gaps.
+
+**Flex min/max clamping does not redistribute** — 2 cases. `min-width:
+150px` on one of two `flex: 1` items in a 200px row leaves the other at
+its unclamped **100** instead of the **50** that is left, and `max-width:
+60px` in a 300px row leaves it at 150 instead of 240. The clamp is
+applied; the freeze-and-re-run loop that gives the freed space to the
+other items is not there.
+
+**Percentage gaps are read as pixels** — 2 cases. `column-gap: 10%` of a
+300px grid is **30** in Brave and 10 here. The block axis is the cyclic
+one: Brave resolves a 10% row gap against the grid's *own* 40px content
+height and gets **4**. Both are the same defect — `node-style` runs
+`parse-int` on the string, and it has no available size to resolve a
+percentage against, which is where a fix belongs.
+
+**Inline-blocks wrap inside a `white-space: nowrap` scroll container** —
+2 cases, and this one was *re-attributed* by a control. The sticky
+horizontal-scroller case looked like a sticky failure; the identical
+markup without the sticky wraps the second inline-block onto a second line
+too (container 40px tall, not 20), so the wrap is the cause and the sticky
+pull (x=300 → 160 in Brave) is a second, smaller one on top of it.
+
+**`caption-side: bottom`** — 2 cases. Already a documented scope-cut in
+`layout-table`'s docstring; now it has a number: the caption is 26px down
+in Brave and at 0 here, and everything below it shifts by its height.
+
+**The `<dialog open>` UA box** — 1 case. `position: absolute; margin:
+auto; width: fit-content; height: fit-content; border: solid; padding:
+1em` gives **48x54 at x=126**; this engine lays out an ordinary 300x20
+block. Left alone deliberately: it cannot be right until `fit-content`
+(above) is, and adding the padding alone would move the numbers without
+converging on them.
+
+**A `<details>` with no `<summary>`** — 1 case. Brave synthesises one and
+the element is 20px tall; this engine renders it as empty.
+`with-details-visibility`'s docstring already says a summary-less
+`<details>` is out of scope, so this is that scope-cut, measured.
+
+**Not a `cssom` finding, recorded where it was seen:** `htmldom` does not
+synthesise the implicit `<colgroup>` a real HTML parser inserts around a
+bare `<col>`, so Brave reports one box this side has not got. The declared
+width now resolves correctly either way (fix 2); only the box count
+differs.
+
+#### Two cases are `:oracle/blind`, for the reason the corpus already has
+
+`:interactive/details-closed-shows-only-the-summary`. Chromium hides a
+closed `<details>`'s content with `content-visibility: hidden`, **not**
+`display: none`: measured, the `<p>` reports a real 300x20 box at y=34 and
+a `Range` reads "Body" out of it — and it is never painted. An engine that
+emits draw-ops cannot report a box it does not paint. This is the
+`text-overflow: ellipsis` situation exactly: comparing the two on text
+compares a DOM to a rendering. Geometry and paint order still score.
+
+`:page/sidebar-with-a-nav-list`, for list markers, exactly like
+`:page/nested-lists-in-nav`.
+
+#### One thing the harness cannot see, so no case was added
+
+`object-fit` / `object-position` change what is painted **inside** a
+replaced element's box. They change neither the box, nor hit testing, nor
+any of the 14 properties the computed-style axis compares — there is
+nothing here for either side to disagree about, at any value. A case that
+can never be scored does not belong in the corpus, and saying so is more
+useful than a case that passes for a reason unrelated to the feature.
+
+#### One case was written expecting a divergence and found none
+
+`:overflow/auto-reserves-no-gutter-in-this-oracle` (and the two beside
+it). A classic scrollbar takes its width out of a scroll container's
+*content* box, and this engine reserves nothing — so this looked like a
+guaranteed 15px divergence. Brave 151 headless on macOS uses **overlay
+scrollbars** and reserves nothing either. The three cases stay in, named
+for what they actually measure: on a classic-scrollbar oracle they would
+all diverge by the gutter width, and this corpus should notice when the
+oracle changes underneath it.
+
 ### Round thirty-one: an element's box and its hit region are two different things
 
 The paint-order axis was at **9202/9234, 356/370 clean**, and its whole
