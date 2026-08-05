@@ -7314,6 +7314,154 @@
     (is (= 0 (:y p))
         "padding-BOTTOM has nothing to do with the top edge")))
 
+;; ---- a self-collapsing block's own two margins are adjoining ----
+;;
+;; CSS 2.1 SS8.3.1's third collapsing case, the one this engine had not got.
+;; Every number below was measured in Brave 151 on 2026-08-05, fifteen
+;; shapes on one page, `margin: 14px 0` on the empty box and 20px-tall
+;; siblings around it. `root-box` is the container the specs are laid out
+;; in, whose HEIGHT is what the collapsing actually decides.
+
+(defn- root-and-block-boxes
+  "block-boxes, but with the root <div> kept -- its height is the number
+   these tests are about."
+  [specs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build-inline-children doc root specs)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})]
+    (mapv #(select-keys % [:tag :x :y :w :h])
+          (filterv #(= :node (:draw/op %)) ops))))
+
+(deftest an-empty-block-does-not-separate-the-boxes-around-it
+  ;; Brave: `<div><div style="margin:14px 0"></div><div style="height:20px">
+  ;; </div></div>` is 20px tall with BOTH children at y=0 -- the empty box's
+  ;; own two margins collapse together, that collapsed margin then collapses
+  ;; with the second child's, and the whole set escapes the container's top
+  ;; edge. This engine made the container 34 with the second child at 14.
+  (let [[root empty-box after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14}]
+                               [:div {:height 20} "a"]])]
+    (is (= 20 (:h root)))
+    (is (= 0 (:y empty-box)))
+    (is (= 0 (:y after))))
+  ;; and the corpus's own shape, an empty <p> taking the same margins from
+  ;; the UA sheet
+  (let [[root p1 p2] (root-and-block-boxes [[:p {}] [:p {} "x"]])]
+    (is (= 20 (:h root)))
+    (is (= 0 (:y p1)))
+    (is (= 0 (:y p2)))))
+
+(deftest an-empty-block-between-two-siblings-collapses-into-one-gap
+  ;; Brave, sibling / empty / sibling: the empty box is at y=34 and the
+  ;; second sibling at y=34 TOO -- one 14px gap, not two.
+  (let [[root before empty-box after]
+        (root-and-block-boxes [[:div {:height 20} "b"]
+                               [:div {:margin-top 14 :margin-bottom 14}]
+                               [:div {:height 20} "a"]])]
+    (is (= 54 (:h root)))
+    (is (= [0 20] [(:y before) (:h before)]))
+    (is (= 34 (:y empty-box)))
+    (is (= 34 (:y after)))))
+
+(deftest a-self-collapsing-blocks-drawn-position-is-not-where-the-flow-resumes
+  ;; The pair that separates the two numbers, and the reason they are
+  ;; computed apart. Brave, with margin-top 5 and margin-bottom 30 on the
+  ;; empty box: it is drawn at y=25 (its own top margin below the first
+  ;; sibling) and the flow resumes at y=50 (`collapse(5, 30)`), NOT at 55.
+  (let [[_ _ empty-box after]
+        (root-and-block-boxes [[:div {:height 20} "b"]
+                               [:div {:margin-top 5 :margin-bottom 30}]
+                               [:div {:height 20} "a"]])]
+    (is (= 25 (:y empty-box)))
+    (is (= 50 (:y after))))
+  ;; the mirror: margin-top 30, margin-bottom 5 -- both numbers are 50
+  (let [[_ _ empty-box after]
+        (root-and-block-boxes [[:div {:height 20} "b"]
+                               [:div {:margin-top 30 :margin-bottom 5}]
+                               [:div {:height 20} "a"]])]
+    (is (= 50 (:y empty-box)))
+    (is (= 50 (:y after)))))
+
+(deftest block-axis-padding-or-a-border-stops-a-box-self-collapsing
+  ;; Brave: `padding-top: 1px` makes the box 1px tall at y=0 and puts the
+  ;; sibling at y=15. Padding on the INLINE axis does not -- the same
+  ;; markup with `padding-left: 20px` is the fully-collapsed 20px tall.
+  (let [[root empty-box after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14 :padding-top 1}]
+                               [:div {:height 20} "a"]])]
+    (is (= 35 (:h root)))
+    (is (= 15 (:y after)))
+    (is (= 0 (:y empty-box))))
+  (let [[root _ after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14 :padding-left 20}]
+                               [:div {:height 20} "a"]])]
+    (is (= 20 (:h root)))
+    (is (= 0 (:y after))))
+  ;; a declared block-axis border stops it too, read from the raw
+  ;; declaration because this engine's box model has one uniform
+  ;; border-width -- see `self-collapsing-block?`
+  (let [[root _ after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14
+                                      :border-top "1px solid red"}]
+                               [:div {:height 20} "a"]])]
+    (is (= 34 (:h root))
+        "not the browser's 35 -- this engine draws no per-side border, so
+         the box is 0 tall rather than 1 -- but it does NOT collapse")
+    (is (= 14 (:y after)))))
+
+(deftest a-zero-height-box-with-content-in-it-is-not-self-collapsing
+  ;; The shape `child-h` alone cannot tell apart. Brave, `height: 0` with
+  ;; text inside: the sibling is at y=14, not 0, because the line box is
+  ;; in-flow content and the two margins are therefore not adjoining.
+  (let [[root _ after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14 :height 0} "text inside"]
+                               [:div {:height 20} "a"]])]
+    (is (= 34 (:h root)))
+    (is (= 14 (:y after)))))
+
+(deftest a-block-formatting-context-root-never-self-collapses
+  ;; Brave, `overflow: hidden` on the empty box between two siblings: the
+  ;; empty box is at y=34 and the sibling at y=48 -- its own two margins do
+  ;; NOT collapse through it, so it still separates them.
+  (let [[root _ empty-box after]
+        (root-and-block-boxes [[:div {:height 20} "b"]
+                               [:div {:margin-top 14 :margin-bottom 14 :overflow "hidden"}]
+                               [:div {:height 20} "a"]])]
+    (is (= 68 (:h root)))
+    (is (= 34 (:y empty-box)))
+    (is (= 48 (:y after)))))
+
+(deftest self-collapsing-blocks-chain
+  ;; Brave: two empty boxes then a sibling is still one 20px container with
+  ;; everything at y=0, and so is an empty box whose only child is another
+  ;; empty box.
+  (let [[root a b after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14}]
+                               [:div {:margin-top 14 :margin-bottom 14}]
+                               [:div {:height 20} "a"]])]
+    (is (= 20 (:h root)))
+    (is (= [0 0 0] [(:y a) (:y b) (:y after)])))
+  (let [[root outer inner after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14}
+                                [:div {:margin-top 14 :margin-bottom 14}]]
+                               [:div {:height 20} "a"]])]
+    (is (= 20 (:h root)))
+    (is (= [0 0 0] [(:y outer) (:y inner) (:y after)]))))
+
+(deftest a-self-collapsing-first-child-inside-padding-still-collapses-with-its-sibling
+  ;; The container's padding stops the set ESCAPING but not the set
+  ;; forming. Brave, container `padding-top: 5px`: the empty box and the
+  ;; sibling are both at y=19 (5 + 14) and the container is 39 tall.
+  (let [boxes (root-and-block-boxes [[:div {:padding-top 5}
+                                      [:div {:margin-top 14 :margin-bottom 14}]
+                                      [:div {:height 20} "a"]]])
+        [_ wrapper empty-box after] boxes]
+    (is (= 39 (:h wrapper)))
+    (is (= 19 (:y empty-box)))
+    (is (= 19 (:y after)))))
+
 ;; ---- UA stylesheet: a nested list has no vertical margin ----
 
 (deftest a-nested-list-has-no-vertical-margin-of-its-own
