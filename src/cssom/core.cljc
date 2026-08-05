@@ -901,6 +901,16 @@
       (and (= "line-height" k-lower) (re-matches #"\s*-?\d+\s*" (str v)))
       (str/trim (str v))
 
+      ;; `columns` is the multi-column shorthand for `column-width ||
+      ;; column-count`, and it has line-height's problem in its sharpest
+      ;; form: which HALF a single value sets is decided by its unit and
+      ;; nothing else (`columns: 3` is three columns, `columns: 3px` is a
+      ;; 3px column width), so the coercion above -- which turns both into
+      ;; the number 3 -- destroys the only thing that tells them apart. Kept
+      ;; whole and raw, exactly as the two-value form (`columns: 2 100px`)
+      ;; already survives, and split by cssom.layout's columns-shorthand.
+      (= "columns" k-lower) (str/trim (str v))
+
       :else (parse-style-value v))))
 
 (def ^:private var-ref-pattern

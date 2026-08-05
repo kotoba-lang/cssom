@@ -2104,8 +2104,15 @@
 
  {:id :multicol/padding-is-outside-the-columns
   :group :multicol
-  ;; The columns divide the CONTENT box: 300 - 2*10 padding = 280, less a
-  ;; 20px gap, is two 130px columns starting at x=10.
+  ;; The columns divide the CONTENT box. `width: 300px` with the default
+  ;; `content-box` sizing IS 300 of content (the padding is outside it, in
+  ;; a 320px border box), so the gap leaves two 140px columns -- and they
+  ;; start at x=10, inside the padding, which is the half that would be
+  ;; wrong if the columns divided the border box. Measured: x=10/w=140 and
+  ;; x=170/w=140. (This comment said 130 until 2026-08-05, from subtracting
+  ;; the padding from a `width` that never included it; the numbers the
+  ;; harness compares against always came from the browser, so nothing was
+  ;; ever scored against the wrong ones.)
   :html "<div style=\"width: 300px; padding: 10px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div></div>"}
 
  ;; ---------------------------------------------------------------------
