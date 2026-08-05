@@ -1139,6 +1139,94 @@
                   (parse-int tok nil))
     :else nil))
 
+(def ^:private overflow-scrolling-values
+  "The computed `overflow` values that make a box a SCROLL CONTAINER -- the
+   ones that establish a block formatting context, and so stop a margin
+   collapsing through the box's edge. `clip` and `visible` are the two that
+   do not, and `overlay` never reaches here (computed-overflow folds it into
+   `auto`, which is what it is a legacy alias for)."
+  #{"hidden" "auto" "scroll"})
+
+(defn- computed-overflow
+  "The two overflow axes as COMPUTED values, from whatever the cascade
+   specified on each -- CSS Overflow 3 SS3's own two fixups, which is why an
+   axis's computed value can be something no author wrote:
+
+     if one axis is `visible` and the other is NOT `visible`/`clip`,
+       the `visible` one computes to `auto`
+     if one axis is `clip` and the other is NOT `clip`/`visible`,
+       the `clip` one computes to `hidden`
+
+   Both are measured in Brave 151, not inferred from the spec text -- the
+   whole table, at width 800, reading `getComputedStyle().overflowX/Y`:
+
+     specified              computed        scroll container?
+     overflow-x: hidden     hidden auto     yes
+     overflow-x: clip       clip visible    NO
+     overflow-x: clip
+       overflow-y: hidden   hidden hidden   yes
+     overflow-x: hidden
+       overflow-y: clip     hidden hidden   yes
+     overflow-x: clip
+       overflow-y: auto     hidden auto     yes
+     overflow: clip         clip clip       NO
+     overflow: clip visible clip visible    NO
+     overflow: visible hidden  auto hidden  yes
+     overflow: overlay      auto auto       yes
+
+   `overlay` is folded into `auto` up front: it is a removed legacy alias
+   that Blink still accepts and still reports as `auto`, measured on both
+   the shorthand and the `-x` longhand.
+
+   A LONGHAND wins over the shorthand outright here, in either source
+   order. This engine's cascade flattens declarations into a map with no
+   surviving order (see cssom.core/apply-cascade), so ordering cannot be
+   consulted; longhand-wins is the order real stylesheets are written in
+   (`overflow: hidden; overflow-x: visible`, measured `auto|hidden`), and
+   guessing the other way would break the idiom rather than a typo."
+  [raw-shorthand raw-x raw-y]
+  (let [norm (fn [v] (let [v (some-> v str str/trim str/lower-case)]
+                       (cond (or (nil? v) (= "" v)) nil
+                             (= "overlay" v) "auto"
+                             :else v)))
+        [sx sy] (let [toks (some-> raw-shorthand str str/trim (str/split #"\s+"))]
+                  [(norm (first toks)) (norm (or (second toks) (first toks)))])
+        x (or (norm raw-x) sx "visible")
+        y (or (norm raw-y) sy "visible")
+        scrolls? #(contains? overflow-scrolling-values %)]
+    [(cond (and (= "visible" x) (scrolls? y)) "auto"
+           (and (= "clip" x) (scrolls? y)) "hidden"
+           :else x)
+     (cond (and (= "visible" y) (scrolls? x)) "auto"
+           (and (= "clip" y) (scrolls? x)) "hidden"
+           :else y)]))
+
+(defn- scroll-container?
+  "Does this box's `overflow` establish a BLOCK FORMATTING CONTEXT -- the
+   reason `overflow: hidden` is the idiom authors reach for to stop a
+   child's margin collapsing out through the parent's edge?
+
+   Exactly `either computed axis is hidden/auto/scroll`, which the two
+   fixups in computed-overflow make equivalent to `either SPECIFIED axis
+   is hidden/auto/scroll/overlay`: whenever one axis scrolls, the other's
+   `visible` has already become `auto` and its `clip` has become `hidden`.
+
+   `overflow: clip` is deliberately NOT one -- it clips without scrolling,
+   so it is not a scroll container and does not establish a formatting
+   context. Measured in Brave: a `<p>` inside `overflow: clip` sits at y=0
+   with its margin collapsed out and the container 20px tall, where the
+   same `<p>` inside `overflow: hidden` sits at y=14 in a 48px container."
+  [st]
+  (boolean (some overflow-scrolling-values [(:overflow/x st) (:overflow/y st)])))
+
+(defn- overflow-visible?
+  "True when NEITHER axis paints outside a boundary: both computed axes are
+   `visible`. The complement of `scroll-container?` plus `clip`, and the
+   question every reader that used to test the bare `overflow` shorthand
+   against `#{nil \"visible\"}` was actually asking."
+  [st]
+  (and (= "visible" (:overflow/x st)) (= "visible" (:overflow/y st))))
+
 (declare font-metrics)
 
 (defn- node-style [node theme]
@@ -1480,7 +1568,25 @@
    ;; the same rule `overflow` triggers, but decided by the PARENT, which is
    ;; why it arrives as an attr rather than a declaration.
    :independent-fc? (boolean (attr node :kotoba/independent-fc))
+   ;; The RAW shorthand, still read by style-passthrough (and so by
+   ;; browser.session's wheel hit-test and dom-gpu) exactly as before.
+   ;; Every LAYOUT decision now goes through the two computed axes below
+   ;; instead -- see scroll-container?/overflow-visible?.
    :overflow (style node :overflow)
+   ;; The two axes as a browser computes them, longhands included. Reading
+   ;; only the shorthand meant `overflow-x`/`overflow-y` reached layout
+   ;; NOWHERE at all: `overflow-y: scroll` established no formatting
+   ;; context, contained no float and clipped nothing, so a `<p>` inside
+   ;; `overflow-x: hidden; overflow-y: scroll` had its 14px margin
+   ;; collapsed out to y=0 where Brave reports y=14
+   ;; (`:overflow/x-hidden-y-scroll`). See computed-overflow for the whole
+   ;; measured table.
+   :overflow/x (first (computed-overflow (style node :overflow)
+                                         (style node :overflow-x)
+                                         (style node :overflow-y)))
+   :overflow/y (second (computed-overflow (style node :overflow)
+                                          (style node :overflow-x)
+                                          (style node :overflow-y)))
    :scroll-top (parse-int (attr node :scroll-top) 0)
    :scroll-left (parse-int (attr node :scroll-left) 0)}))
 
@@ -2328,6 +2434,60 @@
    being reflected."
   [offsets sizes container-main]
   (mapv (fn [off sz] (- container-main off sz)) offsets sizes))
+
+(defn- item-margins
+  "A FLEX or GRID item's own four margins, resolved onto the CONTAINER's
+   two axes: `{:main [start end] :cross [start end]}`.
+
+   A flex/grid item establishes an independent formatting context, so its
+   margins never collapse -- not with the container's content edge, not
+   with an adjacent item's, and not with anything inside it (that half is
+   already handled: measure-child marks every item `:kotoba/independent-fc`,
+   which layout-block reads as `:independent-fc?`). They are simply
+   RESERVED, in full, on both axes. Measured in Brave at width 800:
+
+     `<div style=\"display:flex\"><div style=\"margin:10px 0;width:50px\">`
+        -- item at y=10 in a 40px-tall container
+     `<div style=\"display:flex;flex-direction:column\">` with a
+     `margin-bottom: 20px` item above a `margin-top: 30px` one
+        -- second item at y=70, container 90 tall: 20 AND 30, not max(20,30)
+     `<div style=\"display:flex\"><div style=\"margin-top:-10px\">`
+        -- item at y=-10, container 10 tall (negatives reserved too)
+
+   The engine dropped all of them on the floor: layout-flex measured each
+   item's BORDER box and packed those, so `:page/two-column-text`'s two
+   `<p>` items (14px UA margins) sat at y=0 in a 48px container against
+   Brave's y=14 in a 68px one. This was the single largest paint-order
+   cluster left in the corpus (`div -> none` 14 points, `div -> p` 9).
+
+   `margin-side` is deliberately the reader: it already resolves the
+   per-side value, the `margin` shorthand and the UA default between them,
+   and it already reports an `auto` margin as 0 -- which is what the main
+   axis wants here, because a main-axis `auto` is free-space distribution
+   and lives in auto-main-margins/place-main-axis-auto-margins instead.
+
+   Scope cut, deliberately left: a CROSS-axis `auto` margin (which real
+   CSS uses to centre an item in its line, and which outranks
+   align-self exactly as a main-axis one outranks justify-content) is
+   still 0 here, so such an item keeps its align-items placement --
+   the same cut place-main-axis-auto-margins' own docstring already
+   names, now merely reachable through a second door."
+  [theme column? child]
+  (if (map? child)
+    (let [st (node-style child theme)
+          t (margin-side st :top) b (margin-side st :bottom)
+          l (margin-side st :left) r (margin-side st :right)]
+      (if column? {:main [t b] :cross [l r]} {:main [l r] :cross [t b]}))
+    {:main [0 0] :cross [0 0]}))
+
+(defn- outer-sizes
+  "Each item's size on one axis GROWN by that axis's two margins -- the
+   margin-box extent that flex packing, line sizing and free-space
+   distribution all actually operate on (CSS Flexible Box Layout SS9.2: a
+   flex line is packed from OUTER hypothetical main sizes, and SS9.4 sizes
+   the line from outer cross sizes)."
+  [sizes margins axis]
+  (mapv (fn [sz m] (+ sz (first (axis m)) (second (axis m)))) sizes margins))
 
 (defn- auto-main-margins
   "A flex item's MAIN-axis `auto` margins, as `[leading trailing]` 0/1
@@ -5059,7 +5219,7 @@
   [theme inherited child st]
   (when (and (map? child)
              (nil? (:min-width st))
-             (contains? #{nil "visible"} (:overflow st)))
+             (overflow-visible? st))
     (let [measure-text (:measure-text theme)
           fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
           words (->> (tree-seq map? :children child)
@@ -5232,11 +5392,25 @@
     [0 0]))
 
 (defn- layout-flex-wrap-row
-  [theme cx cy cw cross-avail opacity inherited st in-flow measured wrap-reverse?]
+  [theme cx cy cw cross-avail opacity inherited st in-flow measured wrap-reverse? margins]
   (let [gap (:gap st)
-        main-sizes (mapv #(:w (:box %)) measured)
+        ;; Wrap mode is always ROW direction (see the align-items comment
+        ;; below), so `:main` is the horizontal pair and `:cross` the
+        ;; vertical one. Both are reserved in full -- a flex item's margins
+        ;; never collapse, see item-margins -- which is why an item wraps
+        ;; on its MARGIN-box width and a line is as tall as the tallest
+        ;; margin box in it. Measured in Brave, an 80px `margin-bottom:
+        ;; 10px` item above an 80px `margin-top: 20px` one in a 100px
+        ;; container: second item at y=50 in a 70px-tall container.
+        m-main-start (mapv #(first (:main %)) margins)
+        m-cross-start (mapv #(first (:cross %)) margins)
+        m-cross-total (mapv #(+ (first (:cross %)) (second (:cross %))) margins)
+        main-sizes (outer-sizes (mapv #(:w (:box %)) measured) margins :main)
         rows-idx (pack-rows main-sizes gap cw)
-        natural-cross (mapv (fn [idxs] (apply max 0 (mapv #(:h (:box (nth measured %))) idxs))) rows-idx)
+        natural-cross (mapv (fn [idxs]
+                              (apply max 0 (mapv #(+ (:h (:box (nth measured %))) (nth m-cross-total %))
+                                                 idxs)))
+                            rows-idx)
         n-rows (count rows-idx)
         align-content (:align-content st)
         ;; ---- align-content ----
@@ -5308,7 +5482,10 @@
                                 (if (stretch-eligible-child? theme false st child)
                                   (assoc acc2 idx
                                          (measure-child theme cw opacity inherited
-                                                        (force-cross-size false row-cross-size child)
+                                                        (force-cross-size
+                                                         false
+                                                         (max 0 (- row-cross-size (nth m-cross-total idx)))
+                                                         child)
                                                         true))
                                   acc2)))
                             acc idxs))
@@ -5334,14 +5511,15 @@
                    (mapcat (fn [child-idx off]
                              (let [m (nth measured child-idx)
                                    child (nth in-flow child-idx)
-                                   child-cross (:h (:box m))
+                                   child-cross (+ (:h (:box m)) (nth m-cross-total child-idx))
                                    ;; per-item align-self, and the cross-axis
                                    ;; flip wrap-reverse applies on top of it
                                    ;; -- see item-cross-align/flip-cross-align.
                                    align (cond-> (item-cross-align theme st child)
                                            wrap-reverse? flip-cross-align)
-                                   c-off (cross-offset align child-cross row-cross-size)
-                                   dx (+ cx off)
+                                   c-off (+ (cross-offset align child-cross row-cross-size)
+                                            (nth m-cross-start child-idx))
+                                   dx (+ cx off (nth m-main-start child-idx))
                                    dy (+ cy row-y c-off)]
                                (translate-ops dx dy (:draw m))))
                            idxs offs)))
@@ -5399,7 +5577,14 @@
                          (measure-child theme cw opacity inherited child
                                         (or (not column?)
                                             (not= "stretch" (item-cross-align theme st child)))))
-                       in-flow)]
+                       in-flow)
+        ;; Every item's own margins, on this container's axes -- reserved
+        ;; in full on both, because a flex item's margins never collapse.
+        ;; See item-margins.
+        margins (mapv #(item-margins theme column? %) in-flow)
+        m-main-start (mapv #(first (:main %)) margins)
+        m-cross-start (mapv #(first (:cross %)) margins)
+        m-cross-total (mapv #(+ (first (:cross %)) (second (:cross %))) margins)]
     (if wrap?
       ;; A DEFINITE cross size is what align-content has to distribute (see
       ;; layout-flex-wrap-row); nil means auto-height, where the container
@@ -5407,7 +5592,7 @@
       (let [cross-avail (when-let [h (resolve-height st)] (max 0 (- h (* 2 inset))))
             {:keys [draws cross-total]} (layout-flex-wrap-row theme cx cy cw cross-avail opacity
                                                               inherited st in-flow measured
-                                                              wrap-reverse?)
+                                                              wrap-reverse? margins)
             node-h (or (resolve-height st) (+ cross-total (* 2 inset)))]
         {:box-w w :box-h node-h :draws draws})
       (let [main-of (fn [m] (if column? (:h (:box m)) (:w (:box m))))
@@ -5455,9 +5640,15 @@
                    (mapv (fn [child cst]
                            (when cst (flex-item-min-content-width theme inherited child cst)))
                          in-flow item-sts))
+            ;; Item margins come off the main axis BEFORE any of it is
+            ;; distributed: a margin is space the line has to reserve, not
+            ;; space `flex-grow` may take. Every base size below is still
+            ;; a BORDER box, so `outer-main` re-adds them once the flexible
+            ;; lengths are solved.
+            m-main-total (reduce + 0 (mapv #(+ (first (:main %)) (second (:main %))) margins))
             main-sizes (if (pos? avail-main)
                          (resolve-flexible-lengths base-sizes grows shrinks mins
-                                                   avail-main gaps-main)
+                                                   (max 0 (- avail-main m-main-total)) gaps-main)
                          base-sizes)
             ;; An item resized on the main axis is laid out AGAIN at that
             ;; size, so its own content wraps against the real width -- and
@@ -5491,13 +5682,19 @@
             baseline-align? (fn [align]
                               (and (not column?)
                                    (contains? #{"baseline" "first baseline"} align)))
-            baselines (mapv (fn [cst align]
+            ;; Measured from the item's MARGIN-box top, not its border-box
+            ;; top: the shift below positions the margin box, so the
+            ;; cross-start margin has to be inside the distance being
+            ;; equalised or a margin-bearing item's baseline lands one
+            ;; margin low.
+            baselines (mapv (fn [cst align ms]
                               (when (and cst (baseline-align? align))
-                                (flex-item-baseline theme inherited cst)))
-                            item-sts aligns)
+                                (+ ms (flex-item-baseline theme inherited cst))))
+                            item-sts aligns m-cross-start)
             max-baseline (apply max 0 (keep identity baselines))
             baseline-shifts (mapv #(if % (- max-baseline %) 0) baselines)
-            cross-sizes (mapv (fn [m] (if column? (:w (:box m)) (:h (:box m)))) measured)
+            cross-sizes (outer-sizes (mapv (fn [m] (if column? (:w (:box m)) (:h (:box m)))) measured)
+                                     margins :cross)
             auto-cross (if (seq cross-sizes)
                          (apply max 0 (map + baseline-shifts cross-sizes))
                          0)
@@ -5509,7 +5706,8 @@
             ;; inside the widest item rather than inside the container.
             cross-content (or (explicit-length (if column? (:width st) (:height st)))
                               (if (and column? (not inline?)) cw auto-cross))
-            auto-main (+ (reduce + 0 main-sizes) (* gap (max 0 (dec (count main-sizes)))))
+            outer-main (outer-sizes main-sizes margins :main)
+            auto-main (+ (reduce + 0 outer-main) (* gap (max 0 (dec (count outer-main)))))
             ;; The main-axis size justify-content distributes free space
             ;; WITHIN. For a row that is the container's content width --
             ;; which, now that a flex container is block-level, is the full
@@ -5534,31 +5732,41 @@
             ;; an item cannot undo its grow/shrink -- the bug that made
             ;; `flex-grow: 1` look unimplemented even once the
             ;; distribution was right.
-            measured (mapv (fn [child m]
+            ;; A stretched item fills the line MINUS its own cross-axis
+            ;; margins -- the margin box is what fills the line, so a
+            ;; `margin: 10px 0` item in a 40px line is 20px tall, not 40.
+            measured (mapv (fn [child m mct]
                               (if (stretch-eligible-child? theme column? st child)
                                 (measure-child theme cw opacity inherited
-                                               (force-cross-size column? cross-content child)
+                                               (force-cross-size column? (max 0 (- cross-content mct)) child)
                                                (not column?))
                                 m))
-                            sized measured)
+                            sized measured m-cross-total)
             auto-margins (mapv #(auto-main-margins column? %) in-flow)
+            ;; Packed and justified from MARGIN-box sizes (`outer-main`),
+            ;; so the free space justify-content distributes is what is
+            ;; genuinely left over. Each item's own border box then sits
+            ;; one leading margin inside the margin box the offset names.
             offsets (let [offs (if (pos? (reduce + 0 (apply concat auto-margins)))
-                                 (place-main-axis-auto-margins auto-margins main-sizes gap main-content)
-                                 (place-main-axis (:justify-content st) main-sizes gap main-content))]
+                                 (place-main-axis-auto-margins auto-margins outer-main gap main-content)
+                                 (place-main-axis (:justify-content st) outer-main gap main-content))]
                       (if reverse?
-                        (mirror-main-offsets offs main-sizes main-content)
+                        (mirror-main-offsets offs outer-main main-content)
                         offs))
             draws (mapcat
-                   (fn [m off child align shift]
-                     (let [child-cross (if column? (:w (:box m)) (:h (:box m)))
-                           c-off (if (baseline-align? align)
-                                   shift
-                                   (cross-offset align child-cross cross-content))
+                   (fn [m off child align shift ms mcs mct]
+                     (let [child-cross (+ (if column? (:w (:box m)) (:h (:box m))) mct)
+                           c-off (+ (if (baseline-align? align)
+                                      shift
+                                      (cross-offset align child-cross cross-content))
+                                    mcs)
                            [rdx rdy] (relative-item-offset theme child)
+                           off (+ off ms)
                            dx (+ (if column? (+ cx c-off) (+ cx off)) rdx)
                            dy (+ (if column? (+ cy off) (+ cy c-off)) rdy)]
                        (translate-ops dx dy (:draw m))))
-                   measured offsets in-flow aligns baseline-shifts)
+                   measured offsets in-flow aligns baseline-shifts
+                   m-main-start m-cross-start m-cross-total)
             node-h (if column? (+ main-content (* 2 inset)) (+ cross-content (* 2 inset)))
             ;; A `display: flex` box is a BLOCK-level flex container: it
             ;; fills its containing block's width exactly like any other
@@ -5662,9 +5870,10 @@
             (if (and pl (= 1 (- (:col-end pl) (:col-start pl))))
               (let [i (:col-start pl)]
                 (if (< -1 i n-cols)
-                  (-> acc
-                      (update-in [i :min] max (grid-item-min-content-width theme cw opacity inherited child))
-                      (update-in [i :max] max (grid-item-max-content-width theme cw opacity inherited child)))
+                  (let [{[ml mr] :main} (item-margins theme false child)]
+                    (-> acc
+                        (update-in [i :min] max (+ ml mr (grid-item-min-content-width theme cw opacity inherited child)))
+                        (update-in [i :max] max (+ ml mr (grid-item-max-content-width theme cw opacity inherited child)))))
                   acc))
               acc))
           (vec (repeat n-cols {:min 0 :max 0}))
@@ -6721,15 +6930,28 @@
                        (let [self (when (map? child) (:justify-self (node-style child theme)))]
                          (if (and self (not= "auto" self)) self (:justify-items st))))
         inline-aligns (mapv inline-align in-flow)
-        measured (mapv (fn [child pl align]
-                         (measure-child theme (span-w pl) opacity inherited child
+        ;; A GRID item's margins are reserved in full, exactly like a flex
+        ;; item's and for the same reason -- it establishes an independent
+        ;; formatting context, so nothing of its collapses with anything.
+        ;; Measured in Brave, the same three shapes item-margins names for
+        ;; flex give the identical answers under `display: grid`: a
+        ;; `margin: 10px 0` item sits at y=10 in a 40px container, and a
+        ;; `margin-bottom: 20px` row above a `margin-top: 30px` one puts the
+        ;; second at y=70 in a 90px container (20 AND 30, not max).
+        ;; Grid is physically row-major here, so `:main` is the horizontal
+        ;; pair and `:cross` the vertical one.
+        margins (mapv #(item-margins theme false %) in-flow)
+        m-x (mapv #(+ (first (:main %)) (second (:main %))) margins)
+        m-y (mapv #(+ (first (:cross %)) (second (:cross %))) margins)
+        measured (mapv (fn [child pl align mx]
+                         (measure-child theme (max 0 (- (span-w pl) mx)) opacity inherited child
                                         (not (contains? #{"stretch" "normal"} align))))
-                       in-flow placements inline-aligns)
+                       in-flow placements inline-aligns m-x)
         row-content-h (mapv (fn [row-idx]
                               (let [hs (keep-indexed
                                         (fn [i pl]
                                           (when (= row-idx (:row-start pl))
-                                            (:h (:box (nth measured i)))))
+                                            (+ (:h (:box (nth measured i))) (nth m-y i))))
                                         placements)]
                                 (if (seq hs) (apply max 0 hs) 0)))
                             (range total-rows))
@@ -6754,24 +6976,33 @@
         ;; 20px item at y=20, where stretching it unconditionally gave a
         ;; 60px box at y=0.
         block-aligns (mapv #(item-cross-align theme st %) in-flow)
-        measured (mapv (fn [pl m child align]
+        ;; A stretched item fills its track MINUS its own margins, and the
+        ;; comparison that decides whether to stretch is against the item's
+        ;; MARGIN box -- otherwise an item whose margins already fill the
+        ;; track gets stretched past it.
+        measured (mapv (fn [pl m child align mx my]
                          (let [rh (row-span-h pl)]
-                           (if (and (map? child) (> rh (:h (:box m))) (= "stretch" align)
+                           (if (and (map? child) (> rh (+ (:h (:box m)) my)) (= "stretch" align)
                                     (not (:height (node-style child theme))))
-                             (measure-child theme (span-w pl) opacity inherited
-                                            (force-cross-size false rh child) false)
+                             (measure-child theme (max 0 (- (span-w pl) mx)) opacity inherited
+                                            (force-cross-size false (max 0 (- rh my)) child) false)
                              m)))
-                       placements measured in-flow block-aligns)
+                       placements measured in-flow block-aligns m-x m-y)
         row-offsets (place-main-axis "flex-start" row-heights row-gap 0)
-        draws (vec (mapcat (fn [pl m child ja aa]
-                             (let [[rdx rdy] (relative-item-offset theme child)]
+        ;; Aligned by MARGIN box within the track (so `justify-items: center`
+        ;; centres the margin box, not the border box), then the border box
+        ;; sits one leading margin inside it.
+        draws (vec (mapcat (fn [pl m child ja aa mgn]
+                             (let [[rdx rdy] (relative-item-offset theme child)
+                                   [ml mr] (:main mgn)
+                                   [mt mb] (:cross mgn)]
                                (translate-ops
                                 (+ cx (nth col-offsets (:col-start pl))
-                                   (cross-offset ja (:w (:box m)) (span-w pl)) rdx)
+                                   (cross-offset ja (+ (:w (:box m)) ml mr) (span-w pl)) ml rdx)
                                 (+ cy (nth row-offsets (:row-start pl))
-                                   (cross-offset aa (:h (:box m)) (row-span-h pl)) rdy)
+                                   (cross-offset aa (+ (:h (:box m)) mt mb) (row-span-h pl)) mt rdy)
                                 (:draw m))))
-                           placements measured in-flow inline-aligns block-aligns))
+                           placements measured in-flow inline-aligns block-aligns margins))
         content-h (+ (reduce + 0 row-heights) (* row-gap (max 0 (dec (count row-heights)))))
         node-h (or explicit-h (+ content-h (* 2 inset)))]
     {:box-w w :box-h node-h :draws draws}))
@@ -7222,7 +7453,7 @@
                            ;; input is still y=0 in a 21px line), because
                            ;; the control's inner editable box is a line
                            ;; box even with nothing in it.
-                           (or (and (some? (:overflow st)) (not= "visible" (:overflow st)))
+                           (or (not (overflow-visible? st))
                                (= :textarea (:tag child))
                                (and (not (contains? form-control-tags (:tag child)))
                                     (not-any? #(= :text (:draw/op %)) draw)))
@@ -9257,9 +9488,19 @@
         ;; own 14px margin INTACT below the 20px legend band, and reports the
         ;; fieldset 68px tall with the `<p>`'s bottom margin held inside too.
         ;; Both margins collapse out of an ordinary div.
+        ;; The `overflow` half of this test is `scroll-container?`, not a
+        ;; comparison against the bare `overflow` shorthand. Two things the
+        ;; shorthand test got wrong, both measured in Brave (see
+        ;; computed-overflow's own table): `overflow-x`/`overflow-y` never
+        ;; reached layout at all, so `overflow-x: hidden; overflow-y:
+        ;; scroll` established nothing and let its `<p>`'s 14px margin
+        ;; collapse out to y=0 against Brave's y=14; and `overflow: clip`
+        ;; was treated as a formatting context when it is not one -- it
+        ;; clips without scrolling, and Brave collapses the same `<p>`'s
+        ;; margin straight out of it.
         fieldset? (= :fieldset (:tag node))
         fc-free? (and (zero? (:border-width st))
-                      (contains? #{nil "visible"} (:overflow st))
+                      (not (scroll-container? st))
                       (not= "flow-root" (:display st))
                       (not fieldset?)
                       (not (:independent-fc? st)))
@@ -9276,15 +9517,17 @@
         ;;
         ;; Every entry here is CSS2.1 9.4.1's own list, restricted to the
         ;; ones that reach THIS function: `float` and out-of-flow
-        ;; positioning are self-evident, `overflow` other than `visible` is
-        ;; the idiom authors actually use, and `:independent-fc?` is the
+        ;; positioning are self-evident, a SCROLL CONTAINER (`overflow`
+        ;; hidden/auto/scroll on either axis, but NOT `clip` -- see
+        ;; scroll-container?) is the idiom authors actually use, and
+        ;; `:independent-fc?` is the
         ;; flag measure-child already sets on a flex/grid item or an
         ;; inline-block. Flex and grid containers never get here (they take
         ;; layout-flex/layout-grid), so they are absent by construction
         ;; rather than by oversight.
         contains-floats? (or (boolean (:independent-fc? st))
                              fieldset?
-                             (and (some? (:overflow st)) (not= "visible" (:overflow st)))
+                             (scroll-container? st)
                              (contains? #{"flow-root" "inline-block" "table-cell" "table-caption"}
                                         (:display st))
                              (contains? #{"left" "right"} (:float st))
@@ -9345,7 +9588,20 @@
                           :class (attr node :class) :listeners (listeners node)
                           :opacity opacity}
                          (style-passthrough st))]
-        clip? (and (:overflow st) (not= "visible" (:overflow st)))
+        ;; BOTH axes, not either: the clip op below is a whole-box RECT
+        ;; with no axis of its own, so a box that clips on only one axis
+        ;; (`overflow-x: clip`, computed `clip visible`; or `overflow-x:
+        ;; hidden` before the other fixup runs) cannot be expressed here
+        ;; without also clipping the axis the browser leaves alone. Erring
+        ;; towards NOT clipping is deliberate: an under-clip paints content
+        ;; a browser would have hidden, an over-clip HIDES content a
+        ;; browser paints, and the second is the worse failure. The
+        ;; single-axis case is a scope cut, and the only one this test
+        ;; leaves out -- every `hidden`/`auto`/`scroll` axis drags the
+        ;; other one to a non-`visible` computed value too (see
+        ;; computed-overflow), so `overflow-x: hidden` DOES clip here now
+        ;; where reading the bare shorthand clipped nothing at all.
+        clip? (and (not= "visible" (:overflow/x st)) (not= "visible" (:overflow/y st)))
         ;; Scope cut, measured 2026-08-05 and deliberately left: this clips
         ;; at the BORDER box, and a browser clips at the PADDING box -- the
         ;; border box inset by the border, with the padding INSIDE the

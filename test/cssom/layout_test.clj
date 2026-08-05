@@ -8289,3 +8289,256 @@
                              "transform:translateX(5px)}")
                         nest)]
     (is (= 15.0 (:x inner)))))
+
+;; ---- a flex/grid item's margins, and the overflow axes that stop a
+;; ---- margin collapsing through a box
+;;
+;; Two separate rules, both about margins that must NOT collapse, both
+;; measured in Brave 151 at width 800 before a line of this was written
+;; (see item-margins / computed-overflow / scroll-container? for the full
+;; measured tables). They share this section because they share a symptom:
+;; a margin the browser reserves and this engine used to drop.
+
+(defn- margin-probe
+  "A `.box` container holding `n` children of `tag`, each carrying one text
+   node and a `.item<i>` class -- the shape every test below is written
+   against, so the CSS in each test is the whole of its input."
+  [tag n]
+  (fn [doc root]
+    (let [[box doc] (dom/create-element doc :div)
+          doc (dom/append-child doc root box)
+          doc (dom/set-attribute doc box :class "box")]
+      (reduce (fn [doc i]
+                (let [[item doc] (dom/create-element doc tag)
+                      doc (dom/append-child doc box item)
+                      doc (dom/set-attribute doc item :class (str "item" i))
+                      [t doc] (dom/create-text-node doc "a")]
+                  (dom/append-child doc item t)))
+              doc
+              (range n)))))
+
+(deftest a-flex-items-own-margins-are-reserved-on-the-cross-axis
+  ;; Measured in Brave: `<div style="display:flex"><div style="margin:10px 0;
+  ;; width:50px">a</div></div>` puts the item at y=10 in a 40px-tall
+  ;; container -- both margins held INSIDE the flex container, because a
+  ;; flex item establishes an independent formatting context and nothing of
+  ;; its collapses. This engine measured each item's BORDER box and packed
+  ;; those, so the item sat at y=0 in a 20px container: not a collapse, a
+  ;; drop.
+  (let [[_root box item]
+        (cascaded-boxes ".box{display:flex} .item0{margin:10px 0;width:50px;height:20px}"
+                        (margin-probe :div 1))]
+    (is (= 10 (:y item)))
+    (is (= 40 (:h box)))))
+
+(deftest adjacent-flex-items-margins-do-not-collapse-with-each-other
+  ;; The rule stated as sharply as it gets: in a COLUMN container a 20px
+  ;; bottom margin above a 30px top margin is 50px of space, not max(20,30).
+  ;; Measured in Brave: the second item sits at y=70 in a 90px container.
+  (let [[_root box _a b]
+        (cascaded-boxes (str ".box{display:flex;flex-direction:column} "
+                             ".item0{margin-bottom:20px;height:20px} "
+                             ".item1{margin-top:30px;height:20px}")
+                        (margin-probe :div 2))]
+    (is (= 70 (:y b)) "20 AND 30, not max(20,30)")
+    (is (= 90 (:h box)))))
+
+(deftest a-flex-items-negative-margin-is-reserved-too
+  ;; Brave: item at y=-10 in a 10px-tall container. A negative margin is
+  ;; not a special case here, which is the point -- the item's OUTER cross
+  ;; size is simply 10.
+  (let [[_root box item]
+        (cascaded-boxes ".box{display:flex} .item0{margin-top:-10px;width:50px;height:20px}"
+                        (margin-probe :div 1))]
+    (is (= -10 (:y item)))
+    (is (= 10 (:h box)))))
+
+(deftest a-flex-items-margins-are-reserved-on-the-main-axis
+  ;; Brave, in a 400px row: a `margin-left: 20px` 50px item starts at x=20,
+  ;; and the next item at x=70 -- the leading margin displaces the line, and
+  ;; a trailing one advances it.
+  (let [[_root _box a b]
+        (cascaded-boxes (str ".box{display:flex;width:400px} "
+                             ".item0{margin-left:20px;width:50px;height:10px} "
+                             ".item1{width:60px;height:10px;margin-right:30px}")
+                        (margin-probe :div 2))]
+    (is (= 20 (:x a)))
+    (is (= 70 (:x b)))))
+
+(deftest justify-content-distributes-the-space-left-after-item-margins
+  ;; The reason main-axis margins have to be inside the sizes
+  ;; justify-content packs, not added afterwards: Brave centres the two
+  ;; items' MARGIN boxes (20+50+20 and 60 = 150 of 400), so the first
+  ;; item's border box lands at 145, not at the 155 that centring the
+  ;; border boxes alone would give.
+  (let [[_root _box a b]
+        (cascaded-boxes (str ".box{display:flex;width:400px;justify-content:center} "
+                             ".item0{margin:0 20px;width:50px;height:10px} "
+                             ".item1{width:60px;height:10px}")
+                        (margin-probe :div 2))]
+    (is (= 145 (:x a)))
+    (is (= 215 (:x b)))))
+
+(deftest gap-and-an-item-margin-add-rather-than-absorbing-each-other
+  ;; Brave: 50px item, `margin-right: 20px`, `gap: 10px` -> the next item
+  ;; starts at 80. `gap` is a MINIMUM between margin boxes, so the two
+  ;; stack; taking max(gap, margin) would give 70.
+  (let [[_root _box _a b]
+        (cascaded-boxes (str ".box{display:flex;width:400px;gap:10px} "
+                             ".item0{margin-right:20px;width:50px;height:10px} "
+                             ".item1{width:60px;height:10px}")
+                        (margin-probe :div 2))]
+    (is (= 80 (:x b)))))
+
+(deftest a-stretched-flex-item-fills-the-line-minus-its-own-margins
+  ;; `align-items: stretch` is the initial value, and what stretches is the
+  ;; item's MARGIN box. Brave: a `margin: 10px 0` item in a 100px-tall row
+  ;; is 80px tall at y=10. Stretching the border box to the full 100 would
+  ;; overflow the container by exactly the two margins.
+  (let [[_root _box item]
+        (cascaded-boxes ".box{display:flex;width:400px;height:100px} .item0{margin:10px 0;width:50px}"
+                        (margin-probe :div 1))]
+    (is (= 10 (:y item)))
+    (is (= 80 (:h item)))))
+
+(deftest a-wrapped-flex-line-is-as-tall-as-its-tallest-margin-box
+  ;; The wrap path has its own packing and its own per-line cross sizing,
+  ;; so it gets its own measurement. Brave, in a 100px container: a
+  ;; `margin-bottom: 10px; margin-left: 5px` item on line one and a
+  ;; `margin-top: 20px` item on line two sit at (5,0) and (0,40), in a
+  ;; 50px-tall container -- line one is 20 tall, then the second item's own
+  ;; 20px top margin.
+  (let [[_root box a b]
+        (cascaded-boxes (str ".box{display:flex;flex-wrap:wrap;width:100px} "
+                             ".item0{width:80px;height:10px;margin-bottom:10px;margin-left:5px} "
+                             ".item1{width:80px;height:10px;margin-top:20px}")
+                        (margin-probe :div 2))]
+    (is (= [5 0] [(:x a) (:y a)]))
+    (is (= [0 40] [(:x b) (:y b)]))
+    (is (= 50 (:h box)))))
+
+(deftest two-paragraph-flex-items-keep-their-ua-margins
+  ;; `:page/two-column-text`, the corpus case this rule was found by: two
+  ;; `<p>` flex items, each with the UA stylesheet's own 14px block
+  ;; margins. Brave puts both at y=14 in a 48px-tall container (one 20px
+  ;; line each here); this engine had them at y=0 in a 20px one, which was
+  ;; also the largest single paint-order cluster left in the corpus.
+  (let [[_root box a b]
+        (cascaded-boxes ".box{display:flex;gap:20px} .item0,.item1{width:180px}"
+                        (margin-probe :p 2))]
+    (is (= 14 (:y a)))
+    (is (= 14 (:y b)))
+    (is (= 48 (:h box)))))
+
+(deftest a-grid-items-margins-are-reserved-exactly-like-a-flex-items
+  ;; Same rule, same reason, and measured to be the same answers: Brave
+  ;; puts a `margin: 10px 0` grid item at y=10 in a 40px container, and a
+  ;; `margin-bottom: 20px` row above a `margin-top: 30px` one at y=70 in a
+  ;; 90px container -- 20 AND 30, exactly as for flex.
+  (let [[_root box item]
+        (cascaded-boxes ".box{display:grid} .item0{margin:10px 0;width:50px;height:20px}"
+                        (margin-probe :div 1))]
+    (is (= 10 (:y item)))
+    (is (= 40 (:h box))))
+  (let [[_root box _a b]
+        (cascaded-boxes (str ".box{display:grid} "
+                             ".item0{margin-bottom:20px;height:20px} "
+                             ".item1{margin-top:30px;height:20px}")
+                        (margin-probe :div 2))]
+    (is (= 70 (:y b)))
+    (is (= 90 (:h box)))))
+
+(deftest a-grid-items-margin-widens-its-auto-track
+  ;; An `auto` track is sized from what is IN it, and what is in it is the
+  ;; item's MARGIN box. Brave, `grid-template-columns: auto auto` in 400px
+  ;; with a `margin-left: 20px` item in the first: the first track comes
+  ;; out 210 and the second 190, so the second item starts at x=210 -- the
+  ;; margin went into the track, not on top of it.
+  (let [[_root _box a b]
+        (cascaded-boxes ".box{display:grid;grid-template-columns:auto auto;width:400px} .item0{margin-left:20px}"
+                        (margin-probe :div 2))]
+    (is (= [20 190] [(:x a) (:w a)]))
+    (is (= [210 190] [(:x b) (:w b)]))))
+
+(deftest a-grid-item-is-aligned-and-stretched-by-its-margin-box
+  ;; Brave: `justify-items: center` in a 200px track centres the 70px
+  ;; MARGIN box (50 wide plus a 20px left margin), leaving the border box
+  ;; at x=85 -- centring the border box alone would give 75. And an item in
+  ;; an 80px row track with `margin: 10px 0` stretches to 60, at y=10.
+  (let [[_root _box item]
+        (cascaded-boxes (str ".box{display:grid;grid-template-columns:200px;width:400px;justify-items:center} "
+                             ".item0{width:50px;height:10px;margin-left:20px}")
+                        (margin-probe :div 1))]
+    (is (= 85 (:x item))))
+  (let [[_root _box item]
+        (cascaded-boxes ".box{display:grid;grid-template-rows:80px;width:400px} .item0{margin:10px 0}"
+                        (margin-probe :div 1))]
+    (is (= [10 60] [(:y item) (:h item)]))))
+
+(deftest an-overflow-longhand-establishes-a-formatting-context-on-its-own
+  ;; `:overflow/x-hidden-y-scroll`. Layout read only the `overflow`
+  ;; SHORTHAND, so `overflow-x`/`overflow-y` reached it nowhere at all: a
+  ;; scroll container written in longhands established nothing and let its
+  ;; child's margin collapse straight out. Brave puts the `<p>` at y=14 in
+  ;; every one of these; this engine had it at y=0.
+  (doseq [decl ["overflow-x: hidden" "overflow-y: hidden"
+                "overflow-x: auto" "overflow-y: auto"
+                "overflow-x: scroll" "overflow-y: scroll"
+                "overflow: hidden auto" "overflow: visible hidden"
+                "overflow-x: hidden; overflow-y: scroll"
+                "overflow-x: clip; overflow-y: hidden"
+                "overflow-x: hidden; overflow-y: clip"]]
+    (let [[_root box p]
+          (cascaded-boxes (str ".box{width:200px;" decl "}") (margin-probe :p 1))]
+      (is (= 14 (:y p)) decl)
+      (is (= 48 (:h box)) decl))))
+
+(deftest overflow-clip-is-not-a-formatting-context
+  ;; The other half of the same fix, and the one that is easy to get
+  ;; backwards: `clip` clips WITHOUT scrolling, so it is not a scroll
+  ;; container and does not establish a block formatting context. Measured
+  ;; in Brave -- the `<p>`'s margin collapses straight out of all three, and
+  ;; the container is 20px tall, exactly as for a bare div.
+  (doseq [decl ["overflow: clip" "overflow-x: clip" "overflow-y: clip"
+                "overflow: clip visible" "overflow: visible clip"]]
+    (let [[_root box p]
+          (cascaded-boxes (str ".box{width:200px;" decl "}") (margin-probe :p 1))]
+      (is (= 0 (:y p)) decl)
+      (is (= 20 (:h box)) decl))))
+
+(deftest a-longhand-overflow-axis-wins-over-the-shorthand
+  ;; `overflow: hidden; overflow-x: visible` computes to `auto hidden` in
+  ;; Brave -- the longhand takes the x axis, and the y axis's `hidden` then
+  ;; drags x's `visible` up to `auto`, so the box is still a scroll
+  ;; container and the `<p>` still sits at y=14. This engine's cascade
+  ;; flattens declarations into a map with no surviving source order, so
+  ;; longhand-wins is a decision rather than a reading; it is the order
+  ;; real stylesheets are written in.
+  (let [[_root box p]
+        (cascaded-boxes ".box{width:200px;overflow:hidden;overflow-x:visible}" (margin-probe :p 1))]
+    (is (= 14 (:y p)))
+    (is (= 48 (:h box)))))
+
+(deftest overflow-overlay-is-the-legacy-spelling-of-auto
+  ;; Brave still accepts `overlay` and reports it as `auto` on both axes,
+  ;; so it is a scroll container like any other.
+  (let [[_root box p]
+        (cascaded-boxes ".box{width:200px;overflow:overlay}" (margin-probe :p 1))]
+    (is (= 14 (:y p)))
+    (is (= 48 (:h box)))))
+
+(deftest only-a-scroll-container-contains-its-own-float
+  ;; The same predicate answers `does this box grow to hold its float?`,
+  ;; and the same two corrections apply. Brave: an `overflow-y: scroll`
+  ;; container holding a 50px float is 50px tall, and an `overflow: clip`
+  ;; one is 0 -- the float escapes a `clip` box exactly as it escapes a
+  ;; plain div, because neither establishes a formatting context.
+  (let [float-box (fn [decl]
+                    (:h (second (cascaded-boxes
+                                 (str ".box{width:200px;" decl "} "
+                                      ".item0{float:left;width:40px;height:50px}")
+                                 (margin-probe :div 1)))))]
+    (is (= 50 (float-box "overflow-y: scroll")))
+    (is (= 50 (float-box "overflow: hidden")))
+    (is (= 0 (float-box "overflow: clip")))
+    (is (= 0 (float-box "overflow: visible")))))
