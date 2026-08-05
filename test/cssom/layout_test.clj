@@ -6580,7 +6580,68 @@
         "an INSIDE marker is real inline content and does widen the item")
     (is (= (- td-inside td-outside) (- li-inside li-outside))
         "and the cell that shrink-wraps the list is wider by exactly that
-         same amount, not by some other one")))
+         same amount, not by some other one")
+    (is (== 19.0 (- li-inside li-outside))
+        "and that amount is symbol-marker-advance at 14px, NOT the width of
+         the `\"\\u2022 \"` string this engine draws (13.70625 here). Brave:
+         td 82 / li 40 with `inside` against 63 / 21 without, i.e. exactly
+         19. That 5.3px gap was `:list/list-style-position-inside`'s whole
+         residual, and it does not depend on the theme's own advance
+         because it does not come from any string")))
+
+(deftest an-inside-bullets-advance-is-a-function-of-the-font-size-only
+  ;; Measured in Brave 151 on 2026-08-06 as the `<a>`'s x minus the
+  ;; `<li>`'s, at every integer font size from 6 to 40 and at five
+  ;; fractional ones. See symbol-marker-advance for the full sweep; these
+  ;; are the points that discriminate the rule from the alternatives.
+  ;;
+  ;;   font-size   6   8  10  14  20  28  40      10.5   13.3    21.25
+  ;;   advance     9  11  14  19  27  37  52      14.5  18.297   28.25
+  ;;
+  ;; The 14px row is the one that matters most: 19, where the `"• "`
+  ;; string measures 13.70625 in the conformance theme and something else
+  ;; again in every other font. Measured identical for `disc`, `circle` and
+  ;; `square`, and identical in Arial and monospace -- whose space advances
+  ;; differ by 3px -- so a browser is not laying out that string at all.
+  (let [adv (fn [font-size]
+              (let [[ul doc] (dom/create-element dom/empty-document :ul)
+                    doc (dom/set-root doc ul)
+                    doc (dom/set-style doc ul {:list-style-position "inside"
+                                               :font-size font-size})
+                    [li doc] (dom/create-element doc :li)
+                    doc (dom/append-child doc ul li)
+                    [a doc] (dom/create-element doc :a)
+                    doc (dom/append-child doc li a)
+                    [t doc] (dom/create-text-node doc "F")
+                    doc (dom/append-child doc a t)
+                    [_ doc] (dom/consume-ops doc)
+                    ops (layout/draw-ops (dom/tree doc) {:width 300 :theme {:padding 0 :gap 0}})
+                    box (fn [tag] (first (filter #(and (= :node (:draw/op %)) (= tag (:tag %))) ops)))]
+                (- (:x (box :a)) (:x (box :li)))))]
+    (are [fs expected] (== expected (adv fs))
+      6 9.0, 8 11.0, 10 14.0, 14 19.0, 20 27.0, 28 37.0, 40 52.0))
+  ;; An `<ol>`'s inside marker is a different rule and must not be pulled
+  ;; into this one: it IS its string. Brave advances 21px for `1. ` in 14px
+  ;; monospace, which is what measuring the text already gives.
+  (let [ops (let [[ol doc] (dom/create-element dom/empty-document :ol)
+                  doc (dom/set-root doc ol)
+                  doc (dom/set-style doc ol {:list-style-position "inside"})
+                  [li doc] (dom/create-element doc :li)
+                  doc (dom/append-child doc ol li)
+                  [a doc] (dom/create-element doc :a)
+                  doc (dom/append-child doc li a)
+                  [t doc] (dom/create-text-node doc "F")
+                  doc (dom/append-child doc a t)
+                  [_ doc] (dom/consume-ops doc)]
+              (layout/draw-ops (dom/tree doc) {:width 300 :theme {:padding 0 :gap 0}}))
+        box (fn [tag] (first (filter #(and (= :node (:draw/op %)) (= tag (:tag %))) ops)))
+        texts (text-draw-ops ops)]
+    (is (= ["1." "F"] (mapv :text texts))
+        "the number is drawn as its own text run (its trailing space became
+         the separator inline-tokens makes of every trailing space) and it
+         still advances by that string's width, not by a font-size law")
+    (is (< 0 (- (:x (box :a)) (:x (box :li))))
+        "and it still advances the line")))
 
 (deftest an-outside-marker-is-painted-left-of-the-items-content-edge
   ;; What the conformance harness CANNOT check, stated here instead: the
@@ -8256,6 +8317,31 @@
     (is (< (:x (first sentence)) (:x grid) (:x (second sentence)))
         "with the grid between them rather than above or below")))
 
+(deftest inline-table-shrink-wraps-to-its-columns-and-stays-on-the-line
+  ;; The third and last of the same shape. Measured in Brave 151 on
+  ;; 2026-08-06, `before <span style="display: inline-table"><span
+  ;; style="display: table-cell">cell</span></span> after` is ONE 20px line
+  ;; with the table 28x20 at x=49 -- the cell's four monospace characters,
+  ;; through the anonymous row and table boxes table-rows already
+  ;; generates. This engine made three lines and two 400px-wide blocks.
+  ;;
+  ;; Unlike `inline-flex` and `inline-grid` this needed no sizing rule at
+  ;; all: a table already shrink-wraps to its columns, so the only thing
+  ;; missing was that it was never inline-LEVEL.
+  (let [ops (inline-ops ["before "
+                         [:span {:display "inline-table"}
+                          [:span {:display "table-cell"} "cell"]]
+                         " after"]
+                        {} {:width 480 :theme {:padding 0 :gap 0}})
+        container (first (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))
+        tbl (first (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))
+        sentence (filterv #(contains? #{"before" "after"} (:text %)) (text-draw-ops ops))]
+    (is (= 20 (:h container)) "the whole sentence is ONE line box, not three")
+    (is (< (:w tbl) 100) "the table is its cell's width, not the container's")
+    (is (apply = (map :y sentence)) "and the words either side of it share it")
+    (is (< (:x (first sentence)) (:x tbl) (:x (second sentence)))
+        "with the table between them rather than above or below")))
+
 ;; ---- the inline VERTICAL model: strut + leading + one shared baseline ----
 ;;
 ;; These run with a `:font-metrics` theme hook carrying the faces measured
@@ -8843,6 +8929,196 @@
     (is (= 0 (:y (box nil))) "on the baseline its bottom edge is the baseline")
     (is (= 0.828125 (:y (box "middle")))
         "and `middle` puts it 0.828125 down, exactly Brave's number")))
+
+(deftest an-inline-tables-own-height-sets-the-line-box
+  ;; The vertical half of inline-table-shrink-wraps-to-its-columns..., which
+  ;; runs under the zero-inset theme and so cannot see it: an atomic's own
+  ;; extent only reaches the line box when the host supplies
+  ;; `:font-metrics` (without them inline-line-metrics keeps its documented
+  ;; `max(line-height, baseline)` approximation and reports 20). Measured in
+  ;; Brave 151 on 2026-08-06, `x <span style="display:inline-table"><span
+  ;; style="display:table-cell;height:40px">cell</span></span>` is a 40px
+  ;; line with the table at y=0 -- the table's baseline is its first row's,
+  ;; which is the same rule the atomic path already gives an inline-block
+  ;; holding a line of text and not a second one.
+  (let [ops (inline-ops ["x "
+                         [:span {:display "inline-table"}
+                          [:span {:display "table-cell" :height 40} "cell"]]]
+                        {:line-height 20} {:width 480 :theme brave-theme})]
+    (is (= 40 (:h (first (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops))))
+        "the line box follows the table's own height")))
+
+;; ---- every other `vertical-align` on an ATOMIC inline ----
+;;
+;; One shape carries the whole section, because it is the shape the whole
+;; section was measured on: a 40px empty inline-block (which sets the line
+;; box and its baseline) beside a 10px one carrying the value under test.
+;; Measured in Brave 151 on 2026-08-06 at the conformance harness's own
+;; frame -- 400px block, monospace 14px, `line-height: 20px` -- where the
+;; line box is 46px tall in all of them and its baseline is at y=40:
+;;
+;;   baseline 30 | top 0 | bottom 36 | text-top 28 | text-bottom 33
+;;   middle 31.828125 | super 24.34375 | sub 33.796875 | 12px 18 | 50% 20
+;;
+;; `metric-boxes`' container is 800px rather than 400 and nothing here
+;; depends on the width, so the y values below ARE the browser's absolute
+;; ones -- unlike the text cases, where brave-theme's linearly scaled
+;; faces put the engine within a pixel rather than on it.
+(defn- atomic-va-boxes
+  "[div-h span-y] for `<span 20x40><span 20x10 vertical-align=va>` -- the
+   line box's height and where the second box landed in it."
+  ([va] (atomic-va-boxes va nil))
+  ([va extra]
+   (let [ops (inline-ops [[:span {:display "inline-block" :width 20 :height 40}]
+                          [:span (cond-> {:display "inline-block" :width 20 :height 10}
+                                   va (assoc :vertical-align va)
+                                   extra (merge extra))]]
+                         {:line-height 20}
+                         {:width 800 :theme brave-theme})
+         nodes (filterv #(= :node (:draw/op %)) ops)]
+     [(:h (first (filter #(= :div (:tag %)) nodes)))
+      (:y (second (filter #(= :span (:tag %)) nodes)))])))
+
+(deftest vertical-align-top-and-bottom-pin-an-atomic-inline-to-the-line-edges
+  ;; Brave: y=0 for `top` and y=36 for `bottom` on the 46px line, against
+  ;; y=30 on the baseline. The machinery for this existed for a TEXT piece
+  ;; since the round that added line-edge-aligned, and did not reach the
+  ;; atomic path at all -- an inline-block took the baseline default for
+  ;; both, which is what made the pair a finding rather than "the property
+  ;; does nothing here".
+  (is (= [46 30] (atomic-va-boxes nil)) "the baseline default, for contrast")
+  (is (= [46 0] (atomic-va-boxes "top")))
+  (is (= [46 36] (atomic-va-boxes "bottom")))
+  ;; ...and neither is part of the baseline union, which is why the line is
+  ;; still 46: a box pinned to an edge cannot also stretch the thing it is
+  ;; pinned to. The 40px box and the strut alone decide that number.
+  (is (= 46 (first (atomic-va-boxes "top" {:height 44})))
+      "a taller top-aligned box does not grow a line it still fits in"))
+
+(deftest an-edge-aligned-atomic-taller-than-the-line-grows-it-on-its-far-side
+  ;; Measured in Brave: a 10px inline-block beside a 40px one makes a 20px
+  ;; line (the strut's, since the 40 is `top`-aligned and out of the union);
+  ;; the same pair with the tall box `bottom` puts the SHORT one at y=24
+  ;; rather than y=4, i.e. the 20px of growth went above the baseline
+  ;; instead of below it.
+  (let [pair (fn [va]
+               (let [ops (inline-ops [[:span {:display "inline-block" :width 20 :height 10}]
+                                      [:span {:display "inline-block" :width 20 :height 40
+                                              :vertical-align va}]]
+                                     {:line-height 20} {:width 800 :theme brave-theme})
+                     nodes (filterv #(= :node (:draw/op %)) ops)
+                     spans (filterv #(= :span (:tag %)) nodes)]
+                 [(:h (first (filter #(= :div (:tag %)) nodes)))
+                  (:y (first spans)) (:y (second spans))]))]
+    (is (= [40 4 0] (pair "top"))
+        "line 40, the tall box at the top, the short one on a baseline that
+         has not moved -- Brave's 40/4/0")
+    (is (= [40 24 0] (pair "bottom"))
+        "and `bottom` moves the BASELINE instead: Brave's 40/24/0")))
+
+(deftest two-edge-aligned-atomics-grow-the-line-only-once
+  ;; The one shape CSS 2.1 leaves circular, measured rather than guessed.
+  ;; Brave 151 on 2026-08-06, in both document orders, with a 40px
+  ;; baseline-aligned box setting a 46px line:
+  ;;
+  ;;   top 60 + bottom 50 -> line 60, the 40px box still at y=0
+  ;;   top 60 + bottom 80 -> line 80, the 40px box at y=34
+  ;;
+  ;; i.e. only the LARGER request is served and the smaller box then fits
+  ;; inside the line it made. Growing both sides independently -- what this
+  ;; engine did until 2026-08-06 -- gives the second shape a 94px line.
+  (let [three (fn [h-top h-bottom]
+                (let [ops (inline-ops [[:span {:display "inline-block" :width 20 :height 40}]
+                                       [:span {:display "inline-block" :width 20 :height h-top
+                                               :vertical-align "top"}]
+                                       [:span {:display "inline-block" :width 20 :height h-bottom
+                                               :vertical-align "bottom"}]]
+                                      {:line-height 20} {:width 800 :theme brave-theme})
+                      nodes (filterv #(= :node (:draw/op %)) ops)]
+                  [(:h (first (filter #(= :div (:tag %)) nodes)))
+                   (:y (first (filter #(= :span (:tag %)) nodes)))]))]
+    (is (= [60 0] (three 60 50)) "the top box decides; the baseline holds")
+    (is (= [80 34] (three 60 80)) "the bottom box decides; the baseline moves")))
+
+(deftest text-top-and-text-bottom-align-an-atomic-with-the-parents-content-area
+  ;; The pair that tells a FONT-relative value from a LINE-relative one.
+  ;; Brave puts the 10px box at y=28 for `text-top` where `top` says 0, and
+  ;; at y=33 for `text-bottom` where `bottom` says 36 -- one ascent above
+  ;; and one descent below the shared baseline at 40, in the PARENT's face.
+  (is (= [46 28] (atomic-va-boxes "text-top")))
+  (is (= [46 33] (atomic-va-boxes "text-bottom")))
+  ;; Measured in Brave, the same pair in a BOLD parent (ascent 14, descent
+  ;; 4 against the upright face's 12/3) reads 26 and 34 -- so it is the
+  ;; face and not a constant. `metric-boxes`' theme carries both faces.
+  (let [bold (fn [va]
+               (let [ops (inline-ops [[:b {} [:span {:display "inline-block" :width 20 :height 40}]
+                                       [:span {:display "inline-block" :width 20 :height 10
+                                               :vertical-align va}]]]
+                                     {:line-height 20} {:width 800 :theme brave-theme})
+                     spans (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)]
+                 (:y (second spans))))]
+    (is (= 26 (bold "text-top")) "one BOLD ascent above the baseline")
+    (is (= 34 (bold "text-bottom")) "one BOLD descent below it"))
+  ;; ...and NOT the box's own face or line-height, which is the other half
+  ;; of the discrimination: neither of these moves it.
+  (is (= [46 28] (atomic-va-boxes "text-top" {:font-size 28})))
+  (is (= [46 28] (atomic-va-boxes "text-top" {:line-height 40}))))
+
+(deftest a-percentage-vertical-align-is-of-the-elements-own-line-height
+  ;; Brave raises the 10px box by 10 at `50%` in the harness's 20px frame
+  ;; (y=20 against the baseline's 30), by 20 when the BOX declares
+  ;; `line-height: 40px`, and by 10 still when the parent's font-size
+  ;; changes -- so the base is a line-height and it is the element's own.
+  ;; This value was left out of the round that landed `<length>` for
+  ;; exactly that reason and is now measured.
+  (is (= [46 20.0] (atomic-va-boxes "50%")))
+  (is (= [46 10.0] (atomic-va-boxes "50%" {:line-height 40}))
+      "the BOX's own line-height is the base")
+  (is (= [46 20.0] (atomic-va-boxes "50%" {:font-size 28}))
+      "...and its font-size is not")
+  ;; `-50%` lowers it AND grows the line, because the box is pushed past
+  ;; the bottom of a union it is still part of. Brave reports exactly this
+  ;; pair: y=40 on a 50px line.
+  (is (= [50 40.0] (atomic-va-boxes "-50%")))
+  ;; A length is the control that was already passing, and must keep its
+  ;; number: Brave says y=18 for `12px`.
+  (is (= [46 18.0] (atomic-va-boxes "12px"))))
+
+(deftest super-and-sub-are-an-affine-function-of-the-font-size
+  ;; Measured in Brave 151 on 2026-08-06 at 17 font sizes from 6 to 40,
+  ;; including fractional ones, and in four faces at 20px:
+  ;;
+  ;;     super =  font-size/3 + 1        sub = -(font-size/5 + 1)
+  ;;
+  ;; The `+ 1` is what the old `0.404em`/`0.271em` constants could not
+  ;; express: they were measured at 14px, where they are right, and are
+  ;; 0.42px out at 8px and 0.98px out at 28px. Both errors are inside the
+  ;; conformance geometry axis's 2px tolerance, so no case could have found
+  ;; this -- a sweep did.
+  ;;
+  ;; Checked here on an ATOMIC inline, where the same law applies and the
+  ;; box's y is a direct reading of the shift: on the 46px line whose
+  ;; baseline is 40, a 10px box sits at 30 unshifted, so `super` at parent
+  ;; font-size 14 is 30 - (14/3 + 1) = 24.333 against Brave's 24.34375
+  ;; (its own LayoutUnit floor of 14/3, which this engine does not do).
+  (let [y (fn [fs va]
+            (let [ops (inline-ops [[:span {:display "inline-block" :width 20 :height 40}]
+                                   [:span {:display "inline-block" :width 20 :height 10
+                                           :vertical-align va}]]
+                                  {:line-height 20 :font-size fs}
+                                  {:width 800 :theme brave-theme})
+                  spans (filterv #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)]
+              (:y (second spans))))]
+    (are [fs va lo hi] (< lo (y fs va) hi)
+      14 "super" 24.3 24.4     ; Brave 24.34375
+      14 "sub"   33.79 33.81   ; Brave 33.796875
+      8  "super" 26.3 26.4     ; Brave 26.34375
+      8  "sub"   32.59 32.61   ; Brave 32.59375
+      28 "super" 19.6 19.7     ; Brave 19.671875
+      28 "sub"   36.59 36.61)  ; Brave 36.59375
+    (is (not (== (- 30 (y 28 "super")) (* 2 (- 30 (y 14 "super")))))
+        "and doubling the font size does NOT double the raise, which is the
+         whole content of the affine term")))
 
 (deftest a-lone-inline-element-still-gets-a-real-inline-box
   ;; `<td><a href="/x">link</a></td>` reports the <a> at (0, 2, 28, 15) in

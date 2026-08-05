@@ -508,6 +508,23 @@
       (not (zero? ls)) (+ (* ls (count text)))
       (not (zero? ws)) (+ (* ws (count (filter space-char? text)))))))
 
+(defn- token-advance
+  "How far one inline-tokens token moves the pen.
+
+   Normally the width of the text it draws, which is why almost nothing
+   needs this function. The exception is a `list-style-position: inside`
+   bullet, where a browser reserves a box computed from the font size and
+   paints a glyph narrower than it inside -- so the advance and the drawing
+   are two different numbers and only the fragment knows the first. See
+   symbol-marker-advance.
+
+   Every measurement of a token's width goes through here: the line
+   breaker's wrap test, the pen it advances, inline-max-content-width and
+   inline-min-content-width. They agreed by construction when they each
+   called `text-advance` directly and they have to keep agreeing."
+  [theme t]
+  (or (:advance t) (text-advance theme (:style t) (:text t))))
+
 (defn- tab-stop-width
   "The distance between two tab stops: `tab-size` SPACES, measured with
    whatever `letter-spacing`/`word-spacing` are in force, or nil when the
@@ -6144,7 +6161,11 @@
       (cond-> {:generated/pseudo pseudo-key
                :generated/text (str content)
                :generated/style style}
-        (:marker/outside? style) (assoc :generated/marker :outside)))))
+        (:marker/outside? style) (assoc :generated/marker :outside)
+        ;; ...and `:symbol` when it is a bullet marker taking real inline
+        ;; space, whose ADVANCE is not the width of the glyph it draws --
+        ;; see symbol-marker-advance for the law and for its measurements.
+        (:marker/symbol? style) (assoc :generated/marker :symbol)))))
 
 (defn- generated-node?
   [node]
@@ -6202,6 +6223,49 @@
    generated content as ordinary inline text asks this first."
   [node]
   (and (map? node) (= :outside (:generated/marker node))))
+
+(defn- symbol-marker-advance
+  "How far a `list-style-position: inside` BULLET marker advances the line,
+   given the item's font size -- which is the only thing it depends on.
+
+     advance = font-size + ceil(2 x (font-size + 2) / 7)
+
+   Measured in Brave 151 on 2026-08-06, `<ul><li style=\"list-style-
+   position: inside\"><a>F</a></li></ul>`, as the `<a>`'s x minus the
+   `<li>`'s: every integer font size from 6 to 40 (9, 10, 11, 13, 14, 15,
+   16, 18, 19, 20, 22, 23, 24, 25, 27, 28, ..., 52) and the fractional
+   sizes 10.5, 13.3, 14.5, 17.7 and 21.25 (14.5, 18.296875, 19.5, 23.6875,
+   28.25 -- the browser then quantises to LayoutUnit's 1/64, which this
+   does not; the residual is under 0.005px). The expression is an empirical
+   law over that range, not a derivation: nothing here knows why Blink
+   picks 2/7.
+
+   It is a function of the SIZE alone. Measured identical for `disc`,
+   `circle` and `square`, and identical in Arial and in monospace -- whose
+   space advances differ by 3px -- so the browser is not laying out the
+   `\"\\u2022 \"` string this engine draws. That string is 13.70625 wide at
+   14px against the browser's 19, and that 5.3px is the whole of
+   `:list/list-style-position-inside`'s residual.
+
+   Only for a BULLET. An `<ol>`'s inside marker IS its string: measured,
+   Brave advances 21px for `1. `, 28 for `10. ` and 35 for `100. ` in 14px
+   monospace, i.e. exactly the text, which is what this engine already
+   measures for it. Two list-style-types, two rules.
+
+   An OUTSIDE bullet is not this number either, and is not measurable
+   here: it advances nothing (that is what makes it outside), so all it
+   decides is where the glyph paints, which the oracle has no box for.
+   Left as the string width it has always been."
+  [font-size]
+  (when font-size
+    (+ font-size (Math/ceil (/ (* 2 (+ font-size 2)) 7.0)))))
+
+(defn- symbol-marker-node?
+  "True for a generated node that is an INSIDE bullet marker -- one whose
+   inline advance comes from symbol-marker-advance rather than from the
+   text it draws."
+  [node]
+  (and (map? node) (= :symbol (:generated/marker node))))
 
 (defn- real-text-child
   "Returns the plain string content of `child` if it's a genuine DOM text
@@ -6407,8 +6471,17 @@
         ;; block }` on `<p class="bb">tail</p>` laid out as the single
         ;; text run `headtail` and reported a 20px paragraph where Brave
         ;; reports 40 with `tail` on the second line.
+        ;; ...and neither is an INSIDE BULLET, for the same reason once
+        ;; removed: it is a box whose advance is not the width of the glyph
+        ;; it draws (symbol-marker-advance), and a merged `:text` op has
+        ;; one x and one string, so the item's first word would be painted
+        ;; inside the gap the marker reserves and the run would be measured
+        ;; as the marker alone. Measured: `<td><ul><li>one</li><li>two</li>
+        ;; </ul></td>` is 82px wide in Brave under `list-style-position:
+        ;; inside` against 63 outside; merged, this engine reported 61.
         [before children] (if-let [t (and before
                                           (not (outside-marker-node? before))
+                                          (not (symbol-marker-node? before))
                                           (not (generated-block-level? before))
                                           (seq children)
                                           (real-text-child (first children)))]
@@ -6727,11 +6800,24 @@
                      (let [n (or (parse-int (get-in child [:attrs :value]) nil) (step n))]
                        (if (or (list-style-none? child) (pseudo-content child :before))
                          [(conj out child) n]
-                         [(conj out (assoc-in child [:attrs :pseudo/before]
-                                              (cond-> {:content (implicit-marker-content parent-tag n)}
-                                                (not (or container-inside? (list-style-inside? child)))
-                                                (assoc :marker/outside? true))))
-                          n]))
+                         (let [outside? (not (or container-inside? (list-style-inside? child)))]
+                           [(conj out (assoc-in child [:attrs :pseudo/before]
+                                                (cond-> {:content (implicit-marker-content parent-tag n)}
+                                                  outside? (assoc :marker/outside? true)
+                                                  ;; An INSIDE bullet is the one
+                                                  ;; marker whose advance is not
+                                                  ;; the width of its own text:
+                                                  ;; the trailing space comes off
+                                                  ;; the string and the whole
+                                                  ;; advance is computed from the
+                                                  ;; font size instead. See
+                                                  ;; symbol-marker-advance, which
+                                                  ;; has the sweep and the reason
+                                                  ;; an <ol> is not in this
+                                                  ;; branch.
+                                                  (and (not outside?) (= :ul parent-tag))
+                                                  (assoc :content "•" :marker/symbol? true))))
+                            n])))
                      [(conj out child) n]))
                  [[] init-n]
                  children)))
@@ -7592,7 +7678,7 @@
                 :marker total
                 :atomic (+ total (:w t))
                 (+ total
-                   (w-of (:text t) (:style t))
+                   (token-advance theme t)
                    (if (:space-before? t) (w-of " " (or (:space-style t) (:style t))) 0))))
             (if (indented-line? 0 true (:hanging? block-indent) (:each-line? block-indent))
               (:px block-indent)
@@ -7934,7 +8020,7 @@
               (case (:kind t)
                 (:break :marker) widest
                 :atomic (max widest (:w t))
-                (max widest (text-advance theme (:style t) (:text t)))))
+                (max widest (token-advance theme t))))
             0
             tokens)))
 
@@ -10535,8 +10621,22 @@
    Brave on `before <span style=\"display: inline-grid;
    grid-template-columns: 30px 30px\">...</span> after`: the span is 60px
    wide at x=58 and the whole sentence is ONE 20px line, where the block
-   row this engine gave it made three lines."
-  #{"inline-block" "inline-flex" "inline-grid"})
+   row this engine gave it made three lines.
+
+   `inline-table` is the same story a third time, and it needed no new
+   sizing rule at all: a table already shrink-wraps to its columns, so the
+   only thing missing was that it was never inline-LEVEL. Measured in Brave
+   151 on 2026-08-06, `before <span style=\"display: inline-table\"><span
+   style=\"display: table-cell\">cell</span></span> after` is ONE 20px line
+   with the table 28x20 at x=49 -- exactly the cell's four monospace
+   characters, through the anonymous row and anonymous table boxes
+   table-rows already generates -- where this engine made three lines and
+   two 400px blocks. Its BASELINE is its first row's, which is what the
+   atomic path already gives an inline-block whose content is a line of
+   text; measured, a cell forced to `height: 40px` centres its text
+   (a cell's UA `vertical-align: middle`) and the line box follows it to
+   40, which is that same rule and not a second one."
+  #{"inline-block" "inline-flex" "inline-grid" "inline-table"})
 
 (defn- inline-atomic-element?
   "True for an element that participates in a line as one unbreakable box:
@@ -10741,21 +10841,38 @@
 
     :else false))
 
-(def ^:private vertical-align-shift
-  "How far `vertical-align` raises (positive) or lowers (negative) an inline
-   box from its parent's baseline, as a fraction of the PARENT's font size.
+(defn- vertical-align-shift
+  "How far `vertical-align: super`/`sub` raises (positive) or lowers
+   (negative) an inline box from its parent's baseline, in pixels, given the
+   PARENT's font size. nil for every other value.
 
-   Measured in Chrome rather than guessed: `super` raises a 14px run by
-   5.66px and `sub` lowers it by 3.79px, i.e. 0.404em and 0.271em. These are
-   the font's own superscript/subscript offsets, which a real browser reads
-   from the OS/2 table; this engine has no font tables, so the measured
-   platform values are used and named as such.
+     super =  font-size/3 + 1
+     sub   = -(font-size/5 + 1)
+
+   Measured in Brave 151 on 2026-08-06, and this IS the rule rather than a
+   fit: `M<span style=\"vertical-align:super\">M</span>` against a plain
+   sibling, at font sizes 6, 8, 9, 10, 12, 13.5, 14, 15, 16, 18, 20, 21.5,
+   24, 28, 30, 36 and 40, reproduces both expressions exactly at every one
+   of them (to LayoutUnit's own 1/64 -- the browser floors `fs/3` and
+   `fs/5` to 1/64 before adding the 1, which this does not; the residual is
+   under 0.016px and no axis can see it). Measured in four faces at 20px --
+   monospace, Arial, Georgia and Verdana -- all four give 7.65625 and 5, so
+   this is a function of the font SIZE and of nothing else. The same two
+   numbers apply to an ATOMIC inline, measured the same way on a 10px
+   inline-block at 8/14/28px.
+
+   This replaced a table of `0.404em`/`0.271em`, which was measured at 14px
+   only and is exact there and nowhere else: the affine term makes the
+   ratio 0.457em at 8px and 0.369em at 28px. The old constants were 0.42px
+   out at 8px and 0.98px out at 28px -- inside the geometry axis's 2px
+   tolerance, which is why nothing failed and why the corpus could not have
+   found this. The sweep did.
 
    `top`/`bottom` are NOT here, because they are not a fraction of anything:
    each aligns an edge of the inline box against the finished LINE box, so
    the shift is whatever it takes to put that edge there. They are resolved
-   in inline-line-metrics, in the second pass this map cannot express -- see
-   line-edge-aligned, which is the set of values that get that treatment.
+   in inline-line-metrics, in the second pass this function cannot express
+   -- see line-edge-aligned, the set of values that get that treatment.
 
    `middle` is not here either, and for a third reason: it is not a
    fraction of the parent's font size, it is the box's own midpoint placed
@@ -10767,14 +10884,46 @@
    metric from at all.
 
    `text-top`/`text-bottom` are absent for a related reason: they align
-   against the parent's CONTENT AREA rather than the line box, which this
-   function's callers do not track per owner.
+   against the parent's CONTENT AREA rather than the line box, so they need
+   the parent's ascent and descent and not only its size. On an ATOMIC
+   inline they are resolved in inline-fragments, which has both -- see the
+   two branches at the top of its `baseline-offset` cond, and the table of
+   five parent faces measured there.
+
+   On a non-atomic inline BOX they are NOT implemented, and this is the
+   scope cut with the numbers a fix will need. What they align is the
+   box's own INLINE box (its `line-height`, `leading-ascent` of it above
+   the baseline), not its content area, so the two coincide only when the
+   two are the same height. Measured in Brave 151 on 2026-08-06,
+   `base<span>N</span><span style=\"...\">S</span>` in the harness's 14px /
+   20px frame, as [y h] of the second span and the line's own height:
+
+   | child            | baseline    | text-top    | text-bottom |
+   |------------------|-------------|-------------|-------------|
+   | same face        | [2 15] L=20 | [4 15] L=22 | [2 15] L=23 |
+   | `font-size: 24`  | [-3 26] L=24| [-1 26] L=22| [-3 26] L=23|
+   | `font-size: 10`  | [5 11] L=21 | [6 11] L=22 | [4 11] L=23 |
+   | `line-height: 40`| [12 15] L=40| [14 15] L=42| [12 15] L=43 |
+
+   The same-face row is what makes this a real gap rather than a no-op: an
+   inline box whose line-height is 20 on a 14px face reaches 14 above the
+   baseline where the face's own ascent is 12, so `text-top` moves it DOWN
+   by 2 even when parent and child are identical. This engine leaves all
+   four rows on the baseline. No corpus case measures it.
 
    A LENGTH is not here either, and is not resolved the same way: it is
    already an absolute number of pixels by the time layout sees it (the
    cascade resolves its `em` -- see cssom.core's em-resolvable-properties),
-   so it needs no font size and no table. See vertical-align-length."
-  {"super" 0.404 "sub" -0.271})
+   so it needs no font size and no table. See vertical-align-length.
+
+   A PERCENTAGE is of the element's OWN line-height, which is neither of
+   the two things this function has -- see vertical-align-percentage."
+  [va parent-fs]
+  (when parent-fs
+    (case va
+      "super" (+ (/ parent-fs 3.0) 1)
+      "sub" (- (+ (/ parent-fs 5.0) 1))
+      nil)))
 
 (defn- vertical-align-length
   "`vertical-align` as a signed number of pixels, or nil when this
@@ -10798,8 +10947,10 @@
    (`js/parseFloat` stops at the first non-numeric character) and as nil on
    the JVM (`Double/parseDouble` throws), i.e. two different layouts from
    one document -- and a `%`, which resolves against `line-height` rather
-   than against anything here, is deliberately not admitted at all rather
-   than silently read as pixels."
+   than against anything here, is read by vertical-align-percentage
+   instead: the two produce the same KIND of answer (a signed raise off the
+   parent's baseline) from two different bases, and mixing them here would
+   have needed a length function that also takes a line-height."
   [st]
   (let [v (:vertical-align st)]
     (cond
@@ -10807,6 +10958,42 @@
       (and (string? v) (re-matches #"[+-]?(?:\d+\.?\d*|\.\d+)px" (str/trim v)))
       (parse-dbl (subs (str/trim v) 0 (- (count (str/trim v)) 2)) nil)
       :else nil)))
+
+(defn- vertical-align-percentage
+  "`vertical-align: <percentage>` as a signed number of pixels, or nil when
+   the value is not a percentage.
+
+   The base is the ELEMENT'S OWN computed `line-height`, not the parent's,
+   not the font size, and not the line box. Measured in Brave 151 on
+   2026-08-06 on a 10px inline-block beside a 40px one, where the baseline
+   default puts it at y=30 on a 46px line:
+
+   | what carries the line-height        | `50%` | raise |
+   |-------------------------------------|-------|-------|
+   | inherited 20px (the harness's frame) |  y=20 |    10 |
+   | the CONTAINER at `line-height: 40px` |  y=10 |    20 |
+   | the CONTAINER at `line-height: 10px` |  y=25 |     5 |
+   | the BOX ITSELF at `line-height: 40px`|  y=10 |    20 |
+   | the container at `font-size: 28px`   |  y=20 |    10 |
+
+   The last two rows are the discriminating pair: changing the box's own
+   line-height moves it and changing the parent's font size does not, so
+   the base is a line-height and it is the element's own. `100%` and
+   `-50%` follow the same law and grow the line when they push the box past
+   an edge of it (`100%` on a 20px line-height reads y=10; on a 40px one it
+   reads y=0 with the line 10px taller, because the box was raised out of
+   the top and the line grew to hold it).
+
+   Deliberately not admitted where the base is unresolvable: a caller with
+   no line-height in hand passes nil and gets nil, which keeps the box on
+   the baseline rather than resolving a percentage of a guess."
+  [st line-height]
+  (let [v (:vertical-align st)]
+    (when (and line-height (string? v))
+      (let [t (str/trim v)]
+        (when (re-matches #"[+-]?(?:\d+\.?\d*|\.\d+)%" t)
+          (when-let [n (parse-dbl (subs t 0 (dec (count t))) nil)]
+            (* line-height (/ n 100.0))))))))
 
 (def ^:private line-edge-aligned
   "The `vertical-align` values that align an edge of the inline box with an
@@ -10991,13 +11178,53 @@
                          ;; the first branch below). `inherited` is the
                          ;; parent's text context here -- an atomic is a
                          ;; leaf, so nothing has replaced it yet.
-                         parent-x-height
-                         (:x-height (font-metrics theme (:font-size inherited)
-                                                  (:font-weight inherited)
-                                                  (:font-style inherited)
-                                                  (:font-family inherited)))
+                         parent-face
+                         (font-metrics theme (:font-size inherited)
+                                       (:font-weight inherited)
+                                       (:font-style inherited)
+                                       (:font-family inherited))
+                         parent-x-height (:x-height parent-face)
                          baseline-offset
                          (cond
+                           ;; `text-top` and `text-bottom` align an edge of
+                           ;; the box with an edge of the PARENT's content
+                           ;; area -- its own font's ascent above and
+                           ;; descent below the shared baseline -- so like
+                           ;; `middle` they replace the box's own baseline
+                           ;; rather than shifting it, and unlike
+                           ;; `top`/`bottom` they need nothing the line box
+                           ;; knows.
+                           ;;
+                           ;; Measured in Brave 151 on 2026-08-06, 10px
+                           ;; inline-block beside a 40px one (baseline at
+                           ;; y=40 in every row, default y=30):
+                           ;;
+                           ;;   parent face      text-top  text-bottom
+                           ;;   14px monospace     y=28       y=33
+                           ;;   14px bold mono     y=26       y=34
+                           ;;   28px monospace     y=16       y=35
+                           ;;   8px monospace      y=33       y=32
+                           ;;   14px Arial         y=27       y=33
+                           ;;
+                           ;; i.e. exactly `baseline - ascent` and
+                           ;; `baseline + descent - h` in that face (12/3,
+                           ;; 14/4, 24/5, 7/2, 13/3). Both are unmoved by
+                           ;; `line-height: 40px` or `10px` on the
+                           ;; container, which is what tells them apart
+                           ;; from `top`/`bottom`, and unmoved by a
+                           ;; font-size or line-height on the BOX ITSELF,
+                           ;; which is what makes the face the parent's.
+                           ;;
+                           ;; Both grow the line when the box hangs past an
+                           ;; edge of it, through the ordinary union below
+                           ;; -- measured, a 20px box at `text-top` sits at
+                           ;; y=28 and takes the line from 46 to 48.
+                           (and (= "text-top" (:vertical-align st)) (:ascent parent-face))
+                           (:ascent parent-face)
+
+                           (and (= "text-bottom" (:vertical-align st)) (:descent parent-face))
+                           (- h (:descent parent-face))
+
                            ;; `vertical-align: middle` overrides every rule
                            ;; below it, because it does not ask where the
                            ;; box's own baseline is at all: it puts the
@@ -11122,15 +11349,48 @@
                          ;; own baseline turned out to be, not a fifth way
                          ;; of finding one. The UA sheet's
                          ;; `progress, meter { vertical-align: -0.2em }` is
-                         ;; the only caller today -- see
-                         ;; vertical-align-length.
-                         baseline-offset (if-let [va (vertical-align-length st)]
-                                           (+ baseline-offset va)
-                                           baseline-offset)]
+                         ;; one caller -- see vertical-align-length.
+                         ;;
+                         ;; A PERCENTAGE and `super`/`sub` are the same
+                         ;; kind of offset off the same baseline, from two
+                         ;; other bases: the box's own line-height and the
+                         ;; PARENT's font size. Measured in Brave on the
+                         ;; same 10px-beside-40px shape, `super` puts the
+                         ;; box at y=26.34/24.34/19.67 at parent font sizes
+                         ;; 8/14/28 -- the identical `fs/3 + 1` a text run
+                         ;; gets, so there is one law and not an atomic
+                         ;; one. See vertical-align-shift and
+                         ;; vertical-align-percentage for both sweeps.
+                         own-lh (let [fs (parse-px (:font-size st) (:font-size inherited))]
+                                  (resolve-line-height
+                                   (:line-height st) fs
+                                   (inherited-line-height inherited fs)
+                                   (boolean (:line-height/explicit? inherited))))
+                         baseline-offset (+ baseline-offset
+                                            (or (vertical-align-length st)
+                                                (vertical-align-percentage st own-lh)
+                                                (vertical-align-shift (:vertical-align st)
+                                                                      (:font-size inherited))
+                                                0))]
                      (conj acc (cond-> {:kind :atomic
                                         :w (+ (:w box) ml mr) :h h :baseline-offset baseline-offset
                                         :ml ml :mt mt :draw draw
                                         :owners owners :opacity opacity}
+                                 ;; `top`/`bottom` cannot be resolved here
+                                 ;; at all -- the edge they align to is the
+                                 ;; finished LINE box, which does not exist
+                                 ;; until every other box on it has been
+                                 ;; placed. The fragment carries the MODE
+                                 ;; and inline-line-metrics' second pass
+                                 ;; rewrites `:baseline-offset` once it
+                                 ;; knows the union, exactly as it rewrites
+                                 ;; a text piece's `:shift`. The offset
+                                 ;; computed above stays on the fragment as
+                                 ;; the fallback a host with no
+                                 ;; `:font-metrics` keeps.
+                                 (contains? line-edge-aligned (:vertical-align st))
+                                 (assoc :valign (:vertical-align st))
+
                                  ;; an atomic inline is not an owner of
                                  ;; itself, so its OWN relative offset
                                  ;; rides on the fragment
@@ -11145,11 +11405,22 @@
                    ;; and it advances nothing. See outside-marker-node? and,
                    ;; for each of those three, inline-tokens /
                    ;; inline-line-breaker / layout-inline-run.
-                   (conj acc {:kind (if (outside-marker-node? child) :marker :text)
-                              :text (:generated/text child)
-                              :style (inline-inherited inherited (:generated/style child))
-                              :owners owners
-                              :opacity opacity})
+                   ;;
+                   ;; An INSIDE bullet is ordinary inline text in every
+                   ;; respect but one: what it advances is not what it
+                   ;; draws. It carries that advance on the fragment (see
+                   ;; symbol-marker-advance) and every place that would
+                   ;; otherwise measure the string reads it instead --
+                   ;; token-advance, which is the one function all four of
+                   ;; them go through.
+                   (let [style (inline-inherited inherited (:generated/style child))]
+                     (conj acc (cond-> {:kind (if (outside-marker-node? child) :marker :text)
+                                        :text (:generated/text child)
+                                        :style style
+                                        :owners owners
+                                        :opacity opacity}
+                                 (symbol-marker-node? child)
+                                 (assoc :advance (symbol-marker-advance (:font-size style))))))
 
                    (some? (real-text-child child))
                    (conj acc {:kind :text
@@ -11193,9 +11464,18 @@
                                inherited (inline-inherited inherited st)
                                ;; a `vertical-align` on an inline box moves
                                ;; that box AND everything inside it
-                               inherited (if-let [f (get vertical-align-shift (:vertical-align st))]
-                                           (assoc inherited :vertical-align/shift
-                                                  (* f parent-fs))
+                               inherited (if-let [s (vertical-align-shift (:vertical-align st) parent-fs)]
+                                           (assoc inherited :vertical-align/shift s)
+                                           inherited)
+                               ;; ...and so does a `<percentage>`, off the
+                               ;; box's OWN line-height (which
+                               ;; inline-inherited has just resolved onto
+                               ;; `inherited`, so this reads the used value
+                               ;; rather than re-deriving it). See
+                               ;; vertical-align-percentage.
+                               inherited (if-let [p (vertical-align-percentage
+                                                     st (:line-height inherited))]
+                                           (assoc inherited :vertical-align/shift p)
                                            inherited)
                                ;; `middle` is not a fraction of anything, so
                                ;; it cannot live in vertical-align-shift: it
@@ -11425,17 +11705,30 @@
                                                           lead? (joined pending (:style fr))
                                                           :else pending)
                                                         (space-of (:style fr)))]
-                                            {:kind :word
-                                             :text word
-                                             :space-before? (some? space)
-                                             :space-style (:style space)
-                                             :space-wrap? (boolean (:wrap? space))
-                                             :wbr-before? (and wbr? (zero? i))
-                                             :style (:style fr)
-                                             :owners (:owners fr)
-                                             :opacity (:opacity fr)
-                                             :shift (:shift fr 0)
-                                             :valign (:valign fr)}))
+                                            (cond-> {:kind :word
+                                                     :text word
+                                                     :space-before? (some? space)
+                                                     :space-style (:style space)
+                                                     :space-wrap? (boolean (:wrap? space))
+                                                     :wbr-before? (and wbr? (zero? i))
+                                                     :style (:style fr)
+                                                     :owners (:owners fr)
+                                                     :opacity (:opacity fr)
+                                                     :shift (:shift fr 0)
+                                                     :valign (:valign fr)}
+                                              ;; A fragment that declares
+                                              ;; its own `:advance` is one
+                                              ;; token by construction -- the
+                                              ;; only kind is an inside
+                                              ;; bullet, whose text is a
+                                              ;; single glyph with no
+                                              ;; whitespace in it. Guarded on
+                                              ;; the index anyway, so a
+                                              ;; future multi-word one would
+                                              ;; charge the advance once
+                                              ;; rather than per word.
+                                              (and (:advance fr) (zero? i))
+                                              (assoc :advance (:advance fr)))))
                                         words))))))
         out))))
 
@@ -11748,7 +12041,7 @@
         token-w (fn [t] (case (:kind t)
                           :atomic (:w t)
                           :break 0
-                          (w-of (:text t) (:style t))))
+                          (token-advance theme t)))
         ;; FORWARD: the same three advances the loop below computes for
         ;; itself, plus whether a soft wrap opportunity sits in FRONT of
         ;; this token. The advances are recomputed here rather than
@@ -11881,7 +12174,12 @@
                           (w-of " " (or (:space-style t)
                                         {:font-size (or (:font-size (:style (peek pieces))) 14)}))
                           0)
-                    piece (fn [x] (cond-> (assoc (select-keys t [:owners :opacity :draw :h :ml :mt :baseline-offset])
+                    ;; `:valign` rides along for the same reason a text
+                    ;; piece's does: a `vertical-align: top`/`bottom` box
+                    ;; cannot be placed until inline-line-metrics has the
+                    ;; finished line, and this piece is what it is handed.
+                    piece (fn [x] (cond-> (assoc (select-keys t [:owners :opacity :draw :h :ml :mt
+                                                                 :baseline-offset :valign])
                                                  :kind :atomic :x x :w (:w t))
                                     (seq pad-start) (assoc :pad-start pad-start)))]
                 (if (and (content? pieces) opp? (> (+ x sep cluster) content-w))
@@ -11894,7 +12192,7 @@
               :else
               (let [st (:style t)
                     word (:text t)
-                    ww (w-of word st)
+                    ww (token-advance theme t)
                     rtl? (strong-rtl? word)
                     sep (if (and (content? pieces) (:space-before? t))
                           (w-of " " (or (:space-style t) st))
@@ -11902,6 +12200,7 @@
                     piece (fn [x] (cond-> {:text word :style st :owners owners
                                            :opacity (:opacity t) :x x :w ww
                                            :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}
+                                    (:advance t) (assoc :advance (:advance t))
                                     (seq pad-start) (assoc :pad-start pad-start)))]
                 (if (and (content? pieces) opp? (> (+ x sep cluster) content-w))
                   (let [nx (indent-at (inc (count lines)) false)]
@@ -11910,6 +12209,14 @@
                   (let [last-piece (peek pieces)
                         merge? (and last-piece
                                     (not= :marker (:kind last-piece))
+                                    ;; An INSIDE bullet is a box of its own
+                                    ;; in real CSS, and here it is the one
+                                    ;; piece whose `:w` is not the width of
+                                    ;; its `:text`. Merging the item's first
+                                    ;; word into it would paint them
+                                    ;; concatenated at the marker's x, in the
+                                    ;; gap the advance exists to reserve.
+                                    (nil? (:advance last-piece))
                                     (not rtl?)
                                     (not (:rtl? last-piece))
                                     (= (:style last-piece) st)
@@ -12111,10 +12418,11 @@
    `line-height: 40px` reports a 40px paragraph whose baseline has NOT
    moved (its leading text still sits at y=2), i.e. the extra 20px went
    below. A `bottom` box symmetrically grows the line upward. When both
-   kinds ask for growth at once this grows both sides independently, which
-   over-grows the line -- CSS 2.1's own rule here is circular and browsers
-   differ, and the corpus has no such line; an honest approximation rather
-   than a claim.
+   kinds ask for growth at once only the LARGER request is served and the
+   smaller box then fits inside the line it made -- measured in Brave 151
+   on 2026-08-06 in both document orders, see the `need` binding below.
+   This used to grow both sides independently, which over-grew such a line
+   by the smaller request.
 
    Returns the pieces alongside `:h`/`:baseline`, because resolving those
    shifts is the whole point and the caller places from them."
@@ -12126,7 +12434,15 @@
         ;; baseline, and (for an edge-aligned one) what it needs to be
         ;; re-placed against the finished line.
         measured (mapv (fn [p]
-                         (when (not= :atomic (:kind p))
+                         (if (= :atomic (:kind p))
+                           ;; an atomic brings its own baseline and is
+                           ;; measured through `:baseline-offset` below --
+                           ;; EXCEPT when it is edge-aligned, where it needs
+                           ;; the same second pass a text piece does. `:lh`
+                           ;; is its whole margin-box height, which is the
+                           ;; extent that has to fit the line.
+                           (when (:valign p)
+                             {:atomic? true :a 0 :lh (:h p) :shift 0 :valign (:valign p)})
                            (let [st (:style p)
                                  fs (or (:font-size st) fallback-fs)
                                  lh (or (:line-height st) fallback-lh fs)
@@ -12143,8 +12459,18 @@
         spans (for [m measured :when (and m (nil? (:valign m)))]
                 [(+ (:a m) (:shift m)) (- (- (:lh m) (:a m)) (:shift m))])
         edges (filterv #(and % (:valign %)) measured)
-        atomic-hs (keep #(when (= :atomic (:kind %)) (or (:baseline-offset %) (:h %))) pieces)
-        atomic-below (keep #(when (= :atomic (:kind %))
+        ;; every atomic, for the no-metrics fallback, which has no second
+        ;; pass to place an edge-aligned one with and keeps it on the
+        ;; baseline (see the fallback branch below)
+        atomic-hs-all (keep #(when (= :atomic (:kind %)) (or (:baseline-offset %) (:h %))) pieces)
+        ;; ...and only the BASELINE-aligned ones for the union: a box
+        ;; pinned to an edge of the line is not on the baseline, so letting
+        ;; it stretch the union would place every other box against a
+        ;; baseline it does not share.
+        atomic-hs (keep #(when (and (= :atomic (:kind %)) (nil? (:valign %)))
+                           (or (:baseline-offset %) (:h %)))
+                        pieces)
+        atomic-below (keep #(when (and (= :atomic (:kind %)) (nil? (:valign %)))
                               (- (:h %) (or (:baseline-offset %) (:h %))))
                            pieces)
         strut (let [{:keys [ascent descent]} (font-metrics theme fallback-fs nil nil nil)
@@ -12153,13 +12479,31 @@
                 [a (- lh a)])
         above0 (apply max (concat (map first spans) atomic-hs [(first strut)]))
         below0 (apply max (concat (map second spans) atomic-below [(second strut)]))
-        ;; an edge-aligned box only makes the line taller, and only on the
+        ;; An edge-aligned box only makes the line taller, and only on the
         ;; side it is NOT pinned to: a `top` box grows the line downward.
-        grow (fn [mode] (apply max 0 (for [e edges :when (= mode (:valign e))]
-                                       (- (:lh e) (+ above0 below0)))))
-        above (+ above0 (grow "bottom"))
-        below (+ below0 (grow "top"))
-        ascents (concat (keep #(:font-size (:style %)) pieces) atomic-hs)
+        ;; When a `top` and a `bottom` box ask at once, only the LARGER
+        ;; request is served and the other then fits inside the line it
+        ;; made -- measured in Brave 151 on 2026-08-06 with a 40px
+        ;; baseline-aligned inline-block (line 46, baseline 40) beside two
+        ;; more:
+        ;;
+        ;;   top 60 + bottom 50 -> line 60, baseline still 40 (the top box
+        ;;                         grew it 14 DOWNWARD; the bottom box fits)
+        ;;   top 60 + bottom 80 -> line 80, baseline 74     (the bottom box
+        ;;                         grew it 34 UPWARD; the top box fits)
+        ;;
+        ;; and identically with the two written in the other order, so it
+        ;; is the larger box that decides and not document order. Growing
+        ;; the two sides independently -- what this did until 2026-08-06 --
+        ;; gives the second shape a 94px line. The two models agree
+        ;; whenever only one side asks, which is every line in the corpus.
+        need (fn [mode] (apply max 0 (for [e edges :when (= mode (:valign e))] (:lh e))))
+        need-top (need "top")
+        need-bottom (need "bottom")
+        l0 (+ above0 below0)
+        above (if (and (> need-bottom l0) (>= need-bottom need-top)) (- need-bottom below0) above0)
+        below (if (and (> need-top l0) (> need-top need-bottom)) (- need-top above0) below0)
+        ascents (concat (keep #(:font-size (:style %)) pieces) atomic-hs-all)
         line-heights (keep #(:line-height (:style %)) pieces)
         max-ascent (if (seq ascents) (apply max ascents) fallback-fs)
         max-lh (if (seq line-heights) (apply max line-heights) fallback-lh)
@@ -12191,20 +12535,36 @@
        ;; `baseline - above`, and a box's top is `baseline - a - shift`;
        ;; `bottom` wants its box bottom at `baseline + below`, and a box's
        ;; bottom is `baseline + (lh - a) - shift`.
+       ;;
+       ;; An ATOMIC carries the answer as a `:baseline-offset` instead --
+       ;; the distance from its top MARGIN edge down to the baseline, which
+       ;; is the one number layout-inline-run places it from. `top` puts
+       ;; that edge on the line's top, `above` from the baseline; `bottom`
+       ;; puts its bottom margin edge on the line's bottom, `below` under
+       ;; it. Measured in Brave, a 10px inline-block beside a 40px one:
+       ;; `top` gives y=0 and `bottom` y=36 on a 46px line, where leaving
+       ;; it on the baseline gives 30 for both.
        :pieces (if (seq edges)
                  (mapv (fn [p m]
-                         (if (and m (:valign m))
+                         (cond
+                           (and m (:valign m) (:atomic? m))
+                           (assoc p :baseline-offset (case (:valign m)
+                                                       "top" above
+                                                       "bottom" (- (:h p) below)))
+
+                           (and m (:valign m))
                            (assoc p :shift (case (:valign m)
                                              "top" (- above (:a m))
                                              "bottom" (- (- (:lh m) (:a m)) below)))
-                           p))
+
+                           :else p))
                        pieces measured)
                  pieces)}
       ;; No host metrics, so no ascents to build a union from and nothing
       ;; to align an edge against either: `top`/`bottom` keep the baseline
       ;; fallback this engine has always given them, exactly as sub/super
       ;; keep their em-fraction shift.
-      {:h (max max-lh (if (seq atomic-hs) (apply max atomic-hs) 0))
+      {:h (max max-lh (if (seq atomic-hs-all) (apply max atomic-hs-all) 0))
        :baseline max-ascent
        :pieces pieces})))
 
@@ -16100,7 +16460,13 @@
                              (assoc node :children [])
                              intruding))
 
-             (or (= "table" (:display st))
+             ;; `inline-table` is the same formatting context as `table` --
+             ;; the difference is entirely OUTSIDE the box (it is
+             ;; inline-level in its parent), which inline-atomic-displays
+             ;; handles. A table already shrink-wraps to its columns, so
+             ;; unlike the flex and grid cases there is not even an
+             ;; `inline?` branch inside the algorithm.
+             (or (contains? #{"table" "inline-table"} (:display st))
                  (and (nil? (:display st)) (= :table tag)))
              (layout-table theme x y avail-width opacity inherited st (assoc node :children children))
 

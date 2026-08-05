@@ -3531,8 +3531,11 @@
  ;; 10px one carrying the value under test, so the SECOND span's y is the
  ;; whole measurement and the geometry axis reads it directly. Brave puts
  ;; the line box at 46 tall in all seven and the baseline default at y=30.
- ;; This engine answers 30 for six of the seven -- i.e. it leaves an
- ;; atomic inline on the baseline -- and `middle` is the exception.
+ ;; This engine answered 30 for six of the seven until 2026-08-06 -- i.e.
+ ;; it left an atomic inline on the baseline -- and `middle` was the
+ ;; exception that made the other six a finding rather than "the property
+ ;; does nothing here". ALL SEVEN AGREE now; each case below records what
+ ;; it measured and which rule reproduces it.
 
  {:id :inline/vertical-align-middle
   :group :inline
@@ -3545,36 +3548,51 @@
 
  {:id :inline/vertical-align-top-on-an-inline-block
   :group :inline
-  ;; Brave: y=0, the top of the LINE BOX. Engine: y=30.
+  ;; AGREES since 2026-08-06. Brave: y=0, the top of the LINE BOX --
+  ;; which is not known until every other box on the line has been
+  ;; placed, so this is the one value the atomic path needs a second pass
+  ;; for (inline-line-metrics rewrites the fragment's `:baseline-offset`
+  ;; once the union is known).
   :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: top\"></span></div>"}
 
  {:id :inline/vertical-align-bottom-on-an-inline-block
   :group :inline
-  ;; Brave: y=36, flush with the line box's bottom at 46.
+  ;; AGREES since 2026-08-06. Brave: y=36, flush with the line box's
+  ;; bottom at 46 -- the mirror of `top`, through the same second pass.
   :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: bottom\"></span></div>"}
 
  {:id :inline/vertical-align-text-top
   :group :inline
-  ;; `text-top` is the parent's FONT's top, not the line box's, so Brave
-  ;; says 28 where `top` says 0. The pair is what makes either number
-  ;; mean anything.
+  ;; AGREES. `text-top` is the parent's FONT's top, not the line box's,
+  ;; so Brave says 28 where `top` says 0, and the pair is what makes
+  ;; either number mean anything. This case PASSED while being wrong:
+  ;; engine 30 against oracle 28 is exactly the 2px tolerance, so only the
+  ;; per-case `--dump-ops` diff showed it moving to 28 on 2026-08-06. The
+  ;; rule is `baseline - parent ascent`: unmoved by any line-height, and
+  ;; moved by the parent's face (a bold parent reads 26).
   :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: text-top\"></span></div>"}
 
  {:id :inline/vertical-align-text-bottom
   :group :inline
-  ;; Brave: y=33, against `bottom`'s 36.
+  ;; AGREES since 2026-08-06. Brave: y=33, against `bottom`'s 36 --
+  ;; `baseline + parent descent - h`, one descent below the baseline
+  ;; rather than at the line's own bottom edge.
   :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: text-bottom\"></span></div>"}
 
  {:id :inline/vertical-align-length
   :group :inline
-  ;; A length RAISES the box off the baseline. Brave: y=18, exactly 12
-  ;; above the baseline default's 30.
+  ;; AGREES. A length RAISES the box off the baseline. Brave: y=18,
+  ;; exactly 12 above the baseline default's 30. The control for the
+  ;; percentage below: the same kind of offset from a different base.
   :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: 12px\"></span></div>"}
 
  {:id :inline/vertical-align-percentage
   :group :inline
-  ;; A percentage is of the element's own LINE-HEIGHT (20px here), so 50%
-  ;; raises by 10. Brave: y=20, against 30.
+  ;; AGREES since 2026-08-06. A percentage is of the element's own
+  ;; LINE-HEIGHT (20px here), so 50% raises by 10 -- Brave: y=20, against
+  ;; 30. Discriminated by measurement rather than read off a spec: the
+  ;; BOX's own `line-height: 40px` doubles the raise and the container's
+  ;; `font-size: 28px` does not change it.
   :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: 50%\"></span></div>"}
 
  ;; ---- visibility: collapse ----
@@ -3691,13 +3709,16 @@
  {:id :list/list-style-position-inside
   :group :list
   :oracle/blind true
-  ;; The value round twenty-nine implemented the DEFAULT of, measured
-  ;; alongside, and never gave a case. Brave puts the <a> at x=59 with
-  ;; `inside` against x=40 with the default `outside`; this engine says
-  ;; 53.70625, which is 5.29 short and is exactly the number that round
-  ;; recorded in `list-style-inside?` rather than modelling: Brave's disc
-  ;; marker advance is a function of the font size (19px at 14px) and not
-  ;; the 13.70625 the `"• "` string measures.
+  ;; AGREES since 2026-08-06. The value round twenty-nine implemented the
+  ;; DEFAULT of, measured alongside, and never gave a case. Brave puts the
+  ;; <a> at x=59 with `inside` against x=40 with the default `outside`;
+  ;; this engine said 53.70625, which is 5.29 short and is exactly the
+  ;; number that round recorded in `list-style-inside?` rather than
+  ;; modelling. Round forty-three swept it: the disc advance is
+  ;; `font-size + ceil(2 x (font-size + 2) / 7)`, exact at every integer
+  ;; size from 6 to 40 and identical in Arial and monospace -- so a
+  ;; browser is not laying out the `"• "` string (13.70625 here) at all.
+  ;; See symbol-marker-advance.
   :html "<ul class=\"ins\" style=\"width: 300px\"><li><a href=\"#\">First</a></li></ul>"
   :css ".ins li { list-style-position: inside }"}
 
@@ -3802,9 +3823,11 @@
 
  {:id :display/inline-table-in-a-sentence
   :group :display
-  ;; Brave: the inline-table is 28x20 at x=49, so `after` starts at 84 --
-  ;; one line, with the table shrink-wrapped to its single cell. This
-  ;; engine makes it a block: three lines and two 400px-wide boxes.
+  ;; AGREES since 2026-08-06. Brave: the inline-table is 28x20 at x=49,
+  ;; so `after` starts at 84 -- one line, with the table shrink-wrapped to
+  ;; its single cell. This engine made it a block: three lines and two
+  ;; 400px-wide boxes. The fix needed no sizing rule (a table already
+  ;; shrink-wraps); `inline-table` simply was not inline-LEVEL.
   :html "<div style=\"width: 400px\">before <span style=\"display: inline-table\"><span style=\"display: table-cell\">cell</span></span> after</div>"}
 
  {:id :position/inset-shorthand
