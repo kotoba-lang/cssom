@@ -78,7 +78,7 @@
    a non-normal `white-space` or a `text-overflow` keeps the old path,
    whether declared on the child or inherited from the container
    (inline-flow-candidate?, inline-runs);
-   inline padding/border/margin are not applied and a wrapped inline box
+   a wrapped inline box
    reports one union `:node` box (inline-owner-ops); `vertical-align`
    `top`/`bottom`/`middle` are not modeled (`super`/`sub` are —
    vertical-align-shift, inline-line-metrics); an EMPTY inline box inside a
@@ -8215,6 +8215,75 @@
                                       words))))))
       out)))
 
+(defn- inline-box-edge
+  "One HORIZONTAL edge of an inline box, as the two numbers a line needs:
+   `:advance`, how far the pen moves over it, and `:inset`, how far the
+   box's own border edge sits inside that advance.
+
+   Real CSS applies horizontal margin, border and padding to an inline
+   box -- they move everything after it along the line -- while the
+   VERTICAL ones move nothing and change no line's height: they only make
+   the box's own paint geometry taller (see owner-fragments, which applies
+   them, and inline-line-metrics, which does not). Measured in Brave 151
+   on 2026-08-05, all in the conformance harness's 14px monospace / 20px
+   line page, where a bare word is 7px wide:
+
+     a <span style=\"padding-left:40px\">b</span> c
+       span (x=14, w=47), `b` at 54, `c` at 68
+     a <span style=\"padding-right:40px\">b</span> c
+       span (x=14, w=47), `b` at 14, `c` at 68
+     a <span style=\"margin-left:30px;margin-right:10px\">b</span> c
+       span (x=44, w=7),  `b` at 44, `c` at 68
+     a <span style=\"border:5px solid red\">b</span> c
+       span (x=14, w=17), `b` at 19, `c` at 38
+     a <span style=\"padding:40px\">b</span> c
+       span (x=14, y=10, w=87, h=95) on a line box still 20px tall
+
+   -- the pen advances by margin + border + padding, and the box's own
+   edge starts one margin into that. Nesting composes with no special
+   case: `a <span style=\"padding-left:10px\">b <em style=\"padding-left:
+   20px\">c</em> d</span> e` puts the span's edge at 14, `b` at 24, the
+   em's edge at 38 and `c` at 58.
+
+   PADDING is read from the per-side longhands (with `:padding/declared`
+   behind them for a document that never went through the cascade, which
+   is the only way a uniform `padding` shorthand can arrive unexpanded),
+   never from the uniform `:padding`: that key falls back to the THEME's
+   own block decoration, and charging 4px of host decoration to every
+   `<b>` on the page would move every word after it. BORDER is this
+   engine's single uniform `:border-width`, the same one every block box
+   reads -- per-side border widths are modelled nowhere in this file, and
+   an inline box is not the place to invent them."
+  [st side]
+  (let [pad (or (get st (keyword (str "padding-" (name side))))
+                (:padding/declared st)
+                0)
+        border (:border-width st)
+        margin (or (get st (keyword (str "margin-" (name side)))) (:margin st) 0)]
+    {:advance (+ margin border pad) :inset (+ border pad)}))
+
+(defn- inline-edge-run
+  "The pen advance and the per-owner box offsets for a whole RUN of inline
+   boxes opening (or closing) at one point on a line, folded INNERMOST
+   first.
+
+   Both directions have the same shape. An owner's own border edge is
+   `:inset` past the pen where its run begins, and every owner nested
+   INSIDE it advances the pen further before the content arrives -- so the
+   distance from the content to owner `o`'s edge is `o`'s inset plus the
+   advance of everything between them, which is exactly what folding from
+   the inside out accumulates. Returns `[total-advance {owner-idx
+   distance-from-the-content}]`; layout-inline-run turns the second into
+   the left extension and right extension of that owner's box (see
+   owner-fragments)."
+  [owners side]
+  (reduce (fn [[a m] owner]
+            (let [{:keys [advance inset]} (inline-box-edge (:st owner) side)
+                  d (+ a inset)]
+              [(+ a advance) (cond-> m (pos? d) (assoc (:idx owner) d))]))
+          [0 {}]
+          owners))
+
 (defn- inline-line-breaker
   "Greedily packs inline-tokens into line boxes no wider than `content-w`,
    the same greedy word-packing rule text-lines/text-lines-measured
@@ -8251,7 +8320,27 @@
    supplies one, else this file's `(long (* 0.6 font-size))` per-character
    approximation — identical to layout-text's own `line-w`, so wrap
    decisions inside an inline run agree with wrap decisions for a plain
-   text child at the same font size."
+   text child at the same font size.
+
+   An inline box's own horizontal margin/border/padding moves the pen
+   here, where the boxes a token sits in are known and the ones the
+   previous token sat in still are: comparing the two owner stacks says
+   which boxes CLOSED before this token and which OPENED before it, and
+   `inline-edge-run` turns each run into an advance. The closing edge is
+   charged before the separating space and the opening edge after it,
+   which is source order — `a <span style=\"padding-right:40px\">b</span>
+   c` puts `c` at 68 (7 + 7 + 7 + 40 + 7) and not at 68 by accident.
+
+   The opening edge takes part in the WRAP test, because it is part of
+   what the box needs to start here at all. It does not survive a wrap:
+   the edges belong to the point in the token stream where the box opens,
+   so a box whose content continues onto a second line gets no second
+   padding-left there — real CSS's `box-decoration-break: slice` default,
+   and here simply the consequence of the stacks being equal across the
+   break. A closing edge belongs to the line the box's last content landed
+   on, which is not always the line the pen is on when the NEXT token
+   arrives, so it is applied to the piece it follows rather than to the
+   pen (see `close!`)."
   [theme content-w tokens]
   (let [measure-text (:measure-text theme)
         w-of (fn [text st]
@@ -8267,94 +8356,161 @@
         ;; first one, or is concatenated into the marker's own draw-op and
         ;; dragged outside the content edge with it.
         content? (fn [pieces] (boolean (some #(not= :marker (:kind %)) pieces)))
-        flush (fn [lines pieces w style] (conj lines {:pieces pieces :w w :style style}))]
-    (loop [ts tokens x 0 pieces [] lines []]
+        flush (fn [lines pieces w style] (conj lines {:pieces pieces :w w :style style}))
+        ;; How much of two owner stacks is the SAME box, not merely the
+        ;; same tag with the same declarations: `:idx` is inline-fragments'
+        ;; own per-element counter, so `<b>x</b><b>y</b>` closes one box
+        ;; and opens another where a structural comparison would see no
+        ;; change at all and charge neither edge.
+        shared-depth (fn [a b]
+                       (count (take-while true? (map #(= (:idx %1) (:idx %2)) a b))))
+        ;; The owner stack of the next token that is actually in the text
+        ;; stream, for the one lookahead the wrap test needs (see
+        ;; `tail-adv`). A marker is not in it -- inline-tokens and the
+        ;; marker branch below both say so -- and skipping it here keeps
+        ;; the three in agreement.
+        next-owners (fn [ts] (or (some #(when (not= :marker (:kind %)) (:owners %)) ts) []))
+        ;; A closing edge is charged to the piece it FOLLOWS, not to the
+        ;; pen. The two are the same point whenever the pen is still on
+        ;; that piece's line -- but a box whose last word ended a line has
+        ;; already been left behind by the time the next token reveals
+        ;; that it closed, and adding its padding-right to the new line's
+        ;; pen would indent that line by it.
+        close! (fn [lines pieces x close-adv pad-end]
+                 (let [with-end (fn [ps] (if (seq pad-end)
+                                           (conj (pop ps) (update (peek ps) :pad-end merge pad-end))
+                                           ps))]
+                   (cond
+                     (seq pieces) [lines (with-end pieces) (+ x close-adv)]
+
+                     (and (seq lines) (pos? close-adv) (seq (:pieces (peek lines))))
+                     (let [ln (peek lines)]
+                       [(conj (pop lines)
+                              (assoc ln :pieces (with-end (:pieces ln))
+                                        :w (+ (:w ln) close-adv)))
+                        pieces x])
+
+                     :else [lines pieces x])))]
+    (loop [ts tokens x 0 pieces [] lines [] prev []]
       (if-let [t (first ts)]
-        (cond
-          (= :break (:kind t))
-          ;; The <br> itself keeps its owners on the line it ends, so
-          ;; layout-inline-run can give it a real (zero-width) box. A
-          ;; browser reports one there, and without it every <br> was a
-          ;; missing element on the geometry axis.
-          (recur (rest ts) 0 []
-                 (conj lines {:pieces pieces :w x :style (:style t)
-                              :break-owners (:owners t)}))
-
-          ;; An OUTSIDE list marker gets a piece whose x is its own NEGATIVE
-          ;; width and which does not move the pen: it is painted in the
-          ;; space immediately before the line's content edge, and the first
-          ;; real word still starts at x=0. Because the pen does not move,
-          ;; the marker is also absent from this line's `:w` -- so it takes
-          ;; no part in wrapping, in `text-align`, or in the run's
-          ;; max-content width.
-          ;;
-          ;; `(- w)` is the item's content edge minus the marker, not the
-          ;; pen minus the marker, and it is correct only because such a
-          ;; marker is always the FIRST child of its item (with-implicit-
-          ;; list-markers writes it as the item's ::before and nothing else
-          ;; ever sets :generated/marker), so the pen is at 0 when it
-          ;; arrives.
-          (= :marker (:kind t))
+        ;; An OUTSIDE list marker gets a piece whose x is its own NEGATIVE
+        ;; width and which does not move the pen: it is painted in the
+        ;; space immediately before the line's content edge, and the first
+        ;; real word still starts at x=0. Because the pen does not move,
+        ;; the marker is also absent from this line's `:w` -- so it takes
+        ;; no part in wrapping, in `text-align`, or in the run's
+        ;; max-content width.
+        ;;
+        ;; `(- w)` is the item's content edge minus the marker, not the
+        ;; pen minus the marker, and it is correct only because such a
+        ;; marker is always the FIRST child of its item (with-implicit-
+        ;; list-markers writes it as the item's ::before and nothing else
+        ;; ever sets :generated/marker), so the pen is at 0 when it
+        ;; arrives.
+        ;;
+        ;; It leaves `prev` exactly as it found it, for the same reason it
+        ;; leaves inline-tokens' pending space alone: it is not in the
+        ;; text stream, so no inline box opens or closes around it.
+        (if (= :marker (:kind t))
           (let [w (w-of (:text t) (:style t))]
-            (recur (rest ts) x (conj pieces (assoc t :x (- w) :w w)) lines))
+            (recur (rest ts) x (conj pieces (assoc t :x (- w) :w w)) lines prev))
+          (let [owners (:owners t)
+                depth (shared-depth prev owners)
+                ;; both folded innermost-first -- see inline-edge-run
+                [close-adv pad-end] (inline-edge-run (reverse (drop depth prev)) :right)
+                [open-adv pad-start] (inline-edge-run (reverse (drop depth owners)) :left)
+                [lines pieces x] (close! lines pieces x close-adv pad-end)
+                ;; The inline-END edge of every box that closes right
+                ;; AFTER this token is unbreakable with it, exactly as the
+                ;; inline-START edge above is unbreakable with the token it
+                ;; opens before -- so the wrap test has to charge it here,
+                ;; one token before the pen ever reaches it. Measured in
+                ;; Brave 151, 2026-08-05, in a 200px paragraph:
+                ;; `aaa bbb <span style="padding-left:30px;padding-right:
+                ;; 30px">ccc ddd eee fff</span> ggg` breaks before `fff`,
+                ;; whose own 191px end would have fitted -- it is the 30px
+                ;; of padding behind it that does not. Charging it only
+                ;; when the pen arrives kept `fff` on line one and made the
+                ;; span 165px wide against the browser's 163.
+                tail-adv (let [nxt (next-owners (rest ts))]
+                           (first (inline-edge-run
+                                   (reverse (drop (shared-depth owners nxt) owners))
+                                   :right)))]
+            (cond
+              (= :break (:kind t))
+              ;; The <br> itself keeps its owners on the line it ends, so
+              ;; layout-inline-run can give it a real (zero-width) box. A
+              ;; browser reports one there, and without it every <br> was a
+              ;; missing element on the geometry axis.
+              (recur (rest ts) 0 []
+                     (conj lines {:pieces pieces :w x :style (:style t)
+                                  :break-owners (:owners t)})
+                     owners)
 
-          ;; An atomic inline never merges with a neighbouring piece and is
-          ;; never split: it wraps to the next line whole, or overflows
-          ;; alone, exactly like an over-wide single word.
-          (= :atomic (:kind t))
-          (let [sep (if (and (content? pieces) (:space-before? t))
-                      (w-of " " (or (:space-style t)
-                                    {:font-size (or (:font-size (:style (peek pieces))) 14)}))
-                      0)
-                piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h :ml :mt :baseline-offset])
-                                     :kind :atomic :x x :w (:w t)))]
-            (if (and (content? pieces) (> (+ x sep (:w t)) content-w))
-              (recur (rest ts) (:w t) [(piece 0)] (flush lines pieces x nil))
-              (recur (rest ts) (+ x sep (:w t)) (conj pieces (piece (+ x sep))) lines)))
+              ;; An atomic inline never merges with a neighbouring piece and is
+              ;; never split: it wraps to the next line whole, or overflows
+              ;; alone, exactly like an over-wide single word.
+              (= :atomic (:kind t))
+              (let [sep (if (and (content? pieces) (:space-before? t))
+                          (w-of " " (or (:space-style t)
+                                        {:font-size (or (:font-size (:style (peek pieces))) 14)}))
+                          0)
+                    piece (fn [x] (cond-> (assoc (select-keys t [:owners :opacity :draw :h :ml :mt :baseline-offset])
+                                                 :kind :atomic :x x :w (:w t))
+                                    (seq pad-start) (assoc :pad-start pad-start)))]
+                (if (and (content? pieces) (> (+ x sep open-adv (:w t) tail-adv) content-w))
+                  (recur (rest ts) (+ open-adv (:w t)) [(piece open-adv)]
+                         (flush lines pieces x nil) owners)
+                  (recur (rest ts) (+ x sep open-adv (:w t))
+                         (conj pieces (piece (+ x sep open-adv))) lines owners)))
 
-          :else
-          (let [st (:style t)
-                word (:text t)
-                ww (w-of word st)
-                rtl? (strong-rtl? word)
-                sep (if (and (content? pieces) (:space-before? t))
-                      (w-of " " (or (:space-style t) st))
-                      0)]
-            (if (and (content? pieces) (> (+ x sep ww) content-w))
-              (recur (rest ts) ww
-                     [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww
-                       :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}]
-                     (flush lines pieces x st))
-              (let [last-piece (peek pieces)
-                    merge? (and last-piece
-                                (not= :marker (:kind last-piece))
-                                (not rtl?)
-                                (not (:rtl? last-piece))
-                                (= (:style last-piece) st)
-                                (= (:owners last-piece) (:owners t))
-                                (= (:opacity last-piece) (:opacity t))
-                                (= (:shift last-piece 0) (:shift t 0))
-                                (= (:valign last-piece) (:valign t)))
-                    x' (+ x sep ww)]
-                (recur (rest ts) x'
-                       (if merge?
-                         (conj (pop pieces)
-                               (assoc last-piece
-                                      :text (str (:text last-piece) (if (pos? sep) " " "") word)
-                                      :w (- x' (:x last-piece))))
-                         (conj pieces {:text word :style st :owners (:owners t)
-                                       :opacity (:opacity t) :x (+ x sep) :w ww
-                                       :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}))
-                       lines))))
-          )
-        (cond
-          (and (empty? pieces) (empty? lines)) []
-          ;; A trailing <br> at the very end of a block does not leave an
-          ;; empty line box behind it: measured, `<p>line<br></p>` is 20px
-          ;; tall in the browser where this engine produced a second, empty
-          ;; 20px line.
-          (and (empty? pieces) (seq lines)) lines
-          :else (flush lines pieces x nil))))))
+              :else
+              (let [st (:style t)
+                    word (:text t)
+                    ww (w-of word st)
+                    rtl? (strong-rtl? word)
+                    sep (if (and (content? pieces) (:space-before? t))
+                          (w-of " " (or (:space-style t) st))
+                          0)
+                    piece (fn [x] (cond-> {:text word :style st :owners owners
+                                           :opacity (:opacity t) :x x :w ww
+                                           :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}
+                                    (seq pad-start) (assoc :pad-start pad-start)))]
+                (if (and (content? pieces) (> (+ x sep open-adv ww tail-adv) content-w))
+                  (recur (rest ts) (+ open-adv ww) [(piece open-adv)]
+                         (flush lines pieces x st) owners)
+                  (let [last-piece (peek pieces)
+                        merge? (and last-piece
+                                    (not= :marker (:kind last-piece))
+                                    (not rtl?)
+                                    (not (:rtl? last-piece))
+                                    (= (:style last-piece) st)
+                                    (= (:owners last-piece) owners)
+                                    (= (:opacity last-piece) (:opacity t))
+                                    (= (:shift last-piece 0) (:shift t 0))
+                                    (= (:valign last-piece) (:valign t)))
+                        x' (+ x sep open-adv ww)]
+                    (recur (rest ts) x'
+                           (if merge?
+                             (conj (pop pieces)
+                                   (assoc last-piece
+                                          :text (str (:text last-piece) (if (pos? sep) " " "") word)
+                                          :w (- x' (:x last-piece))))
+                             (conj pieces (piece (+ x sep open-adv))))
+                           lines owners)))))))
+        ;; Every box still open at the end of the run closes here -- its
+        ;; padding-right belongs to the last line whether or not another
+        ;; token ever arrives to reveal it.
+        (let [[close-adv pad-end] (inline-edge-run (reverse prev) :right)
+              [lines pieces x] (close! lines pieces x close-adv pad-end)]
+          (cond
+            (and (empty? pieces) (empty? lines)) []
+            ;; A trailing <br> at the very end of a block does not leave an
+            ;; empty line box behind it: measured, `<p>line<br></p>` is 20px
+            ;; tall in the browser where this engine produced a second, empty
+            ;; 20px line.
+            (and (empty? pieces) (seq lines)) lines
+            :else (flush lines pieces x nil)))))))
 
 (defn- font-metrics
   "The font's ascent and descent in pixels, from the host's optional
@@ -8642,11 +8798,15 @@
    testing, and is exactly right for the single-line case that is by far
    the common one.
 
-   Padding/margin/border on an inline box are deliberately NOT applied —
-   real CSS applies horizontal (but not vertical) padding/border to inline
-   boxes, shifting the following text; this engine's box model resolves
-   those only for block boxes (content-inset), so an inline box here paints
-   only its background. Documented scope-cut, not an oversight."
+   Padding, border and margin on an inline box ARE applied, and the rects
+   that arrive here already carry them: the horizontal ones moved the pen
+   in inline-line-breaker and widened each fragment through
+   inline-edge-run, the vertical ones grew the box (and only the box) in
+   layout-inline-run's owner-fragments. So a background rect painted from
+   a fragment covers the padding, which is what a browser paints. What is
+   NOT modelled is a per-SIDE border width: this engine has one uniform
+   `:border-width` everywhere, blocks included, and an inline box does not
+   invent a second model (inline-box-edge)."
   [theme rects]
   (let [ordered (sort-by key rects)]
     (vec
@@ -8710,10 +8870,10 @@
    owns it: replaced/form-control elements are not inline-level here
    (inline-level-tags), an inline box containing a block box falls back to
    block rows (inline-flow-candidate?), non-normal `white-space` keeps the
-   old path (inline-flow-candidate?), inline padding/border/margin are not
-   applied and a wrapped inline box gets one union node op
-   (inline-owner-ops), and `vertical-align` other than the baseline
-   default is not modeled at all (inline-line-metrics)."
+   old path (inline-flow-candidate?), a wrapped inline box gets one union
+   node op (inline-owner-ops), an inline box's border has one uniform
+   width rather than four (inline-box-edge), and `vertical-align` other
+   than the baseline default is not modeled at all (inline-line-metrics)."
   [theme content-x content-y content-w opacity inherited items]
   (let [padding (:padding theme)
         inner-w (max 0 (- content-w (* 2 padding)))
@@ -8808,8 +8968,22 @@
                 ;; `(:font-* (:st owner))` made every inheriting inline box
                 ;; report the upright metrics -- `code h` 15 against 18 on
                 ;; :inline/deep-nesting-four-levels.
+                ;;
+                ;; The box's own border/padding is added to that content
+                ;; area, in both axes and from opposite sources. The
+                ;; HORIZONTAL half comes from the piece, because only the
+                ;; line breaker knows whether this box opened or closed
+                ;; here or merely continues through (`:pad-start` /
+                ;; `:pad-end`, distances from the content to the box's own
+                ;; edge -- see inline-edge-run). The VERTICAL half comes
+                ;; from the style, because it is the same on every
+                ;; fragment on every line: measured in Brave, `a <span
+                ;; style="padding:40px">b</span> c` reports the span 40px
+                ;; above and below its 15px content area (y=10, h=95) on a
+                ;; line box still 20px tall, so it grows the BOX and
+                ;; nothing else.
                 owner-fragments
-                (fn [rects owners shift px0 w opacity]
+                (fn [rects owners shift px0 w opacity pad-start pad-end]
                   (first
                    (reduce
                     (fn [[rects face] owner]
@@ -8820,7 +8994,12 @@
                                   :family (or (:font-family ost) (:family face))}
                             om (font-metrics theme (:fs face) (:weight face)
                                              (:style face) (:family face))
-                            [odx ody] (:rel owner [0 0])]
+                            [odx ody] (:rel owner [0 0])
+                            left (get pad-start (:idx owner) 0)
+                            right (get pad-end (:idx owner) 0)
+                            border (:border-width ost)
+                            above (+ border (or (:padding-top ost) (:padding/declared ost) 0))
+                            below (+ border (or (:padding-bottom ost) (:padding/declared ost) 0))]
                         [(update rects (:idx owner)
                                  (fn [entry]
                                    (-> (or entry {:node (:node owner) :st (:st owner)
@@ -8829,9 +9008,10 @@
                                        ;; vertical-align shift, exactly
                                        ;; like the text inside it
                                        (update :fragments conj
-                                               {:x (+ px0 odx)
-                                                :y (+ (- baseline (:ascent om) shift) ody)
-                                                :w w :h (+ (:ascent om) (:descent om))}))))
+                                               {:x (- (+ px0 odx) left)
+                                                :y (- (+ (- baseline (:ascent om) shift) ody) above)
+                                                :w (+ w left right)
+                                                :h (+ (:ascent om) (:descent om) above below)}))))
                          face]))
                     [rects {:fs (:font-size inherited) :weight (:font-weight inherited)
                             :style (:font-style inherited) :family (:font-family inherited)}]
@@ -8886,7 +9066,8 @@
                            px (+ px0 rdx)
                            py (+ py0 rdy)
                            rects (owner-fragments rects (:owners piece) 0
-                                                  px0 (:w piece) (:opacity piece))]
+                                                  px0 (:w piece) (:opacity piece)
+                                                  (:pad-start piece) (:pad-end piece))]
                        [(into draws (translate-ops px py (:draw piece))) rects])
 
                      :else
@@ -8911,7 +9092,8 @@
                            main-op (cond-> (assoc base :draw/op :text :x px :y py :color (:color st))
                                      (:text-decoration st) (assoc :text-decoration (:text-decoration st)))
                            rects (owner-fragments rects (:owners piece) (:shift piece 0)
-                                                  px0 (:w piece) (:opacity piece))]
+                                                  px0 (:w piece) (:opacity piece)
+                                                  (:pad-start piece) (:pad-end piece))]
                        [(cond-> draws
                           shadow-op (conj shadow-op)
                           true (conj main-op))
@@ -8933,7 +9115,7 @@
                    ;; is the line's LEFT in an rtl block -- see this fn's
                    ;; own docstring for the measurement.
                    (owner-fragments rects (:break-owners line) 0
-                                    (+ base-x (if rtl? 0 (:w line))) 0 opacity)))
+                                    (+ base-x (if rtl? 0 (:w line))) 0 opacity nil nil)))
           {:draw (into (inline-owner-ops theme rects) text-draws)
            :h (+ (- y content-y) padding)
            :out-of-flow (finish-oof rects)})))))
