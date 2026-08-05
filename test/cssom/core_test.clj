@@ -3208,6 +3208,60 @@
   (is (= "calc()" (calc-probe "margin" "calc()"))
       "empty parens"))
 
+;; ---- min() / max() / clamp() -- the same constant subset ----
+;;
+;; Every expected number below was read out of a real headless Brave 151
+;; over CDP first (conformance round forty-four); the corpus carries the
+;; same shapes as `:math/*` cases so a regression shows up on both sides.
+
+(deftest comparison-functions-resolve-over-the-constant-subset
+  (is (= 50 (calc-probe "width" "min(100px, 50px)"))
+      "min() takes the smaller; Brave reports a 50px box")
+  (is (= 100 (calc-probe "width" "max(100px, 50px)"))
+      "max() takes the larger; Brave reports 100px")
+  (is (= 50 (calc-probe "width" "min(100px, 50px, 70px)"))
+      "min() takes any number of arguments, not two")
+  (is (= 80 (calc-probe "width" "clamp(10px, 500px, 80px)"))
+      "clamp() cut to its ceiling")
+  (is (= 90 (calc-probe "width" "clamp(90px, 5px, 300px)"))
+      "clamp(lo, v, hi) is max(lo, min(v, hi)), so a value BELOW the floor
+       comes out as the floor -- 90, not 5. Reading only the second
+       argument, or only min(), would give 5 and pass the case above")
+  (is (= 4 (calc-probe "padding" "min(4px, 9px)"))
+      "not only widths -- the shorthand path goes through the same
+       parse-style-value coercion"))
+
+(deftest comparison-functions-nest-in-both-directions
+  (is (= 60 (calc-probe "width" "calc(min(100px, 50px) + 10px)"))
+      "a comparison function inside calc()")
+  (is (= 15 (calc-probe "width" "min(calc(10px + 5px), 20px)"))
+      "and calc() inside a comparison function -- one parser, so both")
+  (is (= 12 (calc-probe "width" "max(min(8px, 12px), min(12px, 40px))"))
+      "comparison functions inside each other")
+  (is (= 30 (calc-probe "width" "min(2 * 15px, 40px)"))
+      "an argument is a whole expression, not a single operand"))
+
+(deftest comparison-function-keywords-are-case-insensitive-like-real-css
+  (is (= 50 (calc-probe "width" "MIN(100px, 50px)")))
+  (is (= 80 (calc-probe "width" "Clamp(10px, 500px, 80px)"))))
+
+(deftest comparison-functions-outside-the-constant-subset-stay-unresolved
+  (is (= "min(50%, 300px)" (calc-probe "width" "min(50%, 300px)"))
+      "a percentage needs the containing block, exactly the boundary
+       calc() already draws -- degrades to the raw string, never a guess")
+  (is (= "max(10px, 2em)" (calc-probe "margin-left" "max(10px, 2em)"))
+      "and so does an em, which needs the element's own font size")
+  (is (= "min(10px, 2)" (calc-probe "width" "min(10px, 2)"))
+      "real CSS requires every argument to be the same TYPE; a length and
+       a bare number do not compare, so this is invalid rather than 2")
+  (is (= "clamp(1px, 2px)" (calc-probe "width" "clamp(1px, 2px)"))
+      "clamp() takes exactly three arguments")
+  (is (= "min()" (calc-probe "width" "min()"))
+      "no arguments at all")
+  (is (= "round(10px, 3px)" (calc-probe "width" "round(10px, 3px)"))
+      "a math function OUTSIDE math-function-names is an unrecognized
+       name, not a silently-accepted one"))
+
 ;; ---- :has() relational pseudo-class ----
 ;;
 ;; Every OTHER pseudo-class this file supports (:not()/:is()/:where(), the
