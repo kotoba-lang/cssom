@@ -813,7 +813,7 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
-### Round forty: a block cut in half, and the two rectangles a browser reports for it
+### Round forty-two: a block cut in half, and the two rectangles a browser reports for it
 
 `layout-multicol` landed with a scope cut written into the code: **nothing
 was ever fragmented** — a block that did not fit moved whole into the next
@@ -821,6 +821,11 @@ column. Two corpus cases recorded the gap and together they were the top of
 the geometry residual (`div h` 13 boxes at median −20, `div w` 8 at +230).
 The code named the consequence too: `break-inside: avoid` was satisfied by
 construction and therefore scored nothing, anywhere.
+
+Measured on this round's own merge base, `eb9dca9` — rounds forty-one and
+forty-two were in flight at the same time and landed within hours of each
+other, so these are not the numbers on today's main. The op dump they are
+diffed against is from the same base.
 
 ```
                     LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
@@ -911,6 +916,503 @@ fragmentation: a `<br>` in the **second** column reports x=7 in Brave where
 the engine says 167, i.e. the browser gives a zero-width `<br>` its
 pre-fragmentation x. It costs 2 boxes on a six-line probe shape, which is
 therefore not in the corpus.
+
+### Round forty-one: where a line is allowed to break
+
+The line breaker had no model of a break OPPORTUNITY at all. It would
+break between any two tokens, and `white-space: nowrap` never reached the
+inline path in the first place — `inline-flow-candidate?` refused every
+non-`normal` value, so a paragraph with one `nowrap` child fell apart into
+block rows.
+
+Measured on this round's own merge base (`782d555`, round forty already
+in), because round forty landed on main while this one was in flight and
+its numbers are not this one's to claim:
+
+```
+                    LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
+before   547/556    1933/1973  555/581                   14462/14514  563/581     27733/27736
+after    548/556    1942/1973  559/581                   14490/14514  569/581     27733/27736
+```
+
+On the commit this branch was actually cut from (`eb9dca9`, before round
+forty) the same change reads 546 -> 547, 1926 -> 1935 / 549 -> 553,
+14450 -> 14478 / 561 -> 567 -- the same six cases either side, which is
+what says the two rounds do not overlap.
+
+**Six cases changed in the whole 581-case op dump**, all in the intended
+direction, the same six before and after the merge:
+`:overflow/nowrap-inline-blocks-do-not-wrap`,
+`:text/nowrap-inline-inside-a-wrapping-paragraph`,
+`:text/overflow-wrap-break-word-keeps-min-content` and
+`:generated/before-display-block-makes-its-own-line` now match the oracle
+exactly; `:position/sticky-right-in-a-horizontal-scroller` stopped
+wrapping (what is left of it is `sticky` in the inline axis, which this
+round did not touch); and `:sizing/overflow-hidden-releases-the-flex-floor`
+gave up an overflow hit region it should never have had.
+
+#### `nowrap` collapses whitespace exactly as `normal` does
+
+That is the whole reason it can be admitted here, and the guard that
+excluded it said the opposite: *"`pre`/`pre-wrap`/`pre-line`/`nowrap` each
+mean the run must preserve or re-interpret newlines and runs of spaces"*.
+Three of those four do. `nowrap` changes exactly one thing — whether a
+collapsed space is a place to break — and that is a line-breaker question,
+not a tokenizer one. So the old `#{nil "normal"}` test became two
+predicates that ask the two questions separately (`collapsing-white-space`
+and `soft-wrappable-white-space?`), and `nowrap` passes the first.
+
+Measured in Brave 151 on 2026-08-06, in the harness's own 14px monospace /
+20px line page, `alphaalpha<span style="white-space:nowrap"> betabeta
+</span>` at 120px puts `betabeta` at x=77 on one line: the leading space
+inside the nowrap span is collapsed to a single 7px space and rendered,
+and only the break at it is gone.
+
+#### Which element's `white-space` governs a break
+
+Two rules, and neither is guessable from the other. Nine shapes decided
+them, all at 120px unless stated:
+
+| markup | lines |
+|---|---|
+| `alphaalpha<span nowrap> betabeta</span>` | ONE — the space is the span's |
+| `alphaalpha<span> betabeta</span>` | two |
+| `alphaalpha <span normal>betabeta</span>` in a **nowrap div** | ONE — the space is the div's, and the normal span does not rescue it |
+| the same with `betabeta gammagamma` in the span | breaks before `gammagamma` — that space IS the span's |
+| `alphaalpha<span nowrap>xx </span> betabeta` | two — the span forbids, the div permits, they collapse to one that permits |
+| `alphaalpha <span nowrap> betabeta</span>` | two — the mirror image, same answer |
+| two 40px inline-blocks, no whitespace at all, 60px box | two — an atomic boundary is an opportunity with no space in it |
+| the same inside `<span nowrap>` | ONE |
+| the same with `nowrap` on the FIRST inline-block only | two |
+
+So: **a collapsible space is an opportunity when the element containing it
+permits one**, several collapsing runs are an opportunity if ANY of them
+does, and **a boundary with no space is an opportunity only at an atomic
+inline**, where the NEAREST COMMON ANCESTOR governs it. The last is what
+distinguishes `nowrap` on one side of a boundary from `nowrap` on the box
+around both, and the engine's owner stacks already carry exactly the
+information it needs.
+
+`inline-tokens` was already tracking `:space-style` — which run's font the
+space is drawn in — and that answers the first rule almost for free. It
+does **not** answer the third: `:space-style` keeps the FIRST contributor
+while the opportunity ORs every one of them, and rows five and six above
+are the two spellings that force the two to be tracked separately.
+
+#### A text boundary with no space is not a break, and `<wbr>` was working by accident
+
+The corollary cost a case and paid for a better one. `abcdefgh<span>ijkl
+</span>` in a 60px box is ONE line in Brave — 84px of text overflowing —
+and so is the same run split across two spans. This engine broke at every
+inline box edge, because it broke between any two tokens.
+
+Closing that broke `:wrap/wbr-is-a-break-opportunity`, which the corpus
+note said this engine got right *"by treating the unknown element as an
+inline that splits the text into two runs"* — i.e. by the same accident.
+`<wbr>` now emits a fragment of its own, and it is **unconditional**:
+measured, `aaaaaaa<wbr>bbbbbbb` in an 80px box is 40 tall both plainly and
+under `white-space: nowrap`, where a literal U+200B in the same two places
+is 40 and **20**. A `<wbr>` is not a zero-width space, and `nowrap`
+suppresses one and not the other. It reports no box either
+(`getClientRects()` is empty), which is why it never becomes a piece.
+
+#### The unit a line packs is a cluster, not a token
+
+Suppressing an opportunity is not enough on its own. Measured, `alpha
+<span nowrap>beta gamma delta epsilon</span> zeta` at 120px is 60 tall
+with the span **alone on line two at 168px wide, overflowing** — the
+browser gives up the line rather than the run. Testing one token at a time
+keeps `epsilon` on line one, because each of the span's own words fits
+where it stands.
+
+So the wrap test measures the whole UNBREAKABLE CLUSTER a token begins:
+itself plus every following token with no opportunity in front of it. Two
+folds over the token stream produce it, and the arithmetic is arranged so
+that **a cluster of one reduces to exactly the `open-adv + ww + tail-adv`
+this function always tested**. That identity is the safety property: on
+every stream this engine saw before `nowrap` arrived, the new test is the
+old test.
+
+#### `overflow-wrap: break-word` does not make a box narrower
+
+The distinction the case is named for, and it needed the half of
+shrink-to-fit this file never had. Real CSS is `min(max-content,
+max(min-content, available))`; `atomic-intrinsic-width` ended at
+`min(content-w, natural)`, so an atomic inline in a container narrower
+than its own content was simply squeezed to the container — and then
+`break-word`, which the engine already honoured for line breaking, broke
+the word to fit the width it had just been given.
+
+A 15-character word in a `display: inline-block` inside a 60px block, and
+the same word at `width: min-content` inside a 200px one:
+
+| | box | at `min-content` |
+|---|---|---|
+| (no break property) | 105x20 | 105x20 |
+| `overflow-wrap: break-word` | **105x20** | **105x20** |
+| `word-break: break-all` | 60x40 | 7x300 |
+| `overflow-wrap: anywhere` | 60x40 | 7x300 |
+
+Two pairs of numbers saying the same thing twice. `break-word` breaks a
+word that has nowhere else to go once a width is chosen; it does not
+change what the box asks for. Nine more shapes fix the floor's own shape:
+
+| in a 60px block | box |
+|---|---|
+| `aaaaaaa bbbbbbb` | 60x40 — min-content 49 < 60 |
+| `aaaaaaaaaaaa bbbbbbbbbbbb` | 84x40 — the longest WORD, not the text |
+| the 15-char word with `overflow: hidden` | 105x20 |
+| ...with `padding: 5px` | 115x30 |
+| ...with `max-width: 40px` | 40x20 |
+| ...with `white-space: nowrap`, four words | 105x20 |
+| ...wrapped around a `<div>` | 105x20 |
+| `<button>` with the same one-word label | 111.2x15 |
+| `<select>` / `<input size=20>` / `<img width=200>` | 134 / 153 / 200 |
+
+The last two rows are why a box whose content cannot break at all — a
+replaced element, a form control, an inline-flex/-grid sizing itself from
+its own children, or any `white-space` that forbids a soft wrap — is its
+own floor and is simply not clamped.
+
+#### A block-level `::before` is a box, not the first thing on a line
+
+`with-generated-content` merged every `::before` with the text after it
+into a single run, which is right for the numbered-list idiom it was
+written for and wrong the moment the pseudo-element declares a display.
+Eight spellings on a 300px `<p style="margin:0">tail</p>`:
+
+| | `<p>` |
+|---|---|
+| `::before { content:"head"; display:block }` | 300x40, `tail` at y=22 |
+| `::before { content:"head" }` | 300x20 |
+| `::before { content:"head"; display:inline-block }` | 300x20 |
+| `::before { content:"head"; display:flex }` | 300x40 |
+| `::before { content:"head"; display:block; height:30px }` | 300x50 |
+| `::after { content:"foot"; display:block }` | 300x40, `tail` at y=2 |
+| both block spellings at once | 300x60, `tail` at y=22 |
+| `::before { content:""; display:block }` | 300x20 |
+
+It is not `block` that matters but inline-LEVEL-ness — `flex` makes its
+own row too — and the last row is why the rule is applied to the merge
+rather than to the layout: an empty block `::before` has no line box, and
+making it a row of its own would have reported 40.
+
+#### A harness defect, and the engine half it was hiding
+
+The two `nowrap` scroller cases were still losing 10 paint points after
+their geometry went clean, and the cause was not in the engine's layout at
+all. cssom.layout's own comment at the clip emitter says that *"a line that
+overflows a box which CLIPS is not hit outside it"* and that the engine
+expresses this with `:clip` push/pop ops which *"every hit-tester that
+reads `:node` ops already tracks"*. `browser.session/hit-nodes` does. **This
+harness did not** — it read one half of the engine's answer and charged the
+engine for the other.
+
+Measured, a 300px inline-block in a `width: 200px; overflow: auto` box at
+x=240: `visible` answers the span, and `auto`, `hidden`, `scroll`, `clip`
+and `overflow-x: auto` all answer neither the span nor the box.
+
+Tracking the clips in `engine-topmost-at` — a fold rather than a filter,
+because clip state is order-dependent — turned those 10 points from
+`none -> span` into `none -> div`, and named the second half, which IS the
+engine's: a box's `:node` op is emitted BEFORE its own clip-push (it has
+to be, the clip is for its content), so the overflow region attached to it
+survives its own clip and answers clicks in space the box does not
+occupy. A clipping box now gets no overflow region at all.
+
+**The harness change is not a thumb on the scale**, and the proof is a run
+of the modified harness against the UNMODIFIED engine at this round's base
+commit: line structure 546/556, geometry 1926/1973 with 549/581 clean and
+computed style 27735/27740 — **identical to the baseline on all three**.
+Paint moved by exactly +2 points and +1 case
+(`:overflow/x-auto-reserves-height-only`), which is the only place in the
+corpus where a clip was already being ignored on its own.
+
+#### What was measured and deliberately not implemented
+
+Four break opportunities, each recorded at `inline-line-breaker` with the
+numbers a future round will need, because each needs something this file
+does not have rather than a line there:
+
+- **`&shy;`** (U+00AD) — `super&shy;califragilistic` at 90px is 40 tall,
+  breaking after `super` with a **visible hyphen** and putting a 105px
+  second line in a 90px box; the same word without it is 20 tall, and so
+  is the same markup under `hyphens: none`. What is missing is not the
+  opportunity but the inserted glyph: a break here changes the text that
+  is measured and painted, and a piece in this file is a substring of its
+  token.
+- **`hyphens: auto`** — `hyphenation example` at 70px with `lang="en"` is
+  60 tall against 40 without, Chromium's own dictionary splitting
+  `hyphen-ation`. Not derivable from the text at any width.
+- **`text-wrap: balance`** — not an opportunity at all but a different
+  ALGORITHM; this loop is greedy by construction. `alpha beta gamma delta
+  epsilon` at 200px is 40 tall BOTH ways, and only the lines differ
+  (`alpha beta gamma` / `delta epsilon` against `alpha beta gamma delta` /
+  `epsilon`). The geometry axis cannot see it; the line axis can.
+- **`white-space: break-spaces`** never reaches the line breaker, and
+  neither do `pre-wrap` and `pre-line`. Measured, a 60px box holding `aa`,
+  six spaces and `bb` is 60x40 with the same word positions under BOTH
+  `break-spaces` and `pre-wrap` — that content does not discriminate them,
+  and finding content that does is the first step of implementing either.
+
+And one cluster left alone on purpose. `:text/white-space-pre-keeps-
+leading-spaces`, `:text/tab-in-pre-advances-to-the-next-eight-column-stop`
+and `:text/tab-size-four-in-pre` are red for a reason that is not in this
+repository: `htmldom` collapses whitespace at parse time on an
+HTML-structural rule, so `<span style="white-space: pre">   indented
+</span>` reaches layout as `" indented"` and the characters are gone
+before cssom can measure them. cssom's own half is implemented and
+asserted in `<pre>` form, where they survive — 63 / 35 / 42, the browser's
+numbers exactly. Fixing it means making htmldom defer collapsing to
+layout, which changes the text every corpus case sees, and belongs in a
+round where nothing else is measuring.
+### Round forty: three divergences, one missing capability
+
+`width: min-content | max-content | fit-content` behaving as `auto`, flex
+`min-width`/`max-width` never giving their surplus back to the line, and
+`<dialog open>`'s box. The third depended on the first: the previous round
+measured the whole of the dialog's UA rule, added it, and found **not one
+box moved**, because `width: fit-content` was still `auto` and the
+`margin: auto` it is centred by had nothing to split.
+
+```
+                    LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
+before   546/556    1926/1973  549/581                   14450/14514  561/581     27735/27740  578/581
+after    547/556    1933/1973  555/581                   14462/14514  563/581     27733/27736  579/581
+```
+
+**Six cases changed in the whole 581-case op dump**, all in the intended
+direction, all now matching the oracle exactly:
+`:sizing/min-width-min-content` (which also cost 12 paint points as
+`div -> none`), `:sizing/width-max-content`, `:sizing/width-fit-content`,
+`:sizing/min-width-on-a-flex-item`, `:sizing/max-width-on-a-flex-item`,
+`:interactive/dialog-open-is-a-bordered-block` (6 paint points as
+`div -> dialog`). Nothing else moved, in either direction.
+
+The computed-style DENOMINATOR falls by 4 and the numerator by 2, which is
+the previous round's own prediction landing: the dialog's four auto margins
+go from scored to `non-absolute-length`-EXCLUDED, and two of the four
+(`margin-left`/`margin-right`) were the last two cascade-attributed
+mismatches outside `:text/font-size-absolute-keyword`. The residual is now
+**2 values in 1 case**.
+
+#### What Brave actually said
+
+**The keywords, on `alpha beta` in the corpus's 14px monospace (7px/char).**
+
+| container | `min-content` | `max-content` | `fit-content` | `auto` |
+|---|---|---|---|---|
+| 300px | 35 | 70 | 70 | 300 |
+| 60px | 35 | 70 | 60 | 60 |
+| 50px | 35 | 70 | 50 | 50 |
+| 40px | 35 | 70 | 40 | 40 |
+| 20px | 35 | 70 | **35** | 20 |
+
+So `fit-content` is exactly `min(max-content, max(min-content, available))`
+— it stops narrowing at min-content and overflows — and `max-content`
+never narrows at all.
+
+**`available` is net of the box's own margins AND its own insets.** All in
+a 60px container:
+
+| box | Brave |
+|---|---|
+| `fit-content` | 60 |
+| `fit-content; padding: 0 6px; border: 2px` | 60 border box (44 content) |
+| `fit-content; margin: 0 10px` | 40 |
+| `fit-content; margin-left: auto; margin-right: 15px` | 45 |
+
+A resolved margin takes room away, an `auto` one does not. The margins are
+*not* subtracted by the new code: `layout-children-block` already hands a
+block child `(- content-w ml mr)` through the same `margin-side`.
+Subtracting them twice was measured doing it — the 40px row came out 35 and
+the 45px row 35, both having fallen back to min-content on a room 20px too
+small.
+
+**The keyword yields a CONTENT size in BOTH `box-sizing` modes**, which is
+the fact that decides where the resolution has to live. `width:
+max-content; padding: 0 6px; border: 2px` over `alpha beta` is **86 under
+`content-box` and 86 under `border-box`**, where `width: 70px` is 86 and
+70. A declared length differs by the inset between the modes; a keyword
+does not.
+
+**min-content is a recursion, not the longest word in the subtree.**
+
+| content of a `width: min-content` box | Brave |
+|---|---|
+| `alpha beta` | 35 |
+| `<span>alpha</span> <span>bb</span>` | 35 |
+| `<div>alpha beta</div><div>bb</div>` | 35 |
+| `<div style="padding:0 10px">alpha beta</div>` | **55** |
+| `<div style="width:40px;height:5px"></div>` | **40** |
+| a 40x20 `<img>` | **40** |
+| nothing at all, 1px border | 2 |
+
+The last four are why `flex-item-min-content-width`'s longest-word-in-the-
+subtree rule — which is right for what IT answers, a flex item's automatic
+minimum — could not be reused: it reports 35 for the padded row and nil for
+the other three.
+
+**The flex clamp needs the whole frozen-item loop.** Eleven shapes, in both
+directions and in both the growing and the shrinking case:
+
+| shape | Brave |
+|---|---|
+| 200px row, `flex: 1` x2, `min-width: 150px` on one | 150 / 50 |
+| 300px row, `flex: 1` x2, `max-width: 60px` on one | 60 / 240 |
+| 300px row, `flex: 1` x3, `min-width: 200px` on one | 200 / 50 / 50 |
+| 300px row, `flex: 1` x3, `max-width: 30px` on one | 30 / 135 / 135 |
+| ...with `max-width: 30px` AND `max-width: 40px` | 30 / 40 / 230 |
+| ...with `max-width: 30px` AND `min-width: 200px` | 30 / 200 / 70 |
+| **...with `max-width: 30px` AND `max-width: 110px`** | **30 / 110 / 160** |
+| 100px row, `min-width: 80px` on both of 2 | 80 / 80 (overflows) |
+| 200px row, two `width: 150px`, `min-width: 140px` | 140 / 60 |
+| 200px row, two `width: 150px`, `max-width: 60px` | 60 / 140 |
+| 300px row, `flex: 1` `max-width: 50px` vs `flex: 2` | 50 / 250 |
+| 200px row, 3x`width: 100px`, `max-width: 20px` + `min-width: 95px` | 20 / 95 / 85 |
+
+**The bolded row is the one that proves it is a loop.** One pass proposes
+100/100/100, freezes the first at 30 and offers its 70 to the other two
+(135/135) — and only *then* is the second item's own maximum violated. A
+clamp-once-and-redistribute rule reports 30/110/**135** and leaves 25px in
+nobody's hands. Every other row above is satisfied by the simpler rule, so
+that one shape is the whole evidence, and it was written because the simpler
+rule predicted the other ten.
+
+CSS Flexbox §9.7.4 resolves a pass with BOTH kinds of violation by the SIGN
+of the total (freeze only the min-violated when positive, only the
+max-violated when negative). This engine freezes everything the clamp
+moved, in either direction. The two rows written to discriminate them —
+`max-width: 20px` + `min-width: 95px`, and `max-width: 30px` +
+`min-width: 200px` — give the same answer under both rules, so the simpler
+one is what is implemented and this paragraph is why.
+
+Two more measured facts the flex loop needed. **`max-width` limits the
+CONTENT box**: `flex: 1; max-width: 60px; padding: 0 10px; border: 2px` in
+a 300px row is **84** wide (60 + 24), and 60 under `box-sizing:
+border-box`, with the sibling taking 216 and 240. And **an explicit
+maximum caps the AUTOMATIC minimum**: `flex: 1; max-width: 20px` holding
+`averylongunbrokenword`, whose min-content is 147, is **20**, its sibling
+280 (CSS Flexbox §4.5).
+
+**`<dialog open>` is centred by `margin: auto` between two zero insets.**
+Measured, `<dialog open>Hi</dialog>` in a 300px `position: relative`
+parent: 48x54 at x=126, `getComputedStyle` reporting `width: 14px`,
+`height: 20px`, `margin: 0px 126px`, `left: 0px`, `right: 0px` — and `top`
+resolved to the box's own STATIC position, which is what says `top` is
+`auto` in the UA sheet and only the INLINE insets are declared. Confirmed
+by moving the same dialog into a case with no positioned ancestor: it
+centres in the 756px viewport (x=354) and its `top` reads back as that
+case's own offset down the page (124px), a number no declared `top` could
+produce.
+
+The general rule underneath it, measured on a plain 70px absolutely
+positioned box in a 300px `position: relative` parent:
+
+| declaration | x |
+|---|---|
+| `left:0; right:0; margin:auto` | 115 |
+| `left:0; right:0; margin-left:auto` | 230 |
+| `left:0; right:0; margin-right:auto` | 0 |
+| `left:0; right:0` (no auto margin) | 0 |
+| `left:20px; right:0; margin:auto` | 125 |
+| `left:0; right:0; margin:auto; width:400px` | 0 |
+| `left:0; margin:auto` (no `right`) | 0 |
+| **no `width` at all** | 0, and 300 wide |
+
+and the same rule on the block axis (`top:0; bottom:0; margin:auto` on a
+20px box in a 60px parent is y=20). The last row is why this round could
+close the dialog and the last one could not: without a `width` the box is
+stretched between the two insets, the leftover is zero, and `margin: auto`
+has nothing to distribute.
+
+Measured but deliberately NOT written into the UA sheet: the dialog's
+`background-color: rgb(255,255,255)` and `color: rgb(0,0,0)`. Neither
+changes a box, a hit region, or any of the fourteen properties the
+computed-style axis compares, and this engine's default page is dark.
+
+#### Where the keyword resolution ended up living, and why
+
+In **`layout-node`**, not in `resolve-width`. `resolve-width` takes
+`[st avail]` and an intrinsic width needs the NODE (and the theme, for
+`:measure-text`) — its own docstring said so and left the three keywords
+behaving as `auto`. `layout-node` is the one place a box's style map is
+built for layout: it holds the node, the theme, the available width, the
+opacity and the inherited context at once, and every sub-layout function
+(block, flex, grid, table, form control, absolute) is handed the `st` it
+produces. So resolving once there resolves for all of them — exactly as
+the percentage padding/margin rewrite three lines above it already does.
+
+The used value is written back onto `st` as a plain length, which is
+`measure-child`'s own write-the-used-value-back technique for stopping a
+percentage width resolving twice. Because a keyword yields a content size
+in both box-sizing modes, a `border-box` box gets the insets folded in at
+the write rather than losing them.
+
+#### Scope cuts, each with the number a future round needs
+
+- **A PERCENTAGE-width child inside an intrinsically sized box** is
+  measured at its percentage of the OUTER containing block, where real CSS
+  treats a percentage as indefinite while sizing the box it would resolve
+  against. Measured: `<div style="width:max-content"><div
+  style="width:50%">alpha beta</div></div>` in 300px is **70 / 35** in
+  Brave and **150 / 75** here. Pre-existing — `child-outer-max-content-
+  width` goes through `measure-child`, whose percentage write-back already
+  answered this way for a table cell and a flex item — and the fix belongs
+  in that write-back.
+- **A flex item's base size is already clamped** when it reaches the §9.7
+  loop, because it comes from `measure-child`, which runs `clamp-width`.
+  Real CSS feeds the loop the UNCLAMPED flex base size. One shape measured
+  to differ: a 200px row of three `width: 100px` items, the first
+  `max-width: 20px` and the second `min-width: 95px`, is **20 / 95 / 85**
+  in Brave and **17 / 95 / 87** here. Every `flex: N` shape is unaffected
+  (its basis is `0%` and cannot be clamped away).
+- **`clamp-width` reads `min-width`/`max-width` as BORDER-box limits**, so
+  the same declaration clips the inset twice everywhere except the new
+  flex path (`flex-main-clamp`, which converts). Not corrected here
+  because `clamp-width` is called from `resolve-width`, i.e. from every
+  box in the document. `force-main-width` now neutralises it for a
+  resized flex item, since §9.7 has already applied both bounds.
+- **A percentage `min-width`/`max-width` on a flex item** resolves against
+  the item's own resolved width rather than the container's, because
+  `measure-child` hands the child its own width as `avail-width`.
+  Measured: `flex: 1; max-width: 20%` in a 300px row is **60** in Brave;
+  the line reserves 60 here and the item draws itself 12 wide (20% of 60).
+- **`flex: 1 1 0`** (a unitless zero basis) is not parsed as a basis:
+  `flex: 1 1 0` vs `flex: 2 1 0` in a 300px row is 100 / 200 in Brave and
+  7 / 7 here, while `flex: 1 1 0%` is 100 / 200 both sides. A `flex`
+  shorthand parsing gap in `cssom.core`, unrelated to clamping.
+- **An absolutely positioned box's own margin does not offset it.**
+  Measured, `position:absolute; left:0; margin-left:20px` is at x=20 in
+  Brave and x=0 here. `left` is the offset to the MARGIN edge. Untouched
+  by this round; the auto-margin rule added here is a different clause of
+  the same section.
+- **`min-content` of a FLEX CONTAINER** falls through to the block rule
+  (widest item) where real CSS sums the items' min-contents along a nowrap
+  row. Measured: a `display: flex` holding `alpha beta` and `gamma delta`
+  under `width: min-content` is **70** = 35 + 35, and **35** here. Same
+  cut, same reason, as the grid branch of `intrinsic-max-content-width`.
+- **`text-indent` is counted in the max-content size and not in the
+  min-content one.** The max-content rule was measured (an
+  `inline-block; text-indent: 30px` holding `abcd` is 58); the min-content
+  one has no corpus case and no measurement, so it is absent rather than
+  guessed.
+
+#### Tried and withdrawn
+
+**Subtracting the box's own margins inside `resolve-intrinsic-width`.**
+It reads like the rule — `available` is demonstrably net of margins — and
+it is double-counting: `layout-children-block` has already done it. Caught
+by the two margin rows of the 60px table above, which came out 35 and 35
+instead of 40 and 45.
+
+**Reusing `flex-item-min-content-width` for the `min-content` keyword.**
+Its longest-word-in-the-subtree rule matches on plain text and on the two
+nested shapes above it, and misses everything with a box in it: 35 instead
+of 55 for a padded child, and nil (no text to measure) for a
+declared-width child and for an `<img>`. Replaced by a recursion that
+mirrors `block-max-content-width` branch for branch. That function is
+untouched and still answers what it always answered.
 
 ### Round thirty-nine: four numbers where there was one, and the summary a browser writes for you
 
