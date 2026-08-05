@@ -1378,7 +1378,42 @@
    against the THEME's base size rather than the inherited size -- an
    honest simplification: a heading nested inside larger text will not
    compound, which real `em` would."
-  {:h1 2.0 :h2 1.5 :h3 1.17 :h4 1.0 :h5 0.83 :h6 0.67 :small 0.83 :sub 0.83 :sup 0.83})
+  {:h1 2.0 :h2 1.5 :h3 1.17 :h4 1.0 :h5 0.83 :h6 0.67})
+
+(def ^:private ua-font-smaller-tags
+  "The tags whose UA `font-size` is the RELATIVE keyword `smaller`, which
+   is NOT an `em` multiple and does not belong in `ua-font-scale`.
+
+   `small`, `sub` and `sup` used to sit in that table at 0.83 -- the same
+   number `<h5>` has -- and they are not the same rule. Measured in Brave
+   151 on 2026-08-05, all in the conformance harness's own 14px monospace
+   page:
+
+     <h5>                    11.62px   = 0.83 x 14, an em multiple
+     <small> <sub> <sup>   11.6667px   = 14 / 1.2, the `smaller` keyword
+
+   and `smaller` COMPOUNDS on the inherited size, which an em multiple
+   resolved against the theme base cannot: `x <small>a <small>b <small>c
+   </small></small></small> y` reports 11.6667 / 9.72222 / 8.10185, each
+   the one before it divided by 1.2 again, and a `<small>` in a
+   `font-size: 20px` paragraph reports 16.6667 rather than the 11.6667 a
+   theme-base rule would give. `inline-fragments` therefore resolves these
+   three against the size they actually inherit; the entry in `node-style`
+   is the theme-base fallback for the callers that have no inherited size
+   in hand, and keeps `ua-font-scale`'s documented non-compounding
+   simplification for them.
+
+   The divisor is 1.2 rather than the 0.83 it approximates because it is
+   the ratio CSS states, and 0.83 x 14 truncated by `long` to 11 was 0.67px
+   short of the browser -- the whole of the `small w -3.3125` /
+   `code x -3.3125` residual the geometry axis reported for
+   :inline/small-and-code."
+  #{:small :sub :sup})
+
+(def ^:private ua-font-smaller-ratio
+  "CSS's own `smaller`/`larger` step. Not a measurement to tune -- see
+   ua-font-smaller-tags for the three sizes it reproduces exactly."
+  1.2)
 
 (defn- ua-margin-y
   "The UA vertical margin for `node`, in pixels, resolved against the
@@ -1694,6 +1729,13 @@
    :color (style node :color)
    :font-size (or (style node :font-size)
                   (when (contains? form-control-tags (:tag node)) (:size ua-control-font))
+                  ;; `font-size: smaller` against the theme base -- the
+                  ;; fallback for a caller with no inherited size in hand.
+                  ;; inline-fragments resolves the same three tags against
+                  ;; the size they really inherit, which is what makes them
+                  ;; compound. See ua-font-smaller-tags.
+                  (when (contains? ua-font-smaller-tags (:tag node))
+                    (/ (:font-size theme) ua-font-smaller-ratio))
                   (when-let [scale (get ua-font-scale (:tag node))]
                     (long (* scale (:font-size theme)))))
    :font-family (or (style node :font-family)
@@ -8062,7 +8104,27 @@
                    (and (map? child) (= :element (:node/type child)))
                    (if (non-rendered-tag? (:tag child))
                      acc
-                     (let [st (node-style child theme)]
+                     (let [st (node-style child theme)
+                           ;; `font-size: smaller` resolved where the size
+                           ;; it is smaller THAN is actually known. Nothing
+                           ;; declares a size for `<small>`/`<sub>`/`<sup>`
+                           ;; -- the UA sheet cannot, the keyword is not a
+                           ;; length -- so `node-style` could only divide
+                           ;; the theme base, and a `<small>` inside a
+                           ;; `<small>` or inside sized text got the same
+                           ;; answer as one at the top of the page. Here
+                           ;; `inherited` is still the PARENT's, so the
+                           ;; division lands on the right operand and
+                           ;; nesting compounds the way the browser's does.
+                           ;; See ua-font-smaller-tags for the three
+                           ;; measured chains. An author-declared size
+                           ;; wins, as it must -- the keyword is a UA
+                           ;; default, not an override.
+                           st (if (and (contains? ua-font-smaller-tags (:tag child))
+                                       (nil? (get-in child [:attrs :style/font-size])))
+                                (assoc st :font-size (/ (:font-size inherited)
+                                                        ua-font-smaller-ratio))
+                                st)]
                        (if (= "none" (:display st))
                          acc
                          (let [opacity (* opacity (:opacity st)
