@@ -2067,17 +2067,24 @@
 
  {:id :multicol/a-block-splits-across-the-column-boundary
   :group :multicol
-  ;; The control for the case below: with no `break-inside`, the 20px
-  ;; block straddling the 40px column boundary is FRAGMENTED -- part at the
-  ;; bottom of column 1, the rest at the top of column 2 -- and
-  ;; getBoundingClientRect reports the union of the fragments, so its box
-  ;; spans both columns.
+  ;; The FIRST block is the one that splits, not the second -- this
+  ;; comment said otherwise until 2026-08-06, when fragmentation landed
+  ;; and the case was measured properly. The used column height is 25 (the
+  ;; smallest at which the flow fits in two columns, cutting in the empty
+  ;; band below the first block's line), so the 30px block is cut there:
+  ;; rects [0,0,140,25] and [160,0,140,5], and getBoundingClientRect
+  ;; reports their union [0,0,300,25], spanning both columns. The 20px
+  ;; block then starts at y=5 in column two.
   :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 20px\">b</div></div>"}
 
  {:id :multicol/break-inside-avoid-moves-the-whole-block
   :group :multicol
-  ;; The same block with `break-inside: avoid` moves whole into column 2
-  ;; instead of splitting.
+  ;; The same block with `break-inside: avoid` -- which, measured, makes NO
+  ;; difference here: a 20px block holding a 20px line is unbreakable
+  ;; either way, so this case and the one above read identically in Brave.
+  ;; It is kept as the pair it was authored as, and
+  ;; :multicol/break-inside-avoid-moves-a-whole-wrapper below is the shape
+  ;; that actually discriminates.
   :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 20px; break-inside: avoid\">b</div></div>"}
 
  {:id :multicol/column-span-all-interrupts-the-columns
@@ -3773,4 +3780,121 @@
   ;; position: 0,0,7x20.
   :html "<div style=\"width: 300px; height: 60px; position: relative\"><div style=\"position: absolute; inset: 10px 20px\">a</div></div>"}
 
+
+ ;; ---------------------------------------------------------------------
+ ;; MULTICOL FRAGMENTATION (added 2026-08-06, with the change that made a
+ ;; block splittable at all). The two cases above recorded the gap; these
+ ;; sixteen say what the rule IS. Every one was measured in Brave 151
+ ;; before it was implemented, as part of a 59-shape probe sweep, and all
+ ;; of them agree.
+ ;;
+ ;; A fragmented element has one rect PER FRAGMENT in getClientRects() and
+ ;; the UNION of them in getBoundingClientRect(). This axis compares the
+ ;; latter, which is what a `:node` op's box now is; the fragments
+ ;; themselves are the op's `:hit` rects and are what the PAINT axis
+ ;; compares. Neither side of the harness changed to accommodate any of
+ ;; this.
+ ;; ---------------------------------------------------------------------
+
+ {:id :multicol/a-block-with-room-below-its-line-is-cut-anywhere-in-it
+  :group :multicol
+  ;; The free band a break may land in is CONTINUOUS. A 90px block whose
+  ;; content is one 20px line is cut at 45 -- not at 20, not at any
+  ;; structural boundary, exactly at half -- and reports [0,0,140,45] and
+  ;; [160,0,140,45].
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"height: 90px\">a</div></div>"}
+
+ {:id :multicol/padding-above-the-first-line-is-not-a-break-opportunity
+  :group :multicol
+  ;; The asymmetry: the same 60px of box with the empty band ABOVE the line
+  ;; does not cut at all. 60 tall, one rect, where `height: 60px` over the
+  ;; same content balances to 30 and reports two.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"padding-top: 40px\">a</div></div>"}
+
+ {:id :multicol/padding-below-the-last-line-is-not-a-break-opportunity
+  :group :multicol
+  ;; The other end of the same rule: the band a cut can land in is the
+  ;; CONTENT box, and padding is outside it. 60 tall, one rect.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"padding-bottom: 40px\">a</div></div>"}
+
+ {:id :multicol/break-inside-avoid-moves-a-whole-wrapper
+  :group :multicol
+  ;; The `break-inside: avoid` case the pair above cannot make: a 40px
+  ;; WRAPPER that does not fit the 20px left in column one moves whole,
+  ;; [160,0,140,40] with its children at y 0 and 20 beside it.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 20px\">a</div><div style=\"break-inside: avoid\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div></div></div>"}
+
+ {:id :multicol/break-inside-avoid-is-dropped-when-it-cannot-be-honoured
+  :group :multicol
+  ;; `avoid` is a preference: a 100px block in a 40px column has to go
+  ;; somewhere. It skips column one and then fragments 40/40/20.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 20px\">a</div><div style=\"height: 100px; break-inside: avoid\">b</div></div>"}
+
+ {:id :multicol/decorations-are-sliced-at-the-break
+  :group :multicol
+  ;; `box-decoration-break: slice` is the initial value and is what a
+  ;; browser does: a 56px border box cut at 40 reports 40 and 16, summing
+  ;; to 56 -- the ring cut open, not repeated.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 20px\">a</div><div style=\"height: 40px; border: 5px solid #333; padding: 3px\">b</div></div>"}
+
+ {:id :multicol/a-continuing-fragment-fills-its-column
+  :group :multicol
+  ;; A fragment's height is not the content it holds: a box that continues
+  ;; is stretched to its column's bottom edge. Two 20px lines in a forced
+  ;; 30px column report fragments of 30 and 20, and the 30 holds one line.
+  :html "<div style=\"width: 300px; height: 30px; column-count: 2; column-gap: 20px\"><div>one<br>two</div></div>"}
+
+ {:id :multicol/a-nested-block-is-cut-between-its-own-children
+  :group :multicol
+  ;; The cut is not a top-level operation: the wrapper is fragmented at the
+  ;; boundary between two of its children, [0,20,140,20] and
+  ;; [160,0,140,40], and each child lands whole on one side of it.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 20px\">a</div><div><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div><div style=\"height: 20px\">z</div></div></div>"}
+
+ {:id :multicol/orphans-keeps-the-first-two-lines-together
+  :group :multicol
+  ;; `orphans` (initial 2) is what decides whether a two-line block splits
+  ;; at all: it does not, and the box is 40 tall with one rect.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div>one<br>two</div></div>"}
+
+ {:id :multicol/orphans-one-lets-two-lines-split
+  :group :multicol
+  ;; The same block with `orphans: 1` splits: 20 tall, two rects.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"orphans: 1\">one<br>two</div></div>"}
+
+ {:id :multicol/widows-is-not-honoured
+  :group :multicol
+  ;; `orphans: 1; widows: 2` splits anyway, leaving a single widow: this
+  ;; browser reads `orphans` and ignores `widows`, and so does this engine
+  ;; -- deliberately, because honouring it would diverge.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"orphans: 1; widows: 2\">one<br>two</div></div>"}
+
+ {:id :multicol/three-lines-split-two-and-one
+  :group :multicol
+  ;; Three lines DO split, 2/1 -- which is the widow the case above says is
+  ;; allowed, reached from the other direction.
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div>one<br>two<br>three</div></div>"}
+
+ {:id :multicol/balanced-height-is-never-less-than-the-content-over-the-count
+  :group :multicol
+  ;; The balancer starts at ceil(total / count) and only grows. These two
+  ;; blocks fit one per column at height 30 -- the 60px margin is dropped
+  ;; at the break -- and the box is still 60 tall, which is ceil(120/2).
+  :html "<div style=\"width: 300px; column-count: 2; column-gap: 20px\"><div style=\"height: 30px\">a</div><div style=\"height: 30px; margin-top: 60px\">b</div></div>"}
+
+ {:id :multicol/an-overflow-hidden-block-is-monolithic
+  :group :multicol
+  ;; A scroll container is not fragmented: the 60px block moves whole into
+  ;; the second column and overflows it.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"height: 20px\">a</div><div style=\"height: 60px; overflow: hidden\">b</div></div>"}
+
+ {:id :multicol/a-table-fragments-between-its-rows
+  :group :multicol
+  ;; A table is fragmented -- between rows, never inside one.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><table style=\"border-collapse: collapse\"><tr><td style=\"height: 20px; padding: 0\">a</td></tr><tr><td style=\"height: 20px; padding: 0\">b</td></tr><tr><td style=\"height: 20px; padding: 0\">c</td></tr></table></div>"}
+
+ {:id :multicol/a-flex-container-fragments-between-its-items
+  :group :multicol
+  ;; And so is a column flex container, between its items.
+  :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"display: flex; flex-direction: column\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div><div style=\"height: 20px\">c</div></div></div>"}
 ]
