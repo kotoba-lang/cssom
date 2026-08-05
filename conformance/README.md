@@ -815,6 +815,310 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-four: the cascade machinery, and the harness that could not see it
+
+**The corpus contained zero at-rules.** 601 cases, 48 of them about
+selectors and the cascade, and `grep '@' cases.edn` found two email
+addresses. `@layer`, `@supports`, `@media`, `@container`, CSS nesting,
+`min()`/`max()`/`clamp()` and the `all` shorthand were an entire
+unmeasured dimension — and three of those are *implemented* in
+`cssom.core`, implemented and never differentially tested. Seventy-one
+cases went in, in seven new groups, and every expected value was read out
+of a real headless Brave 151.1.93.129 over CDP before the case was
+written.
+
+**Thirty-four of the seventy-one are controls**, and on a feature this
+engine does not evaluate at all they are the whole point: an `@supports`
+block applies unconditionally here, so `(display: grid)` agreeing proves
+nothing on its own — it is `(display: flurb)` NOT agreeing beside it that
+turns the pair into a measurement. Wherever a control and a divergence
+are two directions of one rule they are written as a pair
+(`@media screen` beside `@media print`, a named container query beside
+the same query under a name the container does not have, the `clamp()`
+ceiling beside its floor).
+
+Three columns, because the corpus growing and the engine changing are two
+different things and a single before/after would let one pay for the
+other. The middle column is the **unmodified engine at the base commit**
+on the finished 672-case corpus; the right is after this round's two
+fixes, on the same corpus.
+
+| axis | 601 cases | 672, base engine | 672, after |
+|---|---|---|---|
+| line structure | 572/576 = **99%** | 642/647 | **642/647** |
+| geometry (boxes) | 2030/2036 | 2157/2186 | **2168/2186** |
+| geometry (clean cases) | 595/601 | 648/672 | **656/672** |
+| paint order | 14987/15009 | 16710/16789 | **16732/16789** |
+| paint order (clean cases) | 589/601 | 656/672 | **658/672** |
+| computed style (values) | 28615/28618 | 30681/30717 | **30685/30717** |
+| computed style (cases clean) | 599/601 | 648/672 | **649/672** |
+| cascade-attributed residual | **2** | 35 | **31** |
+
+The residual is the number to read, and it went 2 → 35 on purpose: those
+33 new values are what a corpus that could see the cascade found in it,
+and four of them were closed the same round.
+
+`--dump-ops` was diffed corpus-wide between the two right-hand columns.
+**Eight cases' box lists changed and all eight are the intended ones** —
+the seven `:math/*` shapes the comparison functions close, and
+`:container/container-type-establishes-a-containment-context`. Nothing
+else in 672 cases moved a pixel, in either direction.
+
+`src/` was NOT touched by the corpus half of this round: the middle
+column is the base commit's own engine, so the drop from column one to
+column two is coverage and nothing else.
+
+#### The harness could not express a single one of these cases
+
+`scope-css` prefixes every selector with the case's own container id so
+601 cases can share one page. It was `split` on `}` and then on `,`, and
+its own docstring said a real at-rule "would be visible as a mis-scoped
+rule rather than silently wrong". Measured on the first shape this round
+needed:
+
+```
+@media (min-width: 600px) { p { color: red } }
+  ->  #case-0 @media (min-width: 600px) { p { color: red }
+@layer a, b;
+  ->  #case-0 @layer a, #case-0 b;
+```
+
+Three things wrong in one line: the at-rule's PRELUDE prefixed with an id,
+so the browser drops the whole block; the inner `p` left UNSCOPED, so had
+it parsed it would have reached every other case on the page; and the
+closing brace lost. The layer-ordering statement got the selector-list
+comma split applied to a *layer-name* list. None of it had ever run,
+because no case had ever contained an `@`.
+
+It is now brace-balanced, with one rule per shape: an at-rule STATEMENT is
+emitted verbatim (there is nothing in `@layer a, b;` to scope); a
+conditional group at-rule keeps its prelude and has its body scoped
+*recursively*, so `@media (…) { @layer x { p { … } } }` reaches
+`#case-0 p`; a style rule has its selector list scoped and its body
+emitted verbatim, because a nested rule (`p { & span { … } }`) is relative
+to its parent and prefixing it again would make it `#case-0 & span`, which
+matches nothing. `@font-face`/`@property`/`@keyframes` hold declarations
+rather than rules and are emitted verbatim.
+
+**Two numbers the harness was assuming and had wrong.** Cases are 800px
+wide; the headless window's `innerWidth` is **756**; and
+`cssom.core/default-viewport-width` is 800. Every `@media` threshold
+between those two would have diverged over WHICH VIEWPORT rather than over
+the cascade. And `default-color-scheme` is `"light"` while headless Brave
+151 answers `(prefers-color-scheme: dark)` with **true** — a matched pair
+of false divergences waiting for the first two cases to use it. Both are
+now measured in the oracle and handed to `apply-cascade`
+(`*oracle-viewport-width*` / `*oracle-color-scheme*`), which is the same
+correction as the case wrapper carrying the page's own `line-height`:
+what is being compared is whether the two sides evaluate the same
+condition the same way, and the number it is evaluated against has to be
+the same number. `:media/a-threshold-between-the-case-width-and-the-viewport`
+is the case that measures exactly this, at 780px.
+
+**Proof that none of it is a thumb on the scale:** the modified harness
+was run against the **unmodified engine at the base commit**, on the
+unmodified 601-case corpus, and reproduced the baseline to the value —
+line 572/576, geometry 2030/2036 with 595/601 clean, paint 14987/15009
+with 589/601 clean, computed style 28615/28618 with 599/601 clean. Which
+is what a corpus with no at-rules and no `@media` in it should do.
+
+#### What the 71 found
+
+**`@layer` — three real divergences under six agreements.** Layer order,
+the `!important` reversal, unlayered-beats-layered, the ordering
+statement, layer-beats-specificity and layer-inside-`@media` all agree
+exactly, which is the first evidence that the feature works rather than
+merely exists. The one worth naming among them is
+`:layer/a-layered-important-beats-an-unlayered-important`: this engine's
+own docstring says "any unlayered declaration beats every layered one of
+the same importance", and that sentence is only true of the *normal* half
+— for `!important` the unlayered declarations are the weakest, and the
+engine gets it right anyway. Then:
+
+| case | Brave | this engine |
+|---|---|---|
+| `two-anonymous-layers-are-two-layers` | blue — the second anonymous layer beats the first regardless of specificity | red — both are tagged with the same empty-string name, so they land in ONE layer and specificity decides |
+| `a-nested-layer-is-the-layer-its-dotted-name-names` | red — `@layer o { @layer i { … } }` and `@layer o.i { … }` are the SAME layer, so specificity decides | blue — the nested block is flattened to its OUTER name and `o.i` is read as an unrelated third name |
+| `media-inside-a-layer-keeps-the-layer` | blue | red |
+| `revert-layer-rolls-back-to-the-previous-layer` | 200×20 | 800×20 — the literal string `revert-layer` is stored as the width |
+
+The `@media`-inside-`@layer` one is a documented cut in `parse-rules`
+("loses the outer layer tag on that block") and the measurement changes
+what the cut costs: losing the tag does not merely forget the layer, it
+promotes the rule to **unlayered**, which is the strongest normal position
+there is. A rule written to be overridable becomes unoverridable.
+
+**`@supports` — absent, and absent in the fail-OPEN direction.**
+`parse-rules` does not recognise the at-rule at all, so the plain selector
+parser picks up its inner rules as if the wrapper were not there and every
+`@supports` block applies **unconditionally**. Measured, that is right
+half the time and wrong the other half: `(display: grid)`, `or` with one
+true arm, and `selector(p:has(b))` agree; `(display: flurb)`,
+`(flurb: 1px)`, `not (display: grid)`, `(grid) and (flurb)` and
+`selector(:frobnicate)` do not. The four controls are in the corpus
+because "applies when it should" is not evidence on an engine that applies
+everything. **Not fixed:** answering `@supports` honestly means a real
+support oracle for this engine's own property/value grammar, which is a
+design decision with a wide blast radius and not a parser change.
+
+**`@media` — three grammar gaps behind a working feature set.**
+`min-width`/`max-width`/`and`/`screen`/`print`/`prefers-color-scheme` all
+agree. The three that do not are all cases where `media-condition-matches?`'s
+documented "unrecognized features match, so nothing is silently hidden"
+default *inverts* an answer rather than widening one:
+
+| case | Brave | this engine |
+|---|---|---|
+| `(width >= 5000px)` (range syntax) | black | red |
+| `(min-width: 60em)` — 960px against a 756px viewport | black | red |
+| `not all and (min-width: 5000px)` | red | black |
+
+`:media/an-unrecognized-feature-still-applies` (`min-resolution`) is the
+control beside them: for a genuine unknown FEATURE the default is right
+and both sides agree. What the three above show is that `not`, range
+syntax and a unit are **grammar**, not features, and a fail-open default
+aimed at features reaches them anyway.
+
+**`@container` — implemented, correct, and it was hiding a layout bug.**
+Seven of the eight query cases agree with Brave exactly on first contact:
+`min-width`, `max-width`, the exact `(width: N)` form, a named container,
+a named query against a *different* name, and — the one that separates
+"the condition is evaluated" from "the condition is ignored" — a 400px
+wrapper with no `container-type`, which never matches. The eighth is the
+engine's own documented cut, now measured:
+`:container/a-percentage-width-container-is-not-queryable` sizes the
+container `50%`, which is 400px once layout runs and which
+`resolvable-container-width` correctly declines to guess at before it.
+Brave applies the rule; this engine honestly does not.
+
+But all eight failed on GEOMETRY while agreeing on every colour they were
+written for, and that is where the round's second engine fix came from —
+see below.
+
+**CSS nesting — not unsupported, DESTRUCTIVE.** The interesting finding is
+not that a nested rule fails to apply. `parse-rules` splits on braces
+without tracking depth, so a block holding both declarations and a nested
+rule **loses the declarations**:
+
+```
+#nc1 { color: blue; span { color: red } }
+   Brave:  paragraph blue, span red
+   here:   span red, and the paragraph has NO colour at all
+```
+
+`:nesting/an-ampersand-descendant-rule-in-its-own-block` is the control
+that isolates it: with the nested rule in a block of its own, both sides
+agree — and the engine's `& span` matches for the wrong reason (a stray
+`&` in a compound selector is ignored rather than resolved against a
+parent), which is exactly why the case is here. Five nesting forms
+diverge: a declaration beside a nested rule, `& > b`, `&.on`, `& + p`, and
+a `@media` block nested inside a style rule. **Not fixed:** making the
+brace splitter depth-aware without implementing nesting would trade one
+wrong answer for another — the outer declaration would survive and the
+nested rule would stop applying at all, and the control above would go
+red. The honest fix is desugaring (`& span` → `:is(#nc1) span`), which is
+a feature and not a bug fix.
+
+**`all`, `@property`, `env()`, `attr()`, `@scope`** — five separate
+features, five measured divergences, none of them fixed and all of them
+now carrying the browser's numbers:
+
+| case | Brave | this engine |
+|---|---|---|
+| `all: initial` on a `<div>` | 9.2×16 inline box, font-size 16px | 120×30 block, 14px |
+| `all: unset` on a `<p>` | 7×15 inline box, colour inherited | 800×20 block, red |
+| `all: revert` | margin-left **0** | margin-left **40** |
+| `@property --x { initial-value: 60px }` + `var(--x)` | 60×20 | 800×20 |
+| `env(safe-area-inset-left, 120px)` | **0**×20 (the variable is defined and is 0, so the fallback is not used) | 800×20 |
+| `attr(data-w px, 30px)` | 55×20 | 800×20 |
+| `@scope (#root) { .sp { … } }` | the `.sp` inside is red, the one outside is black | both red |
+
+The two `env()`/`attr()` fallbacks are deliberately values that are
+neither the resolved answer nor the container width, so "used the
+fallback", "resolved the variable" and "read neither" are three
+distinguishable answers. `all: revert` is the one of these the
+computed-style axis scores as a mismatch rather than excluding, because
+both sides' answers are plain numbers.
+
+**`::first-letter` — round thirty-two named it unscorable and was half
+right.** "Neither produces an element box, so neither the geometry axis
+nor the oracle's element probe can see one" is true of the
+pseudo-element and not of its EFFECT: a 40px first letter grows the
+paragraph's own box, which the geometry axis reads directly. Brave:
+**800×29** against a plain 800×20, which is 9px and well outside the 2px
+tolerance. `::first-line { font-weight: bold }` really is unscorable —
+measured, the paragraph stays 800×20 — and no case was added for it.
+
+#### Two engine fixes, both rules rather than cases
+
+**`min()` / `max()` / `clamp()`, over exactly `calc()`'s constant
+subset.** These are not a new pipeline: a math function is a PRIMARY in
+the expression grammar `parse-calc-level` already implements, so adding
+one token kind makes them nest in both directions —
+`calc(min(100px, 50px) + 10px)` is 60 and `min(calc(10px + 5px), 20px)` is
+15 — and `clamp(lo, v, hi)` is literally `max(lo, min(v, hi))`, which is
+what makes `clamp(90px, 5px, 300px)` come out **90** and not 5. The
+boundary is the one `calc()` already draws and is unmoved:
+`min(50%, 300px)` and `max(10px, 2em)` still degrade to a raw string
+rather than being guessed at against a containing block or a font size
+this pass does not have, and `min(10px, 2)` is invalid rather than 2
+because real CSS requires every argument to be the same type.
+`math-function-names` is the single authority — the whole-value pattern is
+built from it and the tokenizer tests membership against it — so
+`round()`/`mod()`/the trigonometric family are declined by name rather
+than by omission.
+
+Seven corpus cases went green (`min`, `max`, three-argument `min`, both
+`clamp` directions, `min` inside `calc`, and `min` in a `padding`
+shorthand — the one the computed-style axis can score, 0 → 4px on all four
+sides). `:math/constant-calc-multiplication-and-division` is the control
+that places the boundary from inside, and
+`:math/a-percentage-calc-is-resolved-against-the-container` from outside.
+
+**`container-type` applies layout containment.** Found by the eight
+`@container` cases failing on geometry while agreeing on every colour.
+`container-type` was a CASCADE-only property — `cssom.core` read it to
+decide what an `@container` rule may query, and nothing downstream read it
+at all. It is also a layout declaration: `inline-size` and `size` both
+apply layout containment, and a box with layout containment is an
+independent formatting context. Measured in Brave, both shapes on one
+page:
+
+| wrapper | box | its `<p>` |
+|---|---|---|
+| `container-type: inline-size; width: 400px` | **400×48** | y=**14** |
+| `width: 400px` | 400×20 | y=0 |
+
+It joins `scroll-container?` / `flow-root` / `:independent-fc?` in all
+three places that ask the formatting-context question (`fc-free?`,
+`contains-floats?`, and the self-collapsing test), because it is the same
+question. The eight query cases now pin `margin: 0` on their paragraph so
+they measure the QUERY and nothing else, and
+`:container/container-type-establishes-a-containment-context` measures the
+containment beside a control that is the identical wrapper without the
+declaration.
+
+Both fixes were proved to fail first: 12 assertions in
+`cssom.core-test` and 3 in `cssom.layout-test` fail on the base commit and
+pass after, and each has a control beside it that passes on both sides
+(`min(50%, 300px)` stays a raw string either way; a wrapper with no
+`container-type`, and one with `container-type: normal`, are 400×20
+either way).
+
+#### Measured and deliberately NOT added
+
+- **`::first-line`.** Brave reports the same 800×20 paragraph with and
+  without `::first-line { font-weight: bold }`, and the computed-style
+  axis compares fourteen properties on ELEMENTS. There is nothing for
+  either side to disagree about, at any value.
+- **A `revert-layer` on an UNLAYERED declaration.** Brave rolls it back
+  past the whole author origin, so `#x { width: 120px } #x { width:
+  revert-layer }` is 800px wide — and this engine, holding the literal
+  string, is also 800px wide. It would have been a case that passes for
+  precisely the wrong reason. The layered form
+  (`:layer/revert-layer-rolls-back-to-the-previous-layer`) discriminates,
+  and it is the one in the corpus.
+
 ### Round forty-three: where a box sits on a line
 
 Four residuals in one cluster — everything left that was about a box's
