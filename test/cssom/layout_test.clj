@@ -8093,8 +8093,12 @@
   ;; `text/rtl-block-alignment`: a 60px block in a 200px rtl container is at
   ;; x=140 in Brave (CSS 2.1 SS10.3.3 resolves margin-LEFT under rtl), and
   ;; an explicit auto margin still overrides the direction's own side.
-  ;; Nothing here asserts anything about INLINE content: there is no bidi
-  ;; algorithm in this engine and none is claimed.
+  ;; Nothing here asserts anything about INLINE content -- that is the
+  ;; two deftests below, which arrived later and are what made this rule
+  ;; stop applying to a bare TEXT child (see layout-children-block's own
+  ;; `rtl?`: a text child is an anonymous block box that fills its
+  ;; container, so this rule has nothing to place, and with both rules in
+  ;; force such a child was shifted right twice).
   (let [x-of (fn [decl]
                (:x (last (cascaded-boxes (str ".outer{direction:rtl;width:200px} .inner{" decl "}")
                                          nest))))]
@@ -8104,6 +8108,174 @@
     (is (= 0 (x-of ""))
         "an auto-width block fills an rtl container exactly as it does an
          ltr one -- there is no leftover space to place")))
+
+;; ---- `direction: rtl` INSIDE a line ----
+;;
+;; Every number below was measured in a real headless Brave 151 over CDP,
+;; on a page shaped like the conformance corpus's own (800px root, 14px
+;; monospace, 20px line-height), BEFORE the code that produces it was
+;; written. The engine's own coordinates are not the browser's -- it has no
+;; glyph shaping, so its char width is `(long (* 0.6 14))` = 8 against
+;; Brave's 7.0 for this face -- so what is asserted here is the RELATION
+;; each measurement established (which edge, which order, one offset per
+;; line), with the corpus cases named so the absolute numbers can be
+;; checked where they are comparable. See conformance/cases.edn's
+;; `:text/rtl-*` and `:text/ltr-*` for those.
+
+(defn- rtl-texts
+  "The `:text` draw-ops of one <div>-rooted inline layout, as [text x]."
+  [style specs]
+  (mapv (juxt :text :x)
+        (text-draw-ops (inline-ops specs style {:width 300 :theme {:padding 0 :gap 0}}))))
+
+(deftest an-rtl-line-packs-against-the-right-edge-without-reordering-latin
+  ;; `:text/rtl-with-inline-elements` and `:text/rtl-two-inline-elements`.
+  ;; Measured in Brave, `alpha <b>beta</b> gamma` in a 300px rtl block sits
+  ;; at 185.48/227.48/265 where the SAME markup with `direction: ltr` sits
+  ;; at 0/42/79.52 -- the same order, every word shifted by the same
+  ;; 185.48, which is 300 minus the line's own width. UAX #9 gives exactly
+  ;; that for a line whose every word is strong left-to-right: one
+  ;; left-to-right run, placed at the line's inline-end.
+  ;;
+  ;; This is the assertion the previous round of this work declined to
+  ;; make, on the reasoning that the <b> would land near Brave's x "by
+  ;; symmetry" while the words were still in the wrong order. The second
+  ;; half of that is what measuring disproved -- Brave does not reorder
+  ;; this line -- which is why the two-inline case below is asserted
+  ;; alongside it: nothing about `aa <b>bbbb</b> cccccc <i>d</i> ee` is
+  ;; symmetric, so no coincidence can produce it.
+  (let [ltr (rtl-texts {} ["alpha " [:b {} "beta"] " gamma"])
+        rtl (rtl-texts {:direction "rtl"} ["alpha " [:b {} "beta"] " gamma"])
+        shift (- (second (first rtl)) (second (first ltr)))]
+    (is (= (mapv first ltr) (mapv first rtl))
+        "an all-Latin line is NOT reordered by an rtl paragraph direction")
+    (is (pos? shift))
+    (is (= (mapv #(+ shift (second %)) ltr) (mapv second rtl))
+        "every piece shifted by the same amount -- the line moved, the
+         pieces did not move within it")
+    (is (= (- 300 (apply max (map (fn [[t x]] (+ x (* 8 (count t)))) ltr))) shift)
+        "and that amount is the line's own leftover in the content width"))
+  (let [ltr (rtl-texts {} ["aa " [:b {} "bbbb"] " cccccc " [:i {} "d"] " ee"])
+        rtl (rtl-texts {:direction "rtl"} ["aa " [:b {} "bbbb"] " cccccc " [:i {} "d"] " ee"])
+        shift (- (second (first rtl)) (second (first ltr)))]
+    (is (= (mapv first ltr) (mapv first rtl)))
+    (is (= (mapv #(+ shift (second %)) ltr) (mapv second rtl))
+        "the asymmetric shape, where a right edge reached by symmetry
+         would not line up")))
+
+(deftest text-align-start-and-end-are-direction-relative
+  ;; `:text/rtl-text-align-end-is-the-left-edge`,
+  ;; `:text/ltr-text-align-end-is-the-right-edge` and
+  ;; `:text/rtl-text-align-left-overrides-the-direction`. Measured in
+  ;; Brave, all four combinations of {ltr, rtl} x {start, end} on
+  ;; `alpha <b>beta</b> gamma` in a 300px block: the <b> is at 42 for
+  ;; ltr+start and rtl+end, and at 227.48 for ltr+end and rtl+start.
+  ;; A PHYSICAL value still means the physical thing it says.
+  (let [x-of (fn [dir align]
+               (second (first (rtl-texts (cond-> {} dir (assoc :direction dir)
+                                                 align (assoc :text-align align))
+                                         ["alpha " [:b {} "beta"] " gamma"]))))
+        left 0
+        right (x-of "rtl" nil)]
+    (is (pos? right))
+    (is (= left (x-of "ltr" nil)))
+    (is (= left (x-of "ltr" "start")))
+    (is (= right (x-of "ltr" "end")))
+    (is (= right (x-of "rtl" "start")))
+    (is (= left (x-of "rtl" "end")))
+    (is (= left (x-of "rtl" "left")) "a physical value is still physical")
+    (is (= right (x-of "rtl" "right")))
+    (is (= right (x-of "rtl" "justify"))
+        "`justify` degrades to `start`, which in rtl is the right edge --
+         measured, the LAST line of a justified rtl paragraph (the one a
+         real justifier does not stretch either) sits there")))
+
+(deftest each-wrapped-line-of-an-rtl-block-is-placed-on-its-own
+  ;; `:text/rtl-wraps-then-places-each-line`. Measured in Brave, a 160px
+  ;; rtl paragraph puts line one at 33.17..160 and line two at 62..160 --
+  ;; two different offsets, which no single shift of the whole box can
+  ;; produce. Both lines end at the container's right edge.
+  (let [t (rtl-texts {:direction "rtl"} ["one two three four five six seven"])
+        ops (text-draw-ops (inline-ops ["one two " [:b {} "three"] " four five six seven"]
+                                       {:direction "rtl"} {:width 160 :theme {:padding 0 :gap 0}}))
+        by-line (group-by :y ops)]
+    (is (= 1 (count t)) "the single-text-child path is one op per line")
+    (is (< 1 (count by-line)) "the inline path really did wrap")
+    (is (apply not= (map (fn [[_ ops]] (apply min (map :x ops))) by-line))
+        "the two lines start at DIFFERENT offsets")
+    (is (every? (fn [[_ ops]]
+                  (= 160 (apply max (map (fn [o] (+ (:x o) (* 8 (count (:text o))))) ops))))
+                by-line)
+        "...and both end at the right edge")))
+
+(deftest strong-rtl-runs-are-reordered-and-latin-runs-are-not
+  ;; `:text/rtl-hebrew-reverses-the-words`,
+  ;; `:text/rtl-hebrew-keeps-an-embedded-latin-run-in-order` and
+  ;; `:text/ltr-hebrew-run-reverses-inside-a-latin-line`. This is the half
+  ;; that placing a line cannot explain, and the reason placing it is not a
+  ;; shortcut: UAX #9 rule L2 reverses same-direction runs, so an all-rtl
+  ;; line comes out backwards, an embedded left-to-right run inside it does
+  ;; NOT, and an rtl run inside an ltr line does.
+  ;;
+  ;; Measured in Brave at 300px, all three:
+  ;;   rtl `\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd \u05d0\u05d1\u05d2`  -> 193.58 / 225.78 / 266.38, i.e. reversed
+  ;;   rtl `\u05e9\u05dc\u05d5\u05dd one two \u05d0\u05d1\u05d2` -> \u05d0\u05d1\u05d2 178.17, one 210.39, two 238.39,
+  ;;                              \u05e9\u05dc\u05d5\u05dd 266.39 -- one still before two
+  ;;   ltr `alpha \u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd beta` -> alpha 0, \u05e2\u05d5\u05dc\u05dd 42, \u05e9\u05dc\u05d5\u05dd 82.59,
+  ;;                                    beta 123.22 -- only the pair swapped
+  (let [visual (fn [style specs] (mapv first (sort-by second (rtl-texts style specs))))]
+    (is (= ["אבג" "עולם" "שלום"]
+           (visual {:direction "rtl"} ["שלום עולם אבג"]))
+        "a lone text child, reversed, one op per run")
+    (is (= ["אבג" "עולם" "שלום"]
+           (visual {:direction "rtl"} ["שלום " [:b {} "עולם"] " אבג"]))
+        "...and the same across an inline box boundary")
+    (is (= ["אבג" "one two" "שלום"]
+           (visual {:direction "rtl"} ["שלום one two אבג"]))
+        "the embedded left-to-right run keeps its own internal order, and
+         stays ONE op -- which is what preserves it")
+    (is (= ["alpha" "עולם" "שלום" "beta"]
+           (visual {} ["alpha שלום עולם beta"]))
+        "an LTR paragraph reverses the rtl run inside it and leaves the
+         Latin words alone -- this is not an rtl-only branch")
+    (is (= ["أهلا" "عليكم" "السلام"]
+           (visual {:direction "rtl"} ["السلام عليكم أهلا"]))
+        "Arabic too: the character class is a class, not a Hebrew case")))
+
+(deftest nothing-without-a-strong-rtl-character-is-reordered
+  ;; The guarantee that makes the mechanism above safe to have at all: it
+  ;; is inert for every line that is not in an rtl script, INCLUDING in an
+  ;; rtl block, because UAX #9's own levels make it the identity there (all
+  ;; runs at level 2, reversed at 2 and again at 1). Asserted as a
+  ;; property rather than a number, because it is the property that keeps
+  ;; every other test in this file from having to know about bidi.
+  (let [specs ["aa " [:b {} "bbbb"] " cccccc " [:i {} "d"] " ee"]]
+    (doseq [dir [nil "ltr" "rtl"]
+            align [nil "left" "right" "center"]]
+      (is (= (mapv first (rtl-texts {} specs))
+             (mapv first (rtl-texts (cond-> {} dir (assoc :direction dir)
+                                            align (assoc :text-align align))
+                                    specs)))
+          (str "order unchanged for direction=" dir " text-align=" align)))))
+
+(deftest a-br-sits-at-the-inline-end-edge-of-its-line
+  ;; `:text/rtl-br-sits-at-the-left-end-of-its-line`. Measured in Brave,
+  ;; `<p style="direction:rtl;width:300px">aaa<br>bb cc</p>` reports the
+  ;; <br> at x=279 -- the LEFT end of a line whose only word runs
+  ;; 279..300. In ltr the same box is at the line's right end.
+  (let [br-x (fn [style]
+               (->> (inline-ops ["aaa" [:br {}] "bb cc"] style
+                                {:width 300 :theme {:padding 0 :gap 0}})
+                    (filterv #(and (= :node (:draw/op %)) (= :br (:tag %))))
+                    first :x))
+        first-line-x (fn [style]
+                       (->> (text-draw-ops (inline-ops ["aaa" [:br {}] "bb cc"] style
+                                                       {:width 300 :theme {:padding 0 :gap 0}}))
+                            first :x))]
+    (is (= (+ (first-line-x {}) 24) (br-x {}))
+        "ltr: at the end of the text it terminates")
+    (is (= (first-line-x {:direction "rtl"}) (br-x {:direction "rtl"}))
+        "rtl: at the LEFT end of that line, which is its inline-end")))
 
 (deftest a-negative-margin-collapses-instead-of-being-dropped
   ;; `box/negative-margin-pulls-up` and its bottom-side twin
