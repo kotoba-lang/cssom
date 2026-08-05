@@ -1771,9 +1771,111 @@
  ;; Properties that likewise have no case. Each is common enough in real
  ;; pages that not knowing whether this engine handles it is itself a gap.
 
+ {:id :block/menu-is-an-indented-list
+  :group :block
+  ;; `<menu>` is the legacy list container, and a browser gives it exactly
+  ;; `<ul>`'s box: `margin: 1em 0` and a 40px indent.
+  :html "<div style=\"width: 400px\"><menu><li>one</li><li>two</li></menu></div>"}
+
+ {:id :block/figure-has-side-margins
+  :group :block
+  ;; `figure { margin: 1em 40px }` -- the same rule as `<blockquote>`,
+  ;; and the half of it this engine had was the 1em.
+  :html "<div style=\"width: 400px\"><figure>a caption-less figure</figure></div>"}
+
+ {:id :block/hr-is-its-own-border
+  :group :block
+  ;; An `<hr>` has no content at all: its whole box is `margin: 0.5em 0`
+  ;; around a 1px border on each side, so it is 2px tall. Deliberately
+  ;; ALONE in its container -- between two paragraphs the neighbours'
+  ;; larger margins collapse over its own and hide the difference.
+  :html "<div style=\"width: 400px\"><hr></div>"}
+
  {:id :sizing/aspect-ratio-derives-the-height
   :group :sizing
   :html "<div style=\"width: 400px\"><div style=\"width: 120px; aspect-ratio: 3 / 1; background: #eee\">box</div></div>"}
+
+ ;; ...and the rest of `aspect-ratio`, because one case can only show that
+ ;; the property is read at all. Each of these isolates ONE thing the
+ ;; ratio has to lose to, or one form of it a parser can get wrong.
+
+ {:id :sizing/aspect-ratio-loses-to-a-declared-height
+  :group :sizing
+  ;; Both axes are already declared, so the ratio has nothing to solve
+  ;; for and is simply not applied: 120x70, not 120x40.
+  :html "<div style=\"width: 400px\"><div style=\"width: 120px; height: 70px; aspect-ratio: 3 / 1\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-derives-the-width
+  :group :sizing
+  ;; The other direction: a definite height and an auto width make the
+  ;; ratio supply the width, so this block is 180 wide inside a 400px
+  ;; parent rather than filling it.
+  :html "<div style=\"width: 400px\"><div style=\"height: 60px; aspect-ratio: 3 / 1\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-auto-is-no-ratio
+  :group :sizing
+  ;; `auto` on a non-replaced element leaves the height content-driven.
+  :html "<div style=\"width: 400px\"><div style=\"width: 120px; aspect-ratio: auto\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-auto-and-a-ratio
+  :group :sizing
+  ;; The two-value `auto <ratio>` form. With no natural ratio to prefer,
+  ;; the declared one applies -- the same 40px height as the bare form.
+  :html "<div style=\"width: 400px\"><div style=\"width: 120px; aspect-ratio: auto 3 / 1\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-single-number
+  :group :sizing
+  ;; `<number>` with the `/ <number>` omitted is that number over 1.
+  :html "<div style=\"width: 400px\"><div style=\"width: 120px; aspect-ratio: 1.5\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-yields-to-content
+  :group :sizing
+  ;; A ratio-sized box with visible overflow has an automatic MINIMUM
+  ;; size in the ratio-dependent axis: the content wins when it is
+  ;; taller, so this is six lines tall and not the 13px 40/3 asks for.
+  :html "<div style=\"width: 400px\"><div style=\"width: 40px; aspect-ratio: 3 / 1\">a much longer content string here</div></div>"}
+
+ {:id :sizing/aspect-ratio-under-max-height
+  :group :sizing
+  ;; min-height/max-height clamp the ratio's answer like any other.
+  :html "<div style=\"width: 400px\"><div style=\"width: 120px; aspect-ratio: 3 / 1; max-height: 20px\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-in-a-flex-item
+  :group :sizing
+  ;; A flex item's cross size normally stretches to the line; a ratio and
+  ;; a definite main size make it 40 instead.
+  :html "<div style=\"width: 400px; display: flex\"><div style=\"width: 120px; aspect-ratio: 3 / 1\">box</div><div>s</div></div>"}
+
+ {:id :sizing/aspect-ratio-with-padding
+  :group :sizing
+  ;; The ratio governs the box `box-sizing` names: with the default
+  ;; content-box it relates the CONTENT boxes, so this is 140x60.
+  :html "<div style=\"width: 400px\"><div style=\"width: 120px; aspect-ratio: 3 / 1; padding: 10px\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-derives-a-flex-item-main-size
+  :group :sizing
+  ;; The cross axis is the definite one here, so the ratio runs the other
+  ;; way and gives the item its MAIN size: 90 wide for a 30px-tall item.
+  :html "<div style=\"width: 400px; display: flex\"><div style=\"height: 30px; aspect-ratio: 3 / 1\">box</div><div>s</div></div>"}
+
+ {:id :sizing/aspect-ratio-on-an-absolute-box
+  :group :sizing
+  ;; An absolutely positioned box sizes itself, and the ratio applies
+  ;; there too -- 120x40 inside a 100px-tall containing block.
+  :html "<div style=\"width: 400px; position: relative; height: 100px\"><div style=\"position: absolute; width: 120px; aspect-ratio: 3 / 1\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-over-a-percentage-width
+  :group :sizing
+  ;; The ratio consumes the RESOLVED width, not the declared one: 50% of
+  ;; 400 is 200, and 200/4 is 50.
+  :html "<div style=\"width: 400px\"><div style=\"width: 50%; aspect-ratio: 4 / 1\">box</div></div>"}
+
+ {:id :sizing/aspect-ratio-with-no-width-at-all
+  :group :sizing
+  ;; Neither axis is declared: the block still fills its containing block
+  ;; in the inline axis first, and only then does the ratio derive the
+  ;; height from it -- 400 wide and a third of that tall.
+  :html "<div style=\"width: 400px\"><div style=\"aspect-ratio: 3 / 1\">box</div></div>"}
 
  {:id :sizing/min-height-wins-over-content
   :group :sizing

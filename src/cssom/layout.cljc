@@ -789,8 +789,27 @@
 
    They are VERTICAL only, which is why they had to wait for the per-side
    box model: applied as this engine's old uniform margin they would have
-   indented every paragraph sideways as well."
-  {:p 1.0 :blockquote 1.0 :ul 1.0 :ol 1.0 :dl 1.0 :pre 1.0 :figure 1.0
+   indented every paragraph sideways as well.
+
+   `menu`/`dir` are the legacy list containers: `list-container-tags`
+   already treats them as lists for the nested-list cancellation, and
+   Brave gives them the same `margin: 1em 0` as `<ul>` (measured 2026-08-05
+   on a bare `<menu><li>a</li></menu>`: `margin-block: 16px`,
+   `padding-left: 40px`).
+
+   `hr`'s is half an em, and the 1px border that is the rest of an
+   `<hr>`'s box lives in ua-em-box -- see there for why.
+
+   NOT here, and for a reason worth stating rather than leaving as a
+   silent omission (measured in Brave 151 the same day):
+
+   - `pre`'s margin IS 1em and is in this table, but its em is the wrong
+     size: a browser also gives `pre` `font-family: monospace` and, with
+     it, the monospace default size of 13px, so the real margin is 13 and
+     this engine computes 16. Fixing the margin without the font would
+     make the number right for a reason that is not true."
+  {:p 1.0 :blockquote 1.0 :ul 1.0 :ol 1.0 :menu 1.0 :dir 1.0
+   :dl 1.0 :pre 1.0 :figure 1.0 :hr 0.5
    :h1 0.67 :h2 0.83 :h3 1.0 :h4 1.33 :h5 1.67 :h6 2.33})
 
 (def ^:private list-container-tags
@@ -803,9 +822,25 @@
   "Horizontal UA-stylesheet box values -- the list indent every browser
    applies (`ul, ol { padding-left: 40px }`) and a blockquote's own side
    margins. Horizontal-only, for the same reason ua-margin-scale is
-   vertical-only."
+   vertical-only.
+
+   `figure` is the same `margin: 1em 40px` rule as `blockquote`, and only
+   the 1em half of it was here: the vertical margin was in
+   ua-margin-scale from the start while the 40px indent was not, so a
+   `<figure>` sat flush against its article's content edge and was 80px
+   too wide. Measured in Brave 151, 2026-08-05, on
+   `:page/article-with-figure`'s own 300px article -- the browser puts the
+   figure at x=40 with w=220 and this engine had x=0, w=300, which the
+   figure's `<img>` and `<figcaption>` then inherited box for box (the
+   harness's whole `figure`/`figcaption`/`img` residual, six numbers from
+   one missing declaration).
+
+   `menu`/`dir` carry `<ul>`'s 40px indent for the same reason they carry
+   its vertical margin -- see ua-margin-scale."
   {:ul {:padding-left 40} :ol {:padding-left 40}
+   :menu {:padding-left 40} :dir {:padding-left 40}
    :blockquote {:margin-left 40 :margin-right 40}
+   :figure {:margin-left 40 :margin-right 40}
    :dd {:margin-left 40}})
 
 (def ^:private form-control-tags #{:input :button :select :textarea})
@@ -1079,11 +1114,22 @@
 
    A `<legend>` gets its 2px whether or not it is inside a fieldset:
    measured, a bare `<legend>bare legend</legend>` is a full-width block
-   whose text still starts at x=2."
+   whose text still starts at x=2.
+
+   `<hr>` is here for the mechanism rather than the em: this is the only
+   table `node-style`'s `:border-width` consults for a UA border, and an
+   `<hr>`'s entire visible self IS its border. Measured in Brave 151,
+   2026-08-05: `border: 1px inset`, no padding, no content -- a 2px-tall
+   box, where this engine drew a 0px-tall one and every block below it sat
+   2px high. Its `margin: 0.5em 0` is in ua-margin-scale with the other
+   vertical margins. The `inset` STYLE is not modelled (this engine draws
+   one solid border), so the line is a hairline rectangle in the border
+   colour rather than a two-tone bevel -- geometry, not paint."
   {:fieldset {:margin-left 2 :margin-right 2 :border 2
               :em {:padding-top 0.35 :padding-right 0.75
                    :padding-bottom 0.625 :padding-left 0.75}}
-   :legend {:padding-left 2 :padding-right 2 :padding-top 0 :padding-bottom 0}})
+   :legend {:padding-left 2 :padding-right 2 :padding-top 0 :padding-bottom 0}
+   :hr {:border 1 :padding 0}})
 
 (defn- ua-em-box-for
   "`ua-em-box`'s entry for `node`, with its `:em` terms resolved against the
@@ -1199,6 +1245,12 @@
    :max-width (style node :max-width)
    :min-height (style node :min-height)
    :max-height (style node :max-height)
+   ;; Left RAW, like :transform above and for the same reason: an
+   ;; `aspect-ratio` is a ratio (or the keyword `auto`, or both), not a
+   ;; length, so this file's numeric coercions would turn `3 / 1` into the
+   ;; integer 3. The one place that reads it parses it -- see
+   ;; aspect-ratio.
+   :aspect-ratio (style node :aspect-ratio)
    :box-sizing (or (style node :box-sizing)
                    (:box-sizing ua-box)
                    "content-box")
@@ -1859,6 +1911,58 @@
        (when-not (or (percentage? (:height st)) (calc-value? (:height st)))
          (explicit-length (:height st))))))
 
+(defn- aspect-ratio
+  "`aspect-ratio` as a single width-over-height NUMBER, or nil when the
+   element declares none this engine can use.
+
+   The grammar (CSS Sizing 4) is `auto || <ratio>`, and a `<ratio>` is
+   `<number> [ / <number> ]?` with an omitted second term of 1. Every form
+   below was measured in Brave 151 on 2026-08-05, on the corpus case's own
+   `width: 120px` block with one line of text in it:
+
+   | declaration                | height |
+   |----------------------------|--------|
+   | `aspect-ratio: 3 / 1`      |     40 |
+   | `aspect-ratio: 2`          |     60 |
+   | `aspect-ratio: 1.5`        |     80 |
+   | `aspect-ratio: auto 3 / 1` |     40 |
+   | `aspect-ratio: 3 / 1 auto` |     40 |
+   | `aspect-ratio: auto`       |     24 (i.e. the content height) |
+   | `aspect-ratio: 0 / 1`      |     24 (i.e. the content height) |
+
+   Two readings that are decisions rather than parsing:
+
+   `auto <ratio>` is treated as the bare ratio. The `auto` keyword means
+   \"use the element's NATURAL ratio if it has one, and this one
+   otherwise\", and a natural ratio belongs to a replaced element whose
+   intrinsic size a browser learns by decoding the resource. This engine
+   reads an `<img>`'s size from its `width`/`height` attributes (see
+   presentational-size) and never decodes anything, so there is no
+   competing natural ratio for the keyword to prefer -- which is a scope
+   cut, not an equivalence: an `<img>` with a `width` attribute, a real
+   intrinsic ratio, and `aspect-ratio: auto 3/1` would follow the
+   intrinsic one in a browser and the declared one here.
+
+   A degenerate ratio -- a zero or negative term on either side -- is not
+   a ratio and is dropped rather than divided by: measured,
+   `aspect-ratio: 0 / 1` lays out at its content height, exactly as
+   `auto` does."
+  [st]
+  (let [v (:aspect-ratio st)]
+    (cond
+      (number? v) (when (pos? v) (double v))
+      (string? v)
+      (let [terms (->> (str/split (str/replace (str/lower-case v) #"auto" " ") #"/")
+                       (map str/trim)
+                       (remove str/blank?)
+                       (mapv #(parse-dbl % nil)))]
+        (when (every? #(and (some? %) (pos? %)) terms)
+          (case (count terms)
+            1 (first terms)
+            2 (/ (first terms) (second terms))
+            nil)))
+      :else nil)))
+
 (defn- clamp-height
   "Real CSS min-height/max-height apply to a box's FINAL height regardless
    of where that height came from -- an explicit :height (resolve-height)
@@ -1910,6 +2014,61 @@
       (if (= "border-box" (:box-sizing st))
         declared
         (+ declared (declared-inset-side st :top) (declared-inset-side st :bottom))))))
+
+(defn- aspect-ratio-block-height
+  "The BORDER-BOX height an `aspect-ratio` derives from an already-resolved
+   border-box width, or nil when there is no usable ratio.
+
+   The ratio governs the box `box-sizing` names -- so with the default
+   `content-box` it relates the CONTENT width to the CONTENT height and
+   the padding/border sit outside both, and with `border-box` it relates
+   the border boxes directly. Measured in Brave 151, 2026-08-05, on
+   `width: 120px; aspect-ratio: 3/1; padding: 10px`: 140x60 with
+   `content-box` (content 120x40) and 120x44 with `border-box`. The insets
+   are the DECLARED ones, the same halves resolve-width and
+   used-block-height already convert their own declared lengths through.
+
+   This is the ratio's answer alone. It is not the used height: the caller
+   takes the LARGER of this and the content-driven height, because a
+   ratio-sized box with `overflow: visible` has an automatic minimum size
+   in the ratio-dependent axis (CSS Sizing 4) and a browser lets content
+   push it past the ratio rather than overflow. Measured the same day:
+   `width: 40px; aspect-ratio: 3/1` around a string that wraps to six
+   lines is 144 tall in Brave, not the 13 the ratio asks for -- and the
+   `border-box` case above is 44 rather than 40 for the same reason, its
+   ratio height of 40 leaving only 20 for a 24px line."
+  [st border-box-w]
+  (when-let [r (aspect-ratio st)]
+    (if (= "border-box" (:box-sizing st))
+      (long (/ border-box-w r))
+      (let [ix (+ (declared-inset-side st :left) (declared-inset-side st :right))
+            iy (+ (declared-inset-side st :top) (declared-inset-side st :bottom))]
+        (+ iy (long (/ (max 0 (- border-box-w ix)) r)))))))
+
+(defn- aspect-ratio-block-width
+  "The mirror of aspect-ratio-block-height, for the case a browser solves
+   the other way round: `width` is auto and `height` is definite, so the
+   ratio supplies the width.
+
+   A block-level box with `width: auto` normally fills its containing
+   block, which is why this needs its own call site rather than falling
+   out of resolve-width -- and why it returns nil unless BOTH halves hold
+   (no author width, a definite height, a usable ratio), leaving the
+   fill-the-container answer untouched everywhere else. Measured in Brave
+   151, 2026-08-05: `height: 60px; aspect-ratio: 3/1` inside a 400px
+   parent is 180 wide, not 400, as a block AND as an inline-block.
+
+   `basis` is the containing block's content height, for the same reason
+   used-block-height takes one: the declared height may be a percentage."
+  [st basis]
+  (when (and (nil? (:width st)) (nil? (:height/used st)))
+    (when-let [r (aspect-ratio st)]
+      (when-let [h (used-block-height st basis)]
+        (if (= "border-box" (:box-sizing st))
+          (long (* h r))
+          (let [ix (+ (declared-inset-side st :left) (declared-inset-side st :right))
+                iy (+ (declared-inset-side st :top) (declared-inset-side st :bottom))]
+            (+ ix (long (* (max 0 (- h iy)) r)))))))))
 
 (defn- definite-content-height
   "The CONTENT height this box hands its children as the basis a percentage
@@ -9362,7 +9521,15 @@
   ([theme x y avail-width opacity inherited st node]
    (layout-block theme x y avail-width opacity inherited st node nil))
   ([theme x y avail-width opacity inherited st node intruding]
-  (let [w (resolve-width st avail-width)
+  (let [;; `width: auto` fills the containing block -- UNLESS a definite
+        ;; height and an `aspect-ratio` between them already say how wide
+        ;; this box is (aspect-ratio-block-width, which is nil in every
+        ;; other case and leaves the fill answer alone). Clamped through
+        ;; resolve-width's own min/max the same way its fill answer is.
+        w (if-let [ar-w (aspect-ratio-block-width
+                         st (:block/containing-height inherited))]
+            (clamp-width st ar-w avail-width)
+            (resolve-width st avail-width))
         inset (content-inset st)
         inset-l (inset-side st :left)
         inset-r (inset-side st :right)
@@ -9525,7 +9692,19 @@
         ;; modes -- it used to be a separate `box-sizing`-gated term here,
         ;; whose two branches summed to the same number and which would now
         ;; charge every bordered block for its border twice.
-        node-h (clamp-height st (or explicit-h (+ h inset-t inset-b)) cb-h)
+        ;; With no explicit height, an `aspect-ratio` answers instead --
+        ;; but only as a FLOOR against the content, never as a ceiling
+        ;; over it: see aspect-ratio-block-height for the automatic
+        ;; minimum size that makes `max` the right operator and the two
+        ;; Brave measurements that show it. `explicit-h` still wins
+        ;; outright, which is the ratio's own rule (a declared height and
+        ;; a declared width leave the ratio nothing to solve for).
+        node-h (clamp-height st (or explicit-h
+                                    (let [content-h (+ h inset-t inset-b)]
+                                      (if-let [ar-h (aspect-ratio-block-height st w)]
+                                        (max ar-h content-h)
+                                        content-h)))
+                             cb-h)
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
         ;; An absolutely positioned descendant resolves against this box's
