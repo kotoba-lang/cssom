@@ -11341,3 +11341,249 @@
     (is (every? #(zero? (:opacity %))
                 (filter #(and (= :text (:draw/op %)) (= "inner" (:text %))) ops))
         "including its text")))
+
+;; ---- where a line is ALLOWED to break -------------------------------------
+;;
+;; Everything below is measured in Brave 151 on 2026-08-06, in the same
+;; 14px monospace / 20px line page `tm-theme` models (7px per character),
+;; and the browser's own numbers are quoted at each assertion. Before this
+;; the line breaker had no model of a break OPPORTUNITY at all: it would
+;; break between any two tokens, and `white-space: nowrap` never reached
+;; the inline path in the first place.
+;;
+;; The assertions carry Brave's HORIZONTAL numbers and this engine's own
+;; VERTICAL ones, and that difference is not a disagreement: `tm-theme`
+;; supplies `:measure-text` but no `:font-metrics`, so a line's ascent is
+;; the whole font size (see font-metrics' documented default) where a real
+;; face reports 12 of 15. Every `y` below is therefore 2px above the
+;; browser's and every inline box 1px taller -- 0/20 for Brave's 2/22, and
+;; h 16 for its 15. What these tests are about is which line a word lands
+;; on and where it sits along it, and on both of those the two agree
+;; exactly. The conformance corpus, which feeds the oracle's real metrics
+;; in, compares the absolute numbers.
+
+(deftest nowrap-on-an-inline-child-keeps-it-in-the-paragraph-s-line
+  ;; Brave: the <p> is 40 tall and the span is (42,2,70,15) -- one line
+  ;; box holding `alpha beta gamma`, then `delta`. This engine used to
+  ;; refuse the whole paragraph an inline formatting context (a non-normal
+  ;; `white-space` on any child disqualified it), so it stacked three
+  ;; full-width block rows and reported 60.
+  (is (= [:p 0 0 120 40]
+         (tm-box :p (str "<p style=\"width:120px;margin:0\">alpha "
+                         "<span style=\"white-space:nowrap\">beta gamma</span>"
+                         " delta</p>"))))
+  (is (= [:span 42 0 70 16]
+         (tm-box :span (str "<p style=\"width:120px;margin:0\">alpha "
+                            "<span style=\"white-space:nowrap\">beta gamma</span>"
+                            " delta</p>")))))
+
+(deftest a-space-inside-a-nowrap-inline-is-not-a-break-opportunity
+  ;; The element that CONTAINS a collapsible space governs it. Brave, at
+  ;; 120px: `alphaalpha<span nowrap> betabeta</span>` is ONE line with
+  ;; `betabeta` at 77 (the space is the nowrap span's, so it is rendered
+  ;; and not broken at), and the same markup with a plain span is TWO.
+  (is (= [["alphaalpha" 0 0] ["betabeta" 77 0]]
+         (tm-texts (str "<div style=\"width:120px\">alphaalpha"
+                        "<span style=\"white-space:nowrap\"> betabeta</span></div>"))))
+  (is (= [["alphaalpha" 0 0] ["betabeta" 0 20]]
+         (tm-texts (str "<div style=\"width:120px\">alphaalpha"
+                        "<span> betabeta</span></div>")))))
+
+(deftest a-space-outside-a-normal-inline-is-governed-by-the-block
+  ;; The mirror image, and the one that proves the rule is about the space
+  ;; and not about the token after it. Brave, at 120px in a `white-space:
+  ;; nowrap` div: `alphaalpha <span style="white-space:normal">betabeta
+  ;; </span>` is ONE line with `betabeta` at 77 -- the space belongs to
+  ;; the nowrap div, and the normal span does not rescue it.
+  (is (= [["alphaalpha" 0 0] ["betabeta" 77 0]]
+         (tm-texts (str "<div style=\"width:120px;white-space:nowrap\">alphaalpha "
+                        "<span style=\"white-space:normal\">betabeta</span></div>"))))
+  ;; ...and a space INSIDE the normal span still breaks, in the same
+  ;; nowrap div: Brave puts `gammagamma` on line two.
+  (is (= [["alphaalpha" 0 0] ["betabeta" 77 0] ["gammagamma" 0 20]]
+         (tm-texts (str "<div style=\"width:120px;white-space:nowrap\">alphaalpha "
+                        "<span style=\"white-space:normal\">betabeta gammagamma"
+                        "</span></div>")))))
+
+(deftest two-collapsing-spaces-break-if-either-of-them-permits-it
+  ;; Brave, at 120px: `alphaalpha<span nowrap>xx </span> betabeta` breaks
+  ;; before `betabeta` -- the span's trailing space forbids and the div's
+  ;; own leading space permits, and the two collapse into one that
+  ;; permits. The mirror spelling breaks too.
+  (is (= [["alphaalpha" 0 0] ["xx" 70 0] ["betabeta" 0 20]]
+         (tm-texts (str "<div style=\"width:120px\">alphaalpha"
+                        "<span style=\"white-space:nowrap\">xx </span> betabeta</div>"))))
+  (is (= [["alphaalpha" 0 0] ["betabeta" 0 20]]
+         (tm-texts (str "<div style=\"width:120px\">alphaalpha "
+                        "<span style=\"white-space:nowrap\"> betabeta</span></div>")))))
+
+(deftest a-nowrap-run-that-does-not-fit-moves-to-the-next-line-whole
+  ;; What a line breaker packs is the unbreakable CLUSTER, not the token.
+  ;; Brave, at 120px: `alpha <span nowrap>beta gamma delta epsilon</span>
+  ;; zeta` is 60 tall with the span ALONE on line two at 168px wide,
+  ;; overflowing -- the browser gives up the line rather than the run.
+  ;; Testing the token alone keeps `epsilon` on line one, because each of
+  ;; the span's own words fits where it stands.
+  (let [html (str "<p style=\"width:120px;margin:0\">alpha "
+                  "<span style=\"white-space:nowrap\">beta gamma delta epsilon</span>"
+                  " zeta</p>")]
+    (is (= [:p 0 0 120 60] (tm-box :p html)))
+    (is (= [:span 0 20 168 16] (tm-box :span html)))))
+
+(deftest adjacent-inline-blocks-break-and-nowrap-around-them-stops-it
+  ;; With no whitespace between them at all, two atomic inlines still have
+  ;; a break opportunity, and the NEAREST COMMON ANCESTOR governs it.
+  ;; Brave, in a 60px block, two 40px inline-blocks:
+  ;;   plain                                        two lines
+  ;;   nowrap on the block                          one line, second at x=40
+  ;;   nowrap on a span wrapping BOTH               one line
+  ;;   nowrap on the FIRST inline-block only        two lines
+  (let [ibs (fn [outer first-style]
+              (str "<div style=\"width:60px" outer "\">"
+                   "<span style=\"display:inline-block;width:40px" first-style "\">a</span>"
+                   "<span style=\"display:inline-block;width:40px\">b</span></div>"))]
+    (is (= [["a" 0 0] ["b" 0 20]] (tm-texts (ibs "" ""))))
+    (is (= [["a" 0 0] ["b" 40 0]] (tm-texts (ibs ";white-space:nowrap" ""))))
+    (is (= [["a" 0 0] ["b" 0 20]] (tm-texts (ibs "" ";white-space:nowrap")))
+        "nowrap on ONE SIDE of the boundary does not suppress it")
+    (is (= [["a" 0 0] ["b" 40 0]]
+           (tm-texts (str "<div style=\"width:60px\"><span style=\"white-space:nowrap\">"
+                          "<span style=\"display:inline-block;width:40px\">a</span>"
+                          "<span style=\"display:inline-block;width:40px\">b</span>"
+                          "</span></div>")))
+        "and nowrap on the box AROUND both does")))
+
+(deftest a-text-boundary-with-no-space-is-not-a-break-opportunity
+  ;; Brave, in a 60px block: `abcdefgh<span>ijkl</span>` is ONE line, 84px
+  ;; of text overflowing a 60px box, and so is the same run split across
+  ;; two spans. This engine used to break at every inline box edge,
+  ;; because it would break between any two tokens.
+  (is (= [["abcdefgh" 0 0] ["ijkl" 56 0]]
+         (tm-texts "<div style=\"width:60px\">abcdefgh<span>ijkl</span></div>")))
+  (is (= [["abcdefgh" 0 0] ["ijkl" 56 0]]
+         (tm-texts (str "<div style=\"width:60px\"><span>abcdefgh</span>"
+                        "<span>ijkl</span></div>")))))
+
+(deftest wbr-is-a-break-opportunity-that-nowrap-does-not-suppress
+  ;; `<wbr>` used to work here by accident -- it split the text into two
+  ;; fragments and the breaker would break between any two tokens. It no
+  ;; longer breaks at a bare text boundary, so the opportunity has to be
+  ;; real, and it is UNCONDITIONAL: Brave, in an 80px block, `aaaaaaa<wbr>
+  ;; bbbbbbb` is 40 tall both plainly and under `white-space: nowrap`,
+  ;; where a literal U+200B in the same two places is 40 and 20.
+  (is (= [["aaaaaaa" 0 0] ["bbbbbbb" 0 20]]
+         (tm-texts "<div style=\"width:80px\">aaaaaaa<wbr>bbbbbbb</div>")))
+  (is (= [["aaaaaaabbbbbbb" 0 0]]
+         (tm-texts "<div style=\"width:80px\">aaaaaaabbbbbbb</div>"))
+      "and the same 14 characters without it stay on one overflowing line")
+  (is (= [["aaaaaaa" 0 0] ["bbbbbbb" 0 20]]
+         (tm-texts (str "<div style=\"width:80px;white-space:nowrap\">"
+                        "aaaaaaa<wbr>bbbbbbb</div>")))))
+
+(deftest wbr-reports-no-box-of-its-own
+  ;; Brave's `getClientRects()` for a `<wbr>` is empty. It is a break
+  ;; opportunity and nothing else -- it never becomes a piece, so no
+  ;; owner op can appear for it.
+  (is (= [[:div 0 0 80 40]]
+         (tm-boxes "<div style=\"width:80px\">aaaaaaa<wbr>bbbbbbb</div>"))))
+
+;; ---- a block-level ::before is its own row --------------------------------
+
+(defn- gen-boxes [css html]
+  (let [doc (-> (html/parse-into-document
+                 (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">" html "</div>"))
+                (css/apply-cascade (css/parse-rules css)))
+        [_ doc] (dom/consume-ops doc)]
+    (->> (layout/draw-ops (dom/tree doc) {:width 800 :theme tm-theme})
+         (filter #(= :node (:draw/op %)))
+         (drop 2)
+         (mapv (fn [o] (into [(:tag o)] (map tm-n ((juxt :x :y :w :h) o))))))))
+
+(defn- gen-texts [css html]
+  (let [doc (-> (html/parse-into-document
+                 (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">" html "</div>"))
+                (css/apply-cascade (css/parse-rules css)))
+        [_ doc] (dom/consume-ops doc)]
+    (->> (layout/draw-ops (dom/tree doc) {:width 800 :theme tm-theme})
+         (filter #(= :text (:draw/op %)))
+         (mapv (fn [o] [(:text o) (tm-n (:x o)) (tm-n (:y o))])))))
+
+(deftest a-block-level-before-breaks-the-line-it-is-on
+  ;; Brave, on a 300px `<p style="margin:0">tail</p>` at 20px line-height:
+  ;;   ::before { content:"head"; display:block }   p 300x40, `tail` at y=22
+  ;;   ::before { content:"head" }                  p 300x20
+  ;;   ::before { content:"head"; display:inline-block }  p 300x20
+  ;;   ::before { content:"head"; display:flex }    p 300x40
+  ;;   ::after  { content:"foot"; display:block }   p 300x40, `tail` at y=2
+  ;; This engine merged EVERY ::before with the text after it into one
+  ;; run, so all five reported 20 and painted `headtail`.
+  (let [markup "<div style=\"width:300px\"><p style=\"margin:0\" class=\"bb\">tail</p></div>"
+        p-h (fn [css] (nth (first (filter #(= :p (first %)) (gen-boxes css markup))) 4))]
+    (is (= 40 (p-h ".bb::before { content: \"head\"; display: block }")))
+    (is (= 20 (p-h ".bb::before { content: \"head\" }")))
+    (is (= 20 (p-h ".bb::before { content: \"head\"; display: inline-block }")))
+    (is (= 40 (p-h ".bb::before { content: \"head\"; display: flex }")))
+    (is (= 40 (p-h ".bb::after { content: \"foot\"; display: block }")))
+    (is (= 20 (p-h ".bb::before { content: \"\"; display: block }"))
+        "an EMPTY block ::before has no line box and contributes nothing"))
+  (is (= [["head" 0 0] ["tail" 0 20]]
+         (gen-texts ".bb::before { content: \"head\"; display: block }"
+                    "<div style=\"width:300px\"><p style=\"margin:0\" class=\"bb\">tail</p></div>"))
+      "the two are separate runs on separate lines, not one `headtail`"))
+
+;; ---- shrink-to-fit has a floor as well as a ceiling -----------------------
+
+(deftest overflow-wrap-break-word-keeps-a-box-s-min-content-width
+  ;; The distinction the case is named for. Brave, a 15-character word in
+  ;; a `display: inline-block` inside a 60px block:
+  ;;   (no break property)         105x20      overflow-wrap: break-word  105x20
+  ;;   word-break: break-all        60x40      overflow-wrap: anywhere     60x40
+  ;; `break-word` lets a word break once a width is chosen; it does not
+  ;; make the box narrower. This engine had no min-content floor under
+  ;; shrink-to-fit at all, so all four came out 60x40.
+  (let [ib (fn [prop] (tm-box :span (str "<div style=\"width:60px\"><span style=\""
+                                         "display:inline-block" prop
+                                         "\">aaaaaaaaaaaaaaa</span></div>")))]
+    (is (= [:span 0 0 105 20] (ib "")))
+    (is (= [:span 0 0 105 20] (ib ";overflow-wrap:break-word")))
+    (is (= [:span 0 0 60 40] (ib ";word-break:break-all")))
+    (is (= [:span 0 0 60 40] (ib ";overflow-wrap:anywhere")))))
+
+(deftest the-min-content-floor-is-the-longest-word-not-the-whole-text
+  ;; Brave, each in a 60px block: two 7-character words shrink to the
+  ;; container (min-content 49 < 60), two 12-character ones stop at 84,
+  ;; and `white-space: nowrap` makes the whole run one unbreakable unit.
+  ;; The floor survives `overflow: hidden` and includes the box's own
+  ;; padding.
+  (let [ib (fn [prop text] (tm-box :span (str "<div style=\"width:60px\"><span style=\""
+                                              "display:inline-block" prop "\">" text
+                                              "</span></div>")))]
+    (is (= [:span 0 0 60 40] (ib "" "aaaaaaa bbbbbbb")))
+    (is (= [:span 0 0 84 40] (ib "" "aaaaaaaaaaaa bbbbbbbbbbbb")))
+    (is (= [:span 0 0 105 20] (ib ";white-space:nowrap" "aaa bbb ccc ddd")))
+    (is (= [:span 0 0 105 20] (ib ";overflow:hidden" "aaaaaaaaaaaaaaa")))
+    (is (= [:span 0 0 115 30] (ib ";padding:5px" "aaaaaaaaaaaaaaa")))))
+
+;; ---- a box that clips does not answer clicks outside itself ---------------
+
+(deftest a-clipping-box-gets-no-overflow-hit-region
+  ;; A box whose content overflows normally answers clicks out there --
+  ;; that is what `:hit`'s second rect is for. A box that CLIPS does not,
+  ;; and the clip op stream cannot say so on its behalf: a `:node` op is
+  ;; emitted BEFORE its own clip-push, so a region attached there survives
+  ;; its own clip. Measured in Brave 151 on 2026-08-06, a 300px
+  ;; inline-block in a 200px nowrap box, hit at x=240: `overflow: visible`
+  ;; answers the SPAN, and `auto`/`hidden`/`scroll`/`clip`/`overflow-x:
+  ;; auto` answer neither it nor the box.
+  (let [hit-of (fn [ov]
+                 (->> (tm-ops (str "<div style=\"width:200px;height:20px;white-space:nowrap;"
+                                   ov "\"><span style=\"display:inline-block;width:300px\">"
+                                   "a</span></div>"))
+                      (filter #(and (= :node (:draw/op %)) (= :div (:tag %))))
+                      last
+                      :hit))]
+    (is (= [{:x 0 :y 0 :w 200 :h 20} {:x 0 :y 0 :w 300 :h 20}] (hit-of "overflow:visible"))
+        "a non-clipping box keeps the overflow region it always had")
+    (is (nil? (hit-of "overflow:auto")))
+    (is (nil? (hit-of "overflow:hidden")))
+    (is (nil? (hit-of "overflow:scroll")))))

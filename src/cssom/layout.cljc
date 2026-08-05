@@ -694,6 +694,42 @@
                     :else
                     (recur words nil (conj lines cur))))))))))))
 
+(def ^:private collapsing-white-space
+  "The `white-space` values under which every run of whitespace collapses
+   to one space and no newline is preserved -- i.e. the values the inline
+   tokenizer (inline-tokens) already implements, unconditionally, for
+   every fragment it sees.
+
+   `nowrap` is in here and it is the whole reason this is a set rather
+   than the `#{nil \"normal\"}` test that used to be written inline at
+   each site. `nowrap` collapses whitespace EXACTLY as `normal` does; the
+   only thing it changes is whether a collapsed space is a soft wrap
+   opportunity, which is a line-breaker question and not a tokenizer one.
+   `pre`/`pre-wrap`/`pre-line`/`break-spaces` genuinely do re-interpret
+   the characters, and the tokenizer cannot express them -- those keep
+   the pre-existing single-text-child path (layout-text implements them
+   per property).
+
+   Measured in Brave 151, 2026-08-06, in the harness's 14px monospace /
+   20px line page: `<div style=\"width:120px\">alpha<span
+   style=\"white-space:nowrap\"> betabeta</span></div>` puts `betabeta`
+   at x=77 on ONE line -- the leading space inside the nowrap span is
+   collapsed to a single 7px space and rendered, exactly as `normal`
+   would, and only the break at it is gone."
+  #{nil "normal" "nowrap"})
+
+(defn- soft-wrappable-white-space?
+  "True when `white-space` permits a SOFT WRAP at a collapsible space.
+   `nowrap` and `pre` are the two values that do not; every other value
+   (including `pre-wrap`, `pre-line` and `break-spaces`) does.
+
+   This is a separate question from collapsing-white-space? above, and
+   keeping them apart is what lets `nowrap` onto the inline path at all:
+   one asks whether the tokenizer can produce the right characters, the
+   other whether the line breaker may break between two of them."
+  [white-space]
+  (not (contains? #{"nowrap" "pre"} white-space)))
+
 (defn- break-long-word
   "Splits a word that cannot fit `max-w` into the largest pieces that do --
    real CSS `overflow-wrap: break-word` / `word-break: break-all`, which is
@@ -5990,6 +6026,47 @@
   [node]
   (and (map? node) (boolean (:generated/pseudo node))))
 
+(def ^:private generated-inline-displays
+  "The `display` values that leave a ::before/::after IN its originating
+   element's line box.
+
+   Spelled out here rather than derived from inline-atomic-displays,
+   which is defined much further down this file: an `inline-block`
+   ::before is in both, and this is the superset that also holds plain
+   `inline` (the initial value a pseudo-element gets when it declares no
+   display at all) and `contents`."
+  #{"inline" "inline-block" "inline-flex" "inline-grid" "contents"})
+
+(defn- generated-block-level?
+  "True when a ::before/::after's own `display` makes it a BLOCK-level box
+   -- its own row, before or after the element's line, rather than the
+   first or last thing ON that line.
+
+   Measured in Brave 151 on 2026-08-06, a 300px `<p style=\"margin:0\">
+   tail</p>` on a 20px line-height page:
+
+     ::before { content: \"head\"; display: block }   p 300x40, `tail` at y=22
+     ::before { content: \"head\" }                   p 300x20
+     ::before { content: \"head\"; display: inline-block }  p 300x20
+     ::before { content: \"head\"; display: flex }    p 300x40
+     ::before { content: \"head\"; display: block; height: 30px }  p 300x50
+     ::after  { content: \"foot\"; display: block }   p 300x40, `tail` at y=2
+     both of the last two spellings at once           p 300x60, `tail` at y=22
+     ::before { content: \"\"; display: block }       p 300x20
+
+   -- so it is not `block` that matters but INLINE-LEVEL-ness (`flex`
+   makes its own row too), the box is a real one with its own height, and
+   an empty one contributes nothing. The last row is why the rule is
+   applied to the MERGE in with-generated-content rather than to the
+   layout: an empty block ::before has no line box, and letting it become
+   its own row would have made that paragraph 40 tall."
+  [node]
+  (let [d (:display (:generated/style node))]
+    (and (some? d)
+         (not= "none" d)
+         (not (contains? generated-inline-displays d))
+         (seq (str (:generated/text node))))))
+
 (defn- outside-marker-node?
   "True for a generated node that is a list marker at
    `list-style-position: outside` -- the default, and the one every bare
@@ -6199,13 +6276,23 @@
         ;; fuse the two into a single `:text` draw-op, which has exactly one
         ;; x, so the marker could not be placed anywhere the item's first
         ;; word is not.
+        ;; ...and neither is a BLOCK-LEVEL one (generated-block-level?):
+        ;; the merge exists to put a pseudo-element and the text after it
+        ;; on ONE line, which is the opposite of what `display: block`
+        ;; asks for. Merged, `.bb::before { content: "head"; display:
+        ;; block }` on `<p class="bb">tail</p>` laid out as the single
+        ;; text run `headtail` and reported a 20px paragraph where Brave
+        ;; reports 40 with `tail` on the second line.
         [before children] (if-let [t (and before
                                           (not (outside-marker-node? before))
+                                          (not (generated-block-level? before))
                                           (seq children)
                                           (real-text-child (first children)))]
                              [(merge-generated-with-text before t true) (subvec children 1)]
                              [before children])
-        [after children] (if-let [t (and after (seq children) (real-text-child (peek children)))]
+        [after children] (if-let [t (and after
+                                         (not (generated-block-level? after))
+                                         (seq children) (real-text-child (peek children)))]
                             [(merge-generated-with-text after t false) (pop children)]
                             [after children])
         children (if before (into [before] children) children)
@@ -6953,6 +7040,116 @@
          inline-max-content-width block-max-content-width intrinsic-flow-children
          font-metrics avg-advance max-advance measure-child)
 
+(defn- breaks-inside-a-word?
+  "True when the break properties in force let a line break INSIDE a word
+   for the purpose of INTRINSIC SIZING -- i.e. when the box's min-content
+   width is one character rather than its longest word.
+
+   `word-break: break-all` and `overflow-wrap: anywhere` do this.
+   `overflow-wrap: break-word` does NOT, and that asymmetry is the whole
+   point of the function: `break-word` breaks a word that has nowhere
+   else to go once a width is chosen, but it does not make the box
+   NARROWER. Measured in Brave 151 on 2026-08-06, a 15-character word in
+   a `display: inline-block` inside a 60px block, and the same word at
+   `width: min-content` inside a 200px one:
+
+     (no break property)             105x20   min-content 105x20
+     overflow-wrap: break-word       105x20   min-content 105x20
+     word-break: break-all            60x40   min-content   7x300
+     overflow-wrap: anywhere          60x40   min-content   7x300
+
+   -- three pairs of numbers saying the same thing twice, and the first
+   two rows being identical is what a `break-word` box may not lose."
+  [st inherited]
+  (contains? #{"anywhere" "break-all"}
+             (or (:overflow-wrap st) (:word-break st)
+                 (:overflow-wrap inherited) (:word-break inherited))))
+
+(defn- longest-word-width
+  "The widest single WORD in `child`'s whole subtree -- the min-content
+   contribution of a box whose content is breakable text.
+
+   Measured in the box's OWN font throughout, which is an approximation
+   this shares with flex-item-min-content-width: a nested `<b>` inside
+   the box is charged the box's face rather than its own. Both functions
+   answer the same question about the same kind of box, and making them
+   disagree about the font would be worse than the shared approximation.
+
+   Returns 0 when there is no text, which is a real answer here: an empty
+   box has no floor to stand on."
+  [theme inherited st child]
+  (let [fs (parse-px (:font-size st) (:font-size inherited (:font-size theme)))
+        measure-text (:measure-text theme)
+        w-of (fn [word] (if measure-text
+                          (measure-text word fs (:font-weight st) (:font-style st) (:font-family st))
+                          (* (count word) (long (* 0.6 fs)))))]
+    (->> (tree-seq map? :children child)
+         (keep real-text-child)
+         (mapcat #(str/split (str %) #"\s+"))
+         (remove str/blank?)
+         (map w-of)
+         (reduce max 0))))
+
+(defn- atomic-min-content-width
+  "The MIN-CONTENT width of an atomic inline whose max-content width is
+   `natural` -- the floor a shrink-to-fit box may not be clamped below.
+
+   Real CSS's shrink-to-fit is `min(max-content, max(min-content,
+   available))`, and this file had only the `min(max-content,
+   available)` half: an atomic inline in a container narrower than its
+   own content was simply squeezed to the container. Measured in Brave
+   151 on 2026-08-06, each inside a 60px block, monospace 14px:
+
+     inline-block `aaaaaaaaaaaaaaa`                 105x20  (engine 60x40)
+     inline-block `aaaaaaa bbbbbbb`   (words fit)    60x40
+     inline-block `aaaaaaaaaaaa bbbbbbbbbbbb`        84x40
+     the first with overflow: hidden                105x20
+     the first with padding: 5px                    115x30
+     the first with max-width: 40px                  40x20
+     the first with white-space: nowrap (4 words)   105x20
+     the first wrapped around a <div>               105x20
+     <button> with the same one-word label       111.2x15
+     <button> with `aaaaaaa bbbbbbb`                 60x30
+     <select> with a 15-character option            134x19
+     <input size=20>                                153x21
+     <img style=\"width:200px\">                     200x10
+
+   Three rules come out of that list. The floor is the longest WORD, not
+   the whole text (rows 2 and 3). It survives `overflow` and includes the
+   box's own insets (rows 4 and 5) but is itself clamped by `max-width`
+   (row 6), which happens downstream in layout-node. And a box whose
+   content has no break in it at all -- a replaced element, a form
+   control, a sizing-from-its-own-children inline-flex/-grid, or any
+   `white-space` that forbids a soft wrap -- is its own floor, which is
+   why the last four rows are simply not clamped.
+
+   Returns 0 (no floor) when the break properties let a word break
+   anywhere; see breaks-inside-a-word? for the measurement that separates
+   `break-word` from `break-all`."
+  [theme inherited child st natural]
+  (let [tag (:tag child)
+        ws (or (:white-space st) (:white-space inherited))]
+    (cond
+      ;; nothing in here can break, so the box cannot be narrower than it
+      ;; already is
+      (or (contains? replaced-tags tag)
+          (contains? form-control-tags tag)
+          (contains? #{"inline-flex" "inline-grid"} (:display st))
+          (not (soft-wrappable-white-space? ws)))
+      natural
+
+      ;; a declared width is not a shrink-to-fit question at all --
+      ;; layout-node resolves it against the containing block either way,
+      ;; so leaving the clamp alone here keeps every already-agreeing box
+      ;; exactly where it is
+      (:width st) 0
+
+      (breaks-inside-a-word? st inherited) 0
+
+      :else
+      (let [w (longest-word-width theme inherited st child)]
+        (if (pos? w) (+ w (intrinsic-inset-x st)) 0)))))
+
 (defn- atomic-intrinsic-width
   "The available width an atomic inline is laid out at — its intrinsic
    size, NOT the full line width `resolve-width` would hand an ordinary
@@ -7224,7 +7421,11 @@
               :else
               (+ (block-max-content-width theme content-w opacity inherited st cs)
                  inset-x))))]
-    (max 0 (min content-w natural))))
+    ;; ...and the clamp to the container is real CSS's shrink-to-fit, which
+    ;; has a FLOOR under it as well as a ceiling over it -- see
+    ;; atomic-min-content-width, which is the half this used to be missing.
+    (max 0 (min content-w natural)
+         (atomic-min-content-width theme inherited child st natural))))
 
 (defn- inline-max-content-width
   "The width the RUN itself would occupy on ONE line -- real CSS's
@@ -9913,9 +10114,16 @@
        (contains? #{"left" "right"} (:float (node-style child theme)))))
 
 (defn- inline-flow-text?
+  "True for the two things that contribute TEXT to a line box: a real text
+   node, and a generated ::before/::after that is inline-level.
+
+   A BLOCK-LEVEL pseudo-element is deliberately excluded (see
+   generated-block-level?): it is a box of its own between the element's
+   lines, so admitting it here would flow its text into the line it is
+   supposed to break."
   [child]
   (or (some? (real-text-child child))
-      (generated-node? child)))
+      (and (generated-node? child) (not (generated-block-level? child)))))
 
 (defn- inline-fragment-bearing?
   "True when `child` would actually contribute a FRAGMENT to a line box --
@@ -9946,6 +10154,19 @@
                    (with-generated-content child (:children child))))
     :else false))
 
+(defn- inherited-white-space
+  "The white-space an inline box COMPUTES to, given the block container's
+   value and the chain of inline boxes down to it -- i.e. the innermost
+   own declaration, else what it inherits.
+
+   `owners` is a line breaker owner stack (see inline-fragments), whose
+   `:st` is each box's own node-style: an inline box that declares
+   nothing at all has `nil` there and must inherit rather than fall back
+   to `normal`, which is the difference between a `<b>` inside a
+   `white-space: nowrap` paragraph wrapping and not wrapping."
+  [block-ws owners]
+  (reduce (fn [ws o] (or (:white-space (:st o)) ws)) block-ws owners))
+
 (defn- inline-flow-candidate?
   "True when `child` can participate in an inline formatting context (see
    layout-inline-run): a real text node, a generated ::before/::after
@@ -9960,15 +10181,29 @@
    box, the whole element falls back to the pre-existing block-row path —
    exactly the behavior it had before this feature existed, no worse.
 
-   `white-space` must be normal for the same class of reason: `pre`/
-   `pre-wrap`/`pre-line`/`nowrap` each mean the run must preserve or
+   `white-space` must COLLAPSE for the same class of reason: `pre`/
+   `pre-wrap`/`pre-line`/`break-spaces` each mean the run must preserve or
    re-interpret newlines and runs of spaces, which layout-text already
    implements per-property for a single text child; the inline tokenizer
-   here collapses whitespace unconditionally, so anything declaring a
-   non-normal `white-space` keeps the existing single-child path rather
-   than being quietly re-collapsed."
+   here collapses whitespace unconditionally, so anything declaring one of
+   those keeps the existing single-child path rather than being quietly
+   re-collapsed.
+
+   `nowrap` is NOT one of them, and used to be excluded here with them.
+   It collapses whitespace exactly as `normal` does -- see
+   collapsing-white-space? -- and only suppresses the wrap AT a collapsed
+   space, which inline-line-breaker now answers. Excluding it here meant a
+   `<p>alpha <span style=\"white-space:nowrap\">beta gamma</span>
+   delta</p>` partitioned into three one-child groups and stacked as three
+   block rows: measured in Brave 151, 2026-08-06, that paragraph at 120px
+   is 40 tall with the span at (42,2,70,15), and this engine reported 60
+   with the span alone on a full-width row of its own."
   [theme child]
   (cond
+    ;; ...and a BLOCK-LEVEL ::before/::after is not one, which
+    ;; inline-flow-text? answers for both of the tests below it.
+    (generated-node? child) (inline-flow-text? child)
+
     (inline-flow-text? child) true
 
     ;; A floated element is BLOCKIFIED and positioned by its container's
@@ -9992,7 +10227,7 @@
 
     (inline-level-element? theme child)
     (let [st (node-style child theme)]
-      (and (contains? #{nil "normal"} (:white-space st))
+      (and (contains? collapsing-white-space (:white-space st))
            (every? (fn [c]
                      (or (inline-flow-text? c)
                          (and (map? c)
@@ -10132,6 +10367,19 @@
            ;; from the containing block, in layout-inline-run.
            :letter-spacing (or (:letter-spacing st) (:letter-spacing inherited))
            :word-spacing (or (:word-spacing st) (:word-spacing inherited))
+           ;; ...and `white-space`, which an inline box CAN change for its
+           ;; own text and everything nested in it, now that `nowrap` is
+           ;; admitted to this path (see collapsing-white-space?). It is
+           ;; read off the fragment style by inline-tokens, which uses it
+           ;; to decide whether the whitespace INSIDE this box is a soft
+           ;; wrap opportunity -- and the element that CONTAINS a space is
+           ;; the one whose value governs it. Measured in Brave 151,
+           ;; 2026-08-06, at 120px: `alphaalpha<span
+           ;; style=\"white-space:nowrap\"> betabeta</span>` stays on one
+           ;; line (the space is the span's) while the same markup with a
+           ;; plain span breaks (the space is still the span's, and the
+           ;; span now permits it).
+           :white-space (or (:white-space st) (:white-space inherited))
            ;; carried for the same reason it is carried down the block
            ;; path (see layout-node): `caption-side` inherits, and the
            ;; element that reads it is the TABLE, which may be several
@@ -10514,8 +10762,32 @@
                                owners (conj owners (cond-> {:idx (swap! counter inc)
                                                             :node child :st st}
                                                      (not= [0 0] rel) (assoc :rel rel)))]
-                           (if (= :br (:tag child))
+                           (cond
+                             (= :br (:tag child))
                              (conj acc {:kind :break :style inherited :owners owners :opacity opacity})
+
+                             ;; A `<wbr>` is a BREAK OPPORTUNITY and
+                             ;; nothing else: zero width, no box (measured
+                             ;; in Brave 151, 2026-08-06, its
+                             ;; `getClientRects()` is empty), and it never
+                             ;; becomes a piece -- inline-tokens consumes
+                             ;; this fragment and marks the NEXT token
+                             ;; instead, which is why no owner op can
+                             ;; appear for it.
+                             ;;
+                             ;; Emitted explicitly because it used to work
+                             ;; by accident: an unknown inline element
+                             ;; split the text into two fragments, and the
+                             ;; line breaker would break between any two
+                             ;; tokens. It no longer breaks at a text/text
+                             ;; boundary with no space (measured: `<div
+                             ;; style="width:60px">abcdefgh<span>ijkl
+                             ;; </span></div>` is ONE line), so the
+                             ;; opportunity has to be real.
+                             (= :wbr (:tag child))
+                             (conj acc {:kind :wbr})
+
+                             :else
                              (walk (with-nested-list-margins
                                      child
                                      (with-generated-content
@@ -10547,72 +10819,130 @@
    CSS does. A leading space at the start of a line is dropped by the line
    breaker, matching real CSS's own line-start whitespace removal.
 
+   Each word also carries `:space-wrap?`: whether that separating space is
+   a SOFT WRAP OPPORTUNITY, which is a different question from whether it
+   is there. A space is one when the element that CONTAINS it permits
+   wrapping (see soft-wrappable-white-space?), and when several runs of
+   whitespace from different elements collapse into one, the opportunity
+   survives if ANY of them permits it. Both halves measured in Brave 151,
+   2026-08-06, at 120px in the harness's 14px monospace page:
+
+     alphaalpha<span style=\"white-space:nowrap\"> betabeta</span>
+       one line, `betabeta` at 77 -- the space is the nowrap span's
+     alphaalpha <span style=\"white-space:normal\">betabeta</span>
+       inside a `white-space: nowrap` div: one line, `betabeta` at 77 --
+       the space is the nowrap div's, and the normal span does not
+       rescue it
+     alphaalpha<span style=\"white-space:nowrap\">xx </span> betabeta
+       TWO lines -- the span's trailing space forbids and the div's own
+       leading space permits, and the two collapse to one that permits
+     alphaalpha <span style=\"white-space:nowrap\"> betabeta</span>
+       TWO lines -- the mirror image, same answer
+
+   `:space-style` (which run's font the space is drawn in) keeps its own
+   rule, the FIRST contributor, and the two are tracked separately for
+   that reason: the last two shapes above collapse the same pair of
+   spaces and want different answers to the two questions.
+
    `text-transform` is applied HERE, before wrapping, for the same reason
    layout-text applies it before its own word-wrap: it rewrites the
    characters that are actually measured, so wrapping must see the
    transformed text."
   [fragments]
-  ;; `pending-style` doubles as the pending-space flag: it is the style of
-  ;; the fragment whose OWN trailing whitespace is waiting to become the
-  ;; next separator. Carrying the style matters -- a space is part of the
-  ;; text run that contains it and is rendered in that run's font, so the
-  ;; gap in `a <b>b</b>` is a space in the PARAGRAPH's font, not the
-  ;; bold one. Measured against Chrome: it reports 7.00px there, while this
-  ;; system's proportional bold space is 3.88px, so charging the incoming
-  ;; fragment's font put every following inline box ~3px left of where the
-  ;; browser draws it.
-  (loop [frs fragments pending-style nil out []]
-    (if-let [fr (first frs)]
-      (cond
-        (= :break (:kind fr))
-        (recur (rest frs) nil (conj out fr))
+  ;; `pending` doubles as the pending-space flag: it is `{:style :wrap?}`
+  ;; for the whitespace waiting to become the next separator -- the style
+  ;; of the fragment whose OWN trailing whitespace it is, and whether any
+  ;; contributor to it permits a wrap there. Carrying the style matters --
+  ;; a space is part of the text run that contains it and is rendered in
+  ;; that run's font, so the gap in `a <b>b</b>` is a space in the
+  ;; PARAGRAPH's font, not the bold one. Measured against Chrome: it
+  ;; reports 7.00px there, while this system's proportional bold space is
+  ;; 3.88px, so charging the incoming fragment's font put every following
+  ;; inline box ~3px left of where the browser draws it.
+  ;;
+  ;; The two fields accumulate DIFFERENTLY across a chain of collapsing
+  ;; runs -- `:style` keeps the first contributor, `:wrap?` ors every one
+  ;; of them -- and the docstring's last two measurements are what force
+  ;; that asymmetry.
+  (let [space-of (fn [st] {:style st :wrap? (soft-wrappable-white-space? (:white-space st))})
+        joined (fn [pending st]
+                 (if pending
+                   (update pending :wrap? #(or % (soft-wrappable-white-space? (:white-space st))))
+                   (space-of st)))]
+    (loop [frs fragments pending nil wbr? false out []]
+      (if-let [fr (first frs)]
+        (cond
+          (= :break (:kind fr))
+          (recur (rest frs) nil false (conj out fr))
 
-        ;; An outside list marker is not part of the text stream: it passes
-        ;; through whole (never split into words, never text-transformed
-        ;; along with the line) and, crucially, leaves `pending-style`
-        ;; exactly as it found it -- it can neither absorb a pending space
-        ;; nor contribute one, because there is no whitespace between it and
-        ;; the item's first word for CSS to collapse. See
-        ;; outside-marker-node?.
-        (= :marker (:kind fr))
-        (recur (rest frs) pending-style (conj out fr))
+          ;; A `<wbr>` produces no token of its own -- it is consumed here
+          ;; and reappears as `:wbr-before?` on the next one. Unlike a
+          ;; space, its opportunity is UNCONDITIONAL: measured in Brave
+          ;; 151, 2026-08-06, `<div style="width:80px;white-space:nowrap">
+          ;; aaaaaaa<wbr>bbbbbbb</div>` is 40 tall, and so is the same run
+          ;; inside a `white-space: nowrap` SPAN. A literal U+200B in the
+          ;; same two places is 40 and **20** -- the zero-width space is a
+          ;; soft opportunity `nowrap` suppresses, and `<wbr>` is not.
+          ;; That is why this rides on its own key rather than on
+          ;; `:space-wrap?`.
+          (= :wbr (:kind fr))
+          (recur (rest frs) pending true out)
 
-        ;; An atomic inline is one indivisible token. It consumes any
-        ;; pending whitespace as its own leading space (`text <img> text`
-        ;; keeps a space on each side, exactly as a browser renders it) and
-        ;; leaves none behind, so the space after it comes from the next
-        ;; text fragment's own leading whitespace.
-        (= :atomic (:kind fr))
-        (recur (rest frs) nil (conj out (assoc fr :space-before? (some? pending-style)
-                                                  :space-style pending-style)))
+          ;; An outside list marker is not part of the text stream: it passes
+          ;; through whole (never split into words, never text-transformed
+          ;; along with the line) and, crucially, leaves `pending`
+          ;; exactly as it found it -- it can neither absorb a pending space
+          ;; nor contribute one, because there is no whitespace between it and
+          ;; the item's first word for CSS to collapse. See
+          ;; outside-marker-node?.
+          (= :marker (:kind fr))
+          (recur (rest frs) pending wbr? (conj out fr))
 
-        :else
-        (let [text (apply-text-transform (:text-transform (:style fr)) (str (:text fr)))
-              lead? (boolean (re-find #"^\s" text))
-              trail? (boolean (re-find #"\s$" text))
-              words (remove str/blank? (str/split text #"\s+"))]
-          (if (empty? words)
-            (recur (rest frs)
-                   (or pending-style (when (pos? (count text)) (:style fr)))
-                   out)
-            (recur (rest frs)
-                   (when trail? (:style fr))
-                   (into out
-                         (map-indexed (fn [i word]
-                                        (let [space-style (if (zero? i)
-                                                            (or pending-style (when lead? (:style fr)))
-                                                            (:style fr))]
-                                          {:kind :word
-                                           :text word
-                                           :space-before? (some? space-style)
-                                           :space-style space-style
-                                           :style (:style fr)
-                                           :owners (:owners fr)
-                                           :opacity (:opacity fr)
-                                           :shift (:shift fr 0)
-                                           :valign (:valign fr)}))
-                                      words))))))
-      out)))
+          ;; An atomic inline is one indivisible token. It consumes any
+          ;; pending whitespace as its own leading space (`text <img> text`
+          ;; keeps a space on each side, exactly as a browser renders it) and
+          ;; leaves none behind, so the space after it comes from the next
+          ;; text fragment's own leading whitespace.
+          (= :atomic (:kind fr))
+          (recur (rest frs) nil false
+                 (conj out (assoc fr :space-before? (some? pending)
+                                     :space-style (:style pending)
+                                     :space-wrap? (boolean (:wrap? pending))
+                                     :wbr-before? wbr?)))
+
+          :else
+          (let [text (apply-text-transform (:text-transform (:style fr)) (str (:text fr)))
+                lead? (boolean (re-find #"^\s" text))
+                trail? (boolean (re-find #"\s$" text))
+                words (remove str/blank? (str/split text #"\s+"))]
+            (if (empty? words)
+              (recur (rest frs)
+                     (if (pos? (count text)) (joined pending (:style fr)) pending)
+                     wbr?
+                     out)
+              (recur (rest frs)
+                     (when trail? (space-of (:style fr)))
+                     false
+                     (into out
+                           (map-indexed (fn [i word]
+                                          (let [space (if (zero? i)
+                                                        (cond
+                                                          lead? (joined pending (:style fr))
+                                                          :else pending)
+                                                        (space-of (:style fr)))]
+                                            {:kind :word
+                                             :text word
+                                             :space-before? (some? space)
+                                             :space-style (:style space)
+                                             :space-wrap? (boolean (:wrap? space))
+                                             :wbr-before? (and wbr? (zero? i))
+                                             :style (:style fr)
+                                             :owners (:owners fr)
+                                             :opacity (:opacity fr)
+                                             :shift (:shift fr 0)
+                                             :valign (:valign fr)}))
+                                        words))))))
+        out))))
 
 (defn- inline-box-edge
   "One HORIZONTAL edge of an inline box, as the two numbers a line needs:
@@ -10758,8 +11088,99 @@
    line plus the piece's own 40.
 
    A `<br>` is a FORCED break here, which is the distinction
-   `text-indent: ... each-line` turns on; a wrap is not."
-  [theme content-w tokens indent]
+   `text-indent: ... each-line` turns on; a wrap is not.
+
+   ## Where a line is ALLOWED to break
+
+   The unit this packs is not a token, it is an UNBREAKABLE CLUSTER: a
+   token plus every following token with no soft wrap opportunity in
+   front of it. `block-ws` is the containing block's own `white-space`,
+   and `steps` below answers, per token, whether one exists (`clusters`
+   turns those answers into the widths this packs).
+
+   Two rules, each measured rather than read off the spec, in Brave 151
+   on 2026-08-06 in the harness's 14px monospace / 20px line page:
+
+   1. **A collapsible space is an opportunity when the element CONTAINING
+      it permits one** -- inline-tokens' `:space-wrap?`, which see for the
+      four shapes that pin it down.
+
+   2. **A boundary with NO space between the two is an opportunity only
+      at an ATOMIC inline**, and there the NEAREST COMMON ANCESTOR
+      governs it:
+
+        <div w60><span ib w40>a</span><span ib w40>b</span></div>
+          two lines -- adjacent inline-blocks break with no space at all
+        the same with two adjacent <img>                    two lines
+        <div w60>abcdefgh<span ib w40>c</span></div>        two lines
+        <div w60><span ib w40>c</span>abcdefgh</div>        two lines
+        <div w60>abcdefgh<span>ijkl</span></div>            ONE line
+        <div w60><span>abcdefgh</span><span>ijkl</span></div>  ONE line
+        the first shape inside <span style=nowrap>          ONE line
+        the first shape with nowrap on the FIRST inline-block only
+                                                            two lines
+
+      -- so a text/text boundary across an inline box edge is not an
+      opportunity however deeply nested, and `nowrap` on ONE SIDE of an
+      atomic boundary does not suppress it while `nowrap` on the box
+      AROUND both does.
+
+   The cluster, not the token, is what the wrap test measures, and that
+   is not a refinement of the same answer -- it is the difference between
+   breaking before a nowrap run and breaking inside it. Measured, `<p
+   style=\"width:120px\">alpha <span style=\"white-space:nowrap\">beta
+   gamma delta epsilon</span> zeta</p>` is 60 tall with the span ALONE on
+   line two at 168px wide, overflowing: the browser gives up the line
+   rather than the run.
+
+   When every token has an opportunity -- every stream this engine saw
+   before `nowrap` reached the inline path -- a cluster is exactly one
+   token and `cluster` below reduces to the `open-adv + ww + tail-adv`
+   this function always tested. That identity is deliberate: it is what
+   makes the change cost nothing on text that never declares the
+   property.
+
+   ## Break opportunities this model does NOT have
+
+   Four, each measured in Brave 151 on 2026-08-06 on the harness's own
+   14px monospace / 20px line page so a future round starts from numbers
+   rather than from the spec, and each needing something this file does
+   not have rather than a line here:
+
+   - **`&shy;` (U+00AD)** is a conditional break point, and it renders a
+     HYPHEN when it is taken. `<div style=\"width:90px\">super&shy;
+     califragilistic</div>` is 40 tall, breaking after `super` with a
+     visible `-` (the first line's rects are 35 and 14 wide) and putting
+     a 105px second line in a 90px box. The same word without it is 20
+     tall, and so is the same markup under `hyphens: none` -- the
+     initial `hyphens: manual` is what honours it. What is missing is
+     not the opportunity but the INSERTED GLYPH: a break here changes
+     the text that is measured and painted, which no piece in this file
+     can express (a piece is a substring of its token).
+
+   - **`hyphens: auto`** needs a hyphenation dictionary. `<div
+     style=\"width:70px; hyphens:auto\" lang=\"en\">hyphenation example
+     </div>` is 60 tall where the same markup without it is 40:
+     Chromium's own dictionary splits `hyphen-ation` (line one 42 + 14,
+     line two 35). Not implementable from the text alone at any width.
+
+   - **`text-wrap: balance`** is not a break opportunity at all, it is a
+     different ALGORITHM -- this loop is greedy by construction. `<p
+     style=\"width:200px; text-wrap:balance\">alpha beta gamma delta
+     epsilon</p>` and the same paragraph without it are BOTH 40 tall, and
+     the lines differ: balanced is `alpha beta gamma` / `delta epsilon`,
+     greedy is `alpha beta gamma delta` / `epsilon`. Only the LINE axis
+     can see it; the geometry axis cannot.
+
+   - **`white-space: break-spaces`** never reaches this function at all,
+     and neither do `pre-wrap` and `pre-line`: collapsing-white-space
+     keeps every value whose whitespace does not collapse on the
+     single-text-child path. Measured, a 60px box holding `aa` then SIX
+     spaces then `bb` is 60x40 with `aa` at 0,2 and `bb` at 0,22 under
+     BOTH `break-spaces` and `pre-wrap` -- that content does not
+     discriminate the two, and finding content that does is the first
+     step of implementing either."
+  [theme block-ws content-w tokens indent]
   (let [w-of (fn [text st] (text-advance theme st text))
         {ind :px hanging? :hanging? each-line? :each-line?} indent
         indent-at (fn [i forced?]
@@ -10807,8 +11228,84 @@
                                         :w (+ (:w ln) close-adv)))
                         pieces x])
 
-                     :else [lines pieces x])))]
-    (loop [ts tokens x (indent-at 0 true) pieces [] lines [] prev []]
+                     :else [lines pieces x])))
+        ;; ---- the two passes that decide WHERE a line may break ----
+        ;;
+        ;; Indexed by position in the stream so the main loop can look up
+        ;; its own token's answer; a marker's entry is `nil` and both
+        ;; passes step over it without touching `prev`, exactly as
+        ;; `next-owners` and inline-tokens do.
+        tv (vec tokens)
+        n (count tv)
+        token-w (fn [t] (case (:kind t)
+                          :atomic (:w t)
+                          :break 0
+                          (w-of (:text t) (:style t))))
+        ;; FORWARD: the same three advances the loop below computes for
+        ;; itself, plus whether a soft wrap opportunity sits in FRONT of
+        ;; this token. The advances are recomputed here rather than
+        ;; threaded out of the loop because the loop needs its own
+        ;; `pad-start`/`pad-end` from the same call anyway -- the two
+        ;; agree by construction, and the docstring's identity depends on
+        ;; that: `open + w + tail` is exactly the wrap test this function
+        ;; applied before clusters existed.
+        steps
+        (loop [i 0 prev [] prev-kind nil acc []]
+          (if (>= i n)
+            acc
+            (let [t (nth tv i)]
+              (if (= :marker (:kind t))
+                (recur (inc i) prev prev-kind (conj acc nil))
+                (let [owners (:owners t)
+                      depth (shared-depth prev owners)
+                      nxt (next-owners (subvec tv (inc i)))]
+                  (recur (inc i) owners (:kind t)
+                         (conj acc
+                               {:opp?
+                                (cond
+                                  ;; a <br> is a FORCED break, and it also
+                                  ;; ends whatever cluster precedes it
+                                  (= :break (:kind t)) true
+                                  ;; ...and a <wbr> is an unconditional
+                                  ;; SOFT one -- see inline-tokens, which
+                                  ;; measures why it does not go through
+                                  ;; `:space-wrap?`
+                                  (:wbr-before? t) true
+                                  ;; nothing in front of it to break from
+                                  (nil? prev-kind) true
+                                  ;; rule 1: the element containing the
+                                  ;; space decides (inline-tokens)
+                                  (:space-before? t) (boolean (:space-wrap? t))
+                                  ;; rule 2: no space, so only an atomic
+                                  ;; inline boundary is a break at all, and
+                                  ;; the nearest common ancestor decides
+                                  (or (= :atomic (:kind t)) (= :atomic prev-kind))
+                                  (soft-wrappable-white-space?
+                                   (inherited-white-space block-ws (take depth owners)))
+                                  :else false)
+                                :open (first (inline-edge-run (reverse (drop depth owners)) :left))
+                                :tail (first (inline-edge-run
+                                              (reverse (drop (shared-depth owners nxt) owners))
+                                              :right))
+                                :sep (if (:space-before? t) (w-of " " (:space-style t)) 0)
+                                :w (token-w t)})))))))
+        ;; BACKWARD: the pen advance of the whole UNBREAKABLE CLUSTER each
+        ;; token begins -- itself, plus every following token with no
+        ;; opportunity in front of it, each with the edges and the
+        ;; separator between them. A cluster of one folds to
+        ;; `open + w + tail` and nothing else, which is the identity the
+        ;; docstring claims.
+        clusters
+        (loop [i (dec n) nxt nil acc (vec (repeat n 0))]
+          (if (neg? i)
+            acc
+            (if-let [s (nth steps i)]
+              (let [after (when-let [j nxt]
+                            (let [sj (nth steps j)]
+                              (when-not (:opp? sj) (+ (:sep sj) (nth acc j)))))]
+                (recur (dec i) i (assoc acc i (+ (:open s) (:w s) (:tail s) (or after 0)))))
+              (recur (dec i) nxt acc))))]
+    (loop [ts tokens i 0 x (indent-at 0 true) pieces [] lines [] prev []]
       (if-let [t (first ts)]
         ;; An OUTSIDE list marker gets a piece whose x is its own NEGATIVE
         ;; width and which does not move the pen: it is painted in the
@@ -10830,36 +11327,40 @@
         ;; text stream, so no inline box opens or closes around it.
         (if (= :marker (:kind t))
           (let [w (w-of (:text t) (:style t))]
-            (recur (rest ts) x (conj pieces (assoc t :x (- w) :w w)) lines prev))
+            (recur (rest ts) (inc i) x (conj pieces (assoc t :x (- w) :w w)) lines prev))
           (let [owners (:owners t)
                 depth (shared-depth prev owners)
                 ;; both folded innermost-first -- see inline-edge-run
                 [close-adv pad-end] (inline-edge-run (reverse (drop depth prev)) :right)
                 [open-adv pad-start] (inline-edge-run (reverse (drop depth owners)) :left)
                 [lines pieces x] (close! lines pieces x close-adv pad-end)
+                ;; What the wrap test measures is the whole UNBREAKABLE
+                ;; CLUSTER this token begins, not the token -- and whether
+                ;; it may break in front of it at all. Both come from the
+                ;; two passes above.
+                ;;
                 ;; The inline-END edge of every box that closes right
                 ;; AFTER this token is unbreakable with it, exactly as the
                 ;; inline-START edge above is unbreakable with the token it
-                ;; opens before -- so the wrap test has to charge it here,
-                ;; one token before the pen ever reaches it. Measured in
-                ;; Brave 151, 2026-08-05, in a 200px paragraph:
+                ;; opens before -- so the test has to charge it one token
+                ;; before the pen ever reaches it, which `steps`' `:tail`
+                ;; is and `clusters` folds in. Measured in Brave 151,
+                ;; 2026-08-05, in a 200px paragraph:
                 ;; `aaa bbb <span style="padding-left:30px;padding-right:
                 ;; 30px">ccc ddd eee fff</span> ggg` breaks before `fff`,
                 ;; whose own 191px end would have fitted -- it is the 30px
                 ;; of padding behind it that does not. Charging it only
                 ;; when the pen arrives kept `fff` on line one and made the
                 ;; span 165px wide against the browser's 163.
-                tail-adv (let [nxt (next-owners (rest ts))]
-                           (first (inline-edge-run
-                                   (reverse (drop (shared-depth owners nxt) owners))
-                                   :right)))]
+                opp? (:opp? (nth steps i))
+                cluster (nth clusters i)]
             (cond
               (= :break (:kind t))
               ;; The <br> itself keeps its owners on the line it ends, so
               ;; layout-inline-run can give it a real (zero-width) box. A
               ;; browser reports one there, and without it every <br> was a
               ;; missing element on the geometry axis.
-              (recur (rest ts) (indent-at (inc (count lines)) true) []
+              (recur (rest ts) (inc i) (indent-at (inc (count lines)) true) []
                      (conj lines {:pieces pieces :w x :style (:style t)
                                   :break-owners (:owners t)})
                      owners)
@@ -10875,11 +11376,11 @@
                     piece (fn [x] (cond-> (assoc (select-keys t [:owners :opacity :draw :h :ml :mt :baseline-offset])
                                                  :kind :atomic :x x :w (:w t))
                                     (seq pad-start) (assoc :pad-start pad-start)))]
-                (if (and (content? pieces) (> (+ x sep open-adv (:w t) tail-adv) content-w))
+                (if (and (content? pieces) opp? (> (+ x sep cluster) content-w))
                   (let [nx (indent-at (inc (count lines)) false)]
-                    (recur (rest ts) (+ nx open-adv (:w t)) [(piece (+ nx open-adv))]
+                    (recur (rest ts) (inc i) (+ nx open-adv (:w t)) [(piece (+ nx open-adv))]
                            (flush lines pieces x nil) owners))
-                  (recur (rest ts) (+ x sep open-adv (:w t))
+                  (recur (rest ts) (inc i) (+ x sep open-adv (:w t))
                          (conj pieces (piece (+ x sep open-adv))) lines owners)))
 
               :else
@@ -10894,9 +11395,9 @@
                                            :opacity (:opacity t) :x x :w ww
                                            :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}
                                     (seq pad-start) (assoc :pad-start pad-start)))]
-                (if (and (content? pieces) (> (+ x sep open-adv ww tail-adv) content-w))
+                (if (and (content? pieces) opp? (> (+ x sep cluster) content-w))
                   (let [nx (indent-at (inc (count lines)) false)]
-                    (recur (rest ts) (+ nx open-adv ww) [(piece (+ nx open-adv))]
+                    (recur (rest ts) (inc i) (+ nx open-adv ww) [(piece (+ nx open-adv))]
                            (flush lines pieces x st) owners))
                   (let [last-piece (peek pieces)
                         merge? (and last-piece
@@ -10909,7 +11410,7 @@
                                     (= (:shift last-piece 0) (:shift t 0))
                                     (= (:valign last-piece) (:valign t)))
                         x' (+ x sep open-adv ww)]
-                    (recur (rest ts) x'
+                    (recur (rest ts) (inc i) x'
                            (if merge?
                              (conj (pop pieces)
                                    (assoc last-piece
@@ -11328,8 +11829,10 @@
    Scope-cuts, all deliberate and each documented at the function that
    owns it: replaced/form-control elements are not inline-level here
    (inline-level-tags), an inline box containing a block box falls back to
-   block rows (inline-flow-candidate?), non-normal `white-space` keeps the
-   old path (inline-flow-candidate?), a wrapped inline box gets one union
+   block rows (inline-flow-candidate?), a `white-space` that does not
+   COLLAPSE keeps the old path (inline-flow-candidate?; `nowrap` does
+   collapse and is handled here, in inline-line-breaker), a wrapped
+   inline box gets one union
    node op (inline-owner-ops), an inline box's border has one uniform
    width rather than four (inline-box-edge), and `vertical-align` other
    than the baseline default is not modeled at all (inline-line-metrics)."
@@ -11341,7 +11844,11 @@
         ;; to any inline box on them (see inline-inherited), and its
         ;; percentage resolves against that block's own content width --
         ;; which is `inner-w`, the width the breaker wraps against.
-        lines (inline-line-breaker theme inner-w (inline-tokens fragments)
+        ;; the containing block's own `white-space` is what governs a
+        ;; break opportunity no inline box on the line claims -- see
+        ;; inline-line-breaker's `steps`
+        lines (inline-line-breaker theme (:white-space inherited) inner-w
+                                   (inline-tokens fragments)
                                    (text-indent-of (:text-indent inherited) inner-w))
         text-align (:text-align inherited)
         direction (:direction inherited)
@@ -11749,7 +12256,7 @@
                 ;; inline formatting context or it does not -- see the
                 ;; docstring, and inline-flow-candidate? for the same two
                 ;; properties read off a child's own declarations
-                inline-context? (and (contains? #{nil "normal"} (:white-space inherited))
+                inline-context? (and (contains? collapsing-white-space (:white-space inherited))
                                      (nil? (:text-overflow inherited)))
                 {:keys [flow anchors] tail :pending}
                 (reduce (fn [{:keys [flow anchors pending]} c]
@@ -13691,27 +14198,6 @@
         ;; attached only when a line really does stick out -- an ordinary
         ;; box is hit in its box and says nothing extra.
         ;;
-        ;; A line that overflows a box which CLIPS is not hit outside it:
-        ;; measured in Brave, the same nowrap paragraph in an
-        ;; `overflow: hidden` parent stops being hit at exactly the parent's
-        ;; edge. This engine expresses that with the `:clip` ops below, and
-        ;; every hit-tester that reads `:node` ops already tracks them
-        ;; (browser.session/hit-nodes) -- so the region is left unclipped
-        ;; here for the same reason the draw ops are: the clip is a
-        ;; separate op stream, and applying it twice would clip a box's own
-        ;; content against its own edge.
-        overflow-hits (when (seq own-ink)
-                        (into [{:x x :y y :w node-w :h node-h}]
-                              (filter #(or (< (:x %) x)
-                                           (> (+ (:x %) (:w %)) (+ x node-w))
-                                           (< (:y %) y)
-                                           (> (+ (:y %) (:h %)) (+ y node-h))))
-                              own-ink))
-        semantic [(merge {:draw/op :node :id (:node/id node) :tag (:tag node) :x x :y y :w node-w :h node-h
-                          :class (attr node :class) :listeners (listeners node)
-                          :opacity opacity}
-                         (when (next overflow-hits) {:hit overflow-hits})
-                         (style-passthrough st))]
         ;; BOTH axes, not either: the clip op below is a whole-box RECT
         ;; with no axis of its own, so a box that clips on only one axis
         ;; (`overflow-x: clip`, computed `clip visible`; or `overflow-x:
@@ -13726,6 +14212,40 @@
         ;; computed-overflow), so `overflow-x: hidden` DOES clip here now
         ;; where reading the bare shorthand clipped nothing at all.
         clip? (and (not= "visible" (:overflow/x st)) (not= "visible" (:overflow/y st)))
+        ;; A line that overflows a box which CLIPS is not hit outside it:
+        ;; measured in Brave, the same nowrap paragraph in an
+        ;; `overflow: hidden` parent stops being hit at exactly the parent's
+        ;; edge. That has TWO halves, and this file used to state only the
+        ;; first: the overflowing DESCENDANT is clipped by the `:clip` ops
+        ;; below, which every hit-tester that reads `:node` ops already
+        ;; tracks (browser.session/hit-nodes) -- so its own op is left
+        ;; unclipped here, because the clip is a separate op stream and
+        ;; applying it twice would clip a box's own content against its
+        ;; own edge.
+        ;;
+        ;; The second half is THIS box's own region, and the clip stream
+        ;; cannot express it: a box's `:node` op is emitted BEFORE its own
+        ;; clip-push (it has to be -- the clip is for its content, not for
+        ;; itself), so an overflow region attached here survives its own
+        ;; clip and answers clicks in space the box does not occupy.
+        ;; Measured in Brave 151 on 2026-08-06, a 300px `inline-block` in
+        ;; a `width: 200px; height: 20px; white-space: nowrap` box, hit
+        ;; at x=240: `overflow: visible` answers the SPAN, and `auto`,
+        ;; `hidden`, `scroll`, `clip` and `overflow-x: auto` all answer
+        ;; neither the span nor the box -- they answer whatever is behind
+        ;; it. So a clipping box gets no overflow region at all.
+        overflow-hits (when (and (seq own-ink) (not clip?))
+                        (into [{:x x :y y :w node-w :h node-h}]
+                              (filter #(or (< (:x %) x)
+                                           (> (+ (:x %) (:w %)) (+ x node-w))
+                                           (< (:y %) y)
+                                           (> (+ (:y %) (:h %)) (+ y node-h))))
+                              own-ink))
+        semantic [(merge {:draw/op :node :id (:node/id node) :tag (:tag node) :x x :y y :w node-w :h node-h
+                          :class (attr node :class) :listeners (listeners node)
+                          :opacity opacity}
+                         (when (next overflow-hits) {:hit overflow-hits})
+                         (style-passthrough st))]
         ;; Scope cut, measured 2026-08-05 and deliberately left: this clips
         ;; at the BORDER box, and a browser clips at the PADDING box -- the
         ;; border box inset by the border, with the padding INSIDE the

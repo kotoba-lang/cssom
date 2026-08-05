@@ -1537,6 +1537,21 @@
    for the three measured cases where the two differ. Deriving that here
    instead would, again, test my model of the engine.
 
+   `:clip` push/pop ops are tracked for the SAME reason, and not tracking
+   them was this axis's own defect. A box with a non-`visible` `overflow`
+   emits `{:draw/op :clip :clip/op :push ...}` around its content and a
+   matching `:pop` after it, and cssom.layout's own comment at the
+   emission site says in as many words that this is how the engine
+   expresses `a line that overflows a box which CLIPS is not hit outside
+   it` -- and that its `:hit` rects are deliberately left UNCLIPPED
+   because the clip is a separate op stream every real hit-tester already
+   tracks (`browser.session/hit-nodes` does). This harness did not, so it
+   read one half of the engine's answer and charged the engine for the
+   other: measured in Brave 151 on 2026-08-06, a 300px `inline-block`
+   inside a `width: 200px; overflow: auto` box is NOT hit at x=240, and
+   the same box at `overflow: visible` IS. `hidden`, `scroll`, `clip` and
+   `overflow-x: auto` all clip; only `visible` does not.
+
    `:pointer-events` and `:visibility` are read for the SAME reason, and
    not reading them was this axis's own defect for its whole life. The
    engine puts both keys on every `:node` op precisely so that a
@@ -1554,7 +1569,12 @@
    -- it is reading one more field of the answer the engine already
    emitted, exactly like `:hit`."
   [ops wrapper-ids x y]
-  (let [;; Both sides wrap the case, and neither wrapper is an answer: the
+  (let [;; Half-open on the far edges, like every other rectangle test
+        ;; here -- see the note in the filter below, which is where that
+        ;; was measured.
+        inside? (fn [r] (and (<= (:x r) x) (< x (+ (:x r) (:w r)))
+                             (<= (:y r) y) (< y (+ (:y r) (:h r)))))
+        ;; Both sides wrap the case, and neither wrapper is an answer: the
         ;; browser page puts the markup in a `.kotoba-case` div and the
         ;; oracle reports null when a point lands on it, while
         ;; `cascaded-document` wraps the same markup in `<div id="root">`
@@ -1569,33 +1589,47 @@
         ;; taken as the first two node ops here -- see there for the
         ;; measured reordering that broke the positional version.
         ]
+    ;; A fold rather than a filter, because the clip state is ORDER-
+    ;; dependent: a `:node` op is a candidate only while every clip pushed
+    ;; before it and not yet popped still contains the point. The rest of
+    ;; the test is unchanged -- the `last` candidate still wins, which is
+    ;; the paint order read backwards.
+    ;;
+    ;; Half-open, like every other rectangle test here: a box spanning
+    ;; [0,400) does not contain x=400. With the far edges inclusive, every
+    ;; sample point that landed exactly on a box's right or bottom edge
+    ;; was scored as a disagreement -- the browser reports the case
+    ;; wrapper there (i.e. `none`) and the engine claimed the box.
+    ;; Measured on :page/header-nav-main, whose own div is 400px wide
+    ;; inside the 800px case container: all five of that case's mismatches
+    ;; were the x=400 column, and its geometry is 10/10.
+    ;;
+    ;; The same inclusive-edge mistake was found and fixed in
+    ;; `engine-lines`' replaced-box test earlier the same day; this is the
+    ;; paint-order axis's copy of it.
     (->> ops
-         ;; Half-open, like every other rectangle test here: a box spanning
-         ;; [0,400) does not contain x=400. With the far edges inclusive,
-         ;; every sample point that landed exactly on a box's right or
-         ;; bottom edge was scored as a disagreement -- the browser reports
-         ;; the case wrapper there (i.e. `none`) and the engine claimed the
-         ;; box. Measured on :page/header-nav-main, whose own div is 400px
-         ;; wide inside the 800px case container: all five of that case's
-         ;; mismatches were the x=400 column, and its geometry is 10/10.
-         ;;
-         ;; The same inclusive-edge mistake was found and fixed in
-         ;; `engine-lines`' replaced-box test earlier the same day; this is
-         ;; the paint-order axis's copy of it.
-         (filter #(and (= :node (:draw/op %))
-                       ;; the same two skips both real hit-testers apply,
-                       ;; see this fn's docstring
-                       (not= "none" (:pointer-events %))
-                       (not (contains? #{"hidden" "collapse"} (:visibility %)))
-                       (if-let [hit (:hit %)]
-                         (some (fn [r] (and (<= (:x r) x) (< x (+ (:x r) (:w r)))
-                                            (<= (:y r) y) (< y (+ (:y r) (:h r)))))
-                               hit)
-                         (and (<= (:x %) x) (< x (+ (:x %) (:w %)))
-                              (<= (:y %) y) (< y (+ (:y %) (:h %)))))
-                       (not= :document (:tag %))
-                       (not (contains? wrapper-ids (:id %)))))
-         last
+         (reduce
+          (fn [{:keys [clips] :as acc} op]
+            (case (:draw/op op)
+              ;; an unmatched `:pop` cannot arise from layout-node, which
+              ;; emits the pair together -- guarded anyway so a reordering
+              ;; pass upstream can never make this throw
+              :clip (if (= :push (:clip/op op))
+                      (update acc :clips conj op)
+                      (cond-> acc (seq clips) (update :clips pop)))
+              :node (if (and (not= "none" (:pointer-events op))
+                             (not (contains? #{"hidden" "collapse"} (:visibility op)))
+                             (if-let [hit (:hit op)]
+                               (some inside? hit)
+                               (inside? op))
+                             (not= :document (:tag op))
+                             (not (contains? wrapper-ids (:id op)))
+                             (every? inside? clips))
+                      (assoc acc :best op)
+                      acc)
+              acc))
+          {:clips [] :best nil})
+         :best
          (#(when % [(:tag %) (let [c (:class %)] (when (seq c) c))])))))
 
 (defn- hit-label
