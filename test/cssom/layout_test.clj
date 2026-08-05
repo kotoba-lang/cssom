@@ -10396,6 +10396,145 @@
                                 "<td>cccc</td></tr></table>"))
                  3))))
 
+;; ---- a percentage margin/padding is of the containing block's INLINE size ----
+;;
+;; CSS 2.1 SS8.3/SS8.4, and the numbers below were measured in Brave 151
+;; over CDP on 2026-08-06 before the code that produces them was written.
+;; The rule is one rule on all four sides, and the block-axis half is the
+;; counter-intuitive one: it resolves against the WIDTH too, which is what
+;; makes `padding-bottom: 50%` the aspect-ratio idiom.
+;;
+;; See `cssom.layout/percentage-box-basis` for the full measurement table
+;; and for the two OTHER percentage rules this one is not (`top`/`left`
+;; resolve per-axis; `row-gap` against the container's own block size).
+
+(deftest a-percentage-padding-resolves-against-the-containing-blocks-width
+  ;; `:box/padding-top-percentage-is-of-the-width`. Brave: 10% of the 300px
+  ;; container is 30px of padding, so the inner box is 50 tall. Resolving
+  ;; against the parent's 40px HEIGHT would give 4, and reading the bare
+  ;; number -- what this engine did -- gives 10.
+  (is (= [:div 0 0 300 50]
+         (last (tm-boxes (str "<div style=\"width: 300px; height: 40px\">"
+                              "<div style=\"padding-top: 10%\">p</div></div>")))))
+  ;; ...and the idiom itself: a 300x150 box out of a percentage alone, with
+  ;; no height declared anywhere.
+  (is (= [[:div 0 0 300 150] [:div 0 0 300 150]]
+         (tm-boxes "<div style=\"width: 300px\"><div style=\"padding-bottom: 50%\"></div></div>"))))
+
+(deftest a-definite-containing-block-height-does-not-change-the-basis
+  ;; The row that settles which dimension it is. Brave, in a 200x400
+  ;; containing block: `padding-top: 10%` is 20px and `margin-top: 10%` is
+  ;; 20px -- both 10% of the 200px WIDTH, with a perfectly definite 400px
+  ;; height sitting right there.
+  (is (= [:div 0 0 200 40]
+         (last (tm-boxes (str "<div style=\"width: 200px; height: 400px\">"
+                              "<div style=\"padding-top: 10%\">p</div></div>"))))))
+
+(deftest a-percentage-margin-resolves-against-the-same-inline-size
+  ;; `:box/margin-left-percentage`. Brave: x=30 w=270.
+  (is (= [[:div 0 0 300 20] [:div 30 0 270 20]]
+         (tm-boxes "<div style=\"width: 300px\"><div style=\"margin-left: 10%; height: 20px\">m</div></div>")))
+  ;; The block axis of the same rule, with the parent's own padding-top
+  ;; there to stop the child's margin collapsing through it (which is what
+  ;; would otherwise take the number out of the test -- and does in
+  ;; `:box/margin-top-percentage-is-of-the-width`, whose 1px `border-top`
+  ;; this engine cannot read because it has no per-side border at all).
+  ;; Brave: 30px of margin, child at y=31, wrapper 51 tall.
+  (is (= [[:div 0 0 300 51] [:div 0 31 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; padding-top: 1px\">"
+                        "<div style=\"margin-top: 10%; height: 20px\">m</div></div>")))))
+
+(deftest the-basis-is-the-containing-blocks-CONTENT-width
+  ;; Brave, child of a `width:300px; padding:25px` block (a 350px border
+  ;; box): `margin-left: 10%` is 30px, not 35. The percentage is of the
+  ;; 300px content width, and the child sits at 25 + 30 = 55.
+  (is (= [:div 55 25 270 20]
+         (last (tm-boxes (str "<div style=\"width: 300px; padding: 25px\">"
+                              "<div style=\"margin-left: 10%\">m</div></div>"))))))
+
+(deftest a-percentage-margin-works-in-every-formatting-context
+  ;; Measured in Brave: a flex item at x=30, a grid item at y=30, an
+  ;; inline-block at x=30 -- the same 10% of the same 300px container.
+  (is (= [:div 30 0 7 20]
+         (last (tm-boxes (str "<div style=\"width: 300px; display: flex\">"
+                              "<div style=\"margin-left: 10%\">a</div></div>")))))
+  (is (= [:div 0 30 300 20]
+         (last (tm-boxes (str "<div style=\"width: 300px; display: grid; grid-template-columns: 1fr\">"
+                              "<div style=\"margin-top: 10%; height: 20px\">a</div></div>")))))
+  (is (= [:div 30 0 7 20]
+         (last (tm-boxes (str "<div style=\"width: 300px\">"
+                              "<div style=\"display: inline-block; margin-left: 10%\">a</div></div>"))))))
+
+(deftest a-percentage-box-shorthand-resolves-on-every-side-it-expands-to
+  ;; Brave, in a 300x100 block: `padding: 10% 20%` is 30 top/bottom and 60
+  ;; left/right (an 80-tall box, content 180 wide), and `margin: 10% 20%`
+  ;; puts the box at x=60 w=180.
+  (is (= [:div 0 0 300 80]
+         (last (tm-boxes (str "<div style=\"width: 300px; height: 100px\">"
+                              "<div style=\"padding: 10% 20%\">p</div></div>")))))
+  (is (= [:div 60 0 180 20]
+         (last (tm-boxes (str "<div style=\"width: 300px; height: 100px\">"
+                              "<div style=\"margin: 10% 20%\">p</div></div>"))))))
+
+;; ---- logical properties, through layout ----
+
+(deftest logical-box-properties-lay-out-as-their-physical-counterparts
+  ;; The conformance corpus's own `:logical/` group, every number the
+  ;; oracle's. The cascade does the renaming (see cssom.core's
+  ;; `logical->physical-by-flow`); these assert that what comes out the
+  ;; other end is a box in the right place, which is the only thing that
+  ;; makes the rename worth having.
+  (is (= [[:div 0 0 300 20] [:div 20 0 220 20]]
+         (tm-boxes "<div style=\"width: 300px\"><div style=\"margin-inline: 20px 60px\">m</div></div>")))
+  (is (= [[:div 0 0 340 20] [:p 10 0 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; padding-inline: 10px 30px\">"
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  (is (= [[:div 0 0 300 56] [:p 0 12 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; padding-block: 12px 24px\">"
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  (is (= [[:div 0 0 300 60] [:div 0 0 300 10] [:div 0 40 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px\"><div style=\"height: 10px\"></div>"
+                        "<div style=\"margin-block: 30px 0\">m</div></div>"))))
+  (is (= [[:div 0 0 300 20] [:div 0 0 120 20]]
+         (tm-boxes "<div style=\"width: 300px\"><div style=\"inline-size: 120px\">i</div></div>")))
+  (is (= [[:div 0 0 300 60] [:div 0 0 300 60]]
+         (tm-boxes "<div style=\"width: 300px\"><div style=\"block-size: 60px\">b</div></div>")))
+  (is (= [[:div 0 0 300 20] [:div 0 0 80 20]]
+         (tm-boxes "<div style=\"width: 300px\"><div style=\"max-inline-size: 80px\">alpha beta</div></div>")))
+  (is (= [[:div 0 0 300 40] [:div 30 0 7 20]]
+         (tm-boxes (str "<div style=\"width: 300px; height: 40px; position: relative\">"
+                        "<div style=\"position: absolute; inset-inline-start: 30px; top: 0\">a</div></div>")))))
+
+(deftest an-inline-logical-margin-mirrors-under-direction-rtl
+  ;; `:logical/margin-inline-mirrors-under-rtl`, the case that distinguishes
+  ;; a logical property from an alias for the physical one. Brave: x=60
+  ;; w=220 -- the 20px is on the right and the 60px on the left.
+  (is (= [[:div 0 0 300 20] [:div 60 0 220 20]]
+         (tm-boxes (str "<div style=\"width: 300px; direction: rtl\">"
+                        "<div style=\"margin-inline: 20px 60px\">m</div></div>"))))
+  ;; `:logical/padding-inline-start-mirrors-under-rtl`. Brave: the outer
+  ;; box is 350 wide and the <p> is at x=0 -- the 50px landed on the RIGHT,
+  ;; so only the outer box records the difference.
+  (is (= [[:div 0 0 350 20] [:p 0 0 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; direction: rtl; padding-inline-start: 50px\">"
+                        "<p style=\"margin: 0\">p</p></div>")))))
+
+(deftest a-logical-border-has-no-per-side-border-to-land-on
+  ;; SCOPE CUT, asserted rather than left as prose. The cascade resolves
+  ;; `border-inline-start: 5px solid #000` to `border-left-*` correctly (see
+  ;; cssom.core-test), and cssom.layout reads a single UNIFORM
+  ;; `:border-width` -- so nothing changes here, and
+  ;; `:logical/border-inline-start` stays a divergence for the SAME reason
+  ;; `:box/border-left-width-only` already is, not a new one.
+  ;; Brave: the div is 305 wide with its <p> at x=5.
+  (is (= [[:div 0 0 300 20] [:p 0 0 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border-inline-start: 5px solid #000\">"
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  ;; the physical spelling, identical, which is what makes it one gap
+  (is (= [[:div 0 0 300 20] [:p 0 0 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border-left: 5px solid #000\">"
+                        "<p style=\"margin: 0\">p</p></div>")))))
+
 ;; ---- stacking contexts and paint order (CSS 2.1 Appendix E) -------------
 ;;
 ;; Every shape below was read out of a real headless Brave 151 first, on

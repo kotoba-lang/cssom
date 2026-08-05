@@ -2,6 +2,7 @@
   (:require [cssom.core :as css]
             [cssom.layout :as layout]
             [clojure.test :refer [deftest is]]
+            [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 
 (deftest parses-simple-selector-rules
@@ -237,12 +238,34 @@
   (is (= {:top 0 :right "auto" :bottom 0 :left "auto"}
          (:rule/declarations (first (css/parse-rules "#f { inset: 0 auto }"))))))
 
-(deftest inset-shorthand-declines-a-value-it-cannot-resolve
-  ;; Degrade, do not guess: a percentage is not resolvable at declaration
-  ;; time here (the same reason margin/padding decline one), so the
-  ;; shorthand is left for the generic path to store raw rather than
-  ;; expanded into four wrong pixel values.
-  (let [decls (:rule/declarations (first (css/parse-rules "#f { inset: 10% }")))]
+(deftest inset-shorthand-expands-a-percentage-as-the-raw-value
+  ;; REVERSED on 2026-08-06, and the reason it was written the other way
+  ;; round is gone rather than merely overruled. The old assertion said a
+  ;; percentage must NOT be expanded, "the same reason margin/padding
+  ;; decline one" -- and margin/padding declined one because nothing
+  ;; downstream could resolve it. Both halves of that changed: cssom.layout
+  ;; resolves a percentage margin/padding against the containing block's
+  ;; inline size (`resolve-box-percentages`), and it has resolved a
+  ;; percentage `top`/`left` against the containing block since
+  ;; `:position/absolute-percentage-offsets` landed. So each side now
+  ;; carries the raw `"10%"` exactly as `auto` already does, and the value
+  ;; is resolved where the containing block exists.
+  ;;
+  ;; What is NOT claimed here: that the four sides resolve against the same
+  ;; basis. They do not -- measured in Brave 151, `left: 50%` of a 200x60
+  ;; containing block is 100 and `top: 50%` is 30, each against its own
+  ;; axis, where a percentage MARGIN is of the inline size on all four
+  ;; sides. Expansion is per-side either way.
+  (is (= {:top "10%" :right "10%" :bottom "10%" :left "10%"}
+         (:rule/declarations (first (css/parse-rules "#f { inset: 10% }")))))
+  (is (= {:top "10%" :right "20%" :bottom "10%" :left "20%"}
+         (:rule/declarations (first (css/parse-rules "#f { inset: 10% 20% }"))))))
+
+(deftest inset-shorthand-still-declines-a-value-it-cannot-resolve
+  ;; The degrade-don't-guess posture itself is unchanged: a token that is
+  ;; neither a length, a percentage, a calc(), a var() nor `auto` leaves
+  ;; the whole shorthand unexpanded rather than contributing a guess.
+  (let [decls (:rule/declarations (first (css/parse-rules "#f { inset: 1px solid }")))]
     (is (not (contains? decls :top)))
     (is (contains? decls :inset))))
 
@@ -3964,3 +3987,149 @@
                                     ".container { display: flex } .wrapper { display: contents }"))]
     (is (= "contents" (get-in doc [:nodes wrapper :attrs :style/display])))
     (is (= "block" (get-in doc [:nodes real :attrs :style/display])))))
+
+;; ---- logical (flow-relative) box properties ----
+;;
+;; Every number below was measured in Brave 151 over CDP on 2026-08-06, on
+;; the conformance corpus's own 14px monospace page at width 800, BEFORE
+;; the code that produces it was written. `getComputedStyle` is quoted
+;; because it is the direct evidence for WHERE the mapping belongs: the
+;; browser reports the PHYSICAL longhand, so the rename is a
+;; computed-value-time step in the cascade and not a layout-time one.
+
+(defn- cascaded-style
+  "The `:style/*` attrs `apply-cascade` writes for the element carrying
+   `id`, through the real htmldom -> cssom.core pipeline."
+  [css html id]
+  (let [doc (-> (html/parse-into-document html)
+                (css/apply-cascade (css/parse-rules (or css ""))))]
+    (->> (:nodes doc)
+         (some (fn [[_ n]]
+                 (when (= id (get-in n [:attrs :id]))
+                   (into {} (filter (fn [[k _]] (= "style" (namespace k))) (:attrs n)))))))))
+
+(deftest logical-side-shorthands-expand-to-logical-longhands-not-physical-ones
+  ;; Two values are `<start> <end>`, NOT the 1-to-4 clockwise rule the
+  ;; physical shorthands use. They stay logical here because which physical
+  ;; side each lands on is not known until the element's own direction is.
+  (is (= {:margin-inline-start 20 :margin-inline-end 60}
+         (:rule/declarations (first (css/parse-rules "#f { margin-inline: 20px 60px }")))))
+  (is (= {:padding-block-start 12 :padding-block-end 24}
+         (:rule/declarations (first (css/parse-rules "#f { padding-block: 12px 24px }")))))
+  (is (= {:inset-inline-start 3 :inset-inline-end 9}
+         (:rule/declarations (first (css/parse-rules "#f { inset-inline: 3px 9px }")))))
+  ;; one value applies to both
+  (is (= {:margin-inline-start 7 :margin-inline-end 7}
+         (:rule/declarations (first (css/parse-rules "#f { margin-inline: 7px }")))))
+  ;; three values is not a legal flow-relative shorthand: declined outright
+  (is (contains? (:rule/declarations (first (css/parse-rules "#f { margin-inline: 1px 2px 3px }")))
+                 :margin-inline)))
+
+(deftest logical-border-shorthands-expand-per-logical-side
+  (is (= {:border-inline-start-width 5 :border-inline-start-style "solid"
+          :border-inline-start-color "#000"}
+         (:rule/declarations (first (css/parse-rules "#f { border-inline-start: 5px solid #000 }")))))
+  ;; `border-inline` sets BOTH sides -- measured, `border-inline: 3px solid
+  ;; #000` on a 300px block reports border-left-width AND border-right-width
+  ;; of 3px.
+  (is (= {:border-inline-start-width 3 :border-inline-start-style "solid"
+          :border-inline-end-width 3 :border-inline-end-style "solid"}
+         (:rule/declarations (first (css/parse-rules "#f { border-inline: 3px solid }"))))))
+
+(deftest logical-properties-resolve-to-physical-ones-in-the-cascade
+  ;; Brave: `margin-inline: 20px 60px` on a 300px ltr containing block puts
+  ;; the box at x=20 w=220 and reports marginLeft 20px / marginRight 60px.
+  (let [st (cascaded-style nil "<div style=\"width:300px\"><div id=\"a\" style=\"margin-inline: 20px 60px\">m</div></div>" "a")]
+    (is (= 20 (:style/margin-left st)))
+    (is (= 60 (:style/margin-right st)))
+    (is (not (contains? st :style/margin-inline-start))))
+  ;; ...and every other family, all measured the same way.
+  (let [st (cascaded-style nil "<div id=\"a\" style=\"inline-size:120px; block-size:60px; max-inline-size:80px; min-block-size:5px\">i</div>" "a")]
+    (is (= {:width 120 :height 60 :max-width 80 :min-height 5}
+           (select-keys (into {} (map (fn [[k v]] [(keyword (name k)) v])) st)
+                        [:width :height :max-width :min-height]))))
+  (let [st (cascaded-style nil "<div id=\"a\" style=\"inset-inline-start: 30px; inset-block-start: 12px; position:absolute\">a</div>" "a")]
+    (is (= 30 (:style/left st)))
+    (is (= 12 (:style/top st)))))
+
+(deftest a-logical-property-maps-by-the-elements-OWN-direction
+  ;; The measurement that makes this a logical property rather than an
+  ;; alias. Brave puts the box at x=60 for BOTH shapes -- `direction: rtl`
+  ;; on the parent (inherited) and on the element itself -- so the rename
+  ;; reads the element's own computed direction, and that is why the flow
+  ;; is threaded down the cascade walk.
+  (doseq [html ["<div style=\"width:300px; direction:rtl\"><div id=\"a\" style=\"margin-inline: 20px 60px\">m</div></div>"
+                "<div style=\"width:300px\"><div id=\"a\" style=\"direction:rtl; margin-inline: 20px 60px\">m</div></div>"
+                ;; and inherited through an intermediate element that
+                ;; declares nothing
+                "<div style=\"direction:rtl\"><div><div id=\"a\" style=\"margin-inline: 20px 60px\">m</div></div></div>"]]
+    (let [st (cascaded-style nil html "a")]
+      (is (= 60 (:style/margin-left st)) html)
+      (is (= 20 (:style/margin-right st)) html)))
+  ;; The BLOCK axis does not flip with `direction` -- only a writing mode
+  ;; rotates it, and Brave reports marginTop 30px either way.
+  (let [st (cascaded-style nil "<div style=\"direction:rtl\"><div id=\"a\" style=\"margin-block: 30px 0\">m</div></div>" "a")]
+    (is (= 30 (:style/margin-top st)))))
+
+(deftest a-logical-and-a-physical-declaration-compete-in-the-ordinary-cascade
+  ;; All four measured in Brave, and they are the reason the rename happens
+  ;; between the cascade's sort and its per-property winner selection
+  ;; rather than on the resolved map.
+  (is (= 40 (:style/margin-left
+             (cascaded-style nil "<div id=\"a\" style=\"margin-left: 5px; margin-inline-start: 40px\">m</div>" "a"))))
+  (is (= 5 (:style/margin-left
+            (cascaded-style nil "<div id=\"a\" style=\"margin-inline-start: 40px; margin-left: 5px\">m</div>" "a"))))
+  (is (= 40 (:style/margin-left
+             (cascaded-style nil "<div id=\"a\" style=\"margin: 1px; margin-inline-start: 40px\">m</div>" "a"))))
+  (is (= 1 (:style/margin-left
+            (cascaded-style nil "<div id=\"a\" style=\"margin-inline-start: 40px; margin: 1px\">m</div>" "a"))))
+  ;; SPECIFICITY still outranks source order: an `#id` physical declaration
+  ;; beats a later `.class` logical one. Brave: x=5.
+  (is (= 5 (:style/margin-left
+            (cascaded-style "#a { margin-left: 5px } .a { margin-inline-start: 40px }"
+                            "<div id=\"a\" class=\"a\">m</div>" "a"))))
+  ;; ...and under `direction: rtl` the two no longer collide, so order
+  ;; stops mattering: Brave reports marginLeft 5px AND marginRight 40px for
+  ;; BOTH orders.
+  (doseq [decl ["margin-left: 5px; margin-inline-start: 40px"
+                "margin-inline-start: 40px; margin-left: 5px"]]
+    (let [st (cascaded-style nil (str "<div style=\"direction:rtl\"><div id=\"a\" style=\"" decl "\">m</div></div>") "a")]
+      (is (= 5 (:style/margin-left st)) decl)
+      (is (= 40 (:style/margin-right st)) decl))))
+
+(deftest a-logical-property-carrying-em-or-var-resolves-after-the-rename
+  ;; The rename runs inside `resolve-style-and-flow`, i.e. BEFORE
+  ;; `resolve-style-map`'s var() substitution and before
+  ;; `resolve-relative-lengths` -- which is what lets both keep working
+  ;; without a logical entry in `em-resolvable-properties`. Brave: x=40 and
+  ;; x=25 respectively.
+  (is (= 40 (:style/margin-left
+             (cascaded-style nil "<div id=\"a\" style=\"font-size: 20px; margin-inline-start: 2em\">m</div>" "a"))))
+  (is (= 25 (:style/margin-left
+             (cascaded-style nil "<div style=\"--gap: 25px\"><div id=\"a\" style=\"margin-inline: var(--gap) 5px\">m</div></div>" "a")))))
+
+(deftest a-vertical-writing-mode-leaves-logical-properties-unmapped
+  ;; SCOPE CUT, asserted so it cannot drift into a silent half-implementation.
+  ;; Measured in Brave inside `writing-mode: vertical-rl`,
+  ;; `margin-inline-start: 40px` is a margin-TOP and `inline-size: 70px` is
+  ;; a 70px HEIGHT -- a rotation this engine has no vertical layout to
+  ;; perform. Rather than write a mapping neither layout axis of the
+  ;; conformance corpus could check, the rename is gated on `horizontal-tb`
+  ;; and the declaration stays under its logical key, exactly where it was
+  ;; before any of this existed.
+  (let [st (cascaded-style nil "<div style=\"writing-mode: vertical-rl\"><div id=\"a\" style=\"margin-inline-start: 40px; inline-size: 70px\">v</div></div>" "a")]
+    (is (nil? (:style/margin-left st)))
+    (is (nil? (:style/margin-top st)))
+    (is (nil? (:style/width st)))
+    (is (= 40 (:style/margin-inline-start st)))))
+
+(deftest a-percentage-box-shorthand-expands-per-side-as-the-raw-value
+  ;; Admitted since cssom.layout learned to resolve one. Brave: `padding:
+  ;; 10% 20%` inside a 300x100 block is 30px top/bottom and 60px
+  ;; left/right -- both axes of the WIDTH, which is why expanding per side
+  ;; is as well defined for a percentage as for a px length.
+  (is (= {:padding "10%" :padding-top "10%" :padding-right "20%"
+          :padding-bottom "10%" :padding-left "20%"}
+         (:rule/declarations (first (css/parse-rules "#f { padding: 10% 20% }")))))
+  (is (= {:margin-inline-start "20%" :margin-inline-end "20%"}
+         (:rule/declarations (first (css/parse-rules "#f { margin-inline: 20% }"))))))
