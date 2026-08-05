@@ -457,6 +457,51 @@
       'control-bold': fm('bold 13.3333px Arial'),
       'control-italic': fm('italic 13.3333px Arial')
     };
+    // The DECODED SIZE of every image resource on the page, keyed by src.
+    //
+    // Same bargain as the advance tables above, and the same reason: a
+    // resource's own dimensions are a fact about bytes, which a pure
+    // layout engine cannot see and which the engine's `:image-size` theme
+    // hook exists for a host to answer. Handing them over removes the one
+    // difference this comparison cannot legitimately judge (whether the
+    // harness has a decoder) and leaves the actual question -- what BOX
+    // the engine builds from a size, a ratio and the declarations -- fully
+    // on the engine.
+    //
+    // Read off the oracle's own decoder rather than decoded here, and that
+    // is the deliberate half. An independent decoder in the harness would
+    // score a DECODER disagreement as a layout disagreement, and this
+    // corpus contains the case that proves it: `R0lGODlhAQABAAAAACw=`, the
+    // 1x1 GIF ten cases use, has a well-formed header saying 1x1 and no
+    // image data at all. A header-sniffing decoder reports 1x1; Brave
+    // rejects it, reports naturalWidth 0, and paints a 16x16 broken-image
+    // icon. Feeding the engine 1x1 for it would make a `width: 200px`
+    // image 200x200 here against Brave's 16x16 -- an argument between two
+    // decoders, dressed as a layout bug.
+    //
+    // `naturalWidth` is the resource's size, NOT the answer: the engine
+    // still has to combine it with `width`/`height`/`max-width`/the
+    // attributes to reach a box, which is what the `:replaced/img-*` cases
+    // compare. The one case where the two coincide is a bare <img>, whose
+    // box IS its intrinsic size, and that case is a tautology under this
+    // arrangement -- it asserts the size is consulted at all, nothing
+    // more, and it says so in the corpus.
+    //
+    // `complete` is reported alongside so a run where an image had not
+    // loaded when this script ran cannot look like a size of zero. The
+    // engine side prints a warning rather than silently laying out 0x0.
+    //
+    // Emitted as an ARRAY of [src, w, h, complete] rather than as an
+    // object keyed by src, because the reader keywordizes JSON keys and a
+    // keyword whose name contains `/` cannot be turned back into its
+    // string: `(name :data:image/svg+xml;base64,...)` is `data:image` alone.
+    var imgs = [];
+    var els = document.querySelectorAll('img[src]');
+    for (var ii = 0; ii < els.length; ii++) {
+      var im = els[ii];
+      imgs.push([im.getAttribute('src'), im.naturalWidth, im.naturalHeight, im.complete]);
+    }
+    out['__images__'] = imgs;
     var pre = document.createElement('pre');
     pre.id = 'kotoba-conformance-out';
     pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(out))));
@@ -765,7 +810,7 @@
      inset, every row a 4px gap) -- a host styling choice, not CSS. Left
      at their defaults they narrow the content width by 16px per nested
      box, scoring the theme instead of the layout."
-  [{:keys [html css]} width char-w]
+  [{:keys [html css]} width host]
   (let [[_ doc] (dom/consume-ops (cascaded-document {:html html :css css}))]
     (layout/draw-ops (dom/tree doc)
                      {:width width
@@ -817,7 +862,7 @@
                               ;; and re-measuring it is its own change.
                               :font-metrics (fn [font-size weight style family]
                                               (let [face (text-face family weight style)
-                                                    base (get (:metrics char-w) face)
+                                                    base (get (:metrics host) face)
                                                     ref (face-ref-size face)
                                                     k (/ (or font-size ref) ref)]
                                                 {:ascent (* k (:ascent base))
@@ -867,26 +912,37 @@
                                              (let [face (text-face family weight style)
                                                    ref (face-ref-size face)
                                                    w (* (/ (or font-size ref) ref)
-                                                        ((get char-w face) \x))]
+                                                        ((get host face) \x))]
                                                (max w (js/Math.round w))))
                               :max-advance (fn [font-size weight style family]
                                              (let [face (text-face family weight style)
-                                                   base (get (:metrics char-w) face)
+                                                   base (get (:metrics host) face)
                                                    ref (face-ref-size face)]
                                                (js/Math.round
                                                 (* (/ (or font-size ref) ref)
                                                    (:ascent base)))))
                               :measure-text (fn [text font-size weight style family]
                                               (let [face (text-face family weight style)
-                                                    advance (get char-w face)
+                                                    advance (get host face)
                                                     ref (face-ref-size face)]
                                                 (* (/ (or font-size ref) ref)
-                                                   (reduce + 0 (map advance (str text))))))}})))
+                                                   (reduce + 0 (map advance (str text))))))
+                              ;; The resource half, measured in the oracle
+                              ;; the same way (see the measurement script's
+                              ;; `__images__` probe for why it is read off
+                              ;; the browser's decoder rather than decoded
+                              ;; here). A src the oracle could not decode
+                              ;; comes back 0x0, which this hands over
+                              ;; unchanged -- `replaced-intrinsic-size`
+                              ;; treats a non-positive size as no answer,
+                              ;; which is the same "unresolved resource"
+                              ;; state a host with no decoder is in.
+                              :image-size (fn [src] (get (:images host) src))}})))
 
 (defn- engine-lines
   "cssom.layout's own answer, in the same shape the oracle's is read into.
 
-   `char-w` is the ORACLE's own measured per-character advance (see the
+   `host` is the ORACLE's own measured per-character advance (see the
    measurement script's `__char_width__` probe), threaded in through the
    engine's existing `:measure-text` theme hook -- the same hook a real
    host uses to make wrap decisions agree with how it will actually paint.
@@ -902,8 +958,8 @@
    which is exactly the em box the real hosts paint into (dom-gpu draws at
    `y + font-size`, the baseline). Splitting per word also means a wrapped
    line compares correctly rather than as one blob."
-  [{:keys [html css]} width char-w]
-  (let [ops (engine-ops {:html html :css css} width char-w)
+  [{:keys [html css]} width host]
+  (let [ops (engine-ops {:html html :css css} width host)
         ;; Mirror of the oracle script's own `closest(...)` skip: a form
         ;; control's or replaced box's INNER text is its own formatting
         ;; context. Done geometrically here because draw-ops carry no
@@ -935,9 +991,9 @@
                       (filter #(= :text (:draw/op %)))
                       (remove inside-atomic?))
         word-w (fn [text fs weight style]
-                 (let [advance (cond (= "bold" weight) (:bold char-w)
-                                     (= "italic" style) (:italic char-w)
-                                     :else (:normal char-w))]
+                 (let [advance (cond (= "bold" weight) (:bold host)
+                                     (= "italic" style) (:italic host)
+                                     :else (:normal host))]
                    (* (/ (or fs 14) 14) (reduce + 0 (map advance (str text))))))]
     (->> text-ops
          (mapcat (fn [op]
@@ -959,7 +1015,7 @@
                                   ;; convention difference.
                                   (let [face (text-face (:font-family op) (:font-weight op)
                                                         (:font-style op))
-                                        base (get (:metrics char-w) face)
+                                        base (get (:metrics host) face)
                                         ref (face-ref-size face)
                                         k (/ fs ref)
                                         asc (* k (:ascent base))
@@ -1566,10 +1622,10 @@
   "All three axes from one case: the line structure and the element boxes
    (both from cssom.layout), and the cascade-resolved style of every
    element (from cssom.core alone)."
-  [c width char-w]
-  (let [ops (engine-ops c width char-w)
+  [c width host]
+  (let [ops (engine-ops c width host)
         wrapper-ids (wrapper-op-ids c)]
-    {:lines (engine-lines c width char-w)
+    {:lines (engine-lines c width host)
      :boxes (engine-boxes ops wrapper-ids)
      ;; the harness's own two boxes, by identity -- see wrapper-op-ids
      :wrapper-ids wrapper-ids
@@ -1579,10 +1635,10 @@
      :boxes-ops ops
      :styles (engine-styles c)}))
 
-(defn- compare-case [oracle-data ua width char-w c]
+(defn- compare-case [oracle-data ua width host c]
   (let [oracle-words (:words oracle-data)
         lines (cluster-lines oracle-words)
-        rendered (try (engine-render c width char-w)
+        rendered (try (engine-render c width host)
                       (catch :default e {:error (ex-message e)}))
         mine (if (:error rendered) rendered (:lines rendered))
         geo (when-not (:error rendered)
@@ -1662,15 +1718,27 @@
       advances (:__advances__ oracle)
       advance-for (fn [face]
                     (fn [ch] (get-in advances [face (keyword (str (.charCodeAt ch 0)))] 8.4)))
-      ;; both halves of the host's font knowledge travel together: the
-      ;; per-character advances and the per-face ascent/descent
-      char-w {:normal (advance-for :normal)
+      ;; Everything this harness plays the part of a HOST for travels
+      ;; together: the per-character advances, the per-face ascent/descent,
+      ;; and the decoded size of each image resource -- three facts about
+      ;; fonts and bytes that a pure layout engine cannot derive and asks
+      ;; for through `:measure-text`/`:font-metrics`/`:image-size`.
+      images (into {} (map (fn [[src w h complete]]
+                             [src {:w w :h h :complete complete}])
+                           (:__images__ oracle)))
+      _ (let [pending (remove :complete (vals images))]
+          (when (seq pending)
+            (println (str "WARNING: " (count pending) " image(s) had not finished loading when"
+                          " the oracle measured; their size reads as 0 and every <img> using"
+                          " them will lay out as an unresolved resource on BOTH sides."))))
+      host {:normal (advance-for :normal)
               :bold (advance-for :bold)
               :italic (advance-for :italic)
               :control (advance-for :control)
               :control-bold (advance-for :control-bold)
               :control-italic (advance-for :control-italic)
-              :metrics (:__metrics__ oracle)}
+              :metrics (:__metrics__ oracle)
+              :images images}
       ;; ---- cases that cannot share a page with the others --------------
       ;;
       ;; A `position: fixed` box is positioned against the VIEWPORT, so on a
@@ -1706,7 +1774,7 @@
       _ (println (str "UA base: user-agent baseline probed in the oracle for "
                       (count ua) " tags (bare element, no author CSS)\n"))
       results (vec (map-indexed (fn [i c]
-                                  (compare-case (get oracle (keyword (str "case-" i)) []) ua width char-w c))
+                                  (compare-case (get oracle (keyword (str "case-" i)) []) ua width host c))
                                 cases))
       scorable (remove #(= :unscorable (:status %)) results)
       passed (filter #(= :pass (:status %)) scorable)
