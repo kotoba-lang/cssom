@@ -221,7 +221,8 @@
    whatever `open` state is already given to it.
 
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [cssom.core :as css]))
 
 (def default-theme
   {:font-size 14
@@ -1039,15 +1040,6 @@
       (when (and v (re-matches #"\d+" (str v)))
         (parse-int v nil)))))
 
-(def ^:private ua-font-weight
-  "The UA stylesheet's own `font-weight: bold` set. This engine has no user-
-   agent stylesheet at all, which the conformance harness's geometry axis
-   made impossible to ignore: `<b>`, `<strong>`, `<th>` and every heading
-   rendered in NORMAL weight, because nothing anywhere said otherwise.
-   Authors do not write `b { font-weight: bold }` -- the UA does."
-  {:b "bold" :strong "bold" :th "bold"
-   :h1 "bold" :h2 "bold" :h3 "bold" :h4 "bold" :h5 "bold" :h6 "bold"})
-
 (def ^:private ua-margin-scale
   "Vertical margins from the HTML5 UA stylesheet, as multiples of the
    element's OWN font size -- `p { margin: 1em 0 }`, `h1 { margin: .67em 0 }`
@@ -1086,31 +1078,6 @@
    left half of its `:is(ul, ol) ul` nested-list rules. `<menu>`/`<dir>`
    are in Chrome's own rule and cost nothing to honour here."
   #{:ul :ol :menu :dir})
-
-(def ^:private ua-box-sides
-  "Horizontal UA-stylesheet box values -- the list indent every browser
-   applies (`ul, ol { padding-left: 40px }`) and a blockquote's own side
-   margins. Horizontal-only, for the same reason ua-margin-scale is
-   vertical-only.
-
-   `figure` is the same `margin: 1em 40px` rule as `blockquote`, and only
-   the 1em half of it was here: the vertical margin was in
-   ua-margin-scale from the start while the 40px indent was not, so a
-   `<figure>` sat flush against its article's content edge and was 80px
-   too wide. Measured in Brave 151, 2026-08-05, on
-   `:page/article-with-figure`'s own 300px article -- the browser puts the
-   figure at x=40 with w=220 and this engine had x=0, w=300, which the
-   figure's `<img>` and `<figcaption>` then inherited box for box (the
-   harness's whole `figure`/`figcaption`/`img` residual, six numbers from
-   one missing declaration).
-
-   `menu`/`dir` carry `<ul>`'s 40px indent for the same reason they carry
-   its vertical margin -- see ua-margin-scale."
-  {:ul {:padding-left 40} :ol {:padding-left 40}
-   :menu {:padding-left 40} :dir {:padding-left 40}
-   :blockquote {:margin-left 40 :margin-right 40}
-   :figure {:margin-left 40 :margin-right 40}
-   :dd {:margin-left 40}})
 
 (def ^:private form-control-tags #{:input :button :select :textarea})
 
@@ -1232,19 +1199,17 @@
    `<fieldset>` and `<legend>` are NOT in this map -- their box is em-based
    rather than constant, so it lives in `ua-em-box` next door, and the
    legend's placement is a layout rule (`fieldset-legend`), not a box."
-  ;; An input's padding is NOT uniform either: 2px inline, 1px block. The
-  ;; uniform `:padding 2` is kept as the fallback the horizontal axis (and
-  ;; `content-inset`, i.e. where the control's own text and caret are
-  ;; painted) already used; the per-side block values are what the vertical
-  ;; axis reads through `inset-side`.
-  {:input {:padding 2 :padding-top 1 :padding-bottom 1 :border 2
-           :line-height :normal}
+  ;; The PER-SIDE padding a browser reports for these controls
+  ;; (`input { padding: 1px 2px }`, `button { padding: 1px 6px }`,
+  ;; `textarea { padding: 2px }`) now lives in cssom.core's UA stylesheet
+  ;; with every other cascadable UA declaration -- see ADR-2800003100.
+  ;; What is left here is the part a browser does NOT report: the uniform
+  ;; `:padding` this engine's own `content-inset` reads (where a control's
+  ;; text and caret are painted), the border, the `font:` shorthand's
+  ;; line-height reset, and `box-sizing`.
+  {:input {:padding 2 :border 2 :line-height :normal}
    :textarea {:padding 2 :border 1 :line-height :normal}
-   ;; a button's padding is NOT uniform: 6px each side, 1px top and bottom.
-   ;; Measured in Brave (`padding: 1px 6px`, `border: 2px`, so
-   ;; h = 15 + 2 + 4 = 21), and only expressible at all since the box model
-   ;; gained per-side values.
-   :button {:padding 1 :padding-left 6 :padding-right 6 :border 2
+   :button {:padding 1 :border 2
             :line-height :normal :box-sizing "border-box"}
    ;; a <select>'s 1px block padding is Chrome's own internal button
    ;; padding: it reports `padding: 0px` in getComputedStyle yet a select
@@ -1331,16 +1296,16 @@
       (and (= :input tag)
            (contains? #{"checkbox" "radio"}
                       (str/lower-case (str (or (get-in node [:attrs :type]) "text")))))
-      ;; ...and its own margins: Chrome's UA sheet gives a checkbox/radio
-      ;; `margin: 3px 3px 3px 4px`, which is the gap a reader sees between
-      ;; the box and the label beside it.
+      ;; Its own margins (Chrome's UA `margin: 3px 3px 3px 4px`, the gap a
+      ;; reader sees between the box and the label beside it) are in
+      ;; cssom.core's UA stylesheet with every other cascadable UA
+      ;; declaration -- see ADR-2800003100.
       ;; `:box 13` -- a checkbox is a fixed-size PLATFORM WIDGET, not a box
       ;; sized from a font: measured in Brave it is 13x13 at every font
       ;; size. The width path already spells that 13 (see
       ;; atomic-intrinsic-width); naming it here is what keeps the height
       ;; from being derived from the control font instead.
-      {:padding 0 :border 0 :margin-top 3 :margin-right 3
-       :margin-bottom 3 :margin-left 4 :box 13 :box-sizing "border-box"}
+      {:padding 0 :border 0 :box 13 :box-sizing "border-box"}
 
       ;; An OPEN listbox has none of the closed dropdown's 1px internal
       ;; block padding: measured, a `size="3"` multiple select is exactly
@@ -1382,10 +1347,10 @@
    vertical margins. The `inset` STYLE is not modelled (this engine draws
    one solid border), so the line is a hairline rectangle in the border
    colour rather than a two-tone bevel -- geometry, not paint."
-  {:fieldset {:margin-left 2 :margin-right 2 :border 2
+  {:fieldset {:border 2
               :em {:padding-top 0.35 :padding-right 0.75
                    :padding-bottom 0.625 :padding-left 0.75}}
-   :legend {:padding-left 2 :padding-right 2 :padding-top 0 :padding-bottom 0}
+   :legend {:padding-top 0 :padding-bottom 0}
    :hr {:border 1 :padding 0}})
 
 (defn- ua-em-box-for
@@ -1406,23 +1371,6 @@
         (merge (dissoc box :em)
                (reduce-kv (fn [m k v] (assoc m k (* v fs))) {} em)))
       box)))
-
-(def ^:private ua-padding
-  "UA-stylesheet padding defaults, in the uniform form this engine's box
-   model can express. Real Chrome ships `td, th { padding: 1px }`; without
-   it every table cell was 2px short in each axis, which the conformance
-   harness's geometry axis reported as td 6/29."
-  {:td 1 :th 1})
-
-(def ^:private ua-font-style
-  {:em "italic" :i "italic" :cite "italic" :dfn "italic" :var "italic" :address "italic"})
-
-(def ^:private ua-vertical-align
-  "`sub { vertical-align: sub }` and `sup { vertical-align: super }` are UA
-   stylesheet rules -- an author writes `<sub>`, never the declaration --
-   so without them a subscript and a superscript sat on the same baseline
-   as the text around them, which is the entire visual point of both tags."
-  {:sub "sub" :sup "super"})
 
 (def ^:private ua-font-scale
   "Heading font sizes from the HTML5 UA stylesheet, as multiples of the
@@ -1572,12 +1520,26 @@
   ;; (ua-control-box-for) or, for the two form-grouping elements whose
   ;; padding is stated in em, ua-em-box-for. One lookup, read by every
   ;; side below -- they used to call ua-control-box-for ten times over.
-  (let [ua-box (or (ua-control-box-for node) (ua-em-box-for node theme))]
-  ;; real HTML5's [hidden] { display: none } is an ordinary, low-priority
-  ;; UA-stylesheet rule, not !important -- any author :display the cascade
-  ;; already resolved wins over it, matching that real override pattern.
-  {:display (or (style node :display)
-                (when (truthy-attr? (attr node :hidden)) "none"))
+  (let [ua-box (or (ua-control-box-for node) (ua-em-box-for node theme))
+        ;; The user-agent origin of the cascade, at the bottom of every
+        ;; lookup in this map -- one shadowed accessor rather than the
+        ;; column of `(or (style node :x) <ua default>)` chains and the
+        ;; tag->value tables beside them that this file used to carry (see
+        ;; ADR-2800003100). The rules themselves live in `cssom.core`,
+        ;; which folds them into `apply-cascade` as a real origin, so for a
+        ;; document that WAS cascaded every value read here is already on
+        ;; the element's own `:style/*` attrs and this fallback never
+        ;; fires. It fires for the one caller that has no cascade behind
+        ;; it: a host rendering a page with no stylesheet at all skips
+        ;; `apply-cascade` entirely (`browser.core/render-document` runs it
+        ;; only `(seq css-rules)`), and a `<div>` must still be a block
+        ;; there. Reading cssom.core's own table rather than keeping a
+        ;; second copy is the whole point -- the drift this change exists
+        ;; to remove is the same knowledge written down twice.
+        ua (css/ua-style-for node)
+        style (fn [node k] (or (get-in node [:attrs (keyword "style" (name k))])
+                               (get ua k)))]
+  {:display (style node :display)
    :position (or (style node :position) "static")
    :left (style node :left)
    :top (style node :top)
@@ -1601,13 +1563,12 @@
                    "content-box")
    :padding (parse-int (style node :padding)
                        (or (:padding ua-box)
-                           (get ua-padding (:tag node))
                            (:padding theme)))
    ;; The DECLARED padding only -- author or UA -- with no theme fallback.
    ;; The theme's uniform padding is a host decoration, not CSS: letting it
    ;; widen a content-box `width` would make `div{width:50px}` occupy 58px
    ;; because of a styling choice the author never made.
-   :padding/declared (parse-int (style node :padding) (get ua-padding (:tag node)))
+   :padding/declared (parse-int (style node :padding) nil)
    :padding-top (parse-int (style node :padding-top)
                            (:padding-top ua-box))
    :padding-right (parse-int (style node :padding-right)
@@ -1615,20 +1576,13 @@
    :padding-bottom (parse-int (style node :padding-bottom)
                               (:padding-bottom ua-box))
    :padding-left (parse-int (style node :padding-left)
-                            (or (:padding-left ua-box)
-                                (get-in ua-box-sides [(:tag node) :padding-left])))
+                            (:padding-left ua-box))
    :margin-top (parse-int (style node :margin-top)
-                          (or (:margin-top ua-box)
-                              (ua-margin-y node theme)))
+                          (ua-margin-y node theme))
    :margin-bottom (parse-int (style node :margin-bottom)
-                             (or (:margin-bottom ua-box)
-                                 (ua-margin-y node theme)))
-   :margin-left (parse-int (style node :margin-left)
-                           (or (:margin-left ua-box)
-                               (get-in ua-box-sides [(:tag node) :margin-left])))
-   :margin-right (parse-int (style node :margin-right)
-                            (or (:margin-right ua-box)
-                                (get-in ua-box-sides [(:tag node) :margin-right])))
+                             (ua-margin-y node theme))
+   :margin-left (parse-int (style node :margin-left) nil)
+   :margin-right (parse-int (style node :margin-right) nil)
    ;; A USED height injected by the layout itself (force-cross-size's
    ;; stretch, layout-absolute-children's top+bottom solve), as an attr
    ;; rather than a `style/height` declaration because it is a BORDER-box
@@ -1662,8 +1616,7 @@
    ;; 300px-wide div-table puts its two cells at x=0 and x=100 with no gap
    ;; anywhere. Defaulting to 2 for every node put 2px of phantom spacing
    ;; into every CSS-declared table.
-   :border-spacing (parse-int (style node :border-spacing)
-                              (if (= :table (:tag node)) 2 0))
+   :border-spacing (parse-int (style node :border-spacing) 0)
    ;; Both read only by layout-table. `border-collapse`'s initial value is
    ;; `separate` and `table-layout`'s is `auto`, so absent means "what this
    ;; engine already did".
@@ -1768,8 +1721,8 @@
                                               (get ua-control-font-family (:tag node))
                                               (:family ua-control-font)))]
                         (+ ascent descent))))
-   :font-weight (or (style node :font-weight) (get ua-font-weight (:tag node)))
-   :font-style (or (style node :font-style) (get ua-font-style (:tag node)))
+   :font-weight (style node :font-weight)
+   :font-style (style node :font-style)
    ;; parse-int'd for the exact same reason box-shadow-x/y/blur/spread
    ;; above just were -- layout-text's own inline shadow-op does raw
    ;; (+ line-x (or (:x text-shadow) 0)) arithmetic against these with
@@ -1788,7 +1741,7 @@
    ;; own already-laid-out border box to resolve a percentage against.
    :transform (style node :transform)
    :transform-origin (style node :transform-origin)
-   :white-space (or (style node :white-space) (when (= :pre (:tag node)) "pre"))
+   :white-space (style node :white-space)
    :text-overflow (style node :text-overflow)
    :overflow-wrap (or (style node :overflow-wrap) (style node :word-wrap))
    :word-break (style node :word-break)
@@ -1899,8 +1852,7 @@
    ;; browser.document-input's own scrollable-node? already gets this
    ;; right (checks `style` first, falling back to `attr`), confirming
    ;; this file was the outlier, not an intentional design choice.
-   :vertical-align (or (style node :vertical-align)
-                       (get ua-vertical-align (:tag node)))
+   :vertical-align (style node :vertical-align)
    :float (style node :float)
    ;; `clear` was read NOWHERE at all, so the single most common float
    ;; idiom on the web -- a float, some content beside it, then a
@@ -6444,28 +6396,6 @@
 
 (def ^:private table-cell-tags #{:td :th})
 
-(def ^:private ua-table-display
-  "The `display` a real UA stylesheet gives each table tag. Real CSS's table
-   model is driven ENTIRELY by `display`, not by tag names: `<td>` is a
-   table cell only because `td { display: table-cell }` says so, and a
-   `<div style=\"display: table-cell\">` is exactly as much of a cell.
-
-   This engine's table layout keyed off tags alone, so a CSS-declared table
-   found no rows and no cells and emitted one 300x2 box with nothing in it
-   -- measured on the conformance corpus, `:display/table-cells-from-divs`
-   and `:display/table-with-anonymous-rows` both produced an EMPTY line
-   structure while the browser reports four and three real boxes."
-  {:table "table"
-   :tr "table-row"
-   :td "table-cell"
-   :th "table-cell"
-   :thead "table-header-group"
-   :tbody "table-row-group"
-   :tfoot "table-footer-group"
-   :caption "table-caption"
-   :col "table-column"
-   :colgroup "table-column-group"})
-
 (def ^:private table-row-group-displays
   "The wrappers a real HTML parser puts between `<table>` and its `<tr>`s.
    `<tbody>` in particular is INSERTED by the parser even when the author
@@ -6474,15 +6404,21 @@
   #{"table-row-group" "table-header-group" "table-footer-group"})
 
 (defn- table-part-display
-  "The effective `display` of a child of a table box: the author's own
-   declaration when there is one, else the UA default for its tag.
+  "The effective `display` of a child of a table box.
+
+   Real CSS's table model is driven ENTIRELY by `display`, not by tag
+   names: a `<td>` is a table cell only because `td { display: table-cell }`
+   says so, and a `<div style=\"display: table-cell\">` is exactly as much of
+   a cell. This used to need a tag->display table of its own beside the
+   cascade's answer, because the cascade never wrote the UA half; it now
+   reads the one value (see cssom.core's `ua-stylesheet-text`, and
+   node-style's own `ua` fallback for a tree that was never cascaded).
 
    `nil` for a text node or a tag with no table role, which is what both
    callers below filter on."
   [theme node]
   (when (and (map? node) (not= :text (:node/type node)))
-    (or (:display (node-style node theme))
-        (get ua-table-display (:tag node)))))
+    (:display (node-style node theme))))
 
 (defn- anonymous-row
   "The anonymous row box CSS generates around cells that are children of a
