@@ -813,7 +813,7 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
-### Round thirty-five: logical properties, and the percentage that is always of the width
+### Round thirty-six: logical properties, and the percentage that is always of the width
 
 Two gaps, fifteen cases between them, and the interesting part of both is
 *where* the fix belongs rather than what the numbers are.
@@ -963,6 +963,181 @@ site needs is its own **basis**, and there are three:
   not a content width. Resolving a percentage there would have produced a
   correct number nothing reads, so it was left out and the basis to pass
   is recorded in `percentage-box-basis`.
+
+### Round thirty-five: stacking contexts, and the difference between painting above and confining
+
+The single largest measured divergence in the corpus was one subject:
+`210` of the `418` remaining paint-order points, across nine cases, all of
+them with **every geometry box already exact**. Everything in this file
+above this round paints in document order — CSS 2.1 Appendix E's step 3 —
+which is right for most of a page and leaves out exactly the properties
+authors reach for on purpose.
+
+Result on the corpus, measured on `a49f29b` before and after: paint order
+**13971 → 14181 / 14389** (clean cases **529 → 538 / 576**), and line
+structure, geometry and computed style all **unchanged to the value**
+(540/551, 1851/1959 with 510 clean, 27514/27544 with 563 clean). Nine cases
+went red to green and **none went the other way**. Diffing `--dump-ops`
+corpus-wide names 25 cases whose op ORDER changed and exactly one whose op
+CONTENT changed (`:stacking/content-visibility-hidden-is-not-painted`,
+which gains `hit=[]` on its inner box); no case's set of boxes moved,
+which is what says this was a paint change and not a layout one.
+
+#### What was measured, and where Brave departs from a spec reading
+
+Every rule below was read out of a real headless Brave 151 over CDP before
+any of it was implemented, on two probe shapes, each in its own
+`overflow: hidden` wrapper and sampled with `document.elementFromPoint`:
+
+- **lift** — does this trigger on the EARLIER of two boxes pulled onto each
+  other by `margin-top: -60px` put it on top? 25 interior points.
+- **confine** — does this trigger on a WRAPPER stop a `z-index: 5` box
+  inside it from beating a `z-index: 2` sibling of the wrapper? 20 points.
+
+The two questions have different answers for exactly one input, and that
+one difference is the whole of the rule: **a positioned box with
+`z-index: auto` lifts but does not confine.** The engine confined in both
+shapes, so it was wrong on the first half of the pair and right by accident
+on the second.
+
+Creates a stacking context (both probes): `position: fixed | sticky` (with
+or without offsets); `position: relative | absolute` **with an integer
+`z-index`**; a flex/grid **item** with an integer `z-index`;
+`opacity < 1` (`0.999999` does, `1` does not); `transform` / `rotate` /
+`scale` / `translate`; `filter` (even `opacity(1)`); `backdrop-filter`;
+`clip-path`; `perspective`; `transform-style: preserve-3d`;
+`isolation: isolate`; `mix-blend-mode` other than `normal`;
+`contain: paint | layout | strict | content`;
+`content-visibility: auto | hidden`; `view-transition-name`;
+`will-change` naming one of those properties.
+
+Does not, each probed because a spec reading suggests it might:
+`overflow: hidden`; `contain: size`; `contain: style`;
+`will-change: z-index`; `will-change: top`; `z-index` on a `position:
+static` box.
+
+Two departures worth naming rather than arguing with:
+
+- **`container-type` creates no stacking context in Brave.** css-contain
+  gives a size container `layout` containment, and `contain: layout` DOES
+  create one here — yet `container-type: inline-size` lifted nothing on
+  the first probe and confined nothing on the second. Followed the
+  browser.
+- **`will-change: z-index` creates none either**, although a non-initial
+  `z-index` plainly creates one on a positioned box, which is the rule
+  css-will-change states. `will-change: position` does.
+
+#### The mechanism, and why it is not the obvious one
+
+A box that paints in the positioned band does not paint in its parent's op
+run — it paints in its nearest ancestor stacking CONTEXT's, which may be
+many levels up. So the ops cannot be reordered where they are produced;
+they have to travel. They travel as a marked span in the op vector itself
+(`:stack` push/pop, the same shape as the `:clip` pair already there),
+carrying no `:x`/`:y` so that `translate-ops` and `transform-ops` leave
+them alone, and the first ancestor that is a stacking context extracts
+every span it can see, sorts by level, and splices the negatives after its
+own `:node` op and the rest at the end.
+
+Riding in the op vector rather than in a new return key is what kept this
+out of `layout-flex`, `layout-grid`, `layout-table`, `layout-multicol` and
+`layout-inline-run` entirely: each of them already concatenates its
+children's `:draw`, so each already carries the spans correctly without
+knowing they exist.
+
+The extraction FLATTENS — a span found inside another span becomes its
+sibling — and that is the rule, not a convenience: a `z-index: auto`
+positioned box is not a context, so its own positioned descendants belong
+to whatever context IT belongs to. Measured through two nested wrappers.
+
+`layout-absolute-children` stopped sorting. It used to return
+`{:below :above}` split by the sign of `:z`, which was this file's whole
+stacking model; a local sort there cannot be right, because the containing
+block is not the stacking context and two boxes anchored to different
+containing blocks have to meet in a common ancestor to be compared at all.
+
+#### The splice point, measured on one declaration
+
+Appendix E's steps 1 and 2 put a negative-`z` child above its context's own
+background and below everything else in it. In this engine the element's
+own `:node` op is the proxy for its own box — it is what both real
+hit-testers and this harness read — so `after the node op` is what `above
+its own background` means here. The pair: a `z-index: -1` child of a
+`position: relative; z-index: 0` parent is answered as the CHILD at all 20
+points; drop the `z-index: 0` and the same child is answered as the
+PARENT, because it has sunk past a parent that is no longer a context and
+the parent's background is ordinary step-3 content painted over it. One
+declaration apart, opposite answers, and the splice point is the only
+thing that produces both. One unit test asserting the old, single-shape
+behaviour was wrong and now asserts the measurement, with its pair beside
+it.
+
+#### `content-visibility: hidden`
+
+The last case in the group, and not an ordering question: the element
+paints its own background and its contents paint nothing and answer
+nothing. Measured, Brave answers the `<section>` at all 25 points while
+the inner `<article>` still reports a real 800x60 box a `Range` reads
+`inner` out of — so this is not `display: none` and not a box-tree change.
+Expressed on the ops the subtree already produced, in the two channels
+that already exist for it: `:opacity 0` (what `visibility: hidden` uses)
+and `:hit []` (`not a hit-test candidate at all`).
+
+**Scope cut, stated with its cost:** real `content-visibility: hidden`
+skips the subtree's LAYOUT too — its size comes from
+`contain-intrinsic-size`, not from its contents. This engine lays the
+contents out and then declines to paint them: the right picture for the
+wrong reason, and the right numbers on all four axes here only because
+Brave reports the real inner box for this shape anyway.
+
+#### What this round does NOT implement
+
+- **Appendix E's steps 3, 4 and 5 are still one band.** A block child's
+  background and its text travel together, so in-flow INLINE content does
+  not paint above a float the way step 5 says. That was already true (see
+  round twenty-two's float comment) and is unchanged; nothing in the
+  corpus discriminates it.
+- **Positioned INLINE-level boxes are not hoisted.** The spans are created
+  in `layout-node`, and an inline box inside an inline formatting context
+  is laid out by `inline-fragments`, which does not go through it. An
+  inline-block does (it is an atomic inline and gets a real `layout-node`
+  call), and so does every block, flex item, grid item, table cell and
+  out-of-flow box.
+- **A hoisted box escapes an `overflow: hidden` ancestor's CLIP.** The
+  clip is a `clip-push`/`clip-pop` pair in the parent's own op run and the
+  span is spliced past it. Real CSS clips such a descendant when the
+  scroll container is between it and its containing block. Nothing in the
+  corpus measures a clip edge (the geometry axis reads boxes, not clips),
+  so this is a paint change scored by nothing — recorded rather than
+  fitted.
+- **`z-index` is read as an integer only.** No `calc()`, and no
+  `revert`/`unset` handling beyond what the cascade already does.
+
+#### Two harness defects this round exposed, both inert on the old engine
+
+Reordering the op stream broke two places where the harness read the op
+vector by POSITION, and both were fixed by reading identity instead. The
+proof that neither is a thumb on the scale: the whole harness change, run
+against the **unmodified** engine at `a49f29b`, reproduces the baseline
+scoreboard to the value on all four axes and produces a **byte-identical**
+`--dump-ops` dump.
+
+- `engine-boxes` took the first `:div` node op as the `#root` wrapper and
+  subtracted its origin from every box in the case, and
+  `engine-topmost-at` took the first two node ops as the two wrappers.
+  A `z-index: -1` box whose nearest context is the root is now painted
+  before every other box in the document, so it became the first `:div`
+  op — and `:stacking/negative-z-index`, whose geometry is exact on both
+  sides, came out with all four boxes shifted by −120px. Both now read
+  `wrapper-op-ids`, which finds them on the document tree by identity.
+- `cluster-lines` sorted a line's words by `:left` and let equal keys fall
+  through to arrival order, which is DOCUMENT order on the browser side
+  and PAINT order on the engine side. Six corpus cases put two words at
+  exactly x=0 on the same line on purpose, and the newly-correct paint
+  order read as `want ["a b"] got ["b a"]` on an axis that is not about
+  paint order at all. Coincident words now sort by their own text — the
+  same rule on both sides, and it can only reorder words whose positions
+  are identical, which carry no order to preserve.
 
 ### Round thirty-four: the table cluster — `caption-side`, and a cell's own declared width
 
