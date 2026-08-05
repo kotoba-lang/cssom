@@ -818,15 +818,17 @@ wider cell.
 Two gaps, fifteen cases between them, and the interesting part of both is
 *where* the fix belongs rather than what the numbers are.
 
-**Before → after, on the base commit's own corpus of 576:**
+**Before → after**, both measured on the corpus of 576 at this round's
+merge base (`dac2240`, i.e. with the stacking round already in — the two
+rounds ran concurrently, and the paint column moved under this one):
 
 | axis | before | after |
 |---|---|---|
 | line structure | 540/551 | 540/551 |
 | geometry (boxes) | 1851/1959 | **1870/1959** |
 | geometry (clean cases) | 510/576 | **524/576** |
-| paint order (points) | 13971/14389 | **13997/14389** |
-| paint order (clean cases) | 529/576 | **533/576** |
+| paint order (points) | 14181/14389 | **14207/14389** |
+| paint order (clean cases) | 538/576 | **542/576** |
 | computed style (values) | 27514/27544 | **27525/27544** |
 | computed style (clean cases) | 563/576 | **570/576** |
 | computed style (no cascade-attributed mismatch) | 565/576 | **572/576** |
