@@ -511,7 +511,9 @@ That is a deliberate stopping point, recorded rather than fitted.
   permanent failures for a reason no amount of layout work could fix.
   kotoba-lang/htmldom now keeps newlines (collapsing only space/tab runs)
   and cssom.layout collapses them for `normal`/`nowrap`, per the declared
-  property. Both modes now match the browser.
+  property. Both modes now match the browser. (Round forty-two finished
+  the sentence: the space/tab half was a CSS decision too, and the parser
+  now collapses nothing at all.)
 
 ### Round seven: floats
 
@@ -1166,6 +1168,155 @@ asserted in `<pre>` form, where they survive — 63 / 35 / 42, the browser's
 numbers exactly. Fixing it means making htmldom defer collapsing to
 layout, which changes the text every corpus case sees, and belongs in a
 round where nothing else is measuring.
+
+**That round is round forty-two, immediately below. Both paragraphs above
+are now HISTORY** — the parser defers, the three cases are green, and the
+content that discriminates `break-spaces` from `pre-wrap` was found.
+
+### Round forty-two: the parser stops collapsing whitespace
+
+Two of the four things round forty-one recorded as not-implemented, and the
+cluster it named as blocked upstream, were the same blocker: **htmldom
+collapsed runs of spaces and tabs while building text nodes**, so no
+`white-space` value that preserves whitespace could ever see the characters
+it is defined in terms of.
+
+The belief underneath it was that space collapsing is HTML-structural.
+Measured, it is not. htmldom's `conformance/ws_probe.cljs` reads text nodes
+back codepoint by codepoint with no normalisation; Brave 151, 2026-08-06:
+
+| markup | text node in the DOM |
+|---|---|
+| `<div>   a   b   </div>` | `SP SP SP a SP SP SP b SP SP SP` |
+| `<div>a⇥b</div>` | `a TAB b` |
+| `<div>\n  <p>a</p>\n</div>` | `LF SP SP` between the blocks |
+| `<table>\n<tr><td>a` | the newline stays INSIDE the table |
+| `<pre>\nx` / `<pre>\n\nx` / `<pre> \nx` | `x` / `LF x` / `SP LF x` |
+
+**The parser drops exactly one thing: the single leading newline after a
+`<pre>`/`<textarea>` start tag** (last row — one, and only when it is the
+very first character). Everything else a browser keeps and collapses at
+LAYOUT time, from CSS. htmldom now does the same, and additionally
+normalises CR/CRLF to LF on the source before tokenizing (WHATWG 13.2.3.5),
+which is where `<pre>` and raw text can be reached at all — previously a CR
+became a SPACE outside a `<pre>` and survived as a literal U+000D inside
+one.
+
+#### The equivalence is the whole safety property, and it was asserted first
+
+Deferring the collapse changes the text every case sees, so before anything
+else: **under a collapsing `white-space`, this file must lay verbatim text
+out byte-identically to the text the old parser would have handed it.**
+
+It does, and by construction rather than by luck. `layout-text` and
+`inline-tokens` both map any whitespace RUN to a single space; a run the old
+parser had already shortened is still a run, so both land on the same
+single space. `a-collapsing-white-space-lays-out-verbatim-text-identically`
+asserts it over ten shapes — runs between words, a source newline, indented
+block children, the whitespace-only text node between two inlines, leading
+and trailing runs, a tab, `nowrap`, a list and a table — by parsing each one
+twice, once as written and once with the old rule applied, and comparing
+whole draw-op vectors.
+
+Its **control is an inequality**: the same comparison under `white-space:
+pre` must DIFFER. That assertion fails at the base commit, which is what
+makes the ten equalities mean something rather than being satisfied by an
+engine that collapses everything anyway. It also caught a real defect in
+this work — a first run had cssom's `deps.edn` resolving `../dom-gpu` to a
+dom-gpu whose own `../htmldom` was the unmodified shared checkout, so the
+unit suite was scoring the old parser. The equality assertions all passed.
+Only the control noticed.
+
+#### The blast radius, per case
+
+```
+                LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
+before  564/572  2005/2032  577/597                  14885/14909  585/597     28559/28562
+after   569/576  2013/2036  585/601                  14987/15009  589/601     28615/28618
+```
+
+**Exactly four cases changed in the 597-case dump, all four in the intended
+direction, none in the other**, plus four cases added:
+
+| case | before | after | browser |
+|---|---|---|---|
+| `:text/white-space-pre-keeps-leading-spaces` | span 63 | **77** | 77 |
+| `:text/tab-in-pre-advances-to-the-next-eight-column-stop` | span 21 | **63** | 63 |
+| `:text/tab-size-four-in-pre` | span 21 | **35** | 35 |
+| `:text/white-space-break-spaces-keeps-newlines` | div 200x20 | **200x40** | 200x40 |
+
+The parser change ALONE accounts for the first three and moved nothing else
+at all — that intermediate run (htmldom changed, `src/` untouched) is the
+cleanest evidence the equivalence holds: 3 boxes, 577 → 580 clean cases,
+paint and computed style byte-identical.
+
+#### What the surviving characters then exposed in this file
+
+Two bugs, both invisible while the parser was collapsing, because a
+preserving `white-space` never actually received a run of spaces:
+
+- **`break-spaces` was not in the segment split at all.** It is the fourth
+  preserving value and it fell through to the collapsing branch, so its
+  newline was collapsed away like any other whitespace. It also missed the
+  tab-expanding set and measured `a⇥b` at 21px instead of 63.
+- **`pre-wrap` rejoined its own spaces.** `text-lines-measured` packs WORDS
+  and rejoins them with ONE space, which is correct under a collapsing
+  value and silently rewrites the text under a preserving one. `<div
+  style="width:60px;white-space:pre-wrap">aa` + six spaces + `bb</div>`
+  measured 60x20 against Brave's 60x40: the six spaces became one and
+  `aa bb` fits where the real text does not. This one was a pre-existing
+  divergence that only became REACHABLE now.
+
+Both are fixed by one function, `preserved-space-lines`, which packs ATOMS
+(a run of non-whitespace, or one whitespace character) instead of words.
+
+#### The content that discriminates `break-spaces` from `pre-wrap`
+
+Round forty-one looked for it and reported, correctly, that a 60px box
+holding `aa`, six spaces and `bb` is 60x40 under both. The reason is that a
+space run which merely ends the line it sits on **hangs** under both. They
+part company only once the spaces THEMSELVES overflow, and the cheapest
+shape that does it has nothing after them at all:
+
+| in a 60px box | `pre-wrap` | `break-spaces` |
+|---|---|---|
+| `aa` + 10 spaces | 60x20 | **60x40** |
+| `aa` + 20 spaces + `bb` | 60x40 | **60x60** |
+| `aa` + 6 spaces + `bb` | 60x40 | 60x40 |
+| `aaaa` + 6 spaces + `bbbb` | 60x40 | 60x40 |
+
+All four are now corpus cases, in pairs, because a single height cannot
+tell "the rule is implemented" from "this shape does not discriminate" —
+which is exactly the trap the previous round fell into and named.
+
+`pre-line` needed nothing: it collapses spaces and keeps newlines, and it
+was already right. Measured for completeness — a shrink-to-fit `   indented`
+is 56 under `pre-line` and `normal`, 77 under `pre`, `pre-wrap` and
+`break-spaces`; `a⇥b` is 21 under `pre-line` and `normal`, 63 under the
+other three.
+
+#### Two divergences this round measured and did NOT fix
+
+Both are pre-existing — they read the same at the base commit — and both
+are now recorded with the numbers a future round needs rather than left to
+be rediscovered.
+
+- **Collapsible whitespace at the start of a line is collapsed but not
+  REMOVED.** A shrink-to-fit `   indented` under `normal` or `pre-line` is
+  **56px** in Brave (eight characters: the leading space is gone) and 63
+  here (nine: collapsed to one, then kept). `inline-tokens` already drops a
+  line-leading space on the inline path; `layout-text` does not. Pinned at
+  `a-preserved-leading-space-run-is-in-the-measured-width`.
+- **Content HANGING past a box's edge gets a full-height hit region.** The
+  one paint point `:text/white-space-pre-wrap-hangs-a-run-of-spaces` loses,
+  and it is a general rule rather than anything to do with `pre-wrap` — a
+  `white-space: pre` control overflowing the same 60px box behaves
+  identically. Measured with `elementFromPoint` across and down the box: at
+  y=7 and y=13 the browser answers the overflowing div out to x=75, and at
+  y=1 and y=19 it answers the box behind it. The browser hit-tests the
+  overflow over the LINE's content area (~15px, centred in the 20px line);
+  this engine uses a rectangle the full height of the box.
+
 ### Round forty: three divergences, one missing capability
 
 `width: min-content | max-content | fit-content` behaving as `auto`, flex
