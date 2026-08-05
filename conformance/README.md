@@ -933,8 +933,11 @@ style 18687/18763 — and **a corpus that scores 100% can no longer find
 defects**. Seventy-one cases were added in two areas the corpus had barely
 entered: text and typography (28 of them), and selectors, specificity and
 the cascade (43). The drop below is added coverage, not a regression:
-`src/` was **not touched**, and 735 tests / 1697 assertions and the linter
-are green and unchanged either side.
+`src/` was **not touched** by this round, and 736 tests / 1702 assertions and
+the linter are green and unchanged either side (0 failures, 0 errors; 0 lint
+errors, 25 pre-existing warnings, all in `test/`). Both columns were measured
+on the SAME commit, after merging the hit-region round that landed alongside
+this one, so nothing in the table is another round's doing.
 
 | axis | 370 cases | 441 cases |
 |---|---|---|
