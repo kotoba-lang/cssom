@@ -867,14 +867,14 @@
    text op to the atomic inline whose box CONTAINS it, and the button's did
    not contain its own.
 
-   The engine-wide version of that bug is still here and is NOT fixed by
-   this: for a plain `content-box` element `inset-side` leaves the border
-   out, so a `border:2px;padding:10px` div puts its `<p>` at y=24 where
-   Brave says 26, and gives it 4px too much content width. That is one
-   change to the box model rather than one UA reading, it moves every
-   bordered box on every page, and it belongs with whoever owns
-   width/height resolution -- named here because a fieldset's inner `<p>`
-   is 4px wide of Brave for exactly that reason and no other.
+   The engine-wide version of that bug -- `inset-side` leaving the border
+   out for a plain `content-box` element, so a `border:2px;padding:10px`
+   div put its `<p>` at y=24 where Brave says 26 and gave it 4px too much
+   content width -- was named here as NOT fixed by this reading, because it
+   is one change to the box model rather than one UA reading and it moves
+   every bordered box on every page. It is fixed now (2026-08-05, see
+   inset-side). A fieldset's inner `<p>` was 4px wide of Brave for exactly
+   that reason and no other, and `:form/fieldset-and-legend` is clean.
 
    `<fieldset>` and `<legend>` are NOT in this map -- their box is em-based
    rather than constant, so it lives in `ua-em-box` next door, and the
@@ -1620,8 +1620,16 @@
      width)))
 
 (defn- content-inset
+  "inset-side's UNIFORM sibling: the distance from a border-box edge to the
+   content-box edge when every side is the same. Reads the uniform
+   `:padding` alone, so a box with per-side padding is measured against an
+   inset it does not have -- which is why layout-block, the one place that
+   needed to be right about it, reads inset-side per side instead. Kept for
+   the callers whose own axis has no per-side story yet (flex, grid, table,
+   the form controls), and for the intrinsic-width branches whose numbers
+   were fixed against it."
   [st]
-  (+ (:padding st) (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
+  (+ (:padding st) (:border-width st)))
 
 (defn- declared-inset-side
   "The part of the inset that a CONTENT-BOX `width` has to grow by: the
@@ -1636,10 +1644,41 @@
 (defn- inset-side
   "The content inset on ONE side: that side's own padding when the author
    (or the UA stylesheet) gave it one, else the uniform padding this engine
-   has always had, plus the border when box-sizing is border-box."
+   has always had, PLUS the border -- always, in both `box-sizing` modes.
+
+   `box-sizing` does not move the content edge. It decides what a DECLARED
+   `width`/`height` measures (the content box under `content-box`, the
+   border box under `border-box`), and that question belongs to
+   resolve-width / used-block-height, which answer it through
+   declared-inset-side. Where the content STARTS is border + padding in
+   from the border edge either way, which is what this function is.
+
+   Reading `box-sizing` here as well conflated the two and left the border
+   out of a content-box element's inset in both axes: a
+   `border:2px;padding:10px` div put its `<p>` at y=24 where Brave says 26
+   and gave it 4px too much content width. Measured in Brave 2026-08-05
+   (`getComputedStyle` + `getBoundingClientRect` + `clientLeft`/
+   `clientWidth`), on the shapes this reaches:
+
+     div{border:2px;padding:10px}         child at x=12, w=376/400
+     div{box-sizing:border-box;...}       child at x=12, w=176/200
+     div{border:5px;padding:4 8 12 16}    child at x=21, y=23, w=200
+     flex/grid{border:3px;padding:7px}    items at x=10, y=10
+     td{border:4px;padding:6px}           child at x=10, y=24
+     fieldset (UA 2px border)             <p> at x=12.5 of the fieldset
+
+   -- the same `border + padding` on every one of them, and `clientLeft`
+   (the browser's own border-edge-to-padding-edge distance) equal to the
+   border in all six.
+
+   NOT the same as an absolutely positioned descendant's containing block,
+   which is the PADDING box -- border alone, padding outside it. layout-
+   block computes that separately (`pad-x`/`pad-y`), and it stays separate:
+   measured, `position:relative;border:7px;padding:9px` puts a `top:0;
+   left:0` child at x=7, not x=16."
   [st side]
   (+ (or (get st (keyword (str "padding-" (name side)))) (:padding st))
-     (if (= "border-box" (:box-sizing st)) (:border-width st) 0)))
+     (:border-width st)))
 
 (defn- intrinsic-inset-x
   "The horizontal inset an intrinsic width has to put around its content:
@@ -1820,12 +1859,15 @@
    Deliberately the same subtraction layout-block itself performs
    (`inset-side` on both block edges) rather than an independently derived
    'true' content height: the basis a child resolves against and the box the
-   child is actually laid out in have to be the same number, and this file's
-   inset-side carries a known asymmetry for a content-box element with a
-   BORDER (it omits the border there, exactly as the width axis does). One
-   consistent answer is worth more here than a second, differently-wrong
-   one; the border case is what `position/absolute-containing-block-is-the-
-   padding-box` already measures, in the axis where it shows up first."
+   child is actually laid out in have to be the same number.
+
+   That used to be a choice between two wrong answers -- inset-side omitted
+   the border for a content-box element, and this preferred to be wrong the
+   same way layout-block was rather than differently right. inset-side
+   counts the border in both box-sizing modes now (2026-08-05), so the
+   consistent answer and the correct one are the same one, and
+   `position/absolute-containing-block-is-the-padding-box` -- the case that
+   measured the gap in this axis first -- is clean."
   [st basis]
   (when-let [h (used-block-height st basis)]
     (max 0 (- (clamp-height st h basis) (inset-side st :top) (inset-side st :bottom)))))
@@ -4519,10 +4561,13 @@
               ;; The inset added here is content-inset, not this fn's own
               ;; inset-x, only because that is what inline-max-content-width
               ;; used to add for itself -- kept verbatim so moving the inset
-              ;; out of that function changes no number. The two disagree
-              ;; about per-side padding and about a non-border-box border;
-              ;; reconciling them is a separate change with its own
-              ;; measurements.
+              ;; out of that function changes no number. The two used to
+              ;; disagree about per-side padding AND about a non-border-box
+              ;; border; the border half is reconciled (content-inset counts
+              ;; it in both box-sizing modes now, exactly as inset-x always
+              ;; did), and what is left is the per-side padding, on which
+              ;; content-inset reads the uniform value alone. Reconciling
+              ;; that is a separate change with its own measurements.
               (and (seq cs) (every? #(inline-flow-candidate? theme %) cs))
               (+ (inline-max-content-width theme content-w opacity inherited st cs)
                  (* 2 (content-inset st)))
@@ -5890,11 +5935,35 @@
         lead-y (if collapse? (- (nth hedge 0 0) (half (nth hedge 0 0))) spacing)
         trail-y (if collapse? (- (nth hedge n-rows* 0) (half (nth hedge n-rows* 0))) spacing)
         widths (if collapse?
-                 ;; a collapsed cell's box also carries its half of the two
-                 ;; grid lines it sits between, which the natural width
-                 ;; (content + padding, never border) does not include.
+                 ;; A collapsed cell keeps only HALF of each of the two grid
+                 ;; lines it sits between; the other half is the neighbour's
+                 ;; (or, on the outer lines, the table's -- see lead-x /
+                 ;; trail-x). The natural width measured for a cell is its
+                 ;; ordinary border box -- content, padding and its WHOLE
+                 ;; border, both sides -- so what has to come off each side
+                 ;; is the OUTER half of that grid line, the same quantity
+                 ;; lead-x/trail-x hand to the table.
+                 ;;
+                 ;; This used to ADD the inner half instead, because the
+                 ;; natural width was content + padding and never the
+                 ;; border: inset-side left the border out of every
+                 ;; content-box element, and a `<td>` is content-box. The
+                 ;; two forms agree exactly whenever a cell's own border is
+                 ;; the one that wins its grid lines, which is the same
+                 ;; approximation the scope-cut above already names -- this
+                 ;; engine has one uniform border width per box, so a cell
+                 ;; beaten on an edge by a thicker neighbour still paints
+                 ;; its own. Measured in Brave on `:table/border-collapse`
+                 ;; (two `border:2px` cells holding `a` and `b`): table
+                 ;; 24x26, cells 11x24 at x=1 and x=12 -- which is what this
+                 ;; produces, and what adding the inner half to a natural
+                 ;; width that now carries the border turned into 32x26
+                 ;; with 15px cells.
                  (vec (map-indexed (fn [c cw]
-                                     (+ cw (half (nth vedge c 0)) (half (nth vedge (inc c) 0))))
+                                     (let [outer (fn [v] (- v (half v)))]
+                                       (- cw
+                                          (outer (nth vedge c 0))
+                                          (outer (nth vedge (inc c) 0)))))
                                    widths))
                  widths)
         n-cols (count widths)
@@ -8577,12 +8646,18 @@
         ;; whose UA block padding differs from its inline padding -- only
         ;; <select> today, see ua-control-box -- gets both right; for every
         ;; other control inset-side reduces to the same uniform value.
+        ;;
+        ;; The border used to be added HERE, under a `box-sizing` test,
+        ;; because inset-side only carried it for a border-box box. It now
+        ;; carries it in both modes (see inset-side), so adding it again
+        ;; would charge a `<button>` -- the one control the UA gives
+        ;; `border-box` -- four extra pixels of height. The two branches of
+        ;; that old test summed to the same number, which is why removing
+        ;; it changes no control: content-box got padding*2 + border*2 from
+        ;; the two terms, border-box got the same from inset-side alone.
         h (clamp-height st (or (resolve-height st)
                                (+ control-line-height
-                                  (inset-side st :top) (inset-side st :bottom)
-                                  (if (= "border-box" (:box-sizing st))
-                                    0
-                                    (* 2 (:border-width st))))))
+                                  (inset-side st :top) (inset-side st :bottom))))
         value (attr node :value)
         checked (truthy-attr? (attr node :checked))
         input-type (str/lower-case (str (or (attr node :type) "text")))
@@ -8910,13 +8985,12 @@
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
         ;; sits outside the content box in both axes. Without it every
-        ;; bordered block came out two borders short.
-        node-h (clamp-height st (or explicit-h
-                                    (+ h inset-t inset-b
-                                       (if (= "border-box" (:box-sizing st))
-                                         0
-                                         (* 2 (:border-width st)))))
-                             cb-h)
+        ;; bordered block came out two borders short. The border arrives
+        ;; through inset-t/inset-b now (see inset-side), in BOTH box-sizing
+        ;; modes -- it used to be a separate `box-sizing`-gated term here,
+        ;; whose two branches summed to the same number and which would now
+        ;; charge every bordered block for its border twice.
+        node-h (clamp-height st (or explicit-h (+ h inset-t inset-b)) cb-h)
         node-w w
         content-h (max 0 (- node-h (* 2 inset)))
         ;; An absolutely positioned descendant resolves against this box's
@@ -8953,6 +9027,22 @@
                           :opacity opacity}
                          (style-passthrough st))]
         clip? (and (:overflow st) (not= "visible" (:overflow st)))
+        ;; Scope cut, measured 2026-08-05 and deliberately left: this clips
+        ;; at the BORDER box, and a browser clips at the PADDING box -- the
+        ;; border box inset by the border, with the padding INSIDE the
+        ;; clip. Measured in Brave, `div{width:100px;height:40px;
+        ;; overflow:hidden;border:6px;padding:5px}` has a 122x62 border box
+        ;; and reports `clientWidth`/`clientHeight` 110x50, i.e. a scrollport
+        ;; exactly one border in on each side. So an overflowing child is
+        ;; painted 6px too far under the border here.
+        ;;
+        ;; Not folded into the inset-side change that landed with this
+        ;; comment, even though it is the same border: the content inset
+        ;; moves where children are LAID OUT and this moves what is
+        ;; PAINTED, they are separate op streams, and nothing in the corpus
+        ;; measures a clip edge (the geometry axis reads boxes, not clips,
+        ;; and both sides report the same 122x62 border box for the shape
+        ;; above). Changing it would be a paint change scored by nothing.
         clip-push (when clip? [{:draw/op :clip :clip/op :push :node/id (:node/id node)
                                 :x x :y y :w node-w :h node-h}])
         clip-pop (when clip? [{:draw/op :clip :clip/op :pop :node/id (:node/id node)
@@ -8965,9 +9055,7 @@
      ;; height was not content-driven after all -- an explicit or clamped
      ;; height re-fixes the bottom edge, so nothing crosses it.
      :margin/collapsed-top collapsed-top
-     :margin/collapsed-bottom (if (= node-h (+ h inset-t inset-b
-                                               (if (= "border-box" (:box-sizing st))
-                                                 0 (* 2 (:border-width st)))))
+     :margin/collapsed-bottom (if (= node-h (+ h inset-t inset-b))
                                 collapsed-bottom
                                 0)
      ;; A float this box did not contain keeps rising: handed to the
