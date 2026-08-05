@@ -255,6 +255,24 @@
                     fallback)
     :else fallback))
 
+(defn- parse-px
+  "A CSS length in px with its FRACTION kept -- `parse-int`'s regex stops at
+   the decimal point, which is right for a border-width and wrong for a
+   font size.
+
+   It exists because a real UA control font is 13.3333px (see
+   ua-control-font), not 13: every `parse-int` on the way from node-style to
+   a measurement truncated that third of a pixel, and the truncation was
+   load-bearing in a pair of cancelling errors this file used to carry.
+   Numbers pass through unchanged, so an integer size stays an integer and
+   nothing downstream sees a new type it did not already get from a
+   fractional width."
+  [x fallback]
+  (cond
+    (number? x) x
+    (string? x) (if-let [m (re-find #"-?\d+(?:\.\d+)?" x)] (parse-dbl m fallback) fallback)
+    :else fallback))
+
 (defn- attr [node k] (get-in node [:attrs k]))
 (defn- style [node k] (get-in node [:attrs (keyword "style" (name k))]))
 
@@ -1098,7 +1116,7 @@
 
 (def ^:private ua-control-font
   "Form controls do NOT inherit the page font. Every browser's UA
-   stylesheet gives them their own -- measured directly in Chrome on this
+   stylesheet gives them their own -- measured directly in Brave on this
    platform, an `<input>` inside a `font-family: monospace; font-size: 14px`
    container computes to `Arial 13.3333px` regardless -- which is why this
    engine's controls came out ~7px narrower than the browser's however
@@ -1108,66 +1126,54 @@
    it is the platform default, not a guess, and a host that measures text
    (see draw-ops' `:measure-text`) needs a family it can actually measure.
 
-   The size is the browser's 13.3333 TRUNCATED to 13, and that 0.33px is
-   load-bearing in a way worth writing down, because it is the only reason
-   any control box still disagrees with the browser. Measured 2026-08-04:
+   The size is the browser's own 13.3333, and it was 13 -- the same number
+   TRUNCATED -- from 2026-08-04 to 2026-08-05, deliberately and with the
+   reason written down. That third of a pixel was one half of a pair of
+   cancelling errors: it made the `0` glyph this file measured a control
+   with come out 7.2364 instead of 7.4135, which happened to sit close to
+   the font's real AVERAGE advance of 7. Charging 20 characters of it gave
+   152.7 against the browser's 153. Raising the size without an
+   average-advance hook would have made inputs worse (156.3 against 153) and
+   leaving it truncated left long control text ~2.5% narrow, so three
+   agents in a row correctly moved neither half.
 
-   - Chrome sizes a text `<input>` at `7 * size + 5` px of content in this
-     face -- exactly 7 per character across size=1/2/5/10/20/40 (12, 19,
-     40, 75, 145, 285), i.e. the font's OS/2 average advance plus one
-     `maxCharWidth - avgCharWidth` slack. This engine has no average-advance
-     hook: `:measure-text` measures a STRING, and the closest proxy it can
-     ask for is the `0` glyph, which is 7.4219 at 13.3333. Charged at 13
-     that proxy becomes 7.2364, and `20 * 7.2364 + 8` is 152.7 against the
-     browser's 153 -- the two errors cancel almost exactly at the default
-     size=20, and diverge at other sizes (size=40 gives 297.5 against 293).
-   - So raising the size to the true 13.3333 WITHOUT an average-advance
-     hook makes inputs worse (156.3 against 153), while leaving it at 13
-     leaves long control text ~2.5% narrow -- which is why
-     `:form/select-with-long-option` still reports a 24-character option
-     label as 156px against the browser's 160.
+   Both halves moved on 2026-08-05, because the metric turned out to be
+   measurable rather than merely nameable. See avg-advance and max-advance
+   for the two laws and the 3,080 observations behind them; what matters
+   here is that the size is no longer carrying anyone else's error, so it is
+   the browser's own number.
 
-   Fixing that honestly needs the font's average advance, i.e. a new host
-   hook alongside `:measure-text`/`:font-metrics`, and a re-derivation of
-   the `size`-based input width against it. Deliberately NOT faked here by
-   scaling the `0` advance by a fudge factor: that would fit these two
-   measurements and mislead the next one.
+   A note for whoever changes this next, because it was the previous
+   attempt's dead end. Blink's `avgCharWidth` is NOT a mean over an advance
+   table. A hook fed from the mean of the ASCII advances tracks it to ~0.3%
+   at 13.3333px -- 7.02 against 7.0 -- and is 5.4% out at 26.6666px and
+   40px, i.e. right at exactly the size the corpus uses and 22px wrong on a
+   20-column textarea at 40px. The mean is a coincidence at one size; the
+   `x` advance is the metric (avg-advance).
 
-   2026-08-05, measured, on whether that hook can be BUILT from what a host
-   like the conformance harness actually has -- a per-character advance
-   table. It cannot, and the reason is worth writing down so the next
-   attempt does not spend the afternoon finding it again.
+   The FAMILY is not the same for every control, which is what
+   ua-control-font-family next door is for."
+  {:family "Arial" :size 13.3333})
 
-   Blink's `avgCharWidth` is the FONT's own OS/2 summary metric, not a mean
-   over any set of glyphs, and at small sizes it is a hinted whole number.
-   Measured in Brave via `<textarea cols=N>` (whose intrinsic width is
-   exactly `ceil(avg * cols)` plus a constant gutter, so it reads the metric
-   off directly) at three sizes and six families:
+(def ^:private ua-control-font-family
+  "The controls whose UA family is not ua-control-font's Arial.
 
-     face        13.3333px   26.6666px   40px    mean of the ASCII table
-     Arial          7.0        13.33     20.0      7.02 / 14.05 / 21.08
-     Georgia        7.0        13.47     20.21     7.33 / 14.66 / 22.00
-     monospace      7.0        13.33     20.0      6.67 / 13.33 / 20.00
-     Verdana        8.0        16.0      24.0      8.20 / 16.40 / 24.61
-     Courier        8.0        16.0      24.0      8.00 / 16.00 / 24.00
+   Exactly one of them is: measured with `getComputedStyle` in Brave on
+   2026-08-05, a `<textarea>` reports `13.3333px monospace` on the same
+   page where an `<input>`, a `<button>` and a `<select>` all report
+   `13.3333px Arial`. It is a real UA rule, not a platform accident --
+   HTML's rendering section says a textarea's font is monospace.
 
-   The table mean tracks the real metric to ~0.3% at 13.3333px for the
-   control face -- 7.02 against 7.0 -- and to 5.4% at 26.6666 and 40px,
-   because at 13.3333 the font's true 0.5-em advance (6.67) is HINTED UP to
-   a whole 7 and the mean happens to sit in the same place. A hook fed from
-   the table would therefore be right at exactly the size the corpus uses
-   and 22px wrong on a 20-column textarea at 40px. That is the trap the
-   paragraph above names, reached by a different road.
-
-   So the pair stays. What is left of it, measured after the textarea's own
-   two structural bugs were fixed (see atomic-intrinsic-width): the `0`
-   proxy is 7.23 where Brave's average is 7.0, which over 20 columns is the
-   whole of `:form/textarea-in-sentence`'s remaining 5px. Closing it needs a
-   real font's `xAvgCharWidth` AND its `maxCharWidth` (an `<input size=n>`
-   is `ceil(avg * n) + round(max) - avg`, measured: 12 and 145 of content
-   for n=1 and n=20 in this face, i.e. avg 7 and max 12), from a host that
-   has font tables rather than an advance table. Both halves, or neither."
-  {:family "Arial" :size 13})
+   It costs nothing on a textarea's WIDTH, which is why it could be
+   ignored until now: both faces' `x` advance rounds to the same 7 at
+   13.3333px (see avg-advance), so `cols` characters is the same number
+   either way. What it costs is the ROW HEIGHT, and a textarea is the one
+   control with more than one row. Measured, monospace at 13.3333px is
+   ascent 11 / descent 3 -- a 14px row -- where Arial at the same size is
+   12 / 3, a 15px row, and `<textarea rows=3>` multiplies the difference
+   by three. Reported as Arial, `:form/textarea-with-rows` came out 3px
+   tall against Brave; reported as its own face it agrees."
+  {:textarea "monospace"})
 
 (def ^:private ua-control-box
   "UA padding and border for form controls, read straight off
@@ -1738,7 +1744,9 @@
                   (when-let [scale (get ua-font-scale (:tag node))]
                     (long (* scale (:font-size theme)))))
    :font-family (or (style node :font-family)
-                    (when (contains? form-control-tags (:tag node)) (:family ua-control-font)))
+                    (when (contains? form-control-tags (:tag node))
+                      (or (get ua-control-font-family (:tag node))
+                          (:family ua-control-font))))
    :line-height (or (style node :line-height)
                     ;; A control's UA `font:` shorthand resets line-height to
                     ;; NORMAL, so an inherited page line-height never applies
@@ -1756,7 +1764,9 @@
                             (font-metrics theme fs
                                           (style node :font-weight)
                                           (style node :font-style)
-                                          (or (style node :font-family) (:family ua-control-font)))]
+                                          (or (style node :font-family)
+                                              (get ua-control-font-family (:tag node))
+                                              (:family ua-control-font)))]
                         (+ ascent descent))))
    :font-weight (or (style node :font-weight) (get ua-font-weight (:tag node)))
    :font-style (or (style node :font-style) (get ua-font-style (:tag node)))
@@ -5132,7 +5142,7 @@
    affect measured width), so an item with its own font-size/font-weight
    override still measures against the right metrics."
   [theme opacity inherited st text]
-  (let [font-size (parse-int (:font-size st) (:font-size inherited))
+  (let [font-size (parse-px (:font-size st) (:font-size inherited))
         text-inherited (assoc inherited
                               :color (or (:color st) (:color inherited))
                               :font-size font-size
@@ -5257,7 +5267,7 @@
 
 (declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited
          inline-max-content-width block-max-content-width intrinsic-flow-children
-         font-metrics measure-child)
+         font-metrics avg-advance max-advance measure-child)
 
 (defn- atomic-intrinsic-width
   "The available width an atomic inline is laid out at — its intrinsic
@@ -5286,7 +5296,7 @@
    fills its container, which is what a browser does too."
   [theme content-w opacity inherited child st]
   (let [tag (:tag child)
-        font-size (parse-int (:font-size st) (:font-size theme))
+        font-size (parse-px (:font-size st) (:font-size theme))
         measure-text (:measure-text theme)
         ;; Use the host's real measurement when it has one -- a control's
         ;; width is `size` characters of ITS OWN font (see ua-control-font),
@@ -5296,6 +5306,17 @@
         char-w (if measure-text
                  (measure-text "0" font-size (:font-weight st) (:font-style st) (:font-family st))
                  (long (* 0.6 font-size)))
+        ;; ...and the two metrics a FORM CONTROL is actually sized from,
+        ;; which no amount of string measurement produces. See avg-advance
+        ;; and max-advance: `char-w` above is the fallback for both, so a
+        ;; host with neither hook keeps exactly the widths it had.
+        avg-w (avg-advance theme font-size (:font-weight st) (:font-style st)
+                           (:font-family st) char-w)
+        max-w (max-advance theme font-size (:font-weight st) (:font-style st)
+                           (:font-family st) avg-w)
+        ;; one glyph's worth of slack, the difference between the widest
+        ;; character the font can draw and an average one
+        advance-slack (max 0 (- max-w avg-w))
         ;; the intrinsic size is a BORDER box, and the HORIZONTAL padding
         ;; is what matters for a width -- a <button>'s UA padding is 6px at
         ;; the sides and 1px top/bottom, so charging the uniform value left
@@ -5330,7 +5351,18 @@
           (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
             (if (contains? #{"checkbox" "radio"} input-type)
               13
-              (+ (* char-w (parse-int (get-in child [:attrs :size]) inline-atomic-default-input-chars))
+              ;; `size` AVERAGE characters plus one glyph's worth of slack,
+              ;; rounded up once at the end -- Blink's own formula, measured
+              ;; against 1,540 `<input size=n>` widths (see avg-advance and
+              ;; max-advance). The slack is why an `<input size=1>` is 12px
+              ;; of content in the control face where one average character
+              ;; is 7, and why charging `avg * n` alone would have made every
+              ;; input 5px narrow at exactly the moment the average stopped
+              ;; being 6% too wide.
+              (+ (long (Math/ceil
+                        (+ (* avg-w (parse-int (get-in child [:attrs :size])
+                                               inline-atomic-default-input-chars))
+                           advance-slack)))
                  inset-x)))
 
           ;; A `<textarea>` is `cols` characters (HTML's own attribute, and
@@ -5342,15 +5374,16 @@
           ;; ignored outright and every textarea was 20 characters), and it
           ;; reserved nothing for the scrollbar.
           ;;
-          ;; `char-w` is still the `0`-glyph proxy for the font's average
-          ;; advance, and it is still ~0.23px/char too wide at the control
-          ;; size this engine charges -- see ua-control-font, which explains
-          ;; why that error is load-bearing and why HALF of it cannot be
-          ;; fixed. Over 20 columns that is 4.6px, and it is what is left of
-          ;; this case's deficit once the gutter is reserved. Deliberately
-          ;; not absorbed into the gutter: the gutter is 16 in every family
-          ;; and at every size, and bending it to 11.4 to close one case
-          ;; would make every other textarea wrong.
+          ;; `cols` AVERAGE characters, not `cols` of the `0` glyph: the
+          ;; proxy was 7.23 where the control face's average is 7, which
+          ;; over 20 columns was the whole of `:form/textarea-in-sentence`'s
+          ;; remaining 5px deficit. See avg-advance -- and note there is no
+          ;; max-advance slack here, which is measured too: a
+          ;; `<textarea cols=n>` is exactly `ceil(avg * n)` plus the gutter,
+          ;; where an `<input size=n>` carries one glyph's worth on top.
+          ;; The gutter is deliberately NOT where this was absorbed: it is
+          ;; 16 in every family and at every size, and bending it to 11.4
+          ;; to close one case would have made every other textarea wrong.
           ;; `long` around the ceil for the reason leading-ascent spells
           ;; out: this number becomes a `:w` a host paints with and a test
           ;; compares, and a 162.0 where every other control says 162 is a
@@ -5358,7 +5391,7 @@
           ;; branch above hands back a bare double; that is pre-existing
           ;; and not this change's to move.)
           (= :textarea tag)
-          (+ (long (Math/ceil (* char-w (textarea-cols child))))
+          (+ (long (Math/ceil (* avg-w (textarea-cols child))))
              (if (textarea-reserves-gutter? st) textarea-scrollbar-gutter 0)
              inset-x)
 
@@ -5749,7 +5782,7 @@
              (nil? (:min-width st))
              (overflow-visible? st))
     (let [measure-text (:measure-text theme)
-          fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
+          fs (parse-px (:font-size st) (:font-size inherited (:font-size theme)))
           words (->> (tree-seq map? :children child)
                      (keep real-text-child)
                      (mapcat #(str/split (str %) #"\s+"))
@@ -5853,7 +5886,7 @@
    its font's first-line baseline here, which for the common case (an
    empty or single-line box) is the same place."
   [theme inherited st]
-  (let [fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
+  (let [fs (parse-px (:font-size st) (:font-size inherited (:font-size theme)))
         {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                (:font-style st) (:font-family st))
         lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)
@@ -6815,7 +6848,7 @@
         caption-w (if caption
                     (let [measure-text (:measure-text theme)
                           cst (node-style caption theme)
-                          fs (parse-int (:font-size cst) (:font-size theme))
+                          fs (parse-px (:font-size cst) (:font-size theme))
                           words (->> (:children caption)
                                      (keep real-text-child)
                                      (mapcat #(str/split (str %) #"\s+"))
@@ -7798,16 +7831,18 @@
    in inline-line-metrics, in the second pass this map cannot express -- see
    line-edge-aligned, which is the set of values that get that treatment.
 
-   `middle` is still unmodelled and still falls back to the baseline. It
-   needs one metric this engine does not have: the PARENT font's x-height,
-   against which `middle` centres the box (`baseline + x-height/2`).
-   Measured in Brave, a 14px monospace parent puts that half-x-height at
-   3.171875px, i.e. an x-height of 6.34375 -- but `font-metrics` reports
-   only ascent and descent, so there is nowhere honest to read it from, and
-   charging a fixed em fraction would fit this one face and mislead the
-   next. `text-top`/`text-bottom` are absent for a related reason: they
-   align against the parent's CONTENT AREA rather than the line box, which
-   this function's callers do not track per owner."
+   `middle` is not here either, and for a third reason: it is not a
+   fraction of the parent's font size, it is the box's own midpoint placed
+   against the parent's half-x-height, so it needs the box's metrics as
+   well. It is resolved in inline-fragments, which has both -- see the
+   middle-shift branch there for the measured law and for what an absent
+   x-height falls back to. `font-metrics` grew an `:x-height` on 2026-08-05
+   to make that possible; before then there was nowhere honest to read the
+   metric from at all.
+
+   `text-top`/`text-bottom` are absent for a related reason: they align
+   against the parent's CONTENT AREA rather than the line box, which this
+   function's callers do not track per owner."
   {"super" 0.404 "sub" -0.271})
 
 (def ^:private line-edge-aligned
@@ -7831,7 +7866,7 @@
    it is laid out as a block row (layout-node) or as a fragment inside a
    line box (inline-fragments)."
   [inherited st]
-  (let [font-size (parse-int (:font-size st) (:font-size inherited))]
+  (let [font-size (parse-px (:font-size st) (:font-size inherited))]
     (assoc inherited
            :color (or (:color st) (:color inherited))
            :font-size font-size
@@ -7954,8 +7989,36 @@
                          ;; <input> as exactly the input's height (21px),
                          ;; where treating the bottom edge as the baseline
                          ;; adds the strut's descent under it and gives 27.
+                         ;; the PARENT's x-height, which is what
+                         ;; `vertical-align: middle` centres against (see
+                         ;; the first branch below). `inherited` is the
+                         ;; parent's text context here -- an atomic is a
+                         ;; leaf, so nothing has replaced it yet.
+                         parent-x-height
+                         (:x-height (font-metrics theme (:font-size inherited)
+                                                  (:font-weight inherited)
+                                                  (:font-style inherited)
+                                                  (:font-family inherited)))
                          baseline-offset
                          (cond
+                           ;; `vertical-align: middle` overrides every rule
+                           ;; below it, because it does not ask where the
+                           ;; box's own baseline is at all: it puts the
+                           ;; box's vertical MIDPOINT half an x-height above
+                           ;; the parent's baseline, so the box's baseline
+                           ;; offset is `h/2 + x-height/2` whatever is
+                           ;; inside it. Same law as the inline-box branch
+                           ;; further down (see the middle-shift there),
+                           ;; with `h/2` standing in for the midpoint of a
+                           ;; line-height box, and measured the same way:
+                           ;; in Brave at the harness frame, a 20px
+                           ;; inline-block reports `top: 0.828125` on a
+                           ;; 20.828125px line and a 30px `<img>` puts the
+                           ;; text beside it at 6.171875 -- both exactly
+                           ;; `h/2 + 3.171875` above the baseline.
+                           (and (= "middle" (:vertical-align st)) parent-x-height)
+                           (+ (/ h 2) (/ parent-x-height 2))
+
                            (= :img (:tag child))
                            ;; a REPLACED box sits ON the baseline
                            h
@@ -8021,7 +8084,7 @@
                            ;; the bottom edge as the baseline stacks the
                            ;; strut's descent underneath and gives 36 and
                            ;; 27.
-                           (let [fs (parse-int (:font-size st) (:font-size inherited))
+                           (let [fs (parse-px (:font-size st) (:font-size inherited))
                                  {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                                         (:font-style st) (:font-family st))
                                  lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)]
@@ -8081,6 +8144,15 @@
                                ;; size made the line box 1.5px short and put
                                ;; the subscript ~2.5px high.
                                parent-fs (:font-size inherited)
+                               ;; ...and the parent's X-HEIGHT, read the same
+                               ;; way and for the same reason: `middle`
+                               ;; centres a box on the PARENT's half-x-height
+                               ;; (see the middle-shift branch below).
+                               parent-x-height
+                               (:x-height (font-metrics theme parent-fs
+                                                        (:font-weight inherited)
+                                                        (:font-style inherited)
+                                                        (:font-family inherited)))
                                inherited (inline-inherited inherited st)
                                ;; a `vertical-align` on an inline box moves
                                ;; that box AND everything inside it
@@ -8088,6 +8160,54 @@
                                            (assoc inherited :vertical-align/shift
                                                   (* f parent-fs))
                                            inherited)
+                               ;; `middle` is not a fraction of anything, so
+                               ;; it cannot live in vertical-align-shift: it
+                               ;; puts the box's own vertical MIDPOINT on
+                               ;; `baseline - x-height/2`, which needs the
+                               ;; box's own metrics as well as the parent's.
+                               ;;
+                               ;; Measured in Brave 151 on 2026-08-05 across
+                               ;; 60 parent/child font-size and line-height
+                               ;; combinations, every unconfounded one exact
+                               ;; to LayoutUnit's own 1/64:
+                               ;;
+                               ;;   raise = x-height/2 + line-height/2
+                               ;;           - leading-ascent(a, d, line-height)
+                               ;;
+                               ;; -- i.e. the midpoint of the box CSS 2.1
+                               ;; gives an inline box (`line-height` tall,
+                               ;; `leading-ascent` of it above the baseline),
+                               ;; not the midpoint of the font's content
+                               ;; area. The two differ whenever a declared
+                               ;; line-height is not the font's own: measured,
+                               ;; a 14px child at `line-height: 10px` sits
+                               ;; 0.5px higher than the same child at
+                               ;; `normal`, and it is leading-ascent's FLOOR
+                               ;; that puts it there (half-leading -2.5
+                               ;; floors to -3 while `lh/2` does not).
+                               ;;
+                               ;; Gated on the host reporting an x-height at
+                               ;; all: without one there is nothing honest to
+                               ;; centre against, and `middle` keeps the
+                               ;; documented baseline fallback it has always
+                               ;; had rather than getting an invented em
+                               ;; fraction. Measured, the fraction is not a
+                               ;; constant to invent -- x-height is 0.453em
+                               ;; in this platform's monospace, 0.5186em in
+                               ;; Arial, 0.4816em in Georgia and 0.545em in
+                               ;; Verdana.
+                               inherited
+                               (if (and (= "middle" (:vertical-align st)) parent-x-height)
+                                 (let [fs (:font-size inherited)
+                                       lh (or (:line-height inherited) fs)
+                                       {:keys [ascent descent]}
+                                       (font-metrics theme fs (:font-weight inherited)
+                                                     (:font-style inherited)
+                                                     (:font-family inherited))]
+                                   (assoc inherited :vertical-align/shift
+                                          (+ (/ parent-x-height 2)
+                                             (- (/ lh 2) (leading-ascent ascent descent lh)))))
+                                 inherited)
                                ;; ...and a `top`/`bottom` box carries a MODE
                                ;; instead of a shift, because the shift it
                                ;; needs is not known until the line box is
@@ -8357,11 +8477,111 @@
    Chrome, 14px monospace is ascent 12 / descent 3 (content 15, not 16.8),
    its BOLD face is 14 / 4 (content 18), and 24px is 21 / 5 (content 26).
    Those are the numbers that decide how tall a line is and where each
-   inline box sits inside it."
+   inline box sits inside it.
+
+   A host MAY also report an `:x-height`, and one thing needs it:
+   `vertical-align: middle` centres a box on `baseline - x-height/2` (see
+   inline-fragments). It is optional rather than required because it is
+   optional for a host too -- a browser reads it off a canvas as the ink
+   top of a lowercase `x` (measured, 14px monospace is 6.34375, and reading
+   the same number back off a real `middle` box agrees to 1/64px), but a
+   host with only vertical extents has no way to produce it. There is no
+   default: `middle` keeps its baseline fallback rather than being handed
+   an em fraction, because measured across four families the fraction
+   ranges 0.453em to 0.545em and no single one of them is right."
   [theme font-size weight style family]
   (let [fs (or font-size (:font-size theme) 14)]
     (or (when-let [f (:font-metrics theme)] (f fs weight style family))
         {:ascent fs :descent (long (* 0.2 fs))})))
+
+(defn- avg-advance
+  "The font's AVERAGE character advance, from the host's optional
+   `:avg-advance` theme hook -- the third member of the `:measure-text` /
+   `:font-metrics` family, and the same bargain as both: a host that has
+   the font can answer, a host that does not gets the documented fallback
+   the caller already had.
+
+   It exists because a form control's intrinsic width is `size` (or `cols`)
+   of THIS metric and nothing else, and no amount of string measurement
+   produces it: `:measure-text` measures a string, and the closest proxy
+   this file could ask for was the `0` glyph, which is 6% too wide in the
+   control face (see ua-control-font for the pair of cancelling errors that
+   proxy used to be half of).
+
+   What it actually is, measured in Brave 151 on 2026-08-05 over 10
+   families x 11 sizes x 14 column counts (1,540 `<textarea cols=n>` widths,
+   whose intrinsic width is exactly `ceil(avg * cols)` plus a constant
+   gutter, so each one reads the metric off directly):
+
+     avg = max(w, round(w))   where w is the `x` glyph's advance
+
+   -- i.e. the `x` advance, rounded UP to a whole pixel when its fraction
+   is over a half and left alone when it is under. All 1,540 predictions
+   were exact. The rounding is half-UP, not half-to-even, and there is a
+   witness: Zapfino at 20px has an `x` advance of exactly 12.5 and its
+   controls are sized from 13. It is not the mean of an advance table (that is 5.4% out at
+   26.6666px, see ua-control-font), it is not the `0` advance, and it is not
+   a fixed em fraction: measured, `x` is 0.5em in Arial, 0.5918em in
+   Verdana, 0.536em in this platform's `sans-serif` and 0.5049em in Georgia.
+
+   There is a second path, and it is keyed on the FAMILY NAME rather than
+   on anything measurable about the font: Blink keeps a list of families
+   whose summary metric it distrusts, and for those an `<input>`/
+   `<textarea>` is sized from the `0` advance with no max-advance slack at
+   all. Measured by the same method on 2026-08-05, fifteen families on
+   this platform take that path -- American Typewriter, Arial Hebrew,
+   Chalkboard, Cochin, Courier, Euphemia UCAS, Geneva, Gill Sans,
+   Helvetica, Hoefler Text, Lucida Grande, Marker Felt, Monaco, Osaka and
+   Times -- while Skia, Thonburi and Zapfino, which older copies of that
+   list also name, do NOT. `Arial` and `Helvetica` are the sharpest
+   demonstration that it is the NAME: their canvas metrics are identical
+   here to the last bit, and their controls are 6% different widths.
+
+   That is the HOST's business, not this file's: the hook answers for
+   whatever family it is handed, and this note is here so the host has
+   somewhere to read the list off.
+
+   `fallback` is what the caller measured for itself, so a host with no
+   hook keeps its own answer byte for byte."
+  [theme font-size weight style family fallback]
+  (or (when-let [f (:avg-advance theme)] (f font-size weight style family))
+      fallback))
+
+(defn- max-advance
+  "The font's MAXIMUM character width, from the host's optional
+   `:max-advance` theme hook.
+
+   Only an `<input size=n>` needs it, and it needs it because Blink's
+   intrinsic width for one is `ceil(avg * n + (max - avg))` -- `n` average
+   characters plus one glyph's worth of slack, which is why an
+   `<input size=1>` is 12px of content in the control face where one average
+   character is 7.
+
+   Measured the same way and on the same day as avg-advance, over the 1,540
+   `<input size=n>` widths beside the textareas: this quantity is the
+   font's ASCENT, exactly. Not a max over any advance table (in Arial the
+   widest ASCII glyph is 1.015em where this is 0.9em), not a per-family em
+   ratio (no single ratio reproduces it across sizes for monospace, Arial,
+   Times New Roman, sans-serif or serif), and not otherwise derivable from
+   glyph measurement -- but a host that can answer `:font-metrics` already
+   has it, because it IS `:font-metrics`' ascent. Blink says so out loud:
+   `SimpleFontData::PlatformInit` falls back to `-fAscent` when the
+   platform's font tables carry no max-char-width, and macOS is a platform
+   that carries none.
+
+   The blocklisted families avg-advance names get no slack at all here
+   (measured: an `<input size=n>` in Helvetica or Courier is exactly
+   `ceil(avg * n)`), which is Blink refusing to trust that font's metrics
+   twice over rather than a separate rule.
+
+   With all 1,540 input widths and all 1,540 textarea widths, the two hooks
+   together predicted 3,080 of 3,080 exactly.
+
+   The fallback is `avg` -- no slack -- because that is what this file
+   charged before the hook existed."
+  [theme font-size weight style family fallback]
+  (or (when-let [f (:max-advance theme)] (f font-size weight style family))
+      fallback))
 
 (defn- inline-line-metrics
   "One line box's own height and baseline offset, built the way real CSS
@@ -8699,7 +8919,7 @@
                    (reduce
                     (fn [[rects face] owner]
                       (let [ost (:st owner)
-                            face {:fs (parse-int (:font-size ost) (:fs face))
+                            face {:fs (parse-px (:font-size ost) (:fs face))
                                   :weight (or (:font-weight ost) (:weight face))
                                   :style (or (:font-style ost) (:style face))
                                   :family (or (:font-family ost) (:family face))}
@@ -9834,7 +10054,7 @@
   (let [tag (:tag node)
         w (resolve-width st avail-width)
         inset (content-inset st)
-        control-font-size (parse-int (:font-size st) (:font-size theme))
+        control-font-size (parse-px (:font-size st) (:font-size theme))
         ;; A control's content box is `rows` LINE BOXES of its own font at
         ;; its own `line-height: normal` -- i.e. `rows * (ascent + descent)`
         ;; -- and NOT the page's line-height, which the control's UA `font:`
@@ -10757,7 +10977,7 @@
      (generated-node? node)
      (let [gstyle (:generated/style node)
            color (or (:color gstyle) (:color inherited))
-           font-size (parse-int (:font-size gstyle) (:font-size inherited))
+           font-size (parse-px (:font-size gstyle) (:font-size inherited))
            line-height (resolve-line-height (:line-height gstyle) font-size
                                             (or (inherited-line-height inherited font-size) (:line-height theme)))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
@@ -10815,7 +11035,7 @@
                opacity (* opacity (:opacity st)
                           (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
                color (or (:color st) (:color inherited))
-               font-size (parse-int (:font-size st) (:font-size inherited))
+               font-size (parse-px (:font-size st) (:font-size inherited))
                line-height (resolve-line-height (:line-height st) font-size
                                                 (or (inherited-line-height inherited font-size)
                                                     (:line-height theme))
@@ -11025,6 +11245,29 @@
    `opts` map -- can supply `:measure-text` to make this engine's
    word-wrap decisions agree with how the text will actually be painted,
    with no other call-site changes needed anywhere in that chain.
+
+   Three more OPTIONAL font hooks sit beside it, all the same bargain --
+   absent means this file keeps the answer it always had, present means a
+   host that can see the font supplies a fact this engine cannot derive:
+
+   - `:font-metrics` -- `(fn [font-size weight style family]
+     {:ascent px :descent px :x-height px})`. Ascent and descent are what
+     a line box is actually built from; `:x-height` (itself optional
+     within the map) is what `vertical-align: middle` centres against. A
+     browser host reads all three off the same canvas
+     `TextMetrics` object it already holds -- `fontBoundingBoxAscent`,
+     `fontBoundingBoxDescent`, and the `actualBoundingBoxAscent` of a
+     lowercase `x`.
+   - `:avg-advance` -- `(fn [font-size weight style family] px)`, the
+     font's average character advance. A form control's intrinsic width is
+     `size` (or `cols`) of THIS and nothing else, and no string
+     measurement produces it. See avg-advance for the measured law that
+     recovers it from the `x` glyph.
+   - `:max-advance` -- `(fn [font-size weight style family] px)`, the
+     font's maximum character width, which an `<input size=n>` adds one
+     glyph's worth of on top of its `n` average characters. Measured, it
+     is the font's ascent, so a host that can answer `:font-metrics`
+     already has it. See max-advance.
 
    `opts` also accepts an OPTIONAL `:height` -- the viewport's height.
    Nothing about normal flow needs it (a document is as tall as its

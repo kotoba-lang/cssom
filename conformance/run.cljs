@@ -423,11 +423,22 @@
     // line box is actually built from. Measured with canvas TextMetrics --
     // 14px monospace is 12/3 here (a 15px content area, not the 16.8 a
     // 1.2em approximation assumes), its bold face 14/4, and 24px 21/5.
+    //
+    // `xHeight` rides along because it is the same object: the INK top of a
+    // lowercase `x`, which is the metric `vertical-align: middle` centres a
+    // box on (`baseline - x-height/2`) and the one thing font-metrics used
+    // to have no answer for. Measured here, 14px monospace is 6.34375 --
+    // and independently, reading the same number back off a real
+    // `vertical-align: middle` box in this browser gives 6.34375 too, so
+    // the ink extent IS the metric Blink aligns against, not a proxy for
+    // it. (Checked at 14/20/26.6666/40px across four families; the two
+    // readings agree to within 0.0125px, which is LayoutUnit's own 1/64.)
     var ctx = document.createElement('canvas').getContext('2d');
     function fm(font) {
       ctx.font = font;
       var t = ctx.measureText('Hxg');
-      return { ascent: t.fontBoundingBoxAscent, descent: t.fontBoundingBoxDescent };
+      return { ascent: t.fontBoundingBoxAscent, descent: t.fontBoundingBoxDescent,
+               xHeight: ctx.measureText('x').actualBoundingBoxAscent };
     }
     out['__metrics__'] = {
       normal: fm('14px monospace'), bold: fm('bold 14px monospace'),
@@ -763,13 +774,78 @@
                               ;; ua-control-font in cssom.layout); fixing it
                               ;; alone makes the result worse, so it waits
                               ;; for the other half.
+                              ;;
+                              ;; 2026-08-05: the other half landed (see
+                              ;; :avg-advance below), and the control face is
+                              ;; no longer part of this argument -- the
+                              ;; engine now asks at exactly 13.3333, which is
+                              ;; the size the control tables were measured
+                              ;; at, so `k` is 1 and the control's metrics
+                              ;; come back as the browser's own integers with
+                              ;; no rounding to do. What is left of the note
+                              ;; above is about the PAGE faces at 20/24/40px,
+                              ;; and re-measuring it is its own change.
                               :font-metrics (fn [font-size weight style family]
                                               (let [face (text-face family weight style)
                                                     base (get (:metrics char-w) face)
                                                     ref (face-ref-size face)
                                                     k (/ (or font-size ref) ref)]
                                                 {:ascent (* k (:ascent base))
-                                                 :descent (* k (:descent base))}))
+                                                 :descent (* k (:descent base))
+                                                 :x-height (* k (:xHeight base))}))
+                              ;; The two metrics a FORM CONTROL is sized
+                              ;; from, which no string measurement produces.
+                              ;;
+                              ;; Both are derived from data this probe
+                              ;; ALREADY collects -- the `x` entry of the
+                              ;; per-character advance table and the face's
+                              ;; ascent -- and not from measuring a control.
+                              ;; That distinction is the whole point: a
+                              ;; harness that recovered these by inverting
+                              ;; `<textarea cols=n>` would be handing the
+                              ;; engine the answer to the question the
+                              ;; corpus asks. These are font facts, read the
+                              ;; way a host with a canvas reads them, and
+                              ;; the engine still owns every formula they
+                              ;; feed.
+                              ;;
+                              ;; The two laws, measured in Brave 151 on
+                              ;; 2026-08-05 over 10 families x 11 sizes x 14
+                              ;; column counts and exact on all 3,080
+                              ;; observations (see cssom.layout's avg-advance
+                              ;; and max-advance):
+                              ;;
+                              ;;   avg = max(w, round(w)), w = `x` advance
+                              ;;   max = round(the font's ascent)
+                              ;;
+                              ;; Both round at the ASKED size, not at the
+                              ;; reference one -- that is the whole content
+                              ;; of the first law, and scaling a rounded
+                              ;; 13.3333px value linearly would reproduce
+                              ;; exactly the 5.4%-at-40px error the previous
+                              ;; attempt found and correctly refused to ship.
+                              ;;
+                              ;; Blink distrusts a handful of families'
+                              ;; summary metrics (`Courier`, `Helvetica`,
+                              ;; `Times`, `Monaco`, `Geneva`, `Lucida
+                              ;; Grande`) and falls back to the `0` advance
+                              ;; with no max slack for those. Not implemented
+                              ;; here because this corpus has six faces and
+                              ;; none of them is one: it would be dead code
+                              ;; asserting a measurement nothing runs.
+                              :avg-advance (fn [font-size weight style family]
+                                             (let [face (text-face family weight style)
+                                                   ref (face-ref-size face)
+                                                   w (* (/ (or font-size ref) ref)
+                                                        ((get char-w face) \x))]
+                                               (max w (js/Math.round w))))
+                              :max-advance (fn [font-size weight style family]
+                                             (let [face (text-face family weight style)
+                                                   base (get (:metrics char-w) face)
+                                                   ref (face-ref-size face)]
+                                               (js/Math.round
+                                                (* (/ (or font-size ref) ref)
+                                                   (:ascent base)))))
                               :measure-text (fn [text font-size weight style family]
                                               (let [face (text-face family weight style)
                                                     advance (get char-w face)
