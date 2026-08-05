@@ -2247,6 +2247,27 @@
   :group :table
   ;; `empty-cells: hide` suppresses the BORDER and background of an empty
   ;; cell under `border-separate`; the cell still occupies its slot.
+  ;;
+  ;; NOT IMPLEMENTED, and measured to be unscoreable by this harness rather
+  ;; than assumed to be. Brave 151 (2026-08-05), this table with `hide` and
+  ;; with `show`: identical boxes to three decimals (128.625 / 59.375 here,
+  ;; and 153.813 / 34.188 on the background spelling), and
+  ;; `elementFromPoint` answers `td` over the empty cell either way. The
+  ;; property changes which pixels are FILLED, and neither the geometry
+  ;; axis nor the paint-order axis compares a fill. The case stays in
+  ;; because it is the only thing standing between "we do not implement
+  ;; empty-cells" and someone implementing it as a layout change.
+  ;;
+  ;; Its one-point paint-order residual is not this property either: Brave
+  ;; hit-tests every element from ONE PIXEL ABOVE and LEFT of its box.
+  ;; Swept at 0.05px on this table (`td` at y=4..26), `elementFromPoint`
+  ;; answers `table` at y=3.00 and `td` from y=3.05, and stops at y=26.00
+  ;; exactly -- and the same 1px slop appears on a plain `<p>` in a padded
+  ;; `<div>` (box at y=36, hit from y=35.05) and on a bare `<span>`, in x
+  ;; as well as y. It is a property of `elementFromPoint`, not of tables,
+  ;; and this engine's own half-open [x, x+w) test is the honest answer to
+  ;; the question the axis asks. Whether a sample point lands inside that
+  ;; 1px band depends on where the case happens to sit on the corpus page.
   :html "<table style=\"width: 200px; border-spacing: 4px; empty-cells: hide\"><tr><td style=\"border: 2px solid #888\">a</td><td style=\"border: 2px solid #888\"></td></tr></table>"}
 
  {:id :table/tfoot-renders-after-tbody
@@ -2260,8 +2281,11 @@
   ;; A bare `<col>` with no `<colgroup>` around it. Two separate things are
   ;; measured: whether the declared 200px survives the table's surplus
   ;; hand-out, and whether the parser synthesises the implicit
-  ;; `<colgroup>` a real HTML parser inserts (Brave reports one box for it,
-  ;; htmldom does not -- an htmldom finding, not a cssom one).
+  ;; `<colgroup>` a real HTML parser inserts. The second half was an
+  ;; htmldom finding rather than a cssom one, and was fixed THERE
+  ;; (`maybe-insert-implied-table-structure`, 2026-08-05): Brave wraps
+  ;; consecutive bare `<col>`s in ONE synthesised `<colgroup>`, and puts
+  ;; one that arrives after a row group in a group of its own beside it.
   :html "<table style=\"width: 300px\"><col style=\"width: 200px\"><col><tr><td>a</td><td>b</td></tr></table>"}
 
  {:id :table/cell-percentage-width
@@ -2900,5 +2924,664 @@
   ;; leave the UA `margin: 1em 0` standing.
   :html "<div><p class=\"rv\" style=\"margin: revert\">b</p></div>"
   :css "p.rv { margin: 0 }"}
+
+
+ ;; ======================================================================
+ ;; Round thirty-three: 75 cases in territory the corpus had never entered.
+ ;;
+ ;; Every number in the comments below was read out of the same headless
+ ;; Brave 151.1.93.129 over CDP that drives this harness, on a page built
+ ;; with this file's own wrapper (800px, monospace, 14px, line-height
+ ;; 20px), BEFORE the case was written. Where a case AGREES it says so --
+ ;; a control that passes is what makes its neighbour a finding, and
+ ;; several of the pairs below exist for no other reason.
+ ;; ======================================================================
+
+ ;; ---- logical properties: the flow-relative half of the box model ----
+ ;; `margin-inline-*`, `padding-inline-*`, `padding-block-*`,
+ ;; `inline-size`, `block-size`, `border-inline-*` and `inset-inline-*`
+ ;; match NOTHING in src/ -- a repo-wide grep for each is zero in both
+ ;; cssom.core and cssom.layout -- so all twelve diverge and they are one
+ ;; cause. They are here because they are not exotic: they are how a
+ ;; stylesheet that supports both writing directions is written today, and
+ ;; two of them are the only cases in the corpus that can tell a physical
+ ;; property from a logical one -- the ones that FLIP under `direction:
+ ;; rtl`, where `margin-inline-start` is a right margin.
+
+ {:id :logical/margin-inline-start
+  :group :logical
+  ;; Brave: inner div x=40 w=260 inside its 300px parent. Engine: 0/300.
+  :html "<div style=\"width: 300px\"><div style=\"margin-inline-start: 40px\">m</div></div>"}
+
+ {:id :logical/margin-inline-two-values
+  :group :logical
+  ;; `margin-inline: <start> <end>`. Brave: x=20 w=220 (300 - 20 - 60).
+  :html "<div style=\"width: 300px\"><div style=\"margin-inline: 20px 60px\">m</div></div>"}
+
+ {:id :logical/margin-inline-mirrors-under-rtl
+  :group :logical
+  ;; The same declaration in an rtl containing block: start is the RIGHT
+  ;; side. Brave: x=60 w=220 -- the 20px is now on the right and the 60px
+  ;; on the left. This is the case that distinguishes a logical property
+  ;; from an alias for the physical one.
+  :html "<div style=\"width: 300px; direction: rtl\"><div style=\"margin-inline: 20px 60px\">m</div></div>"}
+
+ {:id :logical/padding-inline-two-values
+  :group :logical
+  ;; Brave: the padded div is 340 wide (auto width + 40 of padding) and
+  ;; its <p> is at x=10 with w=300.
+  :html "<div style=\"width: 300px; padding-inline: 10px 30px\"><p style=\"margin: 0\">p</p></div>"}
+
+ {:id :logical/padding-inline-start-mirrors-under-rtl
+  :group :logical
+  ;; Brave: div w=350, <p> at x=0 w=300 -- the 50px landed on the RIGHT,
+  ;; so the <p>'s own box is the same as it would be with no padding at
+  ;; all and only the outer box records the difference.
+  :html "<div style=\"width: 300px; direction: rtl; padding-inline-start: 50px\"><p style=\"margin: 0\">p</p></div>"}
+
+ {:id :logical/padding-block
+  :group :logical
+  ;; Brave: div h=56 (12 + 20 + 24), <p> at y=12.
+  :html "<div style=\"width: 300px; padding-block: 12px 24px\"><p style=\"margin: 0\">p</p></div>"}
+
+ {:id :logical/margin-block
+  :group :logical
+  ;; Brave: the second div is at y=40 (10px sibling + a 30px block-start
+  ;; margin) and the wrapper is 60 tall. Engine: y=10, wrapper 30.
+  :html "<div style=\"width: 300px\"><div style=\"height: 10px\"></div><div style=\"margin-block: 30px 0\">m</div></div>"}
+
+ {:id :logical/inline-size-is-width
+  :group :logical
+  ;; Brave: w=120. This engine reads `width` only, so the box fills 300.
+  :html "<div style=\"width: 300px\"><div style=\"inline-size: 120px\">i</div></div>"}
+
+ {:id :logical/block-size-is-height
+  :group :logical
+  ;; Brave: h=60.
+  :html "<div style=\"width: 300px\"><div style=\"block-size: 60px\">b</div></div>"}
+
+ {:id :logical/max-inline-size
+  :group :logical
+  ;; Brave: w=80, and the text does NOT wrap at it (`alpha beta` is 70px),
+  ;; so what this measures is the box and not the line.
+  :html "<div style=\"width: 300px\"><div style=\"max-inline-size: 80px\">alpha beta</div></div>"}
+
+ {:id :logical/inset-inline-start
+  :group :logical
+  ;; Brave: the absolutely positioned box is at x=30.
+  :html "<div style=\"width: 300px; height: 40px; position: relative\"><div style=\"position: absolute; inset-inline-start: 30px; top: 0\">a</div></div>"}
+
+ {:id :logical/border-inline-start
+  :group :logical
+  ;; Brave: the bordered div is 305 wide (auto width + the 5px border) and
+  ;; its <p> is at x=5 w=300.
+  :html "<div style=\"width: 300px; border-inline-start: 5px solid #000\"><p style=\"margin: 0\">p</p></div>"}
+
+ ;; ---- replaced elements this engine has no box for ----
+ ;; `inline-atomic-tags` is `#{:img :input :button :select :textarea}` and
+ ;; its docstring says why `:svg`/`:canvas`/`:video`/`:audio`/`:iframe`
+ ;; are deliberately absent: "this engine has no rendering for any of
+ ;; them, so giving them an inline box would place an empty rectangle in
+ ;; the middle of a sentence rather than fix anything." These five put a
+ ;; number on that scope cut, and the number is not "an empty rectangle":
+ ;; a browser RESERVES 300x150 for every one of them whether it can decode
+ ;; the content or not, and this engine lays each one out as a BLOCK that
+ ;; fills its container and is 0px tall -- so a page with a <canvas> in it
+ ;; is 150px shorter here than anywhere else, and a <canvas> in a sentence
+ ;; breaks the sentence in two.
+ ;;
+ ;; The <img> cases beside them measure the other half: an intrinsic
+ ;; RATIO, which this engine has never had to read because every image in
+ ;; the corpus until now was a 1x1 GIF with both dimensions declared. The
+ ;; image here is a 40x20 SVG as a data URI, so the 2:1 ratio is a
+ ;; property of the resource rather than of the attributes.
+
+ {:id :replaced/img-intrinsic-size
+  :group :replaced
+  ;; Brave: 40x20, from the resource alone. Engine: 0x0.
+  :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\"></div>"}
+
+ {:id :replaced/img-width-only-keeps-the-ratio
+  :group :replaced
+  ;; Brave: 200x100 -- the declared width and the resource's 2:1 ratio.
+  ;; Engine: 200x0, i.e. the width alone.
+  :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\" style=\"width: 200px\"></div>"}
+
+ {:id :replaced/img-height-only-keeps-the-ratio
+  :group :replaced
+  ;; The mirror: Brave 120x60, engine 0x60.
+  :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\" style=\"height: 60px\"></div>"}
+
+ {:id :replaced/img-attribute-height-survives-a-css-width
+  :group :replaced
+  ;; AGREES, and it is the control that makes the two above findings: the
+  ;; width/height ATTRIBUTES are presentational hints, i.e. ordinary
+  ;; author-origin declarations of the lowest priority, so a CSS `width`
+  ;; replaces the width hint and the height hint stands on its own. Brave
+  ;; and this engine both say 200x20 -- NOT the 200x100 an aspect ratio
+  ;; would give. So what the engine is missing is the RESOURCE's ratio,
+  ;; not the attributes.
+  :html "<div style=\"width: 400px\"><img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\" width=\"40\" height=\"20\" style=\"width: 200px\"></div>"}
+
+ {:id :replaced/img-with-no-src-uses-its-attributes
+  :group :replaced
+  ;; AGREES: 40x20 on both sides, with nothing to load.
+  :html "<div style=\"width: 400px\"><img width=\"40\" height=\"20\"></div>"}
+
+ {:id :replaced/canvas-default-size
+  :group :replaced
+  ;; Brave: 300x150, HTML's own default canvas size, in a 400x156 line.
+  ;; Engine: a 400x0 block in a 400x0 parent.
+  :html "<div style=\"width: 400px\"><canvas></canvas></div>"}
+
+ {:id :replaced/canvas-attributes-size-it
+  :group :replaced
+  ;; Brave: 80x40. Its pair above says the 300x150 is a DEFAULT rather
+  ;; than a constant; this one says the attributes are read at all.
+  :html "<div style=\"width: 400px\"><canvas width=\"80\" height=\"40\"></canvas></div>"}
+
+ {:id :replaced/canvas-in-a-sentence
+  :group :replaced
+  ;; What the block treatment costs on the LINE axis, not just the box:
+  ;; Brave keeps `before <canvas> after` on one line with the canvas an
+  ;; atomic inline at x=49 y=4 w=20 h=10 sitting on the baseline, and
+  ;; this engine puts `before` and `after` on two lines with a 400px-wide
+  ;; block between them.
+  :html "<div style=\"width: 400px\">before <canvas width=\"20\" height=\"10\"></canvas> after</div>"}
+
+ {:id :replaced/iframe-default-size
+  :group :replaced
+  ;; Brave: 304x154 -- the 300x150 default plus Chrome's UA
+  ;; `border: 2px inset` on all four sides.
+  :html "<div style=\"width: 400px\"><iframe></iframe></div>"}
+
+ {:id :replaced/video-default-size
+  :group :replaced
+  ;; Brave: 300x150.
+  :html "<div style=\"width: 400px\"><video></video></div>"}
+
+ {:id :replaced/svg-without-attributes-is-300x150
+  :group :replaced
+  ;; Brave: 300x150. An <svg> WITH width/height attributes is 60x30, but
+  ;; the default is the interesting half -- the same 300x150 as a canvas,
+  ;; which is CSS's own default sizing of a replaced element with no
+  ;; intrinsic size rather than an HTML per-element constant.
+  :html "<div style=\"width: 400px\"><svg></svg></div>"}
+
+ ;; ---- stacking contexts, and what a browser will actually let you click ----
+ ;; Every geometry box in this group AGREES exactly, on both sides, in all
+ ;; eighteen cases. That is the paint-order axis's entire reason to exist:
+ ;; an engine can put every rectangle in the right place and still hand
+ ;; the user the wrong element under the pointer.
+ ;;
+ ;; Two shapes are repeated deliberately. `<section>` over `<article>`
+ ;; whenever the two boxes need to be told apart by their TAG, and
+ ;; `<div class="lower">` over `<div class="upper">` in the two cases that
+ ;; exist to prove the axis can now tell two boxes of the SAME tag apart
+ ;; at all (it could not before this round -- see engine-topmost-at).
+
+ {:id :stacking/z-index-on-a-static-box-is-ignored
+  :group :stacking
+  ;; AGREES, and it is the control for the four cases after it: `z-index`
+  ;; applies only to a positioned box (or a flex/grid item), so this one
+  ;; must NOT lift anything. Brave and this engine both answer `article`
+  ;; at all 25 points -- the later sibling, exactly as if the declaration
+  ;; were absent.
+  :html "<div style=\"height: 60px\"><section style=\"height: 60px; background: #f00\">a</section><article style=\"height: 60px; margin-top: -60px; background: #0f0; z-index: 5\">b</article></div>"}
+
+ {:id :stacking/opacity-lifts-a-box-above-later-flow
+  :group :stacking
+  ;; `opacity < 1` makes the box a stacking context, which real CSS paints
+  ;; in Appendix E's step 8 -- above ALL in-flow content, including a
+  ;; later sibling that overlaps it. Brave: `section` at every one of the
+  ;; 25 points; this engine: `article` at every one of them.
+  :html "<div style=\"height: 60px\"><section style=\"height: 60px; background: #f00; opacity: 0.99\">a</section><article style=\"height: 60px; margin-top: -60px; background: #0f0\">b</article></div>"}
+
+ {:id :stacking/transform-lifts-a-box-above-later-flow
+  :group :stacking
+  ;; Same rule, different trigger. Round twenty-seven implemented
+  ;; `transform` for geometry and named what it left: "a transformed
+  ;; element also establishes a stacking context in real CSS and this
+  ;; engine does not model that". This is that sentence, measured --
+  ;; Brave `section`, engine `article`, 25 points.
+  :html "<div style=\"height: 60px\"><section style=\"height: 60px; background: #f00; transform: translateY(0px)\">a</section><article style=\"height: 60px; margin-top: -60px; background: #0f0\">b</article></div>"}
+
+ {:id :stacking/filter-lifts-a-box-above-later-flow
+  :group :stacking
+  ;; And a third trigger, on a property nothing in src/ reads at all.
+  ;; Brave: `section`.
+  :html "<div style=\"height: 60px\"><section style=\"height: 60px; background: #f00; filter: blur(0px)\">a</section><article style=\"height: 60px; margin-top: -60px; background: #0f0\">b</article></div>"}
+
+ {:id :stacking/relative-lifts-a-box-above-later-flow
+  :group :stacking
+  ;; The oldest of the four and the one most pages depend on: a POSITIONED
+  ;; box with no z-index at all is painted in step 8 too, so
+  ;; `position: relative` alone puts it over a later in-flow sibling.
+  ;; Brave: `section`. This engine's `layout-absolute-children` sorts the
+  ;; OUT-OF-FLOW children into z-index bands, and a relatively positioned
+  ;; box is still in flow, so nothing lifts it.
+  :html "<div style=\"height: 60px\"><section style=\"height: 60px; background: #f00; position: relative\">a</section><article style=\"height: 60px; margin-top: -60px; background: #0f0\">b</article></div>"}
+
+ {:id :stacking/relative-with-z-auto-does-not-confine-a-descendant
+  :group :stacking
+  ;; The discriminating pair, first half. `position: relative` with
+  ;; `z-index: auto` is NOT a stacking context, so the z-index: 5
+  ;; descendant competes in the ROOT context and wins. Brave: `section`;
+  ;; this engine: `article`.
+  :html "<div style=\"position: relative; height: 60px\"><div style=\"position: relative\"><section style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00; z-index: 5\">a</section></div><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #0f0; z-index: 2\">b</article></div>"}
+
+ {:id :stacking/relative-with-z-zero-confines-a-descendant
+  :group :stacking
+  ;; Second half, and the ONLY difference in the markup is `z-index: 0` on
+  ;; the middle div, which makes it a stacking context and confines the 5.
+  ;; Brave: `article`. This engine AGREES here -- and the pair is what
+  ;; says why: it confines a descendant's z-index in BOTH shapes, so it is
+  ;; right by accident here and wrong above. One declaration apart, two
+  ;; different answers, is what makes this a measurement of the rule
+  ;; rather than of a number.
+  :html "<div style=\"position: relative; height: 60px\"><div style=\"position: relative; z-index: 0\"><section style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00; z-index: 5\">a</section></div><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #0f0; z-index: 2\">b</article></div>"}
+
+ {:id :stacking/isolation-isolate-confines-a-descendant
+  :group :stacking
+  ;; `isolation: isolate` exists for no other purpose than to create a
+  ;; stacking context. Brave: `article`, and this engine agrees for the
+  ;; same accidental reason as the case above -- `isolation` appears
+  ;; nowhere in src/.
+  :html "<div style=\"position: relative; height: 60px\"><div style=\"isolation: isolate\"><section style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00; z-index: 5\">a</section></div><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #0f0; z-index: 2\">b</article></div>"}
+
+ {:id :stacking/negative-z-index-stays-above-its-own-context
+  :group :stacking
+  ;; A negative z-index child goes behind its stacking context's CONTENT
+  ;; but not behind that context's own BACKGROUND: Appendix E paints the
+  ;; context's background in step 1 and its negative-z children in step 2.
+  ;; Brave: `article` -- the -1 box is on top of the blue section that
+  ;; established the context. This engine: `section`.
+  :html "<div style=\"height: 60px\"><section style=\"position: relative; z-index: 0; height: 60px; background: #00f\"><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00; z-index: -1\">a</article></section></div>"}
+
+ {:id :stacking/negative-z-index-goes-behind-a-plain-parent
+  :group :stacking
+  ;; Its pair: drop the `z-index: 0` and the parent is no longer a
+  ;; stacking context, so the -1 box sinks past it into the root context
+  ;; and the parent's own background covers it. Brave: `section`, and
+  ;; this engine agrees -- it sinks the box in both shapes.
+  :html "<div style=\"height: 60px\"><section style=\"position: relative; height: 60px; background: #00f\"><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00; z-index: -1\">a</article></section></div>"}
+
+ {:id :stacking/z-index-on-a-flex-item
+  :group :stacking
+  ;; A flex ITEM takes a z-index without being positioned -- the one place
+  ;; the control at the top of this group does not apply. Brave: `section`
+  ;; over the first four sample columns (the negative margin pulls the
+  ;; article across it) and `article` at x=720, past the section's 700px.
+  ;; This engine: `article` everywhere.
+  :html "<div style=\"display: flex; height: 60px\"><section style=\"width: 700px; height: 60px; background: #f00; z-index: 2; margin-right: -650px\">a</section><article style=\"width: 700px; height: 60px; background: #0f0\">b</article></div>"}
+
+ {:id :stacking/pointer-events-none-falls-through
+  :group :stacking
+  ;; Not a paint question at all: the green box IS painted on top, and a
+  ;; click still lands on the red one underneath. Brave: `section` in the
+  ;; first four columns, the wrapper `div` at x=720. This engine agrees --
+  ;; and it did not before this round, because the HARNESS was not reading
+  ;; the `:pointer-events` key the engine puts on every `:node` op for
+  ;; exactly this purpose. See engine-topmost-at.
+  :html "<div style=\"position: relative; height: 60px\"><section style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00\">a</section><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #0f0; pointer-events: none\">b</article></div>"}
+
+ {:id :stacking/visibility-hidden-is-not-hit
+  :group :stacking
+  ;; Brave: `section`. A `visibility: hidden` box keeps its space (the
+  ;; corpus already has that half) and answers no clicks. Same story as
+  ;; the case above: the engine had this right and the harness was not
+  ;; reading `:visibility`.
+  :html "<div style=\"position: relative; height: 60px\"><section style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00\">a</section><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #0f0; visibility: hidden\">b</article></div>"}
+
+ {:id :stacking/opacity-zero-is-still-hit
+  :group :stacking
+  ;; Its contrast partner, and the answers are opposite: a box invisible
+  ;; by OPACITY is still a hit-test candidate. Brave: `article`, and this
+  ;; engine agrees -- which is what stops the two skips above from being
+  ;; "skip anything you cannot see".
+  :html "<div style=\"position: relative; height: 60px\"><section style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00\">a</section><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #0f0; opacity: 0\">b</article></div>"}
+
+ {:id :stacking/border-radius-shrinks-the-hit-region
+  :group :stacking
+  ;; A rounded box is not hit outside its curve. Brave, on an 800x200 box
+  ;; with `border-radius: 50%`: the four CORNER sample points (10% and 90%
+  ;; of each axis) answer the wrapper `div` and the other 21 answer
+  ;; `section`. This is the third measured case of an element's reported
+  ;; box and its hit region being different rectangles -- see
+  ;; cssom.layout's `:hit` key, added for the first two -- and the first
+  ;; where the region is not a union of rectangles at all.
+  :html "<div style=\"width: 800px; height: 200px\"><section style=\"width: 800px; height: 200px; border-radius: 50%; background: #f00\">r</section></div>"}
+
+ {:id :stacking/content-visibility-hidden-is-not-painted
+  :group :stacking
+  ;; `content-visibility: hidden` skips the subtree's PAINT while keeping
+  ;; its layout: Brave reports a real 800x60 box for the <article> and a
+  ;; Range reads "inner" out of it, and all 25 sample points answer
+  ;; `section`. Geometry and the line axis therefore agree with this
+  ;; engine and only paint order can see the difference -- the same shape
+  ;; as `:interactive/details-closed-shows-only-the-summary`, which is how
+  ;; Chromium implements a closed <details> in the first place.
+  :html "<div style=\"height: 60px\"><section style=\"content-visibility: hidden; height: 60px; background: #eee\"><article style=\"height: 60px; background: #f00\">inner</article></section></div>"}
+
+ {:id :stacking/same-tag-opacity-lifts-the-earlier-box
+  :group :stacking
+  ;; The same shape as `:stacking/opacity-lifts-a-box-above-later-flow`
+  ;; with two <div>s instead of a <section> and an <article>, and it is
+  ;; here to prove the axis can now see it: until this round the oracle
+  ;; reported only a TAG per sample point, so two overlapping <div>s were
+  ;; indistinguishable and this case would have passed while measuring
+  ;; nothing. Brave: `div.lower` at all 25 points; this engine:
+  ;; `div.upper`.
+  :html "<div style=\"height: 60px\"><div class=\"lower\" style=\"height: 60px; background: #f00; opacity: 0.99\">a</div><div class=\"upper\" style=\"height: 60px; margin-top: -60px; background: #0f0\">b</div></div>"}
+
+ {:id :stacking/same-tag-later-sibling-covers-earlier
+  :group :stacking
+  ;; Its control, and it AGREES: with the opacity gone the later div wins
+  ;; on both sides. Brave and this engine both answer `div.upper`. Two
+  ;; same-tag cases whose answers differ is the evidence that the class is
+  ;; being compared rather than ignored.
+  :html "<div style=\"height: 60px\"><div class=\"lower\" style=\"height: 60px; background: #f00\">a</div><div class=\"upper\" style=\"height: 60px; margin-top: -60px; background: #0f0\">b</div></div>"}
+
+ ;; ---- a percentage in the BLOCK axis of the box model is of the WIDTH ----
+ ;; CSS 2.1 SS8.3/SS8.4: a percentage margin or padding resolves against
+ ;; the containing block's INLINE size on all four sides, top and bottom
+ ;; included. It is the rule behind the padding-bottom aspect-ratio idiom,
+ ;; and nothing in the corpus asked for it. Measured, this engine reads
+ ;; the number and drops the unit -- `padding-bottom: 50%` is 50px --
+ ;; which is the same defect round thirty-two recorded for percentage
+ ;; GAPS ("node-style runs parse-int on the string, and it has no
+ ;; available size to resolve a percentage against").
+
+ {:id :box/padding-top-percentage-is-of-the-width
+  :group :box
+  ;; Brave: 10% of the 300px container is 30px of padding, so the inner
+  ;; box is 50 tall and its text sits at y=32. Resolving against the
+  ;; parent's 40px HEIGHT would have given 4, and reading the bare number
+  ;; gives 10 -- which is what this engine does (h=30).
+  :html "<div style=\"width: 300px; height: 40px\"><div style=\"padding-top: 10%\">p</div></div>"}
+
+ {:id :box/padding-bottom-percentage-makes-a-ratio-box
+  :group :box
+  ;; The idiom itself. Brave: 300x150 from `padding-bottom: 50%` alone,
+  ;; with no height anywhere. Engine: 300x50.
+  :html "<div style=\"width: 300px\"><div style=\"padding-bottom: 50%\"></div></div>"}
+
+ {:id :box/margin-top-percentage-is-of-the-width
+  :group :box
+  ;; Same rule for margins. Brave: child at y=31, parent 51 tall. The 1px
+  ;; border on the parent is not the subject -- it is there to stop the
+  ;; child's top margin collapsing through it, which would take the
+  ;; number out of the case. (This engine reads neither: `border-top` as a
+  ;; per-side shorthand is not parsed either, see the border group below.)
+  :html "<div style=\"width: 300px; border-top: 1px solid #000\"><div style=\"margin-top: 10%; height: 20px\">m</div></div>"}
+
+ {:id :box/margin-left-percentage
+  :group :box
+  ;; The inline-axis control for the three above, and it fails the same
+  ;; way: Brave x=30 w=270, this engine x=10 w=290. So the percentage is
+  ;; not a block-axis problem -- the unit is dropped on every side.
+  :html "<div style=\"width: 300px\"><div style=\"margin-left: 10%; height: 20px\">m</div></div>"}
+
+ ;; ---- vertical-align, at every value that moves a box ----
+ ;; The corpus had exactly one case for this property (`gap/vertical-
+ ;; align-top`, on a table cell) and none at all for an inline-level box.
+ ;; Each shape is a 40px inline-block (which sets the line box) beside a
+ ;; 10px one carrying the value under test, so the SECOND span's y is the
+ ;; whole measurement and the geometry axis reads it directly. Brave puts
+ ;; the line box at 46 tall in all seven and the baseline default at y=30.
+ ;; This engine answers 30 for six of the seven -- i.e. it leaves an
+ ;; atomic inline on the baseline -- and `middle` is the exception.
+
+ {:id :inline/vertical-align-middle
+  :group :inline
+  ;; AGREES, to the last fractional pixel: both sides say y=31.828125 --
+  ;; the box's middle aligned with the baseline plus half the parent's
+  ;; x-height, which is why it is not simply 30. It is the control that
+  ;; makes the other six a finding rather than "vertical-align does
+  ;; nothing here".
+  :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: middle\"></span></div>"}
+
+ {:id :inline/vertical-align-top-on-an-inline-block
+  :group :inline
+  ;; Brave: y=0, the top of the LINE BOX. Engine: y=30.
+  :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: top\"></span></div>"}
+
+ {:id :inline/vertical-align-bottom-on-an-inline-block
+  :group :inline
+  ;; Brave: y=36, flush with the line box's bottom at 46.
+  :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: bottom\"></span></div>"}
+
+ {:id :inline/vertical-align-text-top
+  :group :inline
+  ;; `text-top` is the parent's FONT's top, not the line box's, so Brave
+  ;; says 28 where `top` says 0. The pair is what makes either number
+  ;; mean anything.
+  :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: text-top\"></span></div>"}
+
+ {:id :inline/vertical-align-text-bottom
+  :group :inline
+  ;; Brave: y=33, against `bottom`'s 36.
+  :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: text-bottom\"></span></div>"}
+
+ {:id :inline/vertical-align-length
+  :group :inline
+  ;; A length RAISES the box off the baseline. Brave: y=18, exactly 12
+  ;; above the baseline default's 30.
+  :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: 12px\"></span></div>"}
+
+ {:id :inline/vertical-align-percentage
+  :group :inline
+  ;; A percentage is of the element's own LINE-HEIGHT (20px here), so 50%
+  ;; raises by 10. Brave: y=20, against 30.
+  :html "<div style=\"width: 400px\"><span style=\"display: inline-block; width: 20px; height: 40px\"></span><span style=\"display: inline-block; width: 20px; height: 10px; vertical-align: 50%\"></span></div>"}
+
+ ;; ---- visibility: collapse ----
+ ;; The one visibility value with a behaviour of its own, and the corpus
+ ;; had `visible` and `hidden` only.
+
+ {:id :visibility/collapse-removes-a-table-row
+  :group :visibility
+  ;; Brave: the collapsed <tr> and its <td> are 0px tall, the third row
+  ;; moves UP to y=22, and the table is 44 tall rather than 66. This
+  ;; engine renders the row as if it were `hidden` (66, rows at 0/22/44),
+  ;; which is what the two controls below say is right EVERYWHERE ELSE.
+  :html "<table style=\"border-collapse: collapse\"><tr><td>one</td></tr><tr style=\"visibility: collapse\"><td>two</td></tr><tr><td>three</td></tr></table>"}
+
+ {:id :visibility/collapse-on-a-block-is-hidden
+  :group :visibility
+  ;; AGREES: outside a table `collapse` is exactly `hidden`, so Brave and
+  ;; this engine both keep the 20px and put `b` at y=20.
+  :html "<div style=\"width: 300px\"><div style=\"height: 20px; visibility: collapse\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :visibility/collapse-on-a-flex-item-is-hidden
+  :group :visibility
+  ;; AGREES, including on a flex item, where the spec once said
+  ;; otherwise: the three items are at x=0, 60 and 120 on both sides --
+  ;; the collapsed one keeps its track.
+  :html "<div style=\"display: flex; width: 300px\"><div style=\"width: 60px; height: 20px\">a</div><div style=\"width: 60px; height: 20px; visibility: collapse\">b</div><div style=\"width: 60px; height: 20px\">c</div></div>"}
+
+ ;; ---- borders: per side, and the two that take no space ----
+ ;; Round twenty-six named "per-side border widths" as not implemented --
+ ;; "this engine has one uniform `:border-width`". Measured, it is sharper
+ ;; than that: a per-side SHORTHAND is not read at all, so `border-top:
+ ;; 10px solid` contributes nothing rather than ten pixels on four sides.
+
+ {:id :box/border-top-width-only
+  :group :box
+  ;; Brave: the bordered div is 30 tall and its <p> is at y=10 with the
+  ;; full w=300 -- a top border costs height and nothing else. This
+  ;; engine: 20 tall, <p> at y=0.
+  :html "<div style=\"width: 300px\"><div style=\"border-top: 10px solid #000\"><p style=\"margin: 0\">p</p></div></div>"}
+
+ {:id :box/border-left-width-only
+  :group :box
+  ;; The mirror: Brave puts the <p> at x=20 with w=280 and the div stays
+  ;; 300 wide. A uniform border would have taken 20 off all four sides;
+  ;; this engine takes none off any of them.
+  :html "<div style=\"width: 300px\"><div style=\"border-left: 20px solid #000\"><p style=\"margin: 0\">p</p></div></div>"}
+
+ {:id :box/border-width-with-style-none-takes-no-space
+  :group :box
+  ;; AGREES, and it is the control that keeps the two above honest:
+  ;; `border-style: none` makes the computed `border-width` ZERO however
+  ;; wide it was declared, which is CSS's own rule and not a rendering
+  ;; shortcut. Brave and this engine both put the <p> at x=0 w=300 in a
+  ;; 20-tall div, i.e. the 10px is not there at all -- so a fix for the
+  ;; two cases above must not simply start adding declared widths up.
+  :html "<div style=\"width: 300px\"><div style=\"border-width: 10px; border-style: none\"><p style=\"margin: 0\">p</p></div></div>"}
+
+ {:id :box/outline-takes-no-space
+  :group :box
+  ;; AGREES: an outline is drawn outside the border box and moves nothing.
+  ;; Both sides put `b` at y=20. `expand-outline-shorthand` in cssom.core
+  ;; parses the property, so this is a real regression guard rather than a
+  ;; test that an unknown declaration is ignored.
+  :html "<div style=\"width: 300px\"><div style=\"outline: 5px solid #000; height: 20px\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :box/box-shadow-takes-no-space
+  :group :box
+  ;; AGREES: neither does a shadow, spread included. `b` at y=20 on both
+  ;; sides, and `expand-box-shadow-shorthand` does parse the 10px spread.
+  :html "<div style=\"width: 300px\"><div style=\"box-shadow: 0 0 0 10px #000; height: 20px\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ ;; ---- generated content, measured where the oracle CAN see it ----
+ ;; A ::before/::after is not DOM text, so no Range reaches it and the
+ ;; line axis is structurally blind (hence `:oracle/blind` on all four).
+ ;; What is NOT blind is the box whose size the generated content changes,
+ ;; and these shapes are chosen so that box is the answer.
+
+ {:id :generated/after-content-widens-an-inline
+  :group :generated
+  :oracle/blind true
+  ;; AGREES on the box: Brave's <b> is 37.03125 wide -- 24.234 of `mid`
+  ;; plus 12.797 of `!!!` -- and this engine says 37.0234375. (Brave
+  ;; reports it as TWO client rects, one per piece; the geometry axis
+  ;; compares the union, which is what getBoundingClientRect returns.)
+  :html "<div style=\"width: 300px\">x<b class=\"aft\">mid</b>y</div>"
+  :css ".aft::after { content: \"!!!\" }"}
+
+ {:id :generated/counter-reset-with-a-start-value
+  :group :generated
+  :oracle/blind true
+  ;; AGREES: `counter-reset: k 7` sets the counter to 7 rather than 0, so
+  ;; the generated text is `7-`. The box is shrink-to-fit, which is what
+  ;; makes the width the whole measurement -- Brave and this engine both
+  ;; say 21 (three characters), against the 14 a missing counter would
+  ;; give and the 21 a counter starting at 0 would give ONLY by having
+  ;; the same digit count, which is why the start value is 7 and not 1.
+  :html "<div style=\"width: 300px\"><div class=\"kk\" style=\"display: inline-block\">x</div></div>"
+  :css ".kk::before { content: counter(k) \"-\" } .kk { counter-reset: k 7 }"}
+
+ {:id :generated/before-display-block-makes-its-own-line
+  :group :generated
+  :oracle/blind true
+  ;; A `display: block` ::before is a block box, not the first thing in
+  ;; the element's line. Brave: the <p> is 40 tall and `tail` is at y=22.
+  ;; This engine flows the generated text into the paragraph's own line
+  ;; and reports 20.
+  :html "<div style=\"width: 300px\"><p style=\"margin: 0\" class=\"bb\">tail</p></div>"
+  :css ".bb::before { content: \"head\"; display: block }"}
+
+ {:id :list/list-style-position-inside
+  :group :list
+  :oracle/blind true
+  ;; The value round twenty-nine implemented the DEFAULT of, measured
+  ;; alongside, and never gave a case. Brave puts the <a> at x=59 with
+  ;; `inside` against x=40 with the default `outside`; this engine says
+  ;; 53.70625, which is 5.29 short and is exactly the number that round
+  ;; recorded in `list-style-inside?` rather than modelling: Brave's disc
+  ;; marker advance is a function of the font size (19px at 14px) and not
+  ;; the 13.70625 the `"• "` string measures.
+  :html "<ul class=\"ins\" style=\"width: 300px\"><li><a href=\"#\">First</a></li></ul>"
+  :css ".ins li { list-style-position: inside }"}
+
+ ;; ---- form controls with a UA box of their own ----
+ ;; `ua-control-box` covers input/button/select/textarea. These five are
+ ;; the ones it does not: two tags that are not controls at all here
+ ;; (laid out as 400x0 blocks) and three <input> types that all come out
+ ;; of the text-field rule at 153x21.
+
+ {:id :form/progress-default-box
+  :group :form
+  ;; Brave: 140x14, at y=2.797 on a 20px line. Engine: a 400x0 block.
+  :html "<div style=\"width: 400px\"><progress></progress></div>"}
+
+ {:id :form/meter-default-box
+  :group :form
+  ;; Brave: 70x14 -- half a progress bar, and a separate constant, which
+  ;; is why both are here.
+  :html "<div style=\"width: 400px\"><meter></meter></div>"}
+
+ {:id :form/input-range-default-box
+  :group :form
+  ;; Brave: 129x16 at x=2 y=2 -- a range input carries `margin: 2px` and
+  ;; no padding, where this engine gives every <input> the text field's
+  ;; 153x21 and its 1px/2px padding. (Those four padding values are the
+  ;; only cascade-attributed computed-style residual these cases add.)
+  :html "<div style=\"width: 400px\"><input type=\"range\"></div>"}
+
+ {:id :form/input-color-default-box
+  :group :form
+  ;; Brave: 50x27.
+  :html "<div style=\"width: 400px\"><input type=\"color\"></div>"}
+
+ {:id :form/input-file-default-box
+  :group :form
+  ;; Brave: 253x27 -- the width of the button plus its label text, so it
+  ;; is a different KIND of number from the two fixed ones above and a
+  ;; single per-type constant table would not produce it.
+  :html "<div style=\"width: 400px\"><input type=\"file\"></div>"}
+
+ ;; ---- five singles, each in the group it belongs to ----
+
+ {:id :wrap/wbr-is-a-break-opportunity
+  :group :wrap
+  ;; AGREES: <wbr> is a zero-width break opportunity inside a word, and
+  ;; Brave breaks the 14-character run in two -- `aaaaaaa` at y=2 and
+  ;; `bbbbbbb` at y=22, box 80x40 -- as does this engine, which reaches
+  ;; the same answer by treating the unknown element as an inline that
+  ;; splits the text into two runs. Brave reports NO box for the <wbr>
+  ;; itself (getClientRects() is empty, the geometry axis's `boxless`).
+  :html "<div style=\"width: 80px\">aaaaaaa<wbr>bbbbbbb</div>"}
+
+ {:id :wrap/no-wbr-does-not-break-the-word
+  :group :wrap
+  ;; Its control, and it agrees too: the same 14 characters with the
+  ;; <wbr> removed stay on ONE line and overflow, 98px of word in an 80px
+  ;; box, 20 tall. Without this the case above would be a break that
+  ;; could have come from the box being too narrow.
+  :html "<div style=\"width: 80px\">aaaaaaabbbbbbb</div>"}
+
+ {:id :text/writing-mode-vertical-rl
+  :group :text
+  ;; `writing-mode` matches nothing in src/. Brave lays the text down the
+  ;; page: the inner box is 20 wide and 70 tall, with `alpha` at y=0 and
+  ;; `beta` at y=42. This engine gives it a horizontal 300x20 and one
+  ;; line. Deep gap, recorded rather than chased -- a vertical writing
+  ;; mode is a second axis convention through every function in
+  ;; cssom.layout, not a property to read.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl\">alpha beta</div></div>"}
+
+ {:id :multicol/columns-shorthand
+  :group :multicol
+  ;; AGREES: the `columns: <count> <width>` shorthand, which the twelve
+  ;; existing multicol cases reach only through its longhands. Brave and
+  ;; this engine both give two 143px columns with the second at x=157.
+  :html "<div style=\"width: 300px; columns: 2 auto\"><div style=\"height: 30px\">a</div><div style=\"height: 30px\">b</div></div>"}
+
+ {:id :display/inline-table-in-a-sentence
+  :group :display
+  ;; Brave: the inline-table is 28x20 at x=49, so `after` starts at 84 --
+  ;; one line, with the table shrink-wrapped to its single cell. This
+  ;; engine makes it a block: three lines and two 400px-wide boxes.
+  :html "<div style=\"width: 400px\">before <span style=\"display: inline-table\"><span style=\"display: table-cell\">cell</span></span> after</div>"}
+
+ {:id :position/inset-shorthand
+  :group :position
+  ;; `inset` is the physical shorthand for top/right/bottom/left and is
+  ;; not in the corpus at all. Brave: x=20 y=10 w=260 h=40. This engine
+  ;; reads none of the four, so the box is shrink-to-fit at its static
+  ;; position: 0,0,7x20.
+  :html "<div style=\"width: 300px; height: 60px; position: relative\"><div style=\"position: absolute; inset: 10px 20px\">a</div></div>"}
 
 ]

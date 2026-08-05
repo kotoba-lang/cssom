@@ -1210,6 +1210,49 @@
        (keyword (str prop "-bottom")) (parse-style-value b)
        (keyword (str prop "-left")) (parse-style-value l)})))
 
+(defn- expand-inset-shorthand
+  "Expands the `inset` shorthand into `top`/`right`/`bottom`/`left` by the
+   same 1-to-4 rule `expand-box-side-shorthand` applies to
+   `margin`/`padding`.
+
+   It is a separate function only because its longhands are BARE side
+   names rather than `<prop>-<side>` ones -- `inset: 10px 20px` is
+   `top: 10px; right: 20px; bottom: 10px; left: 20px`, not `inset-top`.
+   Those four are the exact keys `layout-absolute-children` already reads
+   (`node-style`'s `:top`/`:left`, and the `:right`/`:bottom` beside
+   them), so nothing downstream needed a new concept.
+
+   Measured before it was written, in Brave 151 over CDP:
+   `<div style=\"width:300px;height:60px;position:relative\">
+   <div style=\"position:absolute;inset:10px 20px\">a</div></div>`
+   puts the inner box at x=20 y=10 w=260 h=40. Without this the shorthand
+   was stored raw under an `:inset` key nothing reads, so the box fell
+   back to its static position and shrink-to-fit width: 0,0,7x20.
+
+   `auto` is admitted for the same reason it is admitted for `margin`: it
+   is `inset`'s own INITIAL value and a real, common authored one
+   (`inset: 0 auto`), and it travels as a raw string exactly as a
+   directly-declared `top: auto` already does. Percentages are rejected
+   here exactly as they are for margin/padding -- this namespace's
+   degrade-don't-guess posture, and the same reason
+   `:box/margin-left-percentage` is a recorded divergence rather than a
+   wrong number."
+  [v]
+  (let [tokens (box-shorthand-tokens v)
+        n (count tokens)
+        [t r b l] (map #(get tokens % (last tokens))
+                       (get box-side-picks n [0 0 0 0]))]
+    (when (and (pos? n) (<= n 4)
+               (every? #(or (re-matches #"-?\d+(px)?" %)
+                            (re-matches calc-pattern %)
+                            (re-matches var-ref-pattern %)
+                            (= "auto" (str/lower-case %)))
+                       tokens))
+      {:top (parse-style-value t)
+       :right (parse-style-value r)
+       :bottom (parse-style-value b)
+       :left (parse-style-value l)})))
+
 (defn- expand-text-shadow-shorthand
   "Parses a `text-shadow` shorthand value (real CSS's own grammar,
    `<offset-x> <offset-y> <blur-radius>? <color>?` -- offsets are
@@ -1552,6 +1595,12 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-box-side-shorthand (str/lower-case k) value))
+
+                         (and (= "inset" (str/lower-case k))
+                              (some? (expand-inset-shorthand value)))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-inset-shorthand value))
 
                          (= "border" (str/lower-case k))
                          (map (fn [[longhand longhand-value]]
