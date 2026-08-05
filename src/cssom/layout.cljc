@@ -251,6 +251,21 @@
    document_input.cljc, not here -- this function only ever renders
    whatever `open` state is already given to it.
 
+   CSS MULTI-COLUMN (`column-count`/`column-width`/`column-gap`/
+   `column-rule`/`column-fill`/`column-span`/the `columns` shorthand, see
+   the `---- CSS multi-column layout ----` section above layout-block): a
+   block container declaring a count or a width lays its content out in a
+   row of equal-width columns dividing its CONTENT box, balanced to the
+   shortest height that still fits them (multicol-balanced-height), with a
+   definite height acting as a ceiling that spills the surplus into extra
+   columns past the box's own edge. Its own scope cut is named there and
+   is the important one: a block is never FRAGMENTED across a column
+   boundary -- it moves whole into the next column, i.e. every block
+   behaves as `break-inside: avoid`, where a browser splits it and reports
+   the union of the fragments as its box. The direct inline content of a
+   multicol box DOES break between its line boxes (multicol-line-items),
+   which is the half an author sees; a `<p>` is a block and so is atomic.
+
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
   (:require [clojure.string :as str]
             [cssom.core :as css]))
@@ -10601,6 +10616,425 @@
                         (contains? #{"absolute" "fixed"} (:position lst)))))
          first)))
 
+;; ---- CSS multi-column layout ---------------------------------------------
+;;
+;; A multi-column container is a block box whose CONTENT is laid out in a
+;; row of equal-width columns instead of one full-width flow. Everything
+;; below is the fragmentation half of CSS Multi-column Layout Level 1, and
+;; only that half: the box itself is an ordinary block (layout-block owns
+;; its width, margins, padding, border, background) and the columns divide
+;; its CONTENT box, which is why `padding: 10px` on a 300px two-column box
+;; makes 130px columns starting at x=10 rather than 140px ones at x=0.
+;;
+;; Every number here was measured in a real Blink browser first, at the
+;; conformance harness's own font-size 14 / line-height 20 (the corpus
+;; wrapper's declarations -- the same shapes at the browser default 16px
+;; produce DIFFERENT column heights, because a line box taller than a
+;; block's declared `height` is unbreakable content that forces the column
+;; taller, and at 14/20 it is not). The rules, and the shape each came
+;; from:
+;;
+;;   used count  `column-count: 2`                          -> 2
+;;               `column-width: 100px` in 300px, gap 10     -> 2
+;;                 i.e. floor((avail + gap) / (width + gap)), min 1:
+;;                 `column-width: 40px`  in 300, gap 10     -> 6
+;;                 `column-width: 400px` in 300, gap 10     -> 1
+;;               both declared                              -> min of the two
+;;                 (`column-count:2; column-width:60px` in 300 is 2, not 4)
+;;   used width  (avail - (n-1) * gap) / n, floored to a whole pixel and
+;;               never negative (`width:100px; column-count:3;
+;;               column-gap:60px` reports 0-wide columns at x 0/60/120,
+;;               overflowing its own box rather than shrinking the gap)
+;;   used gap    a length or a PERCENTAGE of the content width (`10%` of
+;;               300 is 30, not 10), `normal` is 1em -- NOT the 0 the same
+;;               property means on a grid or flex box -- and the `gap`
+;;               shorthand's column half feeds it like any other box type
+;;   rule        painted centred INSIDE the gap and taking no space: the
+;;               columns of a `column-rule: 4px solid` box are exactly
+;;               where they are without one
+;;   balancing   see multicol-balanced-height
+;;   `column-fill: auto`  fills each column to the box's own height before
+;;               starting the next instead of balancing, and with no
+;;               definite height it is one column of everything
+;;   `column-span: all`   interrupts the columns: the content before it is
+;;               balanced into its own row of columns, the spanner is one
+;;               full-width block, and the content after it starts a fresh
+;;               row below
+;;
+;; ---- the scope cut: a block is never FRAGMENTED across a boundary ------
+;;
+;; A real browser SPLITS a block that does not fit -- part of it at the
+;; bottom of one column, the rest at the top of the next, with
+;; getBoundingClientRect reporting the union of the two fragments. This
+;; engine moves such a block WHOLE into the next column instead, i.e. it
+;; treats every block as `break-inside: avoid`. That is a real difference
+;; and the corpus measures it: `:multicol/a-block-splits-across-the-column-
+;; boundary` is a 300px box with `height: 40px` holding a 30px and a 20px
+;; block, where Brave balances to a 25px column height by cutting the first
+;; block at 25 (its box reads 300 wide and 25 tall, spanning both columns)
+;; and this engine reports it 140 wide and 30 tall in column one.
+;;
+;; What is NOT cut: the direct inline content of a multicol box breaks
+;; between its LINE boxes, which is the fragmentation an author actually
+;; sees (`:multicol/text-flows-into-the-column-width`'s three lines land
+;; two in the first column and one in the second). See multicol-line-items.
+;;
+;; Two consequences worth naming rather than discovering: `break-inside:
+;; avoid` is satisfied by construction and so scores nothing, and a
+;; PARAGRAPH (`<p>` -- a block, not direct inline content) is atomic here
+;; where a browser would flow its lines across the boundary. A future
+;; cycle that wants the real thing needs op-level fragmentation: split a
+;; laid-out subtree's draw ops at a y, and report ONE `:node` op whose box
+;; is the union of the fragments, which is what the browser reports.
+
+(def ^:private multicol-displays
+  "The `display` values whose box can BE a multi-column container.
+
+   Deliberately not `(not= \"inline\" ...)`: measured in Brave, `<span
+   style=\"column-count: 2\">` gets no columns at all -- the properties
+   apply to block CONTAINERS, and an inline box is not one. Flex and grid
+   containers never reach layout-block, so their absence here is by
+   construction; a table box is left out because its own algorithm owns
+   its children."
+  #{"block" "flow-root" "list-item" "inline-block" "table-cell" "table-caption"})
+
+(def ^:private line-style-keywords
+  #{"none" "hidden" "solid" "dashed" "dotted" "double" "groove" "ridge" "inset" "outset"})
+
+(defn- columns-shorthand
+  "The `columns` shorthand's `<'column-width'> || <'column-count'>` value,
+   as `{:count <raw> :width <raw>}`.
+
+   The two halves are told apart the way the grammar does -- a bare
+   `<integer>` is the count, a `<length>` is the width -- rather than by
+   position, because the shorthand genuinely accepts either order
+   (`columns: 2 100px` and `columns: 100px 2` are the same declaration).
+   `auto` contributes nothing, which is exactly its meaning in both
+   longhands."
+  [v]
+  (when (string? v)
+    (reduce (fn [acc tok]
+              (cond
+                (= "auto" tok) acc
+                (re-matches #"[0-9]+" tok) (assoc acc :count tok)
+                :else (assoc acc :width tok)))
+            {}
+            (str/split (str/trim v) #"\s+"))))
+
+(defn- multicol-gap-px
+  "The used `column-gap` of a MULTICOL box, in px.
+
+   Three sources, in the order CSS resolves them, and one default that is
+   not the one node-style's `:column-gap` carries: on a multicol box
+   `normal` is 1em (measured -- a 300px two-column box at font-size 14 has
+   143px columns, i.e. a 14px gap), where on a grid or flex container the
+   same keyword is 0. node-style's `:column-gap` also falls back to the
+   HOST THEME's `:gap`, which is a styling choice for rows of boxes and not
+   a CSS value at all, so this reads the declaration itself rather than
+   that resolved key.
+
+   A percentage resolves against the multicol box's own content width
+   (measured: `column-gap: 10%` of 300px is 30, giving 135px columns)."
+  [node content-w font-size]
+  (let [declared (style node :column-gap)]
+    (cond
+      (and (some? declared) (not= "normal" declared))
+      (or (length-or-percentage declared content-w) font-size)
+
+      (some? declared) font-size
+
+      :else (or (gap-shorthand-axis (style node :gap) :column) font-size))))
+
+(defn- multicol-rule
+  "The used `column-rule`, as `{:w :style :color}`, from the shorthand and
+   whichever longhands override it. `:style` `none`/`hidden` (the initial
+   value) means nothing is painted."
+  [node]
+  (let [toks (let [v (style node :column-rule)]
+               (if (string? v) (str/split (str/trim v) #"\s+") []))
+        named-width {"thin" 1 "medium" 3 "thick" 5}
+        width-tok (first (filter #(or (some? (re-find #"^[0-9]" %)) (named-width %)) toks))
+        style-tok (first (filter line-style-keywords toks))
+        color-tok (first (remove #(or (= % width-tok) (= % style-tok)) toks))]
+    {:w (or (explicit-length (style node :column-rule-width))
+            (when width-tok (or (named-width width-tok) (parse-int width-tok nil)))
+            3)
+     :style (or (style node :column-rule-style) style-tok "none")
+     :color (or (style node :column-rule-color) color-tok "#000000")}))
+
+(defn- multicol-spec
+  "What kind of multi-column box this is, or nil when it is not one.
+
+   Returns `{:col-count :col-w :gap :fill :rule}` with the USED count and
+   width already resolved -- see this section's header comment for the
+   branches of that resolution and the shape each was measured on."
+  [node st content-w font-size]
+  (when (contains? multicol-displays (:display st))
+    (let [sh (columns-shorthand (style node :columns))
+          cc (or (style node :column-count) (:count sh))
+          cw (or (style node :column-width) (:width sh))
+          n-decl (when (and (some? cc) (not= "auto" cc))
+                   (some-> (parse-int cc nil) (max 1)))
+          w-decl (when (and (some? cw) (not= "auto" cw))
+                   (length-or-percentage cw content-w))]
+      (when (or n-decl w-decl)
+        (let [gap (max 0 (or (multicol-gap-px node content-w font-size) 0))
+              fit (when (and w-decl (pos? (+ w-decl gap)))
+                    (max 1 (long (Math/floor (/ (+ content-w gap) (double (+ w-decl gap)))))))
+              n (max 1 (cond (and n-decl fit) (min n-decl fit)
+                             n-decl n-decl
+                             fit fit
+                             :else 1))]
+          {:col-count n
+           ;; kept FRACTIONAL: the column PITCH (width + gap) is what
+           ;; positions every column after the first, and rounding the
+           ;; width before multiplying by it accumulates -- a 3-column
+           ;; 300px box with a 10px gap has 93.33px columns whose third
+           ;; starts at 206.67, which rounds to 207, where 3 * (93 + 10)
+           ;; is 206. The width HANDED to layout is floored (below), which
+           ;; is the whole-pixel width a browser reports for the same box.
+           :col-w (max 0 (/ (- content-w (* (dec n) gap)) (double n)))
+           :gap gap
+           :fill (if (= "auto" (style node :column-fill)) :auto :balance)
+           :rule (multicol-rule node)})))))
+
+(defn- multicol-line-items
+  "Splits a laid-out bare TEXT entry into one item per LINE, so the column
+   flow can break between them -- the one fragmentation this engine does
+   perform (see the section header for the block-level cut it does not).
+
+   The lines are recovered from the ops' own `:y`, which layout-text sets
+   to `y + padding + i * line-height` and so is one distinct value per
+   line, in order. Two guards keep that inference from firing on anything
+   it would misread: every op must be a `:text` op (a text child emits
+   nothing else), and the distinct `:y` values must be EVENLY spaced,
+   which they are for line boxes and are not for the second, offset op a
+   `text-shadow` adds per run. Anything else stays one atomic item, which
+   is exactly the pre-existing behaviour.
+
+   The first line keeps the box's top padding inside it and the last its
+   bottom padding, so the item heights still sum to the box's own height."
+  [item]
+  (let [ops (:draw item)
+        ys (vec (sort (distinct (map :y ops))))
+        n (count ys)
+        steps (mapv - (rest ys) (butlast ys))]
+    (if-not (and (> n 1)
+                 (every? #(= :text (:draw/op %)) ops)
+                 (apply = steps))
+      [item]
+      (mapv (fn [i]
+              (let [ly (nth ys i)
+                    off (- ly (first ys))]
+                {:h (if (< (inc i) n) (nth steps i) (- (:h item) off))
+                 :mt 0 :mb 0
+                 :draw (mapv #(update % :y - off) (filterv #(= ly (:y %)) ops))
+                 :oof []}))
+            (range n)))))
+
+(defn- multicol-items
+  "One layout entry of a multi-column container's flow, as the vector of
+   ITEMS the column packing sees.
+
+   Each item is `{:h :mt :mb :draw :oof}` laid out at y=0 in `width`, with
+   `:mt`/`:mb` the margins that collapsed OUT of it -- which is why the
+   per-entry layout-children-block call passes `true` for both collapse
+   flags: that is the only way to get the child's own height and its outer
+   margins as separate numbers, and this function's caller does the
+   collapsing BETWEEN entries itself (a break truncates the margin at it,
+   which the shared block flow has no way to express)."
+  [theme content-x width opacity inherited entry]
+  (if (and (map? entry) (:inline/run entry))
+    (let [{:keys [draw h] oof :out-of-flow}
+          (layout-inline-run theme content-x 0 width opacity inherited (:inline/run entry))]
+      [{:h h :mt 0 :mb 0 :draw (vec draw) :oof (vec oof)}])
+    (let [{:keys [draw h out-of-flow] :margin/keys [collapsed-top collapsed-bottom]}
+          (layout-children-block theme content-x 0 width opacity inherited
+                                 [entry] true true true nil)
+          item {:h h :mt (or collapsed-top 0) :mb (or collapsed-bottom 0)
+                :draw (vec draw) :oof (vec out-of-flow)}]
+      (if (or (string? entry) (= :text (:node/type entry)) (generated-node? entry))
+        (multicol-line-items item)
+        [item]))))
+
+(defn- multicol-flow
+  "The items' positions in ONE continuous flow, before they are cut into
+   columns: `{:tops :bottoms :total}`.
+
+   Margins collapse between adjacent items exactly as they do in block
+   flow (and the host theme's inter-row `:gap` separates them the same
+   way), because a column break does not change what the flow WOULD have
+   been -- it only decides where to cut it. The cut itself is what drops a
+   margin: see multicol-pack's `origin`."
+  [theme items]
+  (loop [is items y 0 prev-mb 0 first? true tops [] bottoms []]
+    (if-let [it (first is)]
+      (let [gap (if first?
+                  (:mt it)
+                  (+ (collapse-margins prev-mb (:mt it)) (:gap theme)))
+            top (+ y gap)
+            bot (+ top (:h it))]
+        (recur (rest is) bot (:mb it) false (conj tops top) (conj bottoms bot)))
+      {:tops tops :bottoms bottoms :total (+ y prev-mb)})))
+
+(defn- multicol-pack
+  "Fills columns of height `h` greedily, in order: `[{:from :to :origin
+   :h}]`, one entry per column used -- which may be MORE than the used
+   column count, and is exactly how a box with a definite height overflows
+   sideways (measured: a 200px `height: 40px` two-column box holding three
+   40px blocks puts the third at x=220, past its own right edge).
+
+   `origin` is the flow position the column's own y=0 is at. For every
+   column but the first that is the first item's TOP, i.e. the margin
+   before the break is dropped rather than carried into the new column --
+   measured in Brave, the first block of the second column sits at y=0
+   with its 10px top margin truncated. The first column keeps 0, so the
+   first item's margin stays inside the box, which is the other half of
+   the same measurement.
+
+   A column always takes at least one item, so an item taller than `h`
+   overflows its column instead of looping forever."
+  [tops bottoms h]
+  (let [n (count tops)]
+    (loop [i 0 cols []]
+      (if (>= i n)
+        cols
+        (let [origin (if (zero? i) 0 (nth tops i))
+              j (loop [j i]
+                  (if (and (< (inc j) n)
+                           (<= (- (nth bottoms (inc j)) origin) h))
+                    (recur (inc j))
+                    j))]
+          (recur (inc j) (conj cols {:from i :to j :origin origin
+                                     :h (- (nth bottoms j) origin)})))))))
+
+(defn- multicol-balanced-height
+  "The balanced column height: the SMALLEST height at which the items still
+   fit in `n` columns.
+
+   The rule, stated exactly because it is the part most easily
+   approximated: greedy filling is optimal for this problem (it is the
+   classic minimum-largest-partition of a sequence into at most n
+   contiguous runs), and 'does it fit in n columns' is monotone in the
+   height, so a bisection over [0, total] converges on the smallest
+   feasible height and a final pack at that height snaps it to a real
+   break -- the answer is always some `bottom(j) - origin(i)`, never a
+   number between two of them.
+
+   How far it was verified: against a real Blink browser on eleven corpus
+   shapes plus twenty more probes, every one of which agreed once the
+   items are the ones THIS engine can break at (see the section header --
+   a browser can also break inside a block, and where it does, its
+   balanced height is smaller than the one this returns). Four of those
+   probes are the reason the rule is a search rather than the
+   `ceil(total / n)` first guess it is often written as: three 30px blocks
+   in two columns balance to 60 here and in Brave, not 45, because 45 is
+   not a place the content can be cut."
+  [tops bottoms n]
+  (if (empty? tops)
+    0
+    (let [total (double (peek bottoms))]
+      (loop [lo 0.0 hi total k 0]
+        (if (>= k 40)
+          (reduce max 0 (map :h (multicol-pack tops bottoms hi)))
+          (let [mid (/ (+ lo hi) 2.0)]
+            (if (<= (count (multicol-pack tops bottoms mid)) n)
+              (recur lo mid (inc k))
+              (recur mid hi (inc k)))))))))
+
+(defn- multicol-spanner?
+  [node]
+  (and (map? node) (= :element (:node/type node)) (= "all" (style node :column-span))))
+
+(defn- layout-multicol
+  "Lays `children` out in the columns `mc` describes, returning the same
+   `{:draw :h :out-of-flow ...}` shape layout-children-block does so
+   layout-block can use either without knowing which it got.
+
+   `content-h` is the box's own definite CONTENT height when it has one,
+   else nil. It is a CEILING on the balanced column height and the whole
+   of `column-fill: auto`.
+
+   A `column-span: all` child cuts the flow into segments: the items
+   before it are balanced into their own row of columns, the spanner is
+   one full-width block below them, and the items after it start a fresh
+   row under that. Measured in Brave on a two-column box holding a 20px
+   block, a spanning `<h3>` and another 20px block: 0/20/40, with the
+   first block 140 wide and the `<h3>` 300."
+  [theme content-x content-y content-w opacity inherited children mc content-h]
+  (let [n (:col-count mc)
+        col-w (:col-w mc)
+        gap (:gap mc)
+        lay-w (long (Math/floor col-w))
+        rule (:rule mc)
+        rule-w (if (contains? #{"none" "hidden"} (:style rule)) 0 (max 0 (:w rule)))
+        entries (inline-runs theme inherited children
+                             (if (some #(float-child? theme %) children) 1 2))]
+    (loop [segs (partition-by multicol-spanner? entries)
+           y 0 draws [] oofs []]
+      (if-let [seg (first segs)]
+        (if (multicol-spanner? (first seg))
+          ;; a spanner (or a run of them): full-width blocks, stacked
+          (let [[y' draws' oofs']
+                (reduce (fn [[y draws oofs] e]
+                          (let [it (first (multicol-items theme content-x content-w
+                                                          opacity inherited e))
+                                top (+ y (:mt it))]
+                            [(+ top (:h it) (:mb it))
+                             (into draws (translate-ops 0 (+ content-y top) (:draw it)))
+                             (into oofs (mapv #(update % :y + content-y top) (:oof it)))]))
+                        [y draws oofs] seg)]
+            (recur (rest segs) y' draws' oofs'))
+          (let [items (vec (mapcat #(multicol-items theme content-x lay-w opacity inherited %) seg))
+                {:keys [tops bottoms total]} (multicol-flow theme items)
+                h (if (= :auto (:fill mc))
+                    (or content-h total)
+                    (let [b (multicol-balanced-height tops bottoms n)]
+                      (if content-h (min b content-h) b)))
+                cols (multicol-pack tops bottoms h)
+                seg-h (reduce max 0 (map :h cols))
+                placed (map-indexed
+                        (fn [k {:keys [from to origin]}]
+                          (let [dx (long (Math/round (* k (+ col-w gap))))]
+                            (reduce (fn [acc i]
+                                      (let [it (nth items i)
+                                            dy (+ content-y y (- (nth tops i) origin))]
+                                        (-> acc
+                                            (update :draw into (translate-ops dx dy (:draw it)))
+                                            (update :oof into (mapv #(-> % (update :x + dx)
+                                                                        (update :y + dy))
+                                                                    (:oof it))))))
+                                    {:draw [] :oof []}
+                                    (range from (inc to)))))
+                        cols)
+                ;; the rule is painted in the gap BEFORE each column after
+                ;; the first, centred in it, and is the reason `column-rule`
+                ;; takes no space: it is drawn between columns that are
+                ;; already where they would be without one.
+                rules (when (and (pos? rule-w) (> (count cols) 1))
+                        (mapv (fn [k]
+                                {:draw/op :rect
+                                 :x (long (Math/round (+ content-x
+                                                         (* k (+ col-w gap))
+                                                         (- gap)
+                                                         (/ (- gap rule-w) 2.0))))
+                                 :y (+ content-y y)
+                                 :w rule-w :h seg-h
+                                 :color (:color rule)
+                                 :opacity opacity})
+                              (range 1 (count cols))))]
+            (recur (rest segs)
+                   (+ y seg-h)
+                   (into (into draws (or rules [])) (mapcat :draw placed))
+                   (into oofs (mapcat :oof placed)))))
+        {:draw draws
+         :h y
+         :ink/lines []
+         :margin/collapsed-top 0
+         :margin/collapsed-bottom 0
+         :float/escaped []
+         :out-of-flow oofs}))))
+
 (defn- layout-block
   ([theme x y avail-width opacity inherited st node]
    (layout-block theme x y avail-width opacity inherited st node nil))
@@ -10735,7 +11169,18 @@
         ;; clips without scrolling, and Brave collapses the same `<p>`'s
         ;; margin straight out of it.
         fieldset? (= :fieldset (:tag node))
-        fc-free? (and (zero? (:border-width st))
+        ;; ---- is this box a MULTI-COLUMN container? ----
+        ;;
+        ;; Decided here, above the three formatting-context flags, because
+        ;; it answers all three: a multicol box establishes a block
+        ;; formatting context of its own, so nothing collapses through
+        ;; either of its edges (measured -- the first block of a
+        ;; `column-count: 2` box keeps its own 10px top margin INSIDE the
+        ;; box) and it contains its own floats. See the multicol section
+        ;; above for what it then does with its children.
+        mc (multicol-spec node st content-w (:font-size inherited))
+        fc-free? (and (nil? mc)
+                      (zero? (:border-width st))
                       (not (scroll-container? st))
                       (not= "flow-root" (:display st))
                       (not fieldset?)
@@ -10761,7 +11206,8 @@
         ;; inline-block. Flex and grid containers never get here (they take
         ;; layout-flex/layout-grid), so they are absent by construction
         ;; rather than by oversight.
-        contains-floats? (or (boolean (:independent-fc? st))
+        contains-floats? (or (some? mc)
+                             (boolean (:independent-fc? st))
                              fieldset?
                              (scroll-container? st)
                              (contains? #{"flow-root" "inline-block" "table-cell" "table-caption"}
@@ -10770,16 +11216,24 @@
                              (contains? #{"absolute" "fixed"} (:position st)))
         {:keys [draw h out-of-flow] :margin/keys [collapsed-top collapsed-bottom]
          escaped-floats :float/escaped own-ink :ink/lines}
-        (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
-                               content-w opacity inherited node-children
-                               collapse-top? collapse-bottom? contains-floats?
-                               ;; A box that establishes a formatting context
-                               ;; of its own is NOT intruded on by its
-                               ;; ancestors' floats -- that is what a
-                               ;; formatting context means, and it is the one
-                               ;; place this decision belongs, because
-                               ;; `contains-floats?` is computed right here.
-                               (when-not contains-floats? intruding))
+        (if mc
+          (layout-multicol theme (- content-x scroll-x) (- content-y scroll-y)
+                           content-w opacity inherited node-children mc
+                           ;; the CONTENT height, which is what caps a
+                           ;; column: `explicit-h` is a border box (see
+                           ;; used-block-height), and the columns divide the
+                           ;; content box.
+                           (when explicit-h (max 0 (- explicit-h inset-t inset-b))))
+          (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
+                                 content-w opacity inherited node-children
+                                 collapse-top? collapse-bottom? contains-floats?
+                                 ;; A box that establishes a formatting context
+                                 ;; of its own is NOT intruded on by its
+                                 ;; ancestors' floats -- that is what a
+                                 ;; formatting context means, and it is the one
+                                 ;; place this decision belongs, because
+                                 ;; `contains-floats?` is computed right here.
+                                 (when-not contains-floats? intruding)))
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
         ;; sits outside the content box in both axes. Without it every
