@@ -3424,3 +3424,115 @@
                         "font-size: 2em; margin-top: var(--gap)"])]
     (is (= 28 (:margin-top el))
         "1em of the USER's 28, not of the 14 where it was declared")))
+
+;; ---- blockification (CSS Display 3 SS2.7) ----
+
+(defn- blockify-case
+  "Builds `<container>` with one `<span class=\"item\">` per entry in
+   `items`, cascades `css` over it, and returns the resolved `display` of
+   the container followed by each item's -- `nil` where the cascade wrote
+   none, which is the CSS initial `inline` and is exactly the value
+   blockification has to replace.
+
+   Declarations come through real rules rather than a `style=` attribute
+   for the same reason `nest` above does: an inline style enters this
+   namespace as `:style-inline`, which `kotoba-lang/htmldom` writes and
+   this test namespace has no dependency on. `items` is a seq of class
+   names, one per span, so a rule can address each individually."
+  [css items]
+  (let [[container doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc container)
+        doc (dom/set-attribute doc container :class "container")
+        [ids doc] (reduce (fn [[ids doc] cls]
+                            (let [[id doc] (dom/create-element doc :span)
+                                  doc (dom/set-attribute doc id :class cls)
+                                  doc (dom/append-child doc container id)
+                                  [t doc] (dom/create-text-node doc "x")
+                                  doc (dom/append-child doc id t)]
+                              [(conj ids id) doc]))
+                          [[] doc] items)
+        doc (css/apply-cascade doc (css/parse-rules css))]
+    (mapv #(get-in doc [:nodes % :attrs :style/display])
+          (into [container] ids))))
+
+(deftest a-flex-items-display-is-blockified-at-computed-value-time
+  ;; Measured in Brave 151 on 2026-08-05 with getComputedStyle, on a span
+  ;; carrying each value inside a `display: flex` parent. Before this the
+  ;; cascade wrote the author's value through unchanged, which is 39 wrong
+  ;; computed values on the conformance corpus -- and is also what let
+  ;; cssom.layout mistake a flex item for an inline one.
+  (let [[container i ib if- ig it b n c li]
+        (blockify-case (str ".container { display: flex }"
+                            ".ib { display: inline-block } .if { display: inline-flex }"
+                            ".ig { display: inline-grid } .it { display: inline-table }"
+                            ".b { display: block } .n { display: none }"
+                            ".c { display: contents } .li { display: list-item }")
+                       ["i" "ib" "if" "ig" "it" "b" "n" "c" "li"])]
+    (is (= "flex" container) "the container itself is not an item and does not move")
+    (is (= "block" i) "a bare span is inline by ABSENCE, and still has to come out block")
+    (is (= "block" ib))
+    (is (= "flex" if-) "inline-flex keeps its INNER display and loses only the outer half")
+    (is (= "grid" ig))
+    (is (= "table" it))
+    (is (= "block" b) "already block-level, unchanged")
+    (is (= "none" n) "display:none generates no box, so there is nothing to blockify")
+    (is (= "contents" c) "measured: contents survives -- it is not a box either")
+    (is (= "list-item" li) "measured: an <li> in a flex row still reports list-item")))
+
+(deftest a-grid-item-a-float-and-an-out-of-flow-box-are-blockified-the-same-way
+  ;; The three triggers produce the SAME table in Brave, which is what
+  ;; makes this one rewrite rather than three.
+  (let [item (fn [css] (second (blockify-case css ["x"])))]
+    (is (= "block" (item ".container { display: grid }")))
+    (is (= "block" (item ".container { display: inline-grid }"))
+        "an inline-grid container's children are grid items too")
+    (is (= "block" (item ".container { display: inline-flex }")))
+    (is (= "block" (item ".x { float: left }")))
+    (is (= "block" (item ".x { float: right }")))
+    (is (= "block" (item ".x { position: absolute }")))
+    (is (= "block" (item ".x { position: fixed }")))
+    (is (= "flex" (item ".x { float: left; display: inline-flex }"))
+        "a floated inline-flex box maps the same way a flex item's does")))
+
+(deftest in-flow-positions-and-a-plain-grandchild-are-not-blockified
+  ;; The negative half, and the reason `blockified?` names the two
+  ;; out-of-flow positions instead of testing for `static`: measured in
+  ;; Brave, a `position: sticky` span still reports `display: inline`.
+  (let [item (fn [css] (second (blockify-case css ["x"])))]
+    (is (nil? (item ".x { position: sticky }"))
+        "sticky is in flow -- nothing is written, i.e. still the initial inline")
+    (is (nil? (item ".x { position: relative }")))
+    (is (nil? (item ".x { float: none }")) "`float: none` is not a float")
+    (is (nil? (item ".container { display: block }"))
+        "an ordinary block parent blockifies nothing"))
+  (let [[container doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc container)
+        doc (dom/set-attribute doc container :class "container")
+        [item doc] (dom/create-element doc :div)
+        doc (dom/append-child doc container item)
+        [gc doc] (dom/create-element doc :span)
+        doc (dom/append-child doc item gc)
+        doc (css/apply-cascade doc (css/parse-rules ".container { display: flex }"))]
+    (is (= "block" (get-in doc [:nodes item :attrs :style/display]))
+        "the item itself is blockified")
+    (is (nil? (get-in doc [:nodes gc :attrs :style/display]))
+        "blockification reaches the flex container's OWN children and stops --
+         a grandchild is laid out by its parent's block formatting context")))
+
+(deftest a-display-contents-parent-does-not-hide-the-flex-container-from-its-items
+  ;; `display: contents` generates no box, so the span below really is the
+  ;; flex container's item and is blockified as one. Passing this
+  ;; element's own `contents` down as the container display would have
+  ;; stopped it -- see children-container-display.
+  (let [[container doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc container)
+        doc (dom/set-attribute doc container :class "container")
+        [wrapper doc] (dom/create-element doc :span)
+        doc (dom/set-attribute doc wrapper :class "wrapper")
+        doc (dom/append-child doc container wrapper)
+        [real doc] (dom/create-element doc :span)
+        doc (dom/append-child doc wrapper real)
+        doc (css/apply-cascade doc (css/parse-rules
+                                    ".container { display: flex } .wrapper { display: contents }"))]
+    (is (= "contents" (get-in doc [:nodes wrapper :attrs :style/display])))
+    (is (= "block" (get-in doc [:nodes real :attrs :style/display])))))

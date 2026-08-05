@@ -4912,6 +4912,109 @@
               final-style
               current-color-keys))))
 
+(def ^:private initial-display
+  "CSS's own initial value for `display`, which every element with no
+   declaration of its own (author or UA -- see `ua-stylesheet-text`, which
+   names the block-level, list-item, table and form-control tags and stops
+   there) computes to. `<span>`, `<a>`, `<label>`, `<strong>`, `<img>` and
+   the rest of the inline tags reach it by never being mentioned."
+  "inline")
+
+(def ^:private blockified-displays
+  "CSS Display 3 SS2.7 `blockify`: the computed-value-time rewrite of a box's
+   OUTER display type, for a box that must be block-level in its parent's
+   formatting context. Anything absent is already block-level (`block`,
+   `flex`, `grid`, `table`, `flow-root`) or is not a box at all (`none`,
+   `contents`), and keeps the value it has.
+
+   Measured in Brave 151 on 2026-08-05 by reading `getComputedStyle` on a
+   span carrying each value in three positions -- inside a
+   `<div style=\"display:flex\">`, `float: left`, and `position: absolute`
+   -- all three of which produced the SAME table, which is what makes it
+   one rewrite rather than three:
+
+     inline -> block          inline-flex  -> flex
+     inline-block -> block    inline-grid  -> grid
+     table-cell -> block      inline-table -> table
+     table-row -> block
+
+   And what deliberately does NOT move, measured the same way: `list-item`
+   stays `list-item` (an `<li>` in a flex row still reports it), `contents`
+   stays `contents`, `none` stays `none`, `flow-root` stays `flow-root`.
+
+   `ruby` is left alone rather than mapped: Brave reports `block ruby`, a
+   two-keyword display whose outer half is blockified and whose inner half
+   is not, and this engine has no ruby formatting context to spend the
+   distinction on."
+  {"inline" "block"
+   "inline-block" "block"
+   "inline-flex" "flex"
+   "inline-grid" "grid"
+   "inline-table" "table"
+   "table-cell" "block"
+   "table-row" "block"})
+
+(def ^:private flex-or-grid-container-displays
+  "The `display` values whose IN-FLOW children are flex or grid items, and
+   are therefore blockified. Both spellings of each, because an
+   `inline-flex` container that is ITSELF blockified reads as `flex` while
+   one in a line box still reads as `inline-flex`, and its children are
+   items either way."
+  #{"flex" "inline-flex" "grid" "inline-grid"})
+
+(defn- display-token
+  "A `display`/`float`/`position` value normalised for comparison: the
+   cascade stores what the author wrote, so `Inline-Block` and
+   ` absolute ` have to answer the same as their lower-case selves."
+  [v]
+  (when (some? v)
+    (let [s (str/lower-case (str/trim (str v)))]
+      (when (seq s) s))))
+
+(defn- blockified?
+  "Whether this box is one of the three CSS Display 3 SS2.7 calls for a
+   blockified `display`: a float, an absolutely positioned box, or a flex/
+   grid item.
+
+   `position: sticky` and `position: relative` are NOT among them --
+   measured, a `position: sticky` span still reports `display: inline` --
+   which is why this tests the two out-of-flow positions by name rather
+   than testing for `static`."
+  [style parent-display]
+  (let [pos (display-token (:position style))
+        flt (display-token (:float style))]
+    (boolean
+     (or (contains? #{"absolute" "fixed"} pos)
+         (and flt (not= "none" flt))
+         (contains? flex-or-grid-container-displays parent-display)))))
+
+(defn- blockify-display
+  "`style` with its `display` rewritten when this box is blockified, and
+   unchanged otherwise.
+
+   Writes the value even when the element declared no `display` at all --
+   a bare `<span>` in a flex row has to come out `block`, and the only
+   thing that says `inline` today is the absence of a declaration. That
+   absence is exactly what `initial-display` supplies."
+  [style parent-display]
+  (let [d (or (display-token (:display style)) initial-display)]
+    (if-let [b (and (blockified? style parent-display)
+                    (get blockified-displays d))]
+      (assoc style :display b)
+      style)))
+
+(defn- children-container-display
+  "The `display` this element's children should be blockified against --
+   its OWN computed display, except that a `display: contents` box
+   generates no box at all, so its children are laid out by whatever
+   formatting context this element itself sits in. Passing this element's
+   `contents` down instead would make a
+   `<div style=\"display:flex\"><span style=\"display:contents\">` hide the
+   flex container from the spans that really are its items."
+  [style parent-display]
+  (let [d (or (display-token (:display style)) initial-display)]
+    (if (= "contents" d) parent-display d)))
+
 (defn- style-element
   "Resolves and writes computed style attrs for a single element, given the
    custom-property environment inherited from its ancestors and the running
@@ -4937,9 +5040,18 @@
    `resolve-style-map` because a `font-size: var(--x)` is not a length
    until the substitution has happened, and it covers the pseudo-element
    maps too, against this element's size -- a `::before`'s `em` is its
-   own font size, which it inherits from the element it hangs off."
+   own font size, which it inherits from the element it hangs off.
+
+   `parent-display` is the fourth thing this walk inherits, and it is
+   inherited for exactly one reason: blockification (CSS Display 3 SS2.7,
+   see `blockify-display`) rewrites a box's own `display` when its PARENT
+   establishes a flex or grid formatting context, so the answer for this
+   element is not derivable from this element. The extra return value is
+   what this element's own children should be blockified against, which is
+   its own computed display except for `display: contents` -- see
+   `children-container-display`."
   [document rules node-id inherited-env inherited-counters container-ctx
-   parent-font-size root-font-size]
+   parent-font-size root-font-size parent-display]
   (let [node (get-in document [:nodes node-id])
         [style node-counters] (style-with-counters document rules node inherited-counters container-ctx)
         pseudo-keys #{:pseudo/before :pseudo/after}
@@ -4959,7 +5071,9 @@
                                                 node-font-size
                                                 (or root-font-size node-font-size)))]))
                               pseudo)
-        final-style (resolve-current-color (merge resolved-custom resolved-normal resolved-pseudo))
+        final-style (-> (merge resolved-custom resolved-normal resolved-pseudo)
+                        resolve-current-color
+                        (blockify-display parent-display))
         document (reduce-kv
                   (fn [d k v]
                     (if (contains? pseudo-keys k)
@@ -4967,7 +5081,8 @@
                       (dom/set-attribute d node-id (keyword "style" (name k)) v)))
                   (clear-style-attrs document node-id)
                   final-style)]
-    [document node-env node-counters node-font-size]))
+    [document node-env node-counters node-font-size
+     (children-container-display final-style parent-display)]))
 
 (defn- run-cascade-walk
   "The actual top-down tree walk apply-cascade performs (see its own
@@ -4997,29 +5112,36 @@
    has no ancestor chain to read either number off."
   [document rules container-ctx base-font-size]
   (letfn [(walk [document node-id inherited-env inherited-counters visited
-                 parent-font-size root-font-size]
+                 parent-font-size root-font-size parent-display]
             (let [node (get-in document [:nodes node-id])
                   element? (= :element (:node/type node))
-                  [document node-env node-counters node-font-size]
+                  [document node-env node-counters node-font-size node-display]
                   (if element?
                     (style-element document rules node-id inherited-env inherited-counters
-                                   container-ctx parent-font-size root-font-size)
-                    [document inherited-env inherited-counters parent-font-size])
+                                   container-ctx parent-font-size root-font-size
+                                   parent-display)
+                    ;; a text node establishes no formatting context of its
+                    ;; own, so its (impossible) children would still be
+                    ;; blockified against this node's parent
+                    [document inherited-env inherited-counters parent-font-size parent-display])
                   root-font-size (if element? (or root-font-size node-font-size) root-font-size)
                   visited (conj visited node-id)]
               (reduce (fn [[document visited counters] child-id]
                         (walk document child-id node-env counters visited
-                              node-font-size root-font-size))
+                              node-font-size root-font-size node-display))
                       [document visited node-counters]
                       (:children node))))]
     (let [[document visited] (if-let [root (:root document)]
-                                (walk document root {} {} #{} base-font-size nil)
+                                (walk document root {} {} #{} base-font-size nil nil)
                                 [document #{}])]
       (reduce-kv
        (fn [document node-id node]
          (if (and (= :element (:node/type node)) (not (contains? visited node-id)))
+           ;; a detached subtree has no ancestor chain to read a container
+           ;; display off either -- the same honest simplification the empty
+           ;; inherited environment above it already makes
            (first (style-element document rules node-id {} {} container-ctx
-                                 base-font-size base-font-size))
+                                 base-font-size base-font-size nil))
            document))
        document
        (:nodes document)))))

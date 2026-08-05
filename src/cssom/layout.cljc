@@ -2575,7 +2575,27 @@
    and 300 against this engine's 300 and 268.
 
    With `box-sizing: border-box` the declared width IS the border box, and
-   nothing is added -- which is exactly why authors reach for it."
+   nothing is added -- which is exactly why authors reach for it.
+
+   SCOPE CUT, stated where it is made: the INTRINSIC width keywords
+   (`min-content`, `max-content`, `fit-content`) parse to nil here and
+   therefore behave as `auto` -- a block takes its whole containing block.
+   Measured in Brave 151 on 2026-08-05, `alpha beta` in monospace 14px
+   (7px/char): `min-content` 35, `max-content` 70, `fit-content` 70 at a
+   300px container and 40 at a 40px one, i.e. exactly
+   `min(max-content, max(min-content, available))`.
+
+   Two facts a fix will need, measured rather than assumed. The keyword
+   yields a CONTENT size and the box's padding/border is added on top of it
+   in BOTH box-sizing modes -- `width: max-content; padding: 0 6px;
+   border: 2px` reports 86 under `content-box` and 86 under `border-box`,
+   where an ordinary declared length would differ by 16. And this function
+   cannot answer on its own: it takes a style map and an available width,
+   and an intrinsic width needs the NODE (and this file's `theme`, for
+   `:measure-text`). The resolution therefore belongs at a caller that
+   still holds the node -- the same place, and the same write-the-used-
+   value-back technique, measure-child already uses to keep a percentage
+   width from resolving twice."
   [st avail]
   (let [;; a percentage width -- on its own or inside a calc() -- resolves
         ;; against the containing block's content width, which is exactly
@@ -5658,7 +5678,8 @@
     node
     (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node)))))))
 
-(declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited
+(declare inline-fragments inline-tokens inline-flow-candidate? inline-flow-text?
+         inline-inherited
          inline-max-content-width block-max-content-width intrinsic-flow-children
          font-metrics avg-advance max-advance measure-child)
 
@@ -6001,6 +6022,110 @@
     (vec (remove #(absolute? theme %) children))
     children))
 
+(defn- child-outer-max-content-width
+  "ONE child's max-content CONTRIBUTION to its parent's intrinsic width:
+   its own shrink-to-fit border-box width plus its horizontal margins.
+
+   Real CSS counts a child's margins in its contribution, which is the
+   whole of `<blockquote>`'s 89px in block-max-content-width's own table
+   below (a 7px word inside a UA `margin: 1em 40px`). Text children have
+   no margins and no box of their own, so they measure as themselves.
+
+   Shared by the two rules that combine these contributions differently --
+   block-max-content-width takes the MAX of them, flex-container-max-
+   content-width the SUM along a row -- because the per-child number is
+   the same fact either way, and the two must not drift."
+  [theme content-w opacity inherited c]
+  (let [w (:w (:box (measure-child theme content-w opacity inherited c true)))]
+    (if (map? c)
+      (let [cst (node-style c theme)]
+        (+ w (margin-side cst :left) (margin-side cst :right)))
+      w)))
+
+(defn- flex-container-max-content-width
+  "The max-content width of a FLEX CONTAINER's content -- the SUM of its
+   items' contributions plus the gaps between them along a ROW, the MAX of
+   them along a COLUMN. Excludes the container's own padding/border, like
+   every other rule here; the caller adds the inset.
+
+   Why this is not block-max-content-width's job. That function takes the
+   max over children, which is right for a block container and wrong for a
+   row flex container, whose items sit SIDE BY SIDE -- its preferred size
+   is how much room they need all on one line. This engine used to get the
+   sum by accident: a flex item that declared no `display` still looked
+   inline-level, so the whole set of them was measured as one inline RUN,
+   which sums. The moment the cascade started writing the browser's own
+   blockified `display: block` onto every flex item (CSS Display 3 SS2.7,
+   see cssom.core), they stopped looking inline and the accident stopped
+   with them -- `<div style=\"display:flex\"><div style=\"display:flex\">
+   <span>a</span><span>b</span></div><div>c</div></div>` reported the
+   inner container as 7px, one span, where Brave says 14.
+
+   Measured in Brave 151 on 2026-08-05, every one a nested container
+   inside an outer `display: flex` at 800px, monospace 14px (7px/char):
+
+   | inner container                                  | Brave |
+   |--------------------------------------------------|-------|
+   | `flex` + `<span>a</span><span>b</span>`          |    14 |
+   | the same with `gap: 10px`                        |    24 |
+   | `flex` + three items `aa`/`bbbb`/`c`             |    49 |
+   | `flex-direction: column`, items `aaaa`/`b`       |    28 |
+   | the same with `gap: 10px`                        |    28 |
+   | `flex-wrap: wrap`, items `aa`/`bbbb`             |    42 |
+   | `row-reverse`, items `aa`/`bbbb`                 |    42 |
+   | items with `margin: 0 5px` / none                |    38 |
+   | items with `width: 30px` / `width: 25px`         |    55 |
+   | items `min-width: 60px` / none                   |    88 |
+   | items `max-width: 10px` / none                   |    38 |
+   | items `flex: 1` / `flex: 1`                      |    42 |
+   | `justify-content: space-between`                 |    42 |
+   | one item `display: none`                         |    42 |
+   | one item `position: absolute`                    |    42 |
+
+   So: the gap counts on the MAIN axis only (a column's `row-gap` does not
+   widen it), `flex-wrap` does not (max-content puts every item on one
+   line whether or not the used layout would), `justify-content` does not,
+   the reversed directions size like their forward twins, each item's own
+   min/max/explicit width and margins DO count, and a `flex: 1` item still
+   contributes its own max-content rather than an equal share. Every one
+   of those falls out of `sum of clamped contributions + gaps` with no
+   special case, because measure-child already applies clamp-width and
+   intrinsic-flow-children already drops the out-of-flow items.
+
+   TEXT is the one piece of box-tree fixup this does model: a contiguous
+   run of child text is wrapped in ONE anonymous flex item (CSS Flexbox
+   SS4), so it is measured as a run rather than per node -- exactly
+   block-max-content-width's own grouping, with the combining rule
+   changed.
+
+   SCOPE CUT, stated where it is made: real CSS's max-content contribution
+   of a flex item is its flex base size adjusted by its grow/shrink
+   factors (CSS Flexbox SS9.9.1). This takes the item's own max-content
+   size instead. The two agree for every item measured above -- including
+   `flex: 1`, whose `1 1 0%` basis a browser still resolves against the
+   item's own content when the container is being sized -- and they part
+   company for an item whose declared `flex-basis` is a length smaller
+   than its content, which reports its content here and its basis in a
+   browser."
+  [theme content-w opacity inherited st children]
+  (let [column? (contains? #{"column" "column-reverse"} (:flex-direction st))
+        text? inline-flow-text?
+        ;; ONE number per flex item: an element child is an item on its
+        ;; own, a contiguous text run collapses to a single anonymous one
+        items (->> (partition-by text? children)
+                   (mapcat (fn [run]
+                             (if (text? (first run))
+                               [(inline-max-content-width theme content-w opacity
+                                                          inherited st (vec run))]
+                               (map #(child-outer-max-content-width
+                                      theme content-w opacity inherited %)
+                                    run))))
+                   vec)]
+    (if column?
+      (apply max 0 items)
+      (+ (reduce + 0 items)
+         (* (or (:column-gap st) 0) (max 0 (dec (count items))))))))
+
 (defn- block-max-content-width
   "The max-content width of a box's CONTENT when its children are not all
    inline-level: the WIDEST of their own max-content contributions.
@@ -6043,18 +6168,14 @@
    max-content one, and a box that would need to be narrower than its
    content in a real browser is not narrowed here."
   [theme content-w opacity inherited st children]
-  (let [inline? #(boolean (inline-flow-candidate? theme %))
-        outer (fn [c]
-                (let [w (:w (:box (measure-child theme content-w opacity inherited c true)))]
-                  (if (map? c)
-                    (let [cst (node-style c theme)]
-                      (+ w (margin-side cst :left) (margin-side cst :right)))
-                    w)))]
+  (let [inline? #(boolean (inline-flow-candidate? theme %))]
     (->> (partition-by inline? children)
          (map (fn [run]
                 (if (inline? (first run))
                   (inline-max-content-width theme content-w opacity inherited st (vec run))
-                  (apply max 0 (map outer run)))))
+                  (apply max 0 (map #(child-outer-max-content-width
+                                      theme content-w opacity inherited %)
+                                    run)))))
          (apply max 0))))
 
 (defn- flex-item-main-width
@@ -6095,6 +6216,43 @@
                   (contains? inline-atomic-tags (:tag child))
                   (atomic-intrinsic-width theme content-w opacity inherited child st)
 
+                  ;; A FLEX CONTAINER lays its own children out SIDE BY
+                  ;; SIDE along a row, so its preferred size is their sum
+                  ;; plus the gaps -- not the max block containers take,
+                  ;; and not the inline run's sum either, which counts no
+                  ;; gap and would not survive the children being
+                  ;; blockified. This has to be asked BEFORE the inline
+                  ;; branches below for exactly that reason: a flex
+                  ;; container's items are blockified whatever they were
+                  ;; written as. See flex-container-max-content-width.
+                  (contains? #{"flex" "inline-flex"} (:display st))
+                  (+ (flex-container-max-content-width theme content-w opacity inherited st cs)
+                     (intrinsic-inset-x st))
+
+                  ;; SCOPE CUT, stated where it is made: a GRID container
+                  ;; measured here still falls through to the block rule
+                  ;; below, so it reports the widest of its items where a
+                  ;; browser reports the sum of its COLUMN TRACKS plus the
+                  ;; column gaps. Measured in Brave 151 on 2026-08-05,
+                  ;; each as a `display: grid` item of an outer flex row
+                  ;; at 800px, monospace 14px:
+                  ;;
+                  ;;   `grid-template-columns: 40px 60px`, items a/b   100 (engine 7)
+                  ;;   `auto auto`, items `aa`/`bbbb`                   42 (engine 28)
+                  ;;   the same with `gap: 0 12px`                      54 (engine 28)
+                  ;;   `1fr 1fr`, items `aa`/`bbbb`                     56
+                  ;;   `grid-template-columns: auto` (one column)       28 (engine 28, right)
+                  ;;
+                  ;; NOT fixed here for a reason worth writing down: the
+                  ;; number a grid needs is its TRACK sizes, and layout-grid
+                  ;; already computes exactly it (its `intrinsic-cw`, which
+                  ;; today only an `inline-grid` reads). Answering properly
+                  ;; means lifting that whole prelude -- template areas,
+                  ;; auto-placement, implicit tracks, `fr` equalisation --
+                  ;; out of layout-grid so both callers share ONE answer,
+                  ;; which is a change to grid, not to flex, and is not what
+                  ;; blockification exposed. A second, approximate copy of
+                  ;; track sizing here is the outcome to avoid.
                   (and (= 1 (count cs)) (string? (first cs)))
                   (flex-item-natural-text-width theme opacity inherited st (first cs))
 
