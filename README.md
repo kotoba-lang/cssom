@@ -40,6 +40,7 @@ docstrings over any prose that disagrees with them.
 | Grid | fixed/`fr` tracks, `repeat()`, `minmax()`, named areas, explicit + auto placement |
 | Positioning | `absolute`/`fixed` (containing-block anchored, `z-index` ordered), `relative` (block-flow children only) |
 | Generated content | `::before`/`::after`, implicit list markers, CSS counters |
+| Hit testing | a `:node` op's box is what `getBoundingClientRect` reports; its optional `:hit` rect list is where a click lands, and the two differ for a wrapped inline box, for overflowing lines, and for table rows/row groups (which are never hit) — see `cssom.layout`'s ns docstring |
 | Not implemented | `vertical-align` beyond baseline, inline padding/border/margin, block-in-inline box splitting, replaced elements (`<img>`/form controls) as inline-level, floats, real glyph shaping (a host supplies `:measure-text`, else a per-character approximation is used) |
 
 ## Test

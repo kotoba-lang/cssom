@@ -640,6 +640,84 @@
     (is (> (count wrapped) 1) "sanity check: the same text without nowrap really does wrap in this narrow box")
     (is (= 1 (count nowrapped)) "nowrap must keep the whole text on a single, overflowing line")))
 
+;; ---- a box's HIT REGION includes the lines that overflow it ----
+
+(defn- node-ops-of
+  "Every `:node` draw-op of `tag` styled with `style` around `text`, at a
+   zero-inset theme so the coordinates read as plain CSS ones."
+  [tag style text width]
+  (let [[el doc] (dom/create-element dom/empty-document tag)
+        doc (dom/set-root doc el)
+        doc (if style (dom/set-style doc el style) doc)
+        [t doc] (dom/create-text-node doc text)
+        doc (dom/append-child doc el t)
+        [_ doc] (dom/consume-ops doc)]
+    (filterv #(= :node (:draw/op %))
+             (layout/draw-ops (dom/tree doc) {:width width :theme {:padding 0 :gap 0}}))))
+
+(deftest an-overflowing-line-is-hit-outside-the-box-it-overflows
+  ;; A browser reports the CLAMPED box and hits the overflowing content
+  ;; anyway. Measured in Brave on `<div style="width:80px"><p
+  ;; style="white-space:nowrap">alpha beta gamma</p></div>`: the <p>'s
+  ;; `getBoundingClientRect` is 80 wide, its `scrollWidth` is 112, and
+  ;; `elementFromPoint` answers `p` out to x=111. The corpus charged all
+  ;; five of :text/nowrap-in-narrow-box's sample points to this, plus five
+  ;; more on the <pre> spelling and one on a single word too long for its
+  ;; line.
+  (let [[el] (node-ops-of :div {:white-space "nowrap" :width 80}
+                          "alpha beta gamma" 400)]
+    (is (= {:x 0 :y 0 :w 80} (select-keys el [:x :y :w]))
+        "the BOX is the clamped one, which is what a browser reports and
+         what the geometry axis compares")
+    (is (= [{:x 0 :y 0 :w 80 :h (:h el)}
+            {:x 0 :y 0 :w 128 :h 20}]
+           (:hit el))
+        "the HIT REGION is that box PLUS the line that overflowed it -- 16
+         characters at this engine's own 0.6-em estimate for 14px, i.e.
+         128px, against the browser's 112 for its real 7px monospace"))
+
+  ;; ...per line, not per element: a line that fits is not hit outside the
+  ;; box just because a sibling line overflowed. Measured in Brave on
+  ;; `<p style="width:80px">short aaaaaaaaaaaaaaaaaaaa tail</p>`, which is
+  ;; hit out to x=140 on its middle line and stops at x=80 on the other
+  ;; two.
+  (let [[el] (node-ops-of :p {:width 80} "short aaaaaaaaaaaaaaaaaaaa tail" 400)
+        overflowing (rest (:hit el))]
+    (is (= 1 (count overflowing))
+        "exactly ONE of the three lines is in the hit region beyond the box")
+    (is (= 160 (:w (first overflowing)))
+        "the long word's own line, at its own measured width")
+    (is (< 0 (:y (first overflowing)))
+        "and at the y of the line that overflowed, not the box's top"))
+
+  ;; ...and a box whose lines all fit says nothing extra at all.
+  (let [[el] (node-ops-of :p {:width 300} "alpha beta" 400)]
+    (is (nil? (:hit el))
+        "no :hit key on an ordinary box -- every consumer already reads
+         the border box, and the common case pays nothing")))
+
+(deftest a-descendants-overflow-is-not-its-ancestors-hit-region
+  ;; Measured in Brave on the nested shape above: `elementsFromPoint` at
+  ;; x=100 returns the <p> and the case root -- the <div> that the <p>
+  ;; overflows is NOT in the stack. So the overflow belongs to the block
+  ;; that owns the LINES (CSS wraps a bare text child in an anonymous
+  ;; block, which has no identity of its own) and stops there.
+  (let [[outer doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc outer)
+        doc (dom/set-style doc outer {:width 80})
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc outer p)
+        doc (dom/set-style doc p {:white-space "nowrap"})
+        [t doc] (dom/create-text-node doc "alpha beta gamma")
+        doc (dom/append-child doc p t)
+        [_ doc] (dom/consume-ops doc)
+        ops (filterv #(= :node (:draw/op %))
+                     (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}}))
+        by-tag (fn [tag] (first (filter #(= tag (:tag %)) ops)))]
+    (is (seq (:hit (by-tag :p))) "the <p> owns the overflowing line")
+    (is (nil? (:hit (by-tag :div)))
+        "and its parent does not inherit it")))
+
 (deftest white-space-is-a-real-inheritable-property
   ;; A <span> nested inside a <pre> inherits white-space: pre and splits
   ;; its OWN text on embedded newlines too -- the same inherited-with-
@@ -5853,8 +5931,26 @@
         "each line's background sits at that line's content area, not its
          full line box")
     (is (= {:x 8 :y 8 :h 36} (select-keys a-op [:x :y :h]))
-        "one union :node op covering both fragments -- the documented
-         over-covering approximation of real CSS's per-fragment box list")))
+        "one union :node op covering both fragments -- which is the BOX a
+         browser reports (`getBoundingClientRect` on a two-line inline is
+         the union) and what the geometry axis compares against")
+    (is (= (mapv #(select-keys % [:x :y :w :h]) rects) (:hit a-op))
+        "...and its HIT REGION is the fragment list, not that union: a
+         browser answers `elementFromPoint` with the CONTAINING BLOCK
+         inside the union but outside every fragment. Measured in Brave on
+         `<p style=\"width:200px\">alpha beta gamma <b>delta epsilon</b>
+         zeta eta</p>`, whose <b> has client rects [119,1,33.7,18] and
+         [0,22,46.8,18], a bounding rect of [0,1,152.7,39], and answers
+         `p` at (80,4). The rects the fragments paint their BACKGROUNDS in
+         are the same rects, which is what makes this comparison a real
+         one rather than a restatement"))
+
+  ;; ...and the common case pays nothing for it.
+  (let [a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %)))
+                            (inline-ops ["click " [:a {} "here"]])))]
+    (is (nil? (:hit a-op))
+        "a single-fragment inline box carries no :hit at all -- its union
+         IS its fragment, and every consumer already reads the box")))
 
 (deftest nested-inline-elements-inherit-and-override
   (let [t (text-draw-ops
@@ -6153,6 +6249,30 @@
     (is (= (:y (nth t 0)) (:y (nth t 1))))
     (is (= (:y (nth t 2)) (:y (nth t 3))))
     (is (< (:y (nth t 0)) (:y (nth t 2))))))
+
+(deftest a-table-row-and-row-group-are-not-hit-test-candidates
+  ;; A row and a row group have real BOXES -- a browser reports them, the
+  ;; accessibility projection wants them, and the geometry axis compares
+  ;; them -- and are never the answer to `what did the user click`. Not
+  ;; because they have no background: measured in Brave with `background`
+  ;; on the <tbody> AND on both <tr>s and `border-spacing: 6px` opening
+  ;; real gaps between the rows, `elementsFromPoint` over every point of
+  ;; that table returns `td, table` inside a cell and `table` alone
+  ;; everywhere else. Neither `tr` nor `tbody` appears at any point.
+  ;; A row's painted background IS hit -- as the table.
+  ;;
+  ;; The corpus's two cases with a border-spacing gap under a sampled
+  ;; point (:table/column-widths-follow-widest-cell,
+  ;; :table/th-is-centered-and-bold) answered `tbody` where the browser
+  ;; answers `table`.
+  (let [ops (table-ops [[:tbody {} [:tr {} [:td {} "a"] [:td {} "b"]]]])
+        by-tag (fn [tag] (first (filter #(and (= :node (:draw/op %)) (= tag (:tag %))) ops)))]
+    (is (= [] (:hit (by-tag :tr))) "a row is not a hit-test candidate")
+    (is (= [] (:hit (by-tag :tbody))) "nor is a row group")
+    (is (pos? (:w (by-tag :tr))) "but the row still has its real box")
+    (is (pos? (:w (by-tag :tbody))))
+    (is (nil? (:hit (by-tag :td))) "a CELL is hit in the ordinary way")
+    (is (nil? (:hit (by-tag :table))) "and so is the table itself")))
 
 (deftest table-columns-size-to-their-widest-cell
   (let [ops (table-ops [[:tr {} [:td {} "wide-content"] [:td {} "x"]] [:tr {} [:td {} "a"] [:td {} "b"]]])
@@ -6548,10 +6668,23 @@
      (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}}))))
 
 (defn- div-boxes
-  "The `<div>` element boxes in document order, as [x y w h] vectors."
+  "The `<div>` element boxes in document order, as [x y w h] vectors.
+
+   Sorted by `:id` rather than taken in emitted order, because the two are
+   no longer the same thing and these are GEOMETRY tests: a float's ops
+   are emitted after its in-flow siblings' (CSS 2.1 Appendix E step 4
+   after step 3 -- see layout-children-block's `fdraws`), so reading them
+   in emitted order made every test below assert one sibling's box against
+   another's the moment paint order stopped matching document order. The
+   ids these helpers hand out are document order by construction
+   (dom/create-element is called in that order), and what each test here
+   is about is where a box IS, not when it is painted. The paint order
+   itself is pinned separately, by
+   a-float-is-painted-over-its-in-flow-siblings."
   [ops]
   (->> ops
        (filter #(and (= :node (:draw/op %)) (= :div (:tag %))))
+       (sort-by :id)
        (mapv (juxt :x :y :w :h))))
 
 (deftest floats-that-do-not-fit-side-by-side-stack
@@ -6733,6 +6866,37 @@
     (is (= 0 (:x beside))
         "a LONE text child beside a RISEN float is not narrowed by it.
          Known cut; see this comment")))
+
+(deftest a-float-is-painted-over-its-in-flow-siblings
+  ;; CSS 2.1 Appendix E paints in-flow, non-positioned block-level boxes
+  ;; (step 3) BEFORE non-positioned floats (step 4), so a float is painted
+  ;; over, not under, the background of every later block sibling -- and a
+  ;; float has later block siblings whose boxes reach under it in every
+  ;; ordinary use of one, because a float narrows a sibling's LINE boxes
+  ;; and not its border box.
+  ;;
+  ;; This engine emitted a float's ops at the point in the child list where
+  ;; it was written, so a following `<p>`'s background covered it whole.
+  ;; Measured in Brave on the shape below with real backgrounds: the
+  ;; float's own colour is what is visible over x 0..79, and
+  ;; `elementFromPoint` answers the float there, not the `<p>`.
+  (let [ops (float-ops 300 [[:div {:float "left" :width 80 :height 30} "L"]
+                            [:div {} "beside the float"]])
+        nodes (->> ops
+                   (filter #(and (= :node (:draw/op %)) (= :div (:tag %))))
+                   (mapv :id))]
+    (is (= [1 4 2] nodes)
+        "the float (id 2, written FIRST) is emitted LAST, after the
+         in-flow sibling (id 4) that was written after it"))
+
+  ;; ...and the boxes themselves are untouched by the reordering: this is a
+  ;; paint change, not a layout change.
+  (let [[root f beside]
+        (div-boxes (float-ops 300 [[:div {:float "left" :width 80 :height 30} "L"]
+                                   [:div {} "beside the float"]]))]
+    (is (= [0 0 80 30] f))
+    (is (= [0 0 300 20] beside) "the in-flow sibling is still full width at y=0")
+    (is (= [0 0 300 20] root) "and the float still escapes the plain parent")))
 
 (deftest a-float-does-not-split-the-inline-run-it-sits-inside
   ;; A float is blockified, so it never JOINS a line box -- but it must not
