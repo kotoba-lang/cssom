@@ -3038,6 +3038,113 @@
         "d2 has both a .a and a .b descendant -- both :has() occurrences
          independently hold")))
 
+;; The sibling-relative :has() forms. Every expectation below was measured
+;; in Brave 151 on 2026-08-05, on the markup each test builds.
+
+(defn- sibling-has-doc
+  "A <div> whose element children are `tags` (a vector of [tag class] pairs,
+   class may be nil), cascaded against `css`. Returns the children's
+   resolved values for `prop`, in document order, nil where unset."
+  [tags css prop]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [ids doc] (reduce (fn [[ids d] [tag cls]]
+                            (let [[id d] (dom/create-element d tag)
+                                  d (cond-> d cls (dom/set-attribute id :class cls))
+                                  d (dom/append-child d root id)]
+                              [(conj ids id) d]))
+                          [[] doc]
+                          tags)
+        doc (css/apply-cascade doc (css/parse-rules css))]
+    (mapv #(get-in doc [:nodes % :attrs (keyword "style" (name prop))]) ids)))
+
+(deftest has-with-a-following-sibling-combinator-is-forward-only
+  ;; Brave, on <p>p0</p><h2>h-a</h2><span>s</span><p>after</p> with
+  ;; `h2:has(~ p)`: only the <h2> is italic, and a LATER sibling counts
+  ;; even with a <span> in between.
+  (is (= [nil "italic" nil nil]
+         (sibling-has-doc [[:p nil] [:h2 nil] [:span nil] [:p nil]]
+                          "h2:has(~ p) { font-style: italic }"
+                          :font-style)))
+  (is (= [nil nil]
+         (sibling-has-doc [[:p nil] [:h2 nil]]
+                          "h2:has(~ p) { font-style: italic }"
+                          :font-style))
+      "an <h2> whose only <p> is BEFORE it must not match")
+  ;; The forward-only half, measured directly: Brave gives
+  ;; `p:has(~ .z) { font-weight: bold }` on <p>a<p>b<span class=z><p>c the
+  ;; answer a=700 b=700 c=400 -- the <p> AFTER the `.z` is not selected.
+  (is (= ["bold" "bold" nil nil]
+         (sibling-has-doc [[:p nil] [:p nil] [:span "z"] [:p nil]]
+                          "p:has(~ .z) { font-weight: bold }"
+                          :font-weight))))
+
+(deftest has-with-a-next-sibling-combinator-is-the-immediate-sibling-only
+  ;; Brave: `h2:has(+ p)` italicises `h-d` (the <p> is next) and not `h-e`
+  ;; (a <span> intervenes), where `h2:has(~ p)` would match both.
+  (is (= ["italic" nil]
+         (sibling-has-doc [[:h2 nil] [:p nil]]
+                          "h2:has(+ p) { font-style: italic }" :font-style)))
+  (is (= [nil nil nil]
+         (sibling-has-doc [[:h2 nil] [:span nil] [:p nil]]
+                          "h2:has(+ p) { font-style: italic }" :font-style))))
+
+(deftest has-sibling-forms-compose-in-one-comma-separated-argument
+  ;; Brave: `span:has(~ b, ~ i)` italicises both spans in the first row and
+  ;; neither in the second -- the argument's comma list is an OR, exactly
+  ;; as it already was for the descendant form. Only the SPANS are asserted:
+  ;; the <i> and the <em> beside them are italic from the UA sheet, which
+  ;; would make a "matched nothing" assertion pass for the wrong reason.
+  (is (= ["italic" "italic"]
+         (subvec (sibling-has-doc [[:span nil] [:span nil] [:i nil]]
+                                  "span:has(~ b, ~ i) { font-style: italic }" :font-style)
+                 0 2)))
+  (is (= [nil]
+         (subvec (sibling-has-doc [[:span nil] [:em nil]]
+                                  "span:has(~ b, ~ i) { font-style: italic }" :font-style)
+                 0 1))))
+
+;; ---- :nth-child(An+B of <selector>) ----
+
+(deftest nth-child-of-a-selector-counts-only-among-the-matching-siblings
+  ;; Brave, on li.m/li/li.m/li/li.m/li.m with `li:nth-child(2n+1 of .m)`:
+  ;; the 1st and 5th are bold -- the 1st and 3rd `.m`. Ignoring the clause
+  ;; would bold the 1st, 3rd and 5th (odd children); treating the clause as
+  ;; a plain compound would bold the 1st alone.
+  (is (= ["bold" nil nil nil "bold" nil]
+         (sibling-has-doc [[:li "m"] [:li nil] [:li "m"] [:li nil] [:li "m"] [:li "m"]]
+                          "li:nth-child(2n+1 of .m) { font-weight: bold }"
+                          :font-weight)))
+  ;; `odd` and a bare integer take the clause too.
+  (is (= [nil "bold" nil "bold"]
+         (sibling-has-doc [[:li nil] [:li "m"] [:li "m"] [:li "m"]]
+                          "li:nth-child(odd of .m) { font-weight: bold }"
+                          :font-weight)))
+  ;; and from the end
+  (is (= [nil nil "bold" nil]
+         (sibling-has-doc [[:li "m"] [:li nil] [:li "m"] [:li nil]]
+                          "li:nth-last-child(1 of .m) { font-weight: bold }"
+                          :font-weight))))
+
+(deftest nth-child-of-a-selector-also-requires-the-element-itself-to-match
+  ;; The half that is easy to leave out: an element that is at a matching
+  ;; INDEX but does not itself match the clause selector is not selected.
+  ;; Brave on li/li.m/li.m: `:nth-child(1 of .m)` selects the second <li>,
+  ;; not the first.
+  (is (= [nil "bold" nil]
+         (sibling-has-doc [[:li nil] [:li "m"] [:li "m"]]
+                          "li:nth-child(1 of .m) { font-weight: bold }"
+                          :font-weight))))
+
+(deftest nth-of-type-does-not-take-an-of-clause
+  ;; `of` is valid on :nth-child/:nth-last-child only. `:nth-of-type(2 of
+  ;; .m)` is not valid CSS, so it must select nothing rather than quietly
+  ;; behaving like `:nth-child(2 of .m)`.
+  (is (= [nil nil nil]
+         (sibling-has-doc [[:li "m"] [:li "m"] [:li "m"]]
+                          "li:nth-of-type(2 of .m) { font-weight: bold }"
+                          :font-weight))))
+
 (deftest has-pseudo-class-does-not-match-when-document-is-absent
   ;; Same documented restriction :root/:lang()/the structural pseudo-classes
   ;; already have -- the document-less 2-arity form has no `document` to

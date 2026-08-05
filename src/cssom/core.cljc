@@ -164,17 +164,17 @@
      combinator chain INSIDE the argument (`:has(div p)` is out of scope,
      same as `:is(.a .b)` above). On top of that compound-selector-only
      cut, `:has()` supports exactly one optional LEADING combinator per
-     comma-separated item, `>` (`:has(> img)`, also very common -- 'has a
-     DIRECT CHILD img', not just any img anywhere inside): `:selector/has`
-     stores each item as `{:has/selector <compound> :has/direct-child?
-     bool}` (see `parse-has-item`), and matching dispatches to
-     `has-arg-child-match?` (node's immediate `:children` only) instead of
-     `has-arg-descendant-match?` (the full subtree) for a `direct-child?`
-     item. Deliberately OUT of scope, and unsupported (never crashes, just
-     never matches that form specially): sibling-relative `:has()` forms
-     (`:has(~ p)`/`:has(+ p)` -- real CSS also allows these, testing
-     siblings instead of descendants, but they are rarer in practice than
-     the descendant/child forms above), the `:scope` pseudo-class itself,
+     comma-separated item -- `>` (`:has(> img)`: 'has a DIRECT CHILD img',
+     not just any img anywhere inside), `~` (`:has(~ p)`: has a LATER
+     SIBLING p) and `+` (`:has(+ p)`: the immediately next element sibling
+     is a p). `:selector/has` stores each item as `{:has/selector
+     <compound> :has/combinator <kw>}` (see `parse-has-item`), and matching
+     dispatches to `has-arg-child-match?` (node's immediate `:children`
+     only), `has-arg-sibling-match?` (the parent's later element children)
+     or `has-arg-descendant-match?` (the full subtree). The two sibling
+     forms are forward-only, which is what real CSS's `~`/`+` mean.
+     Deliberately OUT of scope, and unsupported (never crashes, just
+     never matches that form specially): the `:scope` pseudo-class itself,
      and -- same as `:not()`/`:is()`/`:where()` -- any combinator chain or
      nested functional pseudo-class inside one compound-selector argument.
      Like `:root`/`:lang()`/the structural pseudo-classes, matching an
@@ -1865,13 +1865,15 @@
    (`has-groups` below mirrors `parse-group` almost verbatim) -- its
    argument is syntactically the same comma-separated selector-list shape
    -- but each parsed item is a `{:has/selector <compound>
-   :has/direct-child? bool}` map instead of a bare compound-selector map:
-   `parse-has-item` first checks for an optional LEADING `>` combinator
-   (`:has(> img)`, real CSS's direct-child form) and strips it before
-   parsing the rest as an ordinary compound selector, recording whether it
-   was present as :has/direct-child? (false, the far more common case, for
-   a plain `:has(.badge)`-style item with no leading combinator at all --
-   'has this ANYWHERE in the subtree'). See the namespace docstring's own
+   :has/combinator <kw>}` map instead of a bare compound-selector map:
+   `parse-has-item` first checks for an optional LEADING `>`/`~`/`+`
+   combinator (`:has(> img)`, `:has(~ p)`, `:has(+ p)`) and strips it
+   before parsing the rest as an ordinary compound selector, recording
+   which one it was as :has/combinator (`:descendant`, the far more common
+   case, for a plain `:has(.badge)`-style item with no leading combinator
+   at all -- 'has this ANYWHERE in the subtree'). :has/direct-child? is
+   still emitted alongside it for readers that only knew the `>` form.
+   See the namespace docstring's own
    `:has()` paragraph for why this pseudo-class needs a DOWNWARD tree walk
    -- architecturally new for this file -- and `matches-simple?`/
    `has-group-matches?` for how :selector/has is actually matched (never
@@ -1939,10 +1941,18 @@
                            (filter (fn [[_ fn-name _]] (= kind (str/lower-case fn-name))))
                            (mapv (fn [[_ _ arg]] (mapv parse-simple-selector (split-selector-list arg))))))
         parse-has-item (fn [item]
-                         (let [trimmed (str/trim item)]
-                           (if-let [[_ rest] (re-matches #">\s*(.*)" trimmed)]
-                             {:has/selector (parse-simple-selector rest) :has/direct-child? true}
-                             {:has/selector (parse-simple-selector trimmed) :has/direct-child? false})))
+                         (let [trimmed (str/trim item)
+                               [_ combinator rest] (re-matches #"([>+~])\s*(.*)" trimmed)]
+                           {:has/selector (parse-simple-selector (or rest trimmed))
+                            :has/combinator (case combinator
+                                              ">" :child
+                                              "+" :next-sibling
+                                              "~" :following-sibling
+                                              nil :descendant)
+                            ;; kept for readers that only ever knew the
+                            ;; child form; :has/combinator is the value
+                            ;; `has-group-matches?` actually dispatches on.
+                            :has/direct-child? (= ">" combinator)}))
         has-groups (->> functional-matches
                         (filter (fn [[_ fn-name _]] (= "has" (str/lower-case fn-name))))
                         (mapv (fn [[_ _ arg]] (mapv parse-has-item (split-selector-list arg)))))
@@ -3062,6 +3072,22 @@
            (and (zero? (mod diff a))
                 (>= (quot diff a) 0))))))
 
+(def ^:private nth-of-pattern
+  "Splits an `:nth-child()` argument at its `of` keyword: group 1 is the
+   An+B text before it, group 2 the selector list after. `of` is matched as
+   a whole word so an An+B expression can never contain it -- that
+   micro-syntax is digits, signs and the letter `n`, and `even`/`odd` are
+   whole tokens that `of` cannot be a suffix of."
+  #"(?i)^(.*?)\s+of\s+(.+)$")
+
+(defn- nth-of-clause
+  "`[an-b-text of-selector-text]` for an `:nth-child()` argument, with
+   `of-selector-text` nil when there is no `of` clause."
+  [arg]
+  (if-let [[_ an-b of-text] (re-matches nth-of-pattern (str/trim (str arg)))]
+    [an-b of-text]
+    [arg nil]))
+
 (defn- nth-pseudo-matches?
   "Whether `node` matches `:nth-child(arg)` (`same-tag?` false, `from-end?`
    false), `:nth-of-type(arg)` (`same-tag?` true, `from-end?` false),
@@ -3090,18 +3116,53 @@
    no idea, and doesn't need to know, which direction the index it was
    handed came from.
 
+   The `of <selector-list>` clause (`nth-of-clause`, CSS Selectors 4's
+   `:nth-child(2n+1 of .m)`) narrows the sibling set to the siblings that
+   match that list, and additionally requires `node` itself to match it --
+   both, which is what makes it different from simply writing
+   `.m:nth-child(2n+1)`. Measured in Brave 151 on 2026-08-05, on
+   `<p class=m>1</p><p>2</p><p class=m>3</p><p>4</p>` with
+   `p:nth-child(2n+1 of .m)`: only the FIRST `.m` is selected. It is the
+   first `.m` among `.m`s (index 1) and would be the third among all
+   children, so an engine that ignores the clause bolds both `.m`s and one
+   that treats it as a plain compound bolds neither.
+
+   `of` is valid on `:nth-child`/`:nth-last-child` only, so it is read only
+   when `same-tag?` is false -- `:nth-of-type(2n of .m)` is not valid CSS
+   and stays unparseable, i.e. matches nothing.
+
+   `match-fn` is always `matches-simple?`, passed in rather than called by
+   name for the same forward-reference reason `has-group-matches?` states
+   for itself.
+
+   SCOPE, stated because it is measurable: the clause's own selector goes
+   through `parse-simple-selector`, so it is compound-only -- the same cut
+   `:not()`/`:is()`/`:has()` already commit to -- and a selector containing
+   parens (`of :not(.x)`) is not even captured, because
+   `nth-pseudo-class-pattern`'s argument is a non-nested `[^()]*`. And the
+   clause does NOT contribute to specificity: real CSS adds the most
+   specific selector in the list, so `p:nth-child(2n+1 of .m)` should
+   score (0,2,1) and scores (0,1,1) here. That only shows against a
+   competing rule of exactly the intervening specificity.
+
    False for an unparseable `arg` or a `node` with no parent, the same
    conservative defaults their own docstrings describe."
-  [document node same-tag? from-end? arg]
+  [document node same-tag? from-end? arg match-fn]
   (boolean
-   (when-let [an-b (parse-nth-expression arg)]
-     (let [siblings (structural-siblings document node same-tag?)
-           position (sibling-position siblings (:node/id node))]
-       (and position
-            (nth-matches? (if from-end?
-                            (- (+ (count siblings) 1) position)
-                            position)
-                          an-b))))))
+   (let [[an-b-text of-text] (if same-tag? [arg nil] (nth-of-clause arg))
+         of-selectors (when of-text (mapv parse-simple-selector (split-selector-list of-text)))]
+     (when-let [an-b (parse-nth-expression an-b-text)]
+       (let [matches-of? (fn [n] (some #(match-fn document n %) of-selectors))
+             siblings (cond->> (structural-siblings document node same-tag?)
+                        of-selectors
+                        (filter #(matches-of? (get-in document [:nodes %]))))
+             position (sibling-position siblings (:node/id node))]
+         (and position
+              (or (nil? of-selectors) (matches-of? node))
+              (nth-matches? (if from-end?
+                              (- (+ (count siblings) 1) position)
+                              position)
+                            an-b)))))))
 
 ;; ---- :root / :empty pseudo-classes ----
 
@@ -3278,8 +3339,14 @@
    delegate to `in-range?`/`out-of-range?`, which reuse `range-invalid?`
    (already computing exactly real HTML5 range-overflow/underflow for
    `constraint-invalid?`) -- a control with no `min`/`max` at all has no
-   'range limitations' per spec and matches NEITHER pseudo-class."
-  [document node selector-pseudo arg]
+   'range limitations' per spec and matches NEITHER pseudo-class.
+
+   `match-fn` is always `matches-simple?`, threaded through purely so
+   `nth-pseudo-matches?` can evaluate an `:nth-child(... of <selector>)`
+   clause -- the same explicit higher-order-function argument the `:has()`
+   family below uses, and for the same reason: `matches-simple?` calls this
+   function, so this function cannot name it."
+  [document node selector-pseudo arg match-fn]
   (case selector-pseudo
     :disabled (disabled-control? document node)
     :enabled (and (form-control? node)
@@ -3318,10 +3385,10 @@
     :last-of-type (let [siblings (structural-siblings document node true)]
                     (and (seq siblings)
                          (= (count siblings) (sibling-position siblings (:node/id node)))))
-    :nth-child (nth-pseudo-matches? document node false false arg)
-    :nth-of-type (nth-pseudo-matches? document node true false arg)
-    :nth-last-child (nth-pseudo-matches? document node false true arg)
-    :nth-last-of-type (nth-pseudo-matches? document node true true arg)
+    :nth-child (nth-pseudo-matches? document node false false arg match-fn)
+    :nth-of-type (nth-pseudo-matches? document node true false arg match-fn)
+    :nth-last-child (nth-pseudo-matches? document node false true arg match-fn)
+    :nth-last-of-type (nth-pseudo-matches? document node true true arg match-fn)
     :root (and document (= (:node/id node) (:root document)))
     :empty (empty-pseudo-matches? document node)
     :lang (lang-pseudo-matches? document node arg)
@@ -3389,16 +3456,50 @@
            (match-fn document (get-in document [:nodes child-id]) compound))
          (:children node))))
 
+(defn- has-arg-sibling-match?
+  "Whether any of `node`'s FOLLOWING siblings matches compound selector
+   `compound`, per `match-fn` -- `:has(~ p)` (`adjacent-only?` false, real
+   CSS's general-sibling form: any later sibling) and `:has(+ p)`
+   (`adjacent-only?` true: the IMMEDIATELY next element sibling only).
+
+   The one relative form :has() has that does not look downward at all.
+   `has-arg-descendant-match?`/`has-arg-child-match?` walk `node`'s own
+   subtree; this walks sideways, which needs the PARENT's element children
+   -- `element-children`/`sibling-position`, the same pair the structural
+   pseudo-classes already use, rather than a third traversal.
+
+   Only FOLLOWING siblings, never preceding ones: real CSS's `~` and `+`
+   are both forward-only, so `h2:has(~ p)` matches an `<h2>` with a later
+   `<p>` and never a `<p>` with an earlier `<h2>` -- that second element is
+   what `h2 ~ p` selects, and it is a different subject. Measured in Brave
+   151 on 2026-08-05: `<div><h2>head</h2><p>after</p></div>` with
+   `h2:has(~ p) { font-style: italic }` italicises the `<h2>` alone.
+
+   False when `node` has no parent, matching every other sibling-relative
+   answer in this namespace."
+  [document node compound adjacent-only? match-fn]
+  (boolean
+   (when-let [siblings (structural-siblings document node false)]
+     (let [siblings (vec siblings)
+           position (sibling-position siblings (:node/id node))
+           following (when position (subvec siblings position))
+           candidates (if adjacent-only? (take 1 following) following)]
+       (some (fn [sibling-id]
+               (match-fn document (get-in document [:nodes sibling-id]) compound))
+             candidates)))))
+
 (defn- has-group-matches?
   "Whether `node` matches one :has() GROUP -- one occurrence's
    comma-separated relative-selector list, each item a `{:has/selector
-   <compound> :has/direct-child? bool}` map (see `parse-simple-selector`).
+   <compound> :has/combinator <kw>}` map (see `parse-simple-selector`).
    Real CSS: matches if AT LEAST ONE listed relative selector matches
    (`some`) -- :has()'s own comma list is an OR, mirroring :is()/:where()'s
-   identical per-group `some` semantics (see `matches-simple?`) -- dispatching
-   each item to `has-arg-child-match?` (when :has/direct-child? is true, the
-   `>` leading-combinator case) or `has-arg-descendant-match?` (otherwise,
-   the far more common plain case).
+   identical per-group `some` semantics (see `matches-simple?`) --
+   dispatching each item on its leading combinator: `:child` (`>`) to
+   `has-arg-child-match?`, `:next-sibling` (`+`) and `:following-sibling`
+   (`~`) to `has-arg-sibling-match?`, and `:descendant` (no leading
+   combinator, the far more common plain case) to
+   `has-arg-descendant-match?`.
 
    :has() needs `document` to walk `node`'s subtree/children at all --
    `node`'s own `:children` are only ids, resolving them to real nodes needs
@@ -3410,9 +3511,11 @@
   [document node group match-fn]
   (boolean
    (when document
-     (some (fn [{:has/keys [selector direct-child?]}]
-             (if direct-child?
-               (has-arg-child-match? document node selector match-fn)
+     (some (fn [{:has/keys [selector combinator direct-child?]}]
+             (case (or combinator (if direct-child? :child :descendant))
+               :child (has-arg-child-match? document node selector match-fn)
+               :next-sibling (has-arg-sibling-match? document node selector true match-fn)
+               :following-sibling (has-arg-sibling-match? document node selector false match-fn)
                (has-arg-descendant-match? document node selector match-fn)))
            group))))
 
@@ -3501,7 +3604,8 @@
         (every? (fn [pseudo]
                   (matches-pseudo? document node pseudo
                                    (or (get (:selector/nth-args selector) pseudo)
-                                       (get (:selector/lang-args selector) pseudo))))
+                                       (get (:selector/lang-args selector) pseudo))
+                                   matches-simple?))
                 (:selector/pseudos selector))
         (every? (fn [group] (not-any? #(matches-simple? document node %) group))
                 (:selector/not selector))
