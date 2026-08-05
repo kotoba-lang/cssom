@@ -1491,6 +1491,35 @@
               :control-bold (advance-for :control-bold)
               :control-italic (advance-for :control-italic)
               :metrics (:__metrics__ oracle)}
+      ;; ---- cases that cannot share a page with the others --------------
+      ;;
+      ;; A `position: fixed` box is positioned against the VIEWPORT, so on a
+      ;; page holding every case its box in case-relative coordinates is
+      ;; just "how far down the page this case happens to sit" -- measured
+      ;; -47.84 for `:position/fixed-leaves-flow`, 0 if that case were
+      ;; first, and a different number the moment a case is inserted above
+      ;; it. Two rounds recorded that as a limit of this harness.
+      ;;
+      ;; It is not a limit, it is a page-layout choice: a case marked
+      ;; `:oracle/isolated true` gets its OWN page, where the case IS at the
+      ;; viewport origin and the browser's answer is stable and meaningful.
+      ;; One extra browser run per isolated case (~3-6s over CDP), so this
+      ;; is for cases that genuinely need it, not a default.
+      isolated-oracle
+      (reduce (fn [acc [i c]]
+                (if (:oracle/isolated c)
+                  (let [f (path/join (fs/mkdtempSync (path/join (os/tmpdir) "kotoba-conf-iso-"))
+                                     "case.html")]
+                    (fs/writeFileSync f (corpus-page [c] width))
+                    (println (str "isolated: " (:id c) " measured on its own page"))
+                    ;; the case is index 0 of its own page; re-key it to the
+                    ;; index it has in the real corpus
+                    (assoc acc (keyword (str "case-" i))
+                           (get (:data (run-browser! browser f)) :case-0)))
+                  acc))
+              {}
+              (map-indexed vector cases))
+      oracle (merge oracle isolated-oracle)
       _ (println (str "metrics: per-character advance table measured in the oracle ("
                       (count (:normal advances)) " chars x normal/bold/italic)\n"))
       ua (:__ua__ oracle)
