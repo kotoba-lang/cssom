@@ -164,17 +164,17 @@
      combinator chain INSIDE the argument (`:has(div p)` is out of scope,
      same as `:is(.a .b)` above). On top of that compound-selector-only
      cut, `:has()` supports exactly one optional LEADING combinator per
-     comma-separated item, `>` (`:has(> img)`, also very common -- 'has a
-     DIRECT CHILD img', not just any img anywhere inside): `:selector/has`
-     stores each item as `{:has/selector <compound> :has/direct-child?
-     bool}` (see `parse-has-item`), and matching dispatches to
-     `has-arg-child-match?` (node's immediate `:children` only) instead of
-     `has-arg-descendant-match?` (the full subtree) for a `direct-child?`
-     item. Deliberately OUT of scope, and unsupported (never crashes, just
-     never matches that form specially): sibling-relative `:has()` forms
-     (`:has(~ p)`/`:has(+ p)` -- real CSS also allows these, testing
-     siblings instead of descendants, but they are rarer in practice than
-     the descendant/child forms above), the `:scope` pseudo-class itself,
+     comma-separated item -- `>` (`:has(> img)`: 'has a DIRECT CHILD img',
+     not just any img anywhere inside), `~` (`:has(~ p)`: has a LATER
+     SIBLING p) and `+` (`:has(+ p)`: the immediately next element sibling
+     is a p). `:selector/has` stores each item as `{:has/selector
+     <compound> :has/combinator <kw>}` (see `parse-has-item`), and matching
+     dispatches to `has-arg-child-match?` (node's immediate `:children`
+     only), `has-arg-sibling-match?` (the parent's later element children)
+     or `has-arg-descendant-match?` (the full subtree). The two sibling
+     forms are forward-only, which is what real CSS's `~`/`+` mean.
+     Deliberately OUT of scope, and unsupported (never crashes, just
+     never matches that form specially): the `:scope` pseudo-class itself,
      and -- same as `:not()`/`:is()`/`:where()` -- any combinator chain or
      nested functional pseudo-class inside one compound-selector argument.
      Like `:root`/`:lang()`/the structural pseudo-classes, matching an
@@ -729,18 +729,57 @@
   (when-let [[_ counter-name] (re-matches content-counter-pattern (str/trim (str v)))]
     {:content/counter-name counter-name}))
 
+(defn- parse-content-none-ref
+  "A `content` term that is `none` or `normal` -- the two keywords meaning
+   'generate no box' -- as a `{:content/none true}` marker.
+
+   It has to be a MARKER rather than nil, and that only started mattering
+   when the user-agent sheet grew a `::before` rule of its own. Returning
+   nil drops the declaration at PARSE time, so it never enters the cascade
+   and never beats anything; an author writing `q::before { content: none }`
+   got the UA sheet's quotation marks anyway. Measured in Brave 151 on
+   2026-08-05: that rule makes `<q>hello</q>` 35px wide instead of 63.
+   `resolve-content-value` turns the marker back into nil, so every reader
+   downstream sees exactly what it saw before -- an absent `:content`."
+  [v]
+  (when (contains? #{"none" "normal"} (str/lower-case (str/trim (str v))))
+    {:content/none true}))
+
+(def ^:private content-quote-keywords
+  "CSS Generated Content's quote keywords, as `:content/quote` markers. The
+   character each one stands for is not knowable here: it depends on the
+   element's QUOTE DEPTH, which is a property of the tree and not of the
+   declaration -- see `quote-marks` and `resolve-quote-content`, which is
+   where the marker is finally turned into text.
+
+   `no-open-quote`/`no-close-quote` produce no text and still move the
+   depth, which is the entire reason they exist in CSS."
+  {"open-quote" :open "close-quote" :close
+   "no-open-quote" :no-open "no-close-quote" :no-close})
+
+(defn- parse-content-quote-ref
+  "A `content` term that is one of the four quote keywords, as a
+   `{:content/quote <kw>}` marker, or nil."
+  [v]
+  (when-let [kw (get content-quote-keywords (str/lower-case (str/trim (str v))))]
+    {:content/quote kw}))
+
 (defn- parse-content-term
   "Parses a single content TERM -- no combination with any other term --
    into whichever of `parse-content-literal` (a quoted string literal),
-   `parse-content-attr-ref` (a bare `attr(name)` call), or
-   `parse-content-counter-ref` (a bare `counter(name)` call) matches, or nil
-   if none does. Used both for the common single-term case and, by
+   `parse-content-attr-ref` (a bare `attr(name)` call),
+   `parse-content-counter-ref` (a bare `counter(name)` call) or
+   `parse-content-quote-ref` (one of the four quote keywords) matches, or
+   nil if none does. Used both for the common single-term case and, by
    `parse-content-value`, for each term of a multi-term composed value."
   [v]
   (let [literal (parse-content-literal v)]
     (if (some? literal)
       literal
-      (or (parse-content-attr-ref v) (parse-content-counter-ref v)))))
+      (or (parse-content-attr-ref v)
+          (parse-content-counter-ref v)
+          (parse-content-quote-ref v)
+          (parse-content-none-ref v)))))
 
 (defn- content-ws-char? [c] (boolean (re-matches #"\s" (str c))))
 
@@ -801,11 +840,21 @@
       in), the WHOLE declaration is dropped (nil) rather than silently
       rendering a partial string.
 
+   5. One of the four quote keywords (`parse-content-quote-ref`) -- returns
+      a `{:content/quote <kw>}` marker, because the character it stands for
+      depends on the element's quote DEPTH and not on the declaration (see
+      `resolve-quote-content`).
+   6. `none`/`normal` (`parse-content-none-ref`) -- returns a
+      `{:content/none true}` marker that `resolve-content-value` turns back
+      into nil. It is a marker rather than a straight nil so that it can
+      WIN the cascade over the user-agent sheet's own `content`; see that
+      function for the measurement.
+
    Anything else this engine doesn't support (`counter()`'s two-argument
-   `name, <list-style-type>` form, `url(...)`, `none`/`normal`,
-   unquoted/unmatched text, `attr()`'s extended `name type, fallback`
-   syntax) returns nil rather than guessing -- callers treat nil exactly
-   like `content` being absent: no generated-content box, no crash."
+   `name, <list-style-type>` form, `url(...)`, unquoted/unmatched text,
+   `attr()`'s extended `name type, fallback` syntax) returns nil rather
+   than guessing -- callers treat nil exactly like `content` being absent:
+   no generated-content box, no crash."
   [v]
   (or (parse-content-term v)
       (let [terms (split-content-terms v)]
@@ -1020,6 +1069,43 @@
    3 [0 1 2 1]
    4 [0 1 2 3]})
 
+;; ---- the CSS-wide keywords ----
+
+(def ^:private css-wide-keywords
+  "The four CSS-wide keywords (CSS Cascading and Inheritance Level 4 SS7),
+   which every property accepts and which mean the same thing on all of
+   them. Only `inherit` used to be handled here -- the other three were
+   stored as the literal string, which no downstream reader recognizes, so
+   `text-align: initial` reached `cssom.layout` as the word \"initial\" and
+   `margin: revert` left the author's own `margin: 0` standing.
+
+   Measured in Brave 151 on 2026-08-05, in the corpus's own 14px monospace
+   page, on a `<p>` inside a `<div>` that declared color/font-size/
+   font-weight/font-style/text-align, with and without an author rule on
+   the `<p>` itself:
+
+   | keyword   | inherited property (`color`) | non-inherited (`display`) | UA-declared (`p`'s `margin`) |
+   |-----------|------------------------------|---------------------------|------------------------------|
+   | `initial` | black -- NOT the parent's    | `inline` -- NOT the UA `block` | 0 -- NOT the UA 1em |
+   | `unset`   | the parent's green           | `inline` (= initial)      | 0 (= initial)                |
+   | `revert`  | the parent's green           | `block` (the UA value)    | 14px (the UA 1em)            |
+   | `inherit` | the parent's green           | the parent's own value    | the parent's own value       |
+
+   The `initial` row is why this cannot be done by simply forgetting the
+   declaration: a `<p style=\"display: initial\">` must report `inline`,
+   and dropping the declaration would leave the UA sheet's `block`
+   standing. `initial` has to WRITE a value (see `initial-values`), and it
+   is the only one of the four that has to."
+  {"inherit" :inherit "initial" :initial "unset" :unset "revert" :revert})
+
+(defn- css-wide-keyword
+  "The CSS-wide keyword `value` names (`:inherit`/`:initial`/`:unset`/
+   `:revert`), or nil. Case-insensitive and whitespace-trimmed, matching
+   how every other keyword value in this file is compared."
+  [value]
+  (when (string? value)
+    (get css-wide-keywords (str/lower-case (str/trim value)))))
+
 (defn- expand-box-side-shorthand
   "Expands a `margin`/`padding` shorthand into its four per-side longhands
    using real CSS's own 1-to-4 value rule: one value applies to all four
@@ -1101,7 +1187,22 @@
                             (re-matches calc-pattern %)
                             (re-matches var-ref-pattern %)
                             (and (= "margin" prop)
-                                 (= "auto" (str/lower-case %))))
+                                 (= "auto" (str/lower-case %)))
+                            ;; A CSS-wide keyword is admitted as the SOLE
+                            ;; token, which is the only place real CSS
+                            ;; allows one: `margin: 1px revert` is invalid,
+                            ;; `margin: revert` resets all four longhands.
+                            ;; Expanding matters because the longhands are
+                            ;; what the cascade compares -- measured, an
+                            ;; unexpanded `style="margin: revert"` left the
+                            ;; author's own `p.rv { margin: 0 }` longhands
+                            ;; standing and reported 0 where Brave reports
+                            ;; the UA's 14px (`:cascade/revert-drops-to-
+                            ;; the-user-agent-value`). The keyword rides
+                            ;; through to `resolve-style-for`, which is
+                            ;; where all four are resolved, independently,
+                            ;; against whatever each side reverts TO.
+                            (and (= 1 n) (css-wide-keyword %)))
                        tokens))
       {(keyword prop) (parse-style-value (tokens 0))
        (keyword (str prop "-top")) (parse-style-value t)
@@ -1862,13 +1963,15 @@
    (`has-groups` below mirrors `parse-group` almost verbatim) -- its
    argument is syntactically the same comma-separated selector-list shape
    -- but each parsed item is a `{:has/selector <compound>
-   :has/direct-child? bool}` map instead of a bare compound-selector map:
-   `parse-has-item` first checks for an optional LEADING `>` combinator
-   (`:has(> img)`, real CSS's direct-child form) and strips it before
-   parsing the rest as an ordinary compound selector, recording whether it
-   was present as :has/direct-child? (false, the far more common case, for
-   a plain `:has(.badge)`-style item with no leading combinator at all --
-   'has this ANYWHERE in the subtree'). See the namespace docstring's own
+   :has/combinator <kw>}` map instead of a bare compound-selector map:
+   `parse-has-item` first checks for an optional LEADING `>`/`~`/`+`
+   combinator (`:has(> img)`, `:has(~ p)`, `:has(+ p)`) and strips it
+   before parsing the rest as an ordinary compound selector, recording
+   which one it was as :has/combinator (`:descendant`, the far more common
+   case, for a plain `:has(.badge)`-style item with no leading combinator
+   at all -- 'has this ANYWHERE in the subtree'). :has/direct-child? is
+   still emitted alongside it for readers that only knew the `>` form.
+   See the namespace docstring's own
    `:has()` paragraph for why this pseudo-class needs a DOWNWARD tree walk
    -- architecturally new for this file -- and `matches-simple?`/
    `has-group-matches?` for how :selector/has is actually matched (never
@@ -1936,10 +2039,18 @@
                            (filter (fn [[_ fn-name _]] (= kind (str/lower-case fn-name))))
                            (mapv (fn [[_ _ arg]] (mapv parse-simple-selector (split-selector-list arg))))))
         parse-has-item (fn [item]
-                         (let [trimmed (str/trim item)]
-                           (if-let [[_ rest] (re-matches #">\s*(.*)" trimmed)]
-                             {:has/selector (parse-simple-selector rest) :has/direct-child? true}
-                             {:has/selector (parse-simple-selector trimmed) :has/direct-child? false})))
+                         (let [trimmed (str/trim item)
+                               [_ combinator rest] (re-matches #"([>+~])\s*(.*)" trimmed)]
+                           {:has/selector (parse-simple-selector (or rest trimmed))
+                            :has/combinator (case combinator
+                                              ">" :child
+                                              "+" :next-sibling
+                                              "~" :following-sibling
+                                              nil :descendant)
+                            ;; kept for readers that only ever knew the
+                            ;; child form; :has/combinator is the value
+                            ;; `has-group-matches?` actually dispatches on.
+                            :has/direct-child? (= ">" combinator)}))
         has-groups (->> functional-matches
                         (filter (fn [[_ fn-name _]] (= "has" (str/lower-case fn-name))))
                         (mapv (fn [[_ _ arg]] (mapv parse-has-item (split-selector-list arg)))))
@@ -3059,6 +3170,22 @@
            (and (zero? (mod diff a))
                 (>= (quot diff a) 0))))))
 
+(def ^:private nth-of-pattern
+  "Splits an `:nth-child()` argument at its `of` keyword: group 1 is the
+   An+B text before it, group 2 the selector list after. `of` is matched as
+   a whole word so an An+B expression can never contain it -- that
+   micro-syntax is digits, signs and the letter `n`, and `even`/`odd` are
+   whole tokens that `of` cannot be a suffix of."
+  #"(?i)^(.*?)\s+of\s+(.+)$")
+
+(defn- nth-of-clause
+  "`[an-b-text of-selector-text]` for an `:nth-child()` argument, with
+   `of-selector-text` nil when there is no `of` clause."
+  [arg]
+  (if-let [[_ an-b of-text] (re-matches nth-of-pattern (str/trim (str arg)))]
+    [an-b of-text]
+    [arg nil]))
+
 (defn- nth-pseudo-matches?
   "Whether `node` matches `:nth-child(arg)` (`same-tag?` false, `from-end?`
    false), `:nth-of-type(arg)` (`same-tag?` true, `from-end?` false),
@@ -3087,18 +3214,53 @@
    no idea, and doesn't need to know, which direction the index it was
    handed came from.
 
+   The `of <selector-list>` clause (`nth-of-clause`, CSS Selectors 4's
+   `:nth-child(2n+1 of .m)`) narrows the sibling set to the siblings that
+   match that list, and additionally requires `node` itself to match it --
+   both, which is what makes it different from simply writing
+   `.m:nth-child(2n+1)`. Measured in Brave 151 on 2026-08-05, on
+   `<p class=m>1</p><p>2</p><p class=m>3</p><p>4</p>` with
+   `p:nth-child(2n+1 of .m)`: only the FIRST `.m` is selected. It is the
+   first `.m` among `.m`s (index 1) and would be the third among all
+   children, so an engine that ignores the clause bolds both `.m`s and one
+   that treats it as a plain compound bolds neither.
+
+   `of` is valid on `:nth-child`/`:nth-last-child` only, so it is read only
+   when `same-tag?` is false -- `:nth-of-type(2n of .m)` is not valid CSS
+   and stays unparseable, i.e. matches nothing.
+
+   `match-fn` is always `matches-simple?`, passed in rather than called by
+   name for the same forward-reference reason `has-group-matches?` states
+   for itself.
+
+   SCOPE, stated because it is measurable: the clause's own selector goes
+   through `parse-simple-selector`, so it is compound-only -- the same cut
+   `:not()`/`:is()`/`:has()` already commit to -- and a selector containing
+   parens (`of :not(.x)`) is not even captured, because
+   `nth-pseudo-class-pattern`'s argument is a non-nested `[^()]*`. And the
+   clause does NOT contribute to specificity: real CSS adds the most
+   specific selector in the list, so `p:nth-child(2n+1 of .m)` should
+   score (0,2,1) and scores (0,1,1) here. That only shows against a
+   competing rule of exactly the intervening specificity.
+
    False for an unparseable `arg` or a `node` with no parent, the same
    conservative defaults their own docstrings describe."
-  [document node same-tag? from-end? arg]
+  [document node same-tag? from-end? arg match-fn]
   (boolean
-   (when-let [an-b (parse-nth-expression arg)]
-     (let [siblings (structural-siblings document node same-tag?)
-           position (sibling-position siblings (:node/id node))]
-       (and position
-            (nth-matches? (if from-end?
-                            (- (+ (count siblings) 1) position)
-                            position)
-                          an-b))))))
+   (let [[an-b-text of-text] (if same-tag? [arg nil] (nth-of-clause arg))
+         of-selectors (when of-text (mapv parse-simple-selector (split-selector-list of-text)))]
+     (when-let [an-b (parse-nth-expression an-b-text)]
+       (let [matches-of? (fn [n] (some #(match-fn document n %) of-selectors))
+             siblings (cond->> (structural-siblings document node same-tag?)
+                        of-selectors
+                        (filter #(matches-of? (get-in document [:nodes %]))))
+             position (sibling-position siblings (:node/id node))]
+         (and position
+              (or (nil? of-selectors) (matches-of? node))
+              (nth-matches? (if from-end?
+                              (- (+ (count siblings) 1) position)
+                              position)
+                            an-b)))))))
 
 ;; ---- :root / :empty pseudo-classes ----
 
@@ -3275,8 +3437,14 @@
    delegate to `in-range?`/`out-of-range?`, which reuse `range-invalid?`
    (already computing exactly real HTML5 range-overflow/underflow for
    `constraint-invalid?`) -- a control with no `min`/`max` at all has no
-   'range limitations' per spec and matches NEITHER pseudo-class."
-  [document node selector-pseudo arg]
+   'range limitations' per spec and matches NEITHER pseudo-class.
+
+   `match-fn` is always `matches-simple?`, threaded through purely so
+   `nth-pseudo-matches?` can evaluate an `:nth-child(... of <selector>)`
+   clause -- the same explicit higher-order-function argument the `:has()`
+   family below uses, and for the same reason: `matches-simple?` calls this
+   function, so this function cannot name it."
+  [document node selector-pseudo arg match-fn]
   (case selector-pseudo
     :disabled (disabled-control? document node)
     :enabled (and (form-control? node)
@@ -3315,10 +3483,10 @@
     :last-of-type (let [siblings (structural-siblings document node true)]
                     (and (seq siblings)
                          (= (count siblings) (sibling-position siblings (:node/id node)))))
-    :nth-child (nth-pseudo-matches? document node false false arg)
-    :nth-of-type (nth-pseudo-matches? document node true false arg)
-    :nth-last-child (nth-pseudo-matches? document node false true arg)
-    :nth-last-of-type (nth-pseudo-matches? document node true true arg)
+    :nth-child (nth-pseudo-matches? document node false false arg match-fn)
+    :nth-of-type (nth-pseudo-matches? document node true false arg match-fn)
+    :nth-last-child (nth-pseudo-matches? document node false true arg match-fn)
+    :nth-last-of-type (nth-pseudo-matches? document node true true arg match-fn)
     :root (and document (= (:node/id node) (:root document)))
     :empty (empty-pseudo-matches? document node)
     :lang (lang-pseudo-matches? document node arg)
@@ -3386,16 +3554,50 @@
            (match-fn document (get-in document [:nodes child-id]) compound))
          (:children node))))
 
+(defn- has-arg-sibling-match?
+  "Whether any of `node`'s FOLLOWING siblings matches compound selector
+   `compound`, per `match-fn` -- `:has(~ p)` (`adjacent-only?` false, real
+   CSS's general-sibling form: any later sibling) and `:has(+ p)`
+   (`adjacent-only?` true: the IMMEDIATELY next element sibling only).
+
+   The one relative form :has() has that does not look downward at all.
+   `has-arg-descendant-match?`/`has-arg-child-match?` walk `node`'s own
+   subtree; this walks sideways, which needs the PARENT's element children
+   -- `element-children`/`sibling-position`, the same pair the structural
+   pseudo-classes already use, rather than a third traversal.
+
+   Only FOLLOWING siblings, never preceding ones: real CSS's `~` and `+`
+   are both forward-only, so `h2:has(~ p)` matches an `<h2>` with a later
+   `<p>` and never a `<p>` with an earlier `<h2>` -- that second element is
+   what `h2 ~ p` selects, and it is a different subject. Measured in Brave
+   151 on 2026-08-05: `<div><h2>head</h2><p>after</p></div>` with
+   `h2:has(~ p) { font-style: italic }` italicises the `<h2>` alone.
+
+   False when `node` has no parent, matching every other sibling-relative
+   answer in this namespace."
+  [document node compound adjacent-only? match-fn]
+  (boolean
+   (when-let [siblings (structural-siblings document node false)]
+     (let [siblings (vec siblings)
+           position (sibling-position siblings (:node/id node))
+           following (when position (subvec siblings position))
+           candidates (if adjacent-only? (take 1 following) following)]
+       (some (fn [sibling-id]
+               (match-fn document (get-in document [:nodes sibling-id]) compound))
+             candidates)))))
+
 (defn- has-group-matches?
   "Whether `node` matches one :has() GROUP -- one occurrence's
    comma-separated relative-selector list, each item a `{:has/selector
-   <compound> :has/direct-child? bool}` map (see `parse-simple-selector`).
+   <compound> :has/combinator <kw>}` map (see `parse-simple-selector`).
    Real CSS: matches if AT LEAST ONE listed relative selector matches
    (`some`) -- :has()'s own comma list is an OR, mirroring :is()/:where()'s
-   identical per-group `some` semantics (see `matches-simple?`) -- dispatching
-   each item to `has-arg-child-match?` (when :has/direct-child? is true, the
-   `>` leading-combinator case) or `has-arg-descendant-match?` (otherwise,
-   the far more common plain case).
+   identical per-group `some` semantics (see `matches-simple?`) --
+   dispatching each item on its leading combinator: `:child` (`>`) to
+   `has-arg-child-match?`, `:next-sibling` (`+`) and `:following-sibling`
+   (`~`) to `has-arg-sibling-match?`, and `:descendant` (no leading
+   combinator, the far more common plain case) to
+   `has-arg-descendant-match?`.
 
    :has() needs `document` to walk `node`'s subtree/children at all --
    `node`'s own `:children` are only ids, resolving them to real nodes needs
@@ -3407,9 +3609,11 @@
   [document node group match-fn]
   (boolean
    (when document
-     (some (fn [{:has/keys [selector direct-child?]}]
-             (if direct-child?
-               (has-arg-child-match? document node selector match-fn)
+     (some (fn [{:has/keys [selector combinator direct-child?]}]
+             (case (or combinator (if direct-child? :child :descendant))
+               :child (has-arg-child-match? document node selector match-fn)
+               :next-sibling (has-arg-sibling-match? document node selector true match-fn)
+               :following-sibling (has-arg-sibling-match? document node selector false match-fn)
                (has-arg-descendant-match? document node selector match-fn)))
            group))))
 
@@ -3498,7 +3702,8 @@
         (every? (fn [pseudo]
                   (matches-pseudo? document node pseudo
                                    (or (get (:selector/nth-args selector) pseudo)
-                                       (get (:selector/lang-args selector) pseudo))))
+                                       (get (:selector/lang-args selector) pseudo))
+                                   matches-simple?))
                 (:selector/pseudos selector))
         (every? (fn [group] (not-any? #(matches-simple? document node %) group))
                 (:selector/not selector))
@@ -3813,18 +4018,251 @@
                            (contains? value :content/counter-name)))
     (resolve-content-term node counters value)
 
+    ;; `none`/`normal`: a real declaration that generates no box. It
+    ;; travelled this far as a marker only so it could WIN the cascade over
+    ;; the user-agent sheet's own `content` -- see `parse-content-none-ref`
+    ;; -- and becomes the absent `:content` every reader already knows.
+    (and (map? value) (contains? value :content/none))
+    nil
+
     :else value))
 
-(defn- inherit-keyword?
-  "True when `value` is the CSS-wide `inherit` keyword (case-insensitive,
-   ignoring surrounding whitespace, matching how every other keyword value
-   in this file is compared -- see resolve-style-for's own docstring for
-   why a winning `inherit` declaration is removed from the resolved map
-   rather than stored as the literal string \"inherit\"). `initial`/`unset`/
-   `revert` are deliberately NOT handled here -- an honest, documented
-   scope-cut, not an oversight."
-  [value]
-  (and (string? value) (= "inherit" (str/lower-case (str/trim value)))))
+;; ---- generated quotes ----
+
+(def ^:private quote-marks
+  "The characters `open-quote`/`close-quote` produce, one pair per QUOTE
+   DEPTH -- CSS's `quotes` property, at the `auto` value every element in
+   this engine has, resolved for this oracle's locale.
+
+   Measured in Brave 151 on 2026-08-05, and measured rather than looked up
+   because `quotes: auto` is locale-dependent and nothing in the CSS text
+   names a character: the same markup was rendered twice, once with
+   `quotes: auto` and once with `quotes: \"\\201C\" \"\\201D\" \"\\2018\"
+   \"\\2019\"`, and every `<q>` box came out BYTE-IDENTICAL in both -- 63px
+   for `<q>hello</q>`, 91 and 35 for a nested pair. The characters are
+   therefore U+201C/U+201D at depth 1 and U+2018/U+2019 at depth 2.
+
+   Two more numbers from the same page, because they are what makes the
+   depth observable at all: each of those four characters advances 14px in
+   this page's monospace 14px face (a plain ASCII `\"` advances 7 -- they
+   fall back to a proportional face), and a THREE-deep nest measures 147 /
+   91 / 35, i.e. depth 3 reuses depth 2's pair, which is what CSS says
+   happens once the list runs out."
+  [["\u201C" "\u201D"] ["\u2018" "\u2019"]])
+
+(defn- quote-mark
+  "The `open`/`close` character for `depth` (0-indexed), reusing the last
+   pair once the list runs out -- real CSS's own rule for a depth deeper
+   than the `quotes` list."
+  [depth open?]
+  (let [pair (nth quote-marks (min depth (dec (count quote-marks))))]
+    (if open? (first pair) (second pair))))
+
+(defn- quote-marker
+  "The `:content/quote` keyword a resolved pseudo-element style's `content`
+   holds, or nil -- see `parse-content-quote-ref`."
+  [pseudo-style]
+  (let [v (:content pseudo-style)]
+    (when (map? v) (:content/quote v))))
+
+(defn- resolve-quote-content
+  "Turns the `:content/quote` markers on `style`'s `:pseudo/before` and
+   `:pseudo/after` into real text, and answers what quote depth this
+   element's CHILDREN are at. Returns `[style child-depth]`.
+
+   Depth is a property of the tree, which is why this runs in
+   `style-element` (where the walk has it) rather than in
+   `resolve-style-for` (where the declaration is): an element's own two
+   pseudo-elements both sit at `depth` -- a `::after`'s `close-quote`
+   closes the quote its own `::before` opened, not a deeper one -- and only
+   its DESCENDANTS are one deeper. Measured in Brave, `x <q>a <q>b</q> c
+   </q> y`: the outer `<q>` is 91px wide with U+201C/U+201D and the inner
+   35 with U+2018/U+2019, and the outer's closing mark is the wide one.
+
+   `no-open-quote`/`no-close-quote` move the depth and generate nothing,
+   which this expresses by dropping the `:content` key entirely -- the same
+   thing every other unresolvable `content` value does, so no reader needs
+   to learn a new shape.
+
+   SCOPE: the depth is carried down the tree only, so a `close-quote` with
+   no matching `open-quote` above it reads as depth 0 rather than being an
+   error, and a sibling's quote does not affect the next sibling's depth.
+   Real CSS keeps ONE running counter in document order, which differs from
+   this only for markup where the two do not nest -- and `quotes` itself is
+   not modelled at all, so an author cannot change the characters."
+  [style depth]
+  (let [resolve-one
+        (fn [m open?]
+          (if-let [kw (quote-marker m)]
+            (case kw
+              :open (assoc m :content (quote-mark depth true))
+              :close (assoc m :content (quote-mark depth false))
+              (dissoc m :content))
+            m))
+        before (:pseudo/before style)
+        after (:pseudo/after style)
+        opens? (contains? #{:open :no-open} (quote-marker before))
+        style (cond-> style
+                before (assoc :pseudo/before (resolve-one before true))
+                after (assoc :pseudo/after (resolve-one after false)))]
+    [style (if opens? (inc depth) depth)]))
+
+;; ---- resolving the CSS-wide keywords ----
+;;
+;; The keywords themselves are recognized much earlier in this file
+;; (`css-wide-keywords`/`css-wide-keyword`), because
+;; `expand-box-side-shorthand` has to admit one as a whole-declaration
+;; token. What they RESOLVE to needs `parent-node-id`, so it lives here.
+
+(def ^:private inherited-properties
+  "The properties that INHERIT, of those this engine models -- which is the
+   whole of what `unset` needs to know (`unset` is `inherit` on an
+   inherited property and `initial` on every other one).
+
+   Measured rather than recalled, in Brave 151 on 2026-08-05: each property
+   was set to a non-default value on a `<div>` and to `unset` on a `<span>`
+   inside it, and the span was read back. Everything listed here kept the
+   div's value; `vertical-align` -- the one that looks like it belongs and
+   does not -- came back `baseline`, and is therefore absent.
+
+   A property NOT listed here is treated as non-inherited, which is the
+   conservative direction: `unset` then resolves to the property's initial
+   value, which is what an unlisted property's initial value already was
+   before this table existed."
+  #{:color :font :font-family :font-size :font-style :font-weight :font-variant
+    :font-stretch :line-height :letter-spacing :word-spacing :text-align
+    :text-indent :text-transform :text-shadow :white-space :word-break
+    :overflow-wrap :word-wrap :tab-size :hyphens :direction :visibility
+    :cursor :quotes :list-style :list-style-type :list-style-position
+    :list-style-image :border-collapse :border-spacing :caption-side
+    :empty-cells :orphans :widows :writing-mode :text-orientation})
+
+(def ^:private initial-values
+  "CSS's own initial value for the properties whose initial value is not
+   the same as ABSENCE in this engine's representation -- i.e. every
+   property the user-agent stylesheet declares (where dropping the
+   declaration would leave the UA value standing, and `initial` must beat
+   it), plus the inherited properties (where dropping would inherit).
+
+   Every entry measured in Brave 151 on 2026-08-05 by setting the property
+   to `initial` on an element inside an ancestor that declared a different
+   value, and reading `getComputedStyle` back -- see `css-wide-keywords`
+   for the table and the page.
+
+   NOT here, and each for a reason that is not 'not got to yet':
+
+   - `font-size`. Its initial value is the keyword `medium`, whose pixel
+     value is keyed on the DEFAULT font of the family in use: measured
+     13px on the corpus's monospace page and 16px on the same page with
+     `font-family: Arial`. That is the same family-keyed table that keeps
+     the absolute font-size keywords out of `resolve-font-size` (see its
+     own docstring), and this engine has no font-family model to key it
+     on. `font-size: initial` therefore drops, and inherits -- wrong, and
+     wrong in a way that is one measurement away from being right if a
+     family model ever arrives.
+   - `font-family`. Its initial value is the browser's own default family,
+     which is a user preference and not a CSS value at all: measured
+     `\"Hiragino Kaku Gothic ProN\"` on this machine. This sheet has no
+     font-family rule to beat, so `font-family: initial` drops and
+     inherits -- the same cut as `font-size`, for the same missing model.
+   - The uniform `:margin`/`:padding` keys this engine emits alongside the
+     four longhands (see `expand-box-side-shorthand`). They are not CSS
+     properties, and absence is exactly what they should say when no
+     uniform value survives -- their readers already fall back.
+   - Anything else. A property with no entry drops, which is CSS's initial
+     value for every non-inherited property that the UA sheet does not
+     declare. Adding an entry is only ever needed to beat the UA sheet or
+     to stop an inherited property inheriting."
+  {:color "#000000"
+   :font-weight "normal"
+   :font-style "normal"
+   :display "inline"
+   :text-align "start"
+   :vertical-align "baseline"
+   :white-space "normal"
+   :text-transform "none"
+   :text-indent 0
+   :letter-spacing "normal"
+   :word-spacing 0
+   :line-height "normal"
+   :visibility "visible"
+   :list-style-type "disc"
+   :direction "ltr"
+   :border-collapse "separate"
+   :border-spacing 0
+   :caption-side "top"
+   :empty-cells "show"
+   :word-break "normal"
+   :overflow-wrap "normal"
+   :tab-size 8
+   :cursor "auto"
+   :text-shadow "none"
+   :margin-top 0 :margin-right 0 :margin-bottom 0 :margin-left 0
+   :padding-top 0 :padding-right 0 :padding-bottom 0 :padding-left 0})
+
+(def ^:private drop-declaration
+  "The sentinel `resolve-css-wide-keyword` returns for 'this property has
+   no value here' -- distinct from nil, which is a value a declaration can
+   legitimately resolve to."
+  ::drop)
+
+(defn- parent-computed-value
+  "The value the PARENT element resolved for `property`, read off the
+   `:style/*` attrs `style-element` has already written -- which is what
+   makes `inherit` answerable at all. `apply-cascade` walks top-down, so
+   by the time any element resolves, its parent's attrs are final.
+
+   Returns `drop-declaration` when there is no document, no parent, or the
+   parent resolved nothing for this property. All three are the same
+   honest answer for a different reason: a parent that declared nothing
+   for a NON-inherited property computed that property's initial value,
+   which is exactly what dropping the declaration yields; and a parent
+   that declared nothing for an INHERITED one is itself inheriting, which
+   dropping also reproduces, because absence is how this engine spells
+   'look further up' (see `resolve-style-for`'s docstring). The standalone
+   `computed-style` path has no styled ancestors at all and therefore gets
+   initial values throughout -- stated here rather than discovered."
+  [document node property]
+  (or (when document
+        (when-let [parent-id (parent-node-id document (:node/id node))]
+          (get-in document [:nodes parent-id :attrs (keyword "style" (name property))])))
+      drop-declaration))
+
+(defn- resolve-css-wide-keyword
+  "Resolves one CSS-wide keyword to the value it stands for, or
+   `drop-declaration`.
+
+   `lower-entries` is the cascade entries for this same property from
+   origins BELOW the one the keyword was declared in, already sorted --
+   which is all `revert` needs: real CSS's `revert` rolls the cascade back
+   to the previous ORIGIN, and with two origins (see `ua-origin` /
+   `author-origin`) an author's `revert` is 'resolve this property using
+   the user-agent declarations alone'. Measured in Brave 151, 2026-08-05:
+   `p.rv { margin: 0 }` with `style=\"margin: revert\"` reports 14px top
+   and bottom (the UA `p { margin: 1em 0 }`) and 0 left and right (no UA
+   declaration, so the initial value) -- the author rule is gone, not
+   merely outranked.
+
+   A `revert` with nothing below it degrades to `unset`, per the spec's
+   own definition, and so does a `revert` inside the lowest origin -- this
+   sheet has no CSS-wide keyword in it, so that branch is reachable only
+   from a host that supplies its own UA rules."
+  [document node property keyword-kind lower-entries]
+  (case keyword-kind
+    :inherit (parent-computed-value document node property)
+    :initial (get initial-values property drop-declaration)
+    :unset (resolve-css-wide-keyword document node property
+                                     (if (contains? inherited-properties property)
+                                       :inherit
+                                       :initial)
+                                     nil)
+    :revert (if-let [{:keys [value]} (last lower-entries)]
+              (if-let [nested (css-wide-keyword value)]
+                (resolve-css-wide-keyword document node property
+                                          (if (= :revert nested) :unset nested)
+                                          nil)
+                value)
+              (resolve-css-wide-keyword document node property :unset nil))))
 
 ;; ---- the user-agent stylesheet ----
 ;;
@@ -3950,6 +4388,35 @@
      `<div style=\"display:table\">` reports `border-spacing: 0px` where
      `<table>` reports 2px. Defaulting every table-displayed box to 2 put
      phantom spacing into every CSS-declared table.
+   - The `:disabled` colours, measured in Brave 151 on 2026-08-05 by
+     putting every control in the page twice, once bare and once
+     `disabled`, and reading `color` back. There are THREE of them, not
+     one, and which one applies is keyed on the control's `type`:
+
+       input, textarea                                rgb(84, 84, 84)
+       button, input type=button/submit/reset/color   rgba(16, 16, 16, .3)
+       select                                         rgb(128, 128, 128)
+
+     `:disabled` and not `[disabled]`: an `<input>` inside a
+     `<fieldset disabled>` reports the same grey with no attribute of its
+     own, which is exactly what `disabled-control?` already computes.
+     `readonly` is NOT this -- a readonly input reports plain black -- and
+     neither is `disabled` on a non-control (a `<p disabled>` is black).
+     `input[type=\"range\"]:disabled` measures rgb(197, 197, 197) and is
+     deliberately absent: the range control has no text to colour here and
+     this engine draws no track, so the value would be unobservable.
+
+     What is deliberately NOT here, though it was measured at the same
+     time: the ENABLED control colours. An `<input>` inside a
+     `color: #ff0000` div reports BLACK in a browser -- a control does not
+     inherit the page's colour -- and this engine inherits it. Writing
+     `input, textarea, select { color: #000000 }` would fix that and would
+     also hard-code black into every host theme that renders through this
+     cascade, including the dark one `cssom.layout`'s own theme draws (the
+     conformance corpus paints its text `#e6ebf5`). The real UA value is
+     the system colour `fieldtext`, and this sheet has no system-colour
+     model; landing it needs one, not a hex constant.
+
    - `[hidden] { display: none }` is attribute PRESENCE and does not look
      at the value. Measured in Brave 151, 2026-08-05: `hidden=\"false\"`,
      `hidden=\"\"` and `hidden=\"hidden\"` all report `display: none` and
@@ -3992,7 +4459,36 @@
      sheet has no font-family rule at all and adding one is a separate
      measurement.
    - `input[type=\"radio\"]`'s own margins, `3px 3px 0 5px`, split out of
-     the checkbox rule they were wrongly sharing."
+     the checkbox rule they were wrongly sharing.
+   - `dialog`'s `padding: 1em` and `border: solid`, measured in Brave 151
+     on 2026-08-05: `padding` 14px on all four sides at this page's 14px,
+     `border-top-width` 3px (`solid`'s `medium`), `border-top-style`
+     solid. Written as four padding longhands, like `fieldset`, because
+     `padding: 1em` is not a length at declaration time and
+     `expand-box-side-shorthand` correctly declines to expand it -- which
+     leaves ONLY the uniform key, and everything that reads a per-side
+     padding (including `getComputedStyle`) then sees nothing. Together
+     these make the box exact in one dimension: Brave reports
+     `<dialog open>Hi</dialog>` as 48x54 and this engine drew 300x20,
+     which is now 300x54.
+
+   And the rest of `dialog`'s UA rule, measured at the same time and
+   deliberately NOT written, because writing it would remove the harness's
+   ability to see the divergence without removing the divergence:
+   `position: absolute; left: 0; right: 0; width: fit-content;
+   height: fit-content; margin: auto`. Brave puts that same dialog at
+   x=126 with width 48 inside a 300px `position: relative` parent, i.e.
+   `(300 - 48) / 2` on each side, and reports the auto margins as the used
+   126px. This engine cannot: `explicit-width`'s own docstring records
+   `fit-content` as a scope cut that behaves as `auto`, so the box stays
+   300 wide, the leftover space is zero, and `margin: auto` resolves to 0.
+   Measured with the declarations added: NOT ONE BOX MOVES, and the
+   computed-style axis loses four values -- `margin-left`/`margin-right`
+   go from a scored mismatch (0 against 126px) to EXCLUDED as
+   non-absolute, and `margin-top`/`margin-bottom`, which agree today at 0,
+   go from scored to excluded too. The order this wants is intrinsic
+   sizing first, then this declaration; see `explicit-width` for the two
+   facts that fix needs."
   "
   html, body, address, article, aside, blockquote, center, dd, details,
   dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form,
@@ -4024,6 +4520,13 @@
   pre { white-space: pre }
   a[href] { color: #0000EE }
   hr { color: #808080 }
+  q::before { content: open-quote }
+  q::after { content: close-quote }
+  input:disabled, textarea:disabled { color: #545454 }
+  select:disabled { color: #808080 }
+  button:disabled, input[type=\"button\"]:disabled,
+  input[type=\"submit\"]:disabled, input[type=\"reset\"]:disabled,
+  input[type=\"color\"]:disabled { color: rgba(16, 16, 16, 0.3) }
 
   table { border-spacing: 2px }
   td, th { padding: 1px }
@@ -4066,6 +4569,9 @@
     margin-top: 0; margin-bottom: 0 }
   fieldset { padding-top: 0.35em; padding-right: 0.75em;
              padding-bottom: 0.625em; padding-left: 0.75em }
+  dialog { padding-top: 1em; padding-right: 1em;
+           padding-bottom: 1em; padding-left: 1em;
+           border-width: 3px; border-style: solid }
   ")
 
 (def ua-rules
@@ -4170,10 +4676,18 @@
    being probed against a detached node -- and here it would be actively
    wrong: `ul ul { margin-block: 0 }` would then zero the margins of every
    list on the page, nested or not. Skipping means a caller with no
-   document gets the no-ancestors answer, which is the honest one."
+   document gets the no-ancestors answer, which is the honest one.
+
+   A selector with a PSEUDO-ELEMENT is skipped outright. This answers what
+   the UA sheet says about the ELEMENT, and `q::before { content:
+   open-quote }` says nothing about a `<q>` -- merging it in would put a
+   `content` on the element itself, which real CSS does not render and
+   this engine's only caller (`cssom.layout`, on a document that was never
+   cascaded) has no generated box to hang it on."
   [document node]
   (->> (for [rule (ua-rules-for node)
              selector (:rule/selectors rule)
+             :when (nil? (pseudo-element-of selector))
              :when (if document
                      (matches? document node selector)
                      (and (<= (count (:selector/parts selector [selector])) 1)
@@ -4334,13 +4848,47 @@
    `root-px` is the root element's, which is what `rem` means.
 
    nil for the ABSOLUTE keywords (`medium`, `small`, `x-large`, ...) on
-   purpose rather than for want of a table: measured in Brave 151,
-   `font-size: medium` reports 13px and `x-large` 20px on a page whose
-   font-family is monospace, against 16 and 24 on a proportional one --
-   the keyword table is keyed on the default font of the FAMILY in use,
-   which this cascade has no way to know. Guessing 16 would be wrong by
-   3px on every monospace page. An unresolved value is left exactly as
-   the author wrote it, which is this namespace's posture everywhere else."
+   purpose rather than for want of a table: the keyword table is keyed on
+   the DEFAULT font size of the family in use, which this cascade has no
+   way to know. Guessing 16 would be wrong by 3px on every monospace page.
+   An unresolved value is left exactly as the author wrote it, which is
+   this namespace's posture everywhere else.
+
+   The whole table, measured in Brave 151 on 2026-08-05 so a future fix
+   does not have to go and get it -- the SAME page twice, once in its
+   `font-family: monospace` (whose default size is 13) and once with
+   `font-family: Arial` (16), with every keyword on a `<p>`:
+
+     keyword      monospace page   Arial page (= serif page)
+     xx-small           10*             10*
+     x-small            10              10
+     small              12              13
+     medium             13              16
+     large              16              18
+     x-large            20              24
+     xx-large           26              32
+     xxx-large          39              48
+
+   Three things read off it. It is not a ratio -- 16/13 is not 18/16, so
+   the two columns are two ROWS of a table and not one row scaled. It is
+   keyed on the family's default SIZE and not on the family: `Arial` and
+   `serif` produce byte-identical columns, and both differ from
+   `monospace` only because Chrome's default fixed size is 13 where its
+   default proportional size is 16. And the starred entries are the one
+   place the reported value and the value `em` resolves against DISAGREE:
+   `xx-small` reports 10px in every family while the same element's
+   `margin: 1em` measures 9, so the row's own value is 9 and something
+   clamps only the reported one. Anything built on this table should
+   assert against the margin, not against the reported size.
+
+   What a fix needs beyond the table is a font-family model: the row is
+   chosen by the family's default size, so `font-family` has to reach the
+   cascade first. This engine's sheet has no font-family rule at all (see
+   `ua-stylesheet-text`'s note on the control font, which is the same
+   gap). Until then the corpus's own `:text/font-size-absolute-keyword`
+   stays divergent -- and its cost is not the font size, which the
+   harness excludes as non-absolute, but the UA `p { margin: 1em 0 }`
+   underneath it, which then resolves against 14 instead of 16."
   [v parent-px root-px]
   (cond
     (number? v) v
@@ -4585,26 +5133,35 @@
    own FIRST pass either, which must not let any @container rule contribute
    before container widths are even known).
 
-   The CSS-wide `inherit` keyword (see `inherit-keyword?`): a winning
-   declaration whose value is `inherit` is REMOVED from the resulting map
-   rather than stored as the literal string \"inherit\" -- storing it
-   verbatim was a real, previously-unfixed bug (an extremely common author
-   idiom, `color: inherit`, silently rendered fully transparent/invisible
-   text downstream, since no color parser recognizes the word \"inherit\"
-   as a color). Removing the property from the map lets the SAME
+   The CSS-wide keywords -- `inherit`, `initial`, `unset`, `revert` (see
+   `css-wide-keywords` for the browser measurements that separate them,
+   and `resolve-css-wide-keyword` for the resolution): a winning
+   declaration whose value is one of the four never reaches the resulting
+   map as the literal string. Storing it verbatim was a real bug -- an
+   extremely common author idiom, `color: inherit`, silently rendered
+   fully transparent/invisible text downstream, since no color parser
+   recognizes the word \"inherit\" as a color -- and the same was true of
+   the other three until 2026-08-05.
+
+   `inherit` reads the PARENT's resolved value straight off its
+   `:style/*` attrs (`parent-computed-value`), which works for a
+   non-inherited property (`padding-left: inherit` under a
+   `padding-left: 40px` parent now reports 40, where dropping it reported
+   0 -- measured against Brave, `:cascade/inherit-on-a-non-inherited-
+   property`) as well as for an inherited one. When the parent resolved
+   nothing, the property is dropped instead, which lets the SAME
    already-existing `(or (:prop st) (:prop inherited))` fallback
-   `cssom.layout` already applies for every genuinely-inherited CSS
-   property (color/font-*/line-height/text-*/white-space) do the real
-   inheriting at layout time, for free -- exactly as if this element's
-   stylesheet/inline rules had never mentioned that property at all, which
-   is precisely what `inherit` should look like to a descendant lookup.
-   For a NON-inherited property (e.g. `display`), this only stops the
-   literal-string corruption -- it does not make `cssom.layout` treat that
-   property as inherited, since no per-property fallback exists for it
-   there; genuinely forcing inheritance for non-inherited properties is an
-   honest, documented scope-cut, not attempted here. `initial`/`unset`/
-   `revert` are separately, deliberately not handled at all (same
-   scope-cut)."
+   `cssom.layout` applies for genuinely-inherited properties do the real
+   inheriting at layout time -- and is also, for a non-inherited property,
+   exactly the initial value the parent itself computed.
+
+   `initial` WRITES the property's initial value (`initial-values`) rather
+   than dropping it, because dropping would leave the user-agent
+   stylesheet's value standing: a `<p style=\"display: initial\">` reports
+   `inline` in a browser, not the UA's `block`. `unset` is `inherit` on an
+   inherited property (`inherited-properties`) and `initial` on every
+   other. `revert` rolls the cascade back to the previous ORIGIN, which is
+   why the entries below the winner are kept rather than discarded."
   ([document rules node pseudo-element]
    (resolve-style-for document rules node pseudo-element nil nil))
   ([document rules node pseudo-element counters]
@@ -4634,14 +5191,18 @@
          ;; The USER-AGENT origin, at the bottom of the cascade: every
          ;; author declaration of the same importance beats it, which is
          ;; the whole of what "UA stylesheet" means and is why :origin sits
-         ;; between :important? and :inline? in the sort tuple below. It is
-         ;; only ever consulted for the element itself -- this sheet has no
-         ;; ::before/::after rule (a real one has `li::marker`, which this
-         ;; engine does not model), so a pseudo-element resolution is
-         ;; unchanged from before this origin existed.
-         ua-declarations (when (nil? pseudo-element)
-                           (for [rule (ua-rules-for node)
+         ;; between :important? and :inline? in the sort tuple below.
+         ;;
+         ;; Matched per PSEUDO-ELEMENT, exactly like the author rules
+         ;; above: the sheet's `q::before { content: open-quote }` must
+         ;; reach a ::before resolution and must NOT reach the element's
+         ;; own. It used to be skipped for pseudo-elements outright, which
+         ;; was correct only while the sheet had no ::before/::after rule
+         ;; in it. `li::marker` -- a real UA sheet's other one -- is still
+         ;; not here, because this engine has no marker box to style.
+         ua-declarations (for [rule (ua-rules-for node)
                                  selector (:rule/selectors rule)
+                                 :when (= pseudo-element (pseudo-element-of selector))
                                  ;; Same no-document rule as `ua-style-of`,
                                  ;; and for the same reason: `matches?`'s
                                  ;; 1-arity tests only the SUBJECT compound,
@@ -4669,7 +5230,7 @@
                               :specificity (specificity selector)
                               :inline? false
                               :layer 0
-                              :order (:rule/order rule)}))
+                              :order (:rule/order rule)})
          node-inline-importance (inline-style-importance node)
          inline-declarations (when (nil? pseudo-element)
                                 (map-indexed (fn [idx [property value]]
@@ -4681,20 +5242,35 @@
                                                 :inline? true
                                                 :layer max-layer-priority
                                                 :order idx})
-                                             (inline-style node)))]
-     (let [m (reduce (fn [m {:keys [property value]}]
-                        (if (inherit-keyword? value)
-                          (dissoc m property)
-                          (assoc m property value)))
-                      {}
-                      (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
-                               (concat ua-declarations declarations inline-declarations)))]
-       (if (contains? m :content)
-         (let [resolved (resolve-content-value node counters (:content m))]
-           (if (nil? resolved)
-             (dissoc m :content)
-             (assoc m :content resolved)))
-         m)))))
+                                             (inline-style node)))
+         sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
+                         (concat ua-declarations declarations inline-declarations))
+         ;; Grouped per property rather than reduced straight into a map,
+         ;; because `revert` needs the LOSING entries too -- it rolls the
+         ;; cascade back to the previous origin rather than to nothing.
+         ;; `sort-by` is stable and `group-by` preserves input order within
+         ;; each group, so the last entry of each group is the same winner
+         ;; the old straight reduce ended on.
+         m (reduce-kv
+            (fn [m property entries]
+              (let [{:keys [value] :as winner} (peek entries)]
+                (if-let [kind (css-wide-keyword value)]
+                  (let [resolved (resolve-css-wide-keyword
+                                  document node property kind
+                                  (when (= :revert kind)
+                                    (filterv #(< (:origin %) (:origin winner)) entries)))]
+                    (if (= drop-declaration resolved)
+                      m
+                      (assoc m property resolved)))
+                  (assoc m property value))))
+            {}
+            (group-by :property sorted))]
+     (if (contains? m :content)
+       (let [resolved (resolve-content-value node counters (:content m))]
+         (if (nil? resolved)
+           (dissoc m :content)
+           (assoc m :content resolved)))
+       m))))
 
 (defn computed-style
   "Cascade-resolved style map for `node`. Regular declarations are flat
@@ -5100,7 +5676,7 @@
    its own computed display except for `display: contents` -- see
    `children-container-display`."
   [document rules node-id inherited-env inherited-counters container-ctx
-   parent-font-size root-font-size parent-display]
+   parent-font-size root-font-size parent-display parent-quote-depth]
   (let [node (get-in document [:nodes node-id])
         [style node-counters] (style-with-counters document rules node inherited-counters container-ctx)
         pseudo-keys #{:pseudo/before :pseudo/after}
@@ -5120,9 +5696,11 @@
                                                 node-font-size
                                                 (or root-font-size node-font-size)))]))
                               pseudo)
-        final-style (-> (merge resolved-custom resolved-normal resolved-pseudo)
-                        resolve-current-color
-                        (blockify-display parent-display))
+        [final-style child-quote-depth]
+        (-> (merge resolved-custom resolved-normal resolved-pseudo)
+            resolve-current-color
+            (blockify-display parent-display)
+            (resolve-quote-content (or parent-quote-depth 0)))
         document (reduce-kv
                   (fn [d k v]
                     (if (contains? pseudo-keys k)
@@ -5131,7 +5709,8 @@
                   (clear-style-attrs document node-id)
                   final-style)]
     [document node-env node-counters node-font-size
-     (children-container-display final-style parent-display)]))
+     (children-container-display final-style parent-display)
+     child-quote-depth]))
 
 (defn- run-cascade-walk
   "The actual top-down tree walk apply-cascade performs (see its own
@@ -5161,27 +5740,31 @@
    has no ancestor chain to read either number off."
   [document rules container-ctx base-font-size]
   (letfn [(walk [document node-id inherited-env inherited-counters visited
-                 parent-font-size root-font-size parent-display]
+                 parent-font-size root-font-size parent-display quote-depth]
             (let [node (get-in document [:nodes node-id])
                   element? (= :element (:node/type node))
-                  [document node-env node-counters node-font-size node-display]
+                  [document node-env node-counters node-font-size node-display
+                   node-quote-depth]
                   (if element?
                     (style-element document rules node-id inherited-env inherited-counters
                                    container-ctx parent-font-size root-font-size
-                                   parent-display)
+                                   parent-display quote-depth)
                     ;; a text node establishes no formatting context of its
                     ;; own, so its (impossible) children would still be
-                    ;; blockified against this node's parent
-                    [document inherited-env inherited-counters parent-font-size parent-display])
+                    ;; blockified against this node's parent -- and it
+                    ;; generates no quote, so the depth passes straight
+                    ;; through it
+                    [document inherited-env inherited-counters parent-font-size parent-display
+                     quote-depth])
                   root-font-size (if element? (or root-font-size node-font-size) root-font-size)
                   visited (conj visited node-id)]
               (reduce (fn [[document visited counters] child-id]
                         (walk document child-id node-env counters visited
-                              node-font-size root-font-size node-display))
+                              node-font-size root-font-size node-display node-quote-depth))
                       [document visited node-counters]
                       (:children node))))]
     (let [[document visited] (if-let [root (:root document)]
-                                (walk document root {} {} #{} base-font-size nil nil)
+                                (walk document root {} {} #{} base-font-size nil nil 0)
                                 [document #{}])]
       (reduce-kv
        (fn [document node-id node]
@@ -5189,8 +5772,11 @@
            ;; a detached subtree has no ancestor chain to read a container
            ;; display off either -- the same honest simplification the empty
            ;; inherited environment above it already makes
+           ;; a detached subtree has no ancestor chain to read a quote
+           ;; depth off either -- it starts at 0, the same honest
+           ;; simplification as the two above
            (first (style-element document rules node-id {} {} container-ctx
-                                 base-font-size base-font-size nil))
+                                 base-font-size base-font-size nil 0))
            document))
        document
        (:nodes document)))))

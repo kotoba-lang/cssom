@@ -835,8 +835,87 @@
       "a blank value is not suffering overflow/underflow, so it matches :in-range like real HTML5"))
 
 (deftest disabled-out-of-range-control-matches-neither-pseudo-class
-  (is (nil? (range-check-doc {:type "number" :min "1" :max "10" :value "15" :disabled "disabled"}))
-      "constraint validation (and so :in-range/:out-of-range) does not apply to a disabled control"))
+  ;; The answer is the USER-AGENT grey, not nil: neither author rule
+  ;; matched (which is what this test is about), and the UA sheet's own
+  ;; `input:disabled { color: #545454 }` -- measured in Brave 151 on
+  ;; 2026-08-05 -- then stands, exactly as it does in a browser. Before
+  ;; that rule existed this read nil for the same reason.
+  (is (= "#545454" (range-check-doc {:type "number" :min "1" :max "10" :value "15" :disabled "disabled"}))
+      "constraint validation (and so :in-range/:out-of-range) does not apply
+       to a disabled control -- neither author rule wins, leaving the UA
+       disabled colour"))
+
+;; ---- the user-agent sheet's `:disabled` colours ----
+
+(defn- control-color
+  "`tag`'s resolved colour with `attrs` on it, cascaded against no author
+   CSS at all -- so what comes back is the user-agent sheet's own answer."
+  [tag attrs]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [el doc] (dom/create-element doc tag)
+        doc (reduce (fn [d [k v]] (dom/set-attribute d el k v)) doc attrs)
+        doc (dom/append-child doc root el)]
+    (get-in (css/apply-cascade doc []) [:nodes el :attrs :style/color])))
+
+(deftest disabled-controls-take-one-of-three-user-agent-colours
+  ;; Measured in Brave 151 on 2026-08-05, every control in the page twice,
+  ;; once bare and once `disabled`. THREE distinct greys, keyed on the
+  ;; control's type -- an engine with one of them would be wrong about the
+  ;; other two.
+  (is (= "#545454" (control-color :input {:disabled "disabled"})))
+  (is (= "#545454" (control-color :input {:type "number" :disabled "disabled"})))
+  (is (= "#545454" (control-color :textarea {:disabled "disabled"})))
+  (is (= "#808080" (control-color :select {:disabled "disabled"})))
+  (is (= "rgba(16, 16, 16, 0.3)" (control-color :button {:disabled "disabled"})))
+  (is (= "rgba(16, 16, 16, 0.3)" (control-color :input {:type "submit" :disabled "disabled"})))
+  ;; and the negatives, each of which a coarser rule would get wrong
+  (is (nil? (control-color :input {})) "an enabled control is not greyed")
+  (is (nil? (control-color :input {:readonly "readonly"}))
+      "readonly is not disabled -- Brave reports plain black")
+  (is (nil? (control-color :p {:disabled "disabled"}))
+      "`disabled` on a non-control does nothing"))
+
+(deftest dialog-gets-the-user-agent-padding-and-border
+  ;; Measured in Brave 151 on 2026-08-05 in the corpus's own 14px page:
+  ;; `padding` 14px on all four sides (`1em`), `border-top-width` 3px
+  ;; (`border: solid`, i.e. `medium`), style solid. As four padding
+  ;; LONGHANDS, because `padding: 1em` is not a length at declaration time
+  ;; and so expands to nothing but the uniform key -- which is invisible to
+  ;; every per-side reader, `getComputedStyle` included.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [d doc] (dom/create-element doc :dialog)
+        doc (dom/set-attribute doc d :open "")
+        doc (dom/append-child doc root d)
+        doc (css/apply-cascade doc [] {:base-font-size 14})
+        attrs (get-in doc [:nodes d :attrs])]
+    (is (= [14 14 14 14] [(:style/padding-top attrs) (:style/padding-right attrs)
+                          (:style/padding-bottom attrs) (:style/padding-left attrs)]))
+    (is (= 3 (:style/border-width attrs)))
+    (is (= "solid" (:style/border-style attrs)))
+    (is (= "block" (:style/display attrs))))
+  ;; and a dialog with no `open` is still `display: none`, which the sheet
+  ;; already said and the padding must not have disturbed
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [d doc] (dom/create-element doc :dialog)
+        doc (dom/append-child doc root d)
+        doc (css/apply-cascade doc [])]
+    (is (= "none" (get-in doc [:nodes d :attrs :style/display])))))
+
+(deftest disabled-colour-follows-a-disabled-fieldset-not-just-the-attribute
+  ;; The rule is `:disabled`, not `[disabled]`: Brave greys an <input>
+  ;; inside a <fieldset disabled> that has no attribute of its own.
+  (let [[root doc] (dom/create-element dom/empty-document :form)
+        doc (dom/set-root doc root)
+        [fs doc] (dom/create-element doc :fieldset)
+        doc (dom/set-attribute doc fs :disabled "disabled")
+        doc (dom/append-child doc root fs)
+        [el doc] (dom/create-element doc :input)
+        doc (dom/append-child doc fs el)
+        doc (css/apply-cascade doc [])]
+    (is (= "#545454" (get-in doc [:nodes el :attrs :style/color])))))
 
 ;; ---- radio button groups honor real form ownership, not the literal
 ;; :form attribute string (https://html.spec.whatwg.org/multipage/input.html
@@ -992,6 +1071,87 @@
     (is (= "red" (:color style-before)))
     (is (= "!" (:content style-after))
         "single-quoted content literals are supported too")))
+
+;; ---- generated quotes: `content: open-quote` / `close-quote` ----
+;;
+;; Measured in Brave 151 on 2026-08-05, in the conformance corpus's own
+;; 14px monospace page. The characters are not read off a spec: the same
+;; markup was rendered with `quotes: auto` and with
+;; `quotes: "\201C" "\201D" "\2018" "\2019"` and every `<q>` box came out
+;; byte-identical, which is what identifies them. See `quote-marks`.
+
+(defn- nest-tags
+  "Builds `tags` as a chain of nested elements under a root <p> and returns
+   `[document ids]`, ids outermost first. Built with the DOM API rather
+   than parsed, because this namespace must not depend on htmldom -- cssom
+   is htmldom's dependency, not the other way round."
+  [tags]
+  (let [[root doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc root)
+        [doc ids _] (reduce (fn [[doc ids parent] tag]
+                              (let [[id doc] (dom/create-element doc tag)
+                                    doc (dom/append-child doc parent id)]
+                                [doc (conj ids id) id]))
+                            [doc [] root]
+                            tags)]
+    [doc ids]))
+
+(defn- q-quotes
+  "The generated ::before/::after text of `depth` nested `<q>` elements,
+   outermost first, after a real cascade with no author CSS."
+  [depth]
+  (let [[doc ids] (nest-tags (repeat depth :q))
+        doc (css/apply-cascade doc [])
+        [_ doc] (dom/consume-ops doc)]
+    (mapv (fn [id] [(get-in doc [:nodes id :attrs :pseudo/before :content])
+                    (get-in doc [:nodes id :attrs :pseudo/after :content])])
+          ids)))
+
+(deftest a-q-gets-its-quotation-marks-from-the-user-agent-sheet
+  ;; The rule is `q::before { content: open-quote }`, which needed the UA
+  ;; origin to be matched per PSEUDO-ELEMENT -- it used to be skipped for
+  ;; pseudo-elements outright, which was only correct while the sheet had
+  ;; no ::before rule in it.
+  (is (= [["“" "”"]] (q-quotes 1))))
+
+(deftest a-nested-q-uses-the-second-quote-level
+  ;; Brave: the outer <q> is 91px wide and the inner 35 on this page, which
+  ;; is only consistent with two DIFFERENT pairs -- the four characters all
+  ;; advance 14px here where an ASCII `"` advances 7.
+  (is (= [["“" "”"] ["‘" "’"]] (q-quotes 2)))
+  ;; and a third level reuses the second's pair, which is CSS's own rule
+  ;; for a depth deeper than the `quotes` list. Measured: 147 / 91 / 35.
+  (is (= [["“" "”"] ["‘" "’"] ["‘" "’"]] (q-quotes 3))))
+
+(deftest quote-depth-counts-only-the-quote-generating-ancestors
+  ;; A `<q>` inside a `<span>` is still at level 1 -- measured in Brave, a
+  ;; `<q>` inside a `<span>` and one inside a `<blockquote>` are both 28px
+  ;; wider than their text, exactly like a bare one.
+  (let [[doc ids] (nest-tags [:span :q])
+        doc (css/apply-cascade doc [])
+        [_ doc] (dom/consume-ops doc)]
+    (is (= "“" (get-in doc [:nodes (second ids) :attrs :pseudo/before :content])))))
+
+(deftest an-author-can-suppress-the-generated-quotes
+  ;; `content: none` is not a value this engine renders (see
+  ;; `parse-content-value`), so an author rule beating the UA one removes
+  ;; the quote entirely -- measured in Brave, the same `<q>` is then 35px
+  ;; wide rather than 63.
+  (let [[doc ids] (nest-tags [:q])
+        doc (css/apply-cascade doc (css/parse-rules "q::before, q::after { content: none }"))
+        [_ doc] (dom/consume-ops doc)
+        q (first ids)]
+    (is (nil? (get-in doc [:nodes q :attrs :pseudo/before :content])))
+    (is (nil? (get-in doc [:nodes q :attrs :pseudo/after :content])))))
+
+(deftest the-ua-pseudo-rule-does-not-leak-onto-the-element-itself
+  ;; `ua-style-for` answers what the UA sheet says about the ELEMENT, and
+  ;; `q::before { content: open-quote }` says nothing about a `<q>`.
+  (is (nil? (:content (css/ua-style-for {:node/type :element :tag :q :attrs {}}))))
+  (let [[doc ids] (nest-tags [:q])
+        doc (css/apply-cascade doc [])
+        [_ doc] (dom/consume-ops doc)]
+    (is (nil? (get-in doc [:nodes (first ids) :attrs :style/content])))))
 
 (deftest before-content-empty-string-is-a-real-declared-value-not-absent
   (let [[span doc] (dom/create-element dom/empty-document :span)
@@ -3089,6 +3249,113 @@
         "d2 has both a .a and a .b descendant -- both :has() occurrences
          independently hold")))
 
+;; The sibling-relative :has() forms. Every expectation below was measured
+;; in Brave 151 on 2026-08-05, on the markup each test builds.
+
+(defn- sibling-has-doc
+  "A <div> whose element children are `tags` (a vector of [tag class] pairs,
+   class may be nil), cascaded against `css`. Returns the children's
+   resolved values for `prop`, in document order, nil where unset."
+  [tags css prop]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [ids doc] (reduce (fn [[ids d] [tag cls]]
+                            (let [[id d] (dom/create-element d tag)
+                                  d (cond-> d cls (dom/set-attribute id :class cls))
+                                  d (dom/append-child d root id)]
+                              [(conj ids id) d]))
+                          [[] doc]
+                          tags)
+        doc (css/apply-cascade doc (css/parse-rules css))]
+    (mapv #(get-in doc [:nodes % :attrs (keyword "style" (name prop))]) ids)))
+
+(deftest has-with-a-following-sibling-combinator-is-forward-only
+  ;; Brave, on <p>p0</p><h2>h-a</h2><span>s</span><p>after</p> with
+  ;; `h2:has(~ p)`: only the <h2> is italic, and a LATER sibling counts
+  ;; even with a <span> in between.
+  (is (= [nil "italic" nil nil]
+         (sibling-has-doc [[:p nil] [:h2 nil] [:span nil] [:p nil]]
+                          "h2:has(~ p) { font-style: italic }"
+                          :font-style)))
+  (is (= [nil nil]
+         (sibling-has-doc [[:p nil] [:h2 nil]]
+                          "h2:has(~ p) { font-style: italic }"
+                          :font-style))
+      "an <h2> whose only <p> is BEFORE it must not match")
+  ;; The forward-only half, measured directly: Brave gives
+  ;; `p:has(~ .z) { font-weight: bold }` on <p>a<p>b<span class=z><p>c the
+  ;; answer a=700 b=700 c=400 -- the <p> AFTER the `.z` is not selected.
+  (is (= ["bold" "bold" nil nil]
+         (sibling-has-doc [[:p nil] [:p nil] [:span "z"] [:p nil]]
+                          "p:has(~ .z) { font-weight: bold }"
+                          :font-weight))))
+
+(deftest has-with-a-next-sibling-combinator-is-the-immediate-sibling-only
+  ;; Brave: `h2:has(+ p)` italicises `h-d` (the <p> is next) and not `h-e`
+  ;; (a <span> intervenes), where `h2:has(~ p)` would match both.
+  (is (= ["italic" nil]
+         (sibling-has-doc [[:h2 nil] [:p nil]]
+                          "h2:has(+ p) { font-style: italic }" :font-style)))
+  (is (= [nil nil nil]
+         (sibling-has-doc [[:h2 nil] [:span nil] [:p nil]]
+                          "h2:has(+ p) { font-style: italic }" :font-style))))
+
+(deftest has-sibling-forms-compose-in-one-comma-separated-argument
+  ;; Brave: `span:has(~ b, ~ i)` italicises both spans in the first row and
+  ;; neither in the second -- the argument's comma list is an OR, exactly
+  ;; as it already was for the descendant form. Only the SPANS are asserted:
+  ;; the <i> and the <em> beside them are italic from the UA sheet, which
+  ;; would make a "matched nothing" assertion pass for the wrong reason.
+  (is (= ["italic" "italic"]
+         (subvec (sibling-has-doc [[:span nil] [:span nil] [:i nil]]
+                                  "span:has(~ b, ~ i) { font-style: italic }" :font-style)
+                 0 2)))
+  (is (= [nil]
+         (subvec (sibling-has-doc [[:span nil] [:em nil]]
+                                  "span:has(~ b, ~ i) { font-style: italic }" :font-style)
+                 0 1))))
+
+;; ---- :nth-child(An+B of <selector>) ----
+
+(deftest nth-child-of-a-selector-counts-only-among-the-matching-siblings
+  ;; Brave, on li.m/li/li.m/li/li.m/li.m with `li:nth-child(2n+1 of .m)`:
+  ;; the 1st and 5th are bold -- the 1st and 3rd `.m`. Ignoring the clause
+  ;; would bold the 1st, 3rd and 5th (odd children); treating the clause as
+  ;; a plain compound would bold the 1st alone.
+  (is (= ["bold" nil nil nil "bold" nil]
+         (sibling-has-doc [[:li "m"] [:li nil] [:li "m"] [:li nil] [:li "m"] [:li "m"]]
+                          "li:nth-child(2n+1 of .m) { font-weight: bold }"
+                          :font-weight)))
+  ;; `odd` and a bare integer take the clause too.
+  (is (= [nil "bold" nil "bold"]
+         (sibling-has-doc [[:li nil] [:li "m"] [:li "m"] [:li "m"]]
+                          "li:nth-child(odd of .m) { font-weight: bold }"
+                          :font-weight)))
+  ;; and from the end
+  (is (= [nil nil "bold" nil]
+         (sibling-has-doc [[:li "m"] [:li nil] [:li "m"] [:li nil]]
+                          "li:nth-last-child(1 of .m) { font-weight: bold }"
+                          :font-weight))))
+
+(deftest nth-child-of-a-selector-also-requires-the-element-itself-to-match
+  ;; The half that is easy to leave out: an element that is at a matching
+  ;; INDEX but does not itself match the clause selector is not selected.
+  ;; Brave on li/li.m/li.m: `:nth-child(1 of .m)` selects the second <li>,
+  ;; not the first.
+  (is (= [nil "bold" nil]
+         (sibling-has-doc [[:li nil] [:li "m"] [:li "m"]]
+                          "li:nth-child(1 of .m) { font-weight: bold }"
+                          :font-weight))))
+
+(deftest nth-of-type-does-not-take-an-of-clause
+  ;; `of` is valid on :nth-child/:nth-last-child only. `:nth-of-type(2 of
+  ;; .m)` is not valid CSS, so it must select nothing rather than quietly
+  ;; behaving like `:nth-child(2 of .m)`.
+  (is (= [nil nil nil]
+         (sibling-has-doc [[:li "m"] [:li "m"] [:li "m"]]
+                          "li:nth-of-type(2 of .m) { font-weight: bold }"
+                          :font-weight))))
+
 (deftest has-pseudo-class-does-not-match-when-document-is-absent
   ;; Same documented restriction :root/:lang()/the structural pseudo-classes
   ;; already have -- the document-less 2-arity form has no `document` to
@@ -3132,15 +3399,25 @@
 
 ;; ---- CSS-wide `inherit` keyword ----
 
-(deftest inherit-keyword-removes-the-property-instead-of-storing-the-literal-string
+(deftest inherit-keyword-resolves-to-the-parents-value-instead-of-storing-the-literal-string
   ;; Real bug this guards: `color: inherit` (an extremely common real-world
   ;; author idiom) previously stored the literal string "inherit" as the
   ;; winning declaration's value -- no downstream color parser recognizes
   ;; "inherit" as a color, so it silently rendered fully transparent,
   ;; invisible text. Confirmed via direct REPL reproduction before touching
-  ;; source. Fixed by removing the property from the resolved map instead,
-  ;; letting cssom.layout's own already-existing per-property
-  ;; `(or (:prop st) (:prop inherited))` fallback do the real inheriting.
+  ;; source.
+  ;;
+  ;; The first fix REMOVED the property instead, leaving cssom.layout's own
+  ;; `(or (:prop st) (:prop inherited))` fallback to do the inheriting.
+  ;; That is right for an inherited property and WRONG for a non-inherited
+  ;; one, which has no such fallback -- measured against Brave 151 on
+  ;; 2026-08-05, `<div style="padding-left:40px"><p style="padding-left:
+  ;; inherit">` reports 40px in the browser and reported 0 here. So
+  ;; `inherit` now reads the parent's already-resolved value off its
+  ;; :style/* attrs (`parent-computed-value`), for every property alike.
+  ;; The value therefore APPEARS on the child, where it used to be absent;
+  ;; what layout renders is unchanged, and `computed-style` is no longer
+  ;; silent about it.
   (let [[root doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc root)
         [child doc] (dom/create-element doc :span)
@@ -3148,10 +3425,23 @@
         rules (css/parse-rules "div { color: red } span { color: inherit }")
         doc (css/apply-cascade doc rules)]
     (is (= "red" (get-in doc [:nodes root :attrs :style/color])))
-    (is (nil? (get-in doc [:nodes child :attrs :style/color]))
+    (is (= "red" (get-in doc [:nodes child :attrs :style/color]))
         "the winning `inherit` declaration must NOT leave the literal
-         string \"inherit\" on the node -- absent, so layout's own
-         inherited-value fallback can take over")))
+         string \"inherit\" on the node -- it resolves to the parent's
+         own value")))
+
+(deftest inherit-keyword-drops-when-the-parent-resolved-nothing
+  ;; The other half of `parent-computed-value`: a parent with no value of
+  ;; its own leaves the property absent, which is both the initial value
+  ;; for a non-inherited property and the way this engine spells "look
+  ;; further up" for an inherited one.
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [child doc] (dom/create-element doc :span)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules "span { color: inherit }")
+        doc (css/apply-cascade doc rules)]
+    (is (nil? (get-in doc [:nodes child :attrs :style/color])))))
 
 (deftest inherit-keyword-is-case-insensitive-and-tolerates-surrounding-whitespace
   (let [[root doc] (dom/create-element dom/empty-document :div)
@@ -3160,7 +3450,7 @@
         doc (dom/append-child doc root child)
         rules (css/parse-rules "div { color: green } span { color:  InHeRiT  }")
         doc (css/apply-cascade doc rules)]
-    (is (nil? (get-in doc [:nodes child :attrs :style/color])))))
+    (is (= "green" (get-in doc [:nodes child :attrs :style/color])))))
 
 (deftest inherit-keyword-loses-to-a-later-more-specific-declaration-like-any-other-value
   ;; Sanity check that this fix doesn't special-case `inherit` OUTSIDE the
@@ -3184,8 +3474,12 @@
         doc (dom/append-child doc mid leaf)
         rules (css/parse-rules "div { color: blue } section { color: inherit } span { color: inherit }")
         doc (css/apply-cascade doc rules)]
-    (is (nil? (get-in doc [:nodes leaf :attrs :style/color])))
-    (is (nil? (get-in doc [:nodes mid :attrs :style/color])))))
+    ;; The top-down walk means `section` is resolved before `span`, so the
+    ;; blue `section` inherited from `div` is already on the node by the
+    ;; time `span` reads it -- the chain carries a value now rather than an
+    ;; absence (see inherit-keyword-resolves-to-the-parents-value... above).
+    (is (= "blue" (get-in doc [:nodes leaf :attrs :style/color])))
+    (is (= "blue" (get-in doc [:nodes mid :attrs :style/color])))))
 
 (deftest inherit-keyword-resolves-through-the-real-layout-pipeline-to-the-parents-actual-color
   ;; End-to-end confirmation through the real cascade -> DOM -> layout
@@ -3207,6 +3501,89 @@
     (is (= "red" (:color text-op))
         "the child's real, painted text color must be the parent's red,
          not the literal string \"inherit\" and not a default fallback")))
+
+
+;; ---- CSS-wide `initial` / `unset` / `revert` ----
+;;
+;; Every expectation below was measured in Brave 151 on 2026-08-05, in the
+;; conformance corpus's own 14px page -- see `css-wide-keywords` in
+;; src/cssom/core.cljc for the table those measurements produced.
+
+(defn- wide-keyword-doc
+  "A <div> parent carrying `parent-decls` and a <p> child carrying
+   `child-decls`, cascaded. Returns the child's resolved :style/* map. A
+   `<p>` on purpose: it is the tag the user-agent sheet declares a margin
+   and a display for, which is what separates `initial` from `unset` from
+   `revert`."
+  [parent-decls child-decls]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (dom/set-attribute doc root :class "parent")
+        [child doc] (dom/create-element doc :p)
+        doc (dom/append-child doc root child)
+        rules (css/parse-rules (str ".parent { " parent-decls " } p { " child-decls " }"))
+        doc (css/apply-cascade doc rules {:base-font-size 14})]
+    (into {} (filter (fn [[k _]] (= "style" (namespace k)))) (get-in doc [:nodes child :attrs]))))
+
+(deftest initial-keyword-writes-the-css-initial-value-and-beats-the-ua-sheet
+  ;; Brave: `<p style="display: initial">` reports `inline`, NOT the UA
+  ;; sheet's `block`, and `text-align: initial` under a `text-align:
+  ;; center` parent reports `start`. Dropping the declaration -- what
+  ;; `inherit` does -- would report `block` and `center` respectively.
+  (let [st (wide-keyword-doc "text-align: center"
+                             "display: initial; text-align: initial; margin-top: initial")]
+    (is (= "inline" (:style/display st)))
+    (is (= "start" (:style/text-align st)))
+    (is (= 0 (:style/margin-top st)))))
+
+(deftest unset-keyword-is-inherit-on-inherited-and-initial-on-everything-else
+  ;; Brave, same page: `color: unset` under a green parent reports green;
+  ;; `display: unset` reports `inline` (the initial value, not the UA
+  ;; `block`); `padding-left: unset` under a 40px parent reports 0.
+  (let [st (wide-keyword-doc "color: #008000; padding-left: 40px"
+                             "color: unset; display: unset; padding-left: unset")]
+    (is (= "#008000" (:style/color st)))
+    (is (= "inline" (:style/display st)))
+    (is (= 0 (:style/padding-left st)))))
+
+(deftest revert-keyword-rolls-back-to-the-user-agent-origin
+  ;; Brave: `p { margin: 0 }` plus `margin: revert` reports 14px top and
+  ;; bottom (the UA `p { margin: 1em 0 }` at this page's 14px) and 0 left
+  ;; and right (no UA declaration there, so the initial value). The author
+  ;; rule is GONE, not outranked -- which is why the losing entries have to
+  ;; survive as far as `resolve-css-wide-keyword`.
+  (let [st (wide-keyword-doc "" "margin: 0; margin: revert")]
+    (is (= 14 (:style/margin-top st)))
+    (is (= 14 (:style/margin-bottom st)))
+    (is (= 0 (:style/margin-left st)))
+    (is (= 0 (:style/margin-right st))))
+  ;; And a property the UA sheet says nothing about reverts to initial.
+  (let [st (wide-keyword-doc "" "color: red; color: revert")]
+    (is (nil? (:style/color st)))))
+
+(deftest revert-keyword-keeps-the-ua-display-where-initial-would-not
+  ;; The pair that makes `revert` a different keyword from `initial` on the
+  ;; same declaration: Brave reports `block` for `display: revert` on a
+  ;; `<p>` and `inline` for `display: initial`.
+  (is (= "block" (:style/display (wide-keyword-doc "" "display: inline-block; display: revert"))))
+  (is (= "inline" (:style/display (wide-keyword-doc "" "display: inline-block; display: initial")))))
+
+(deftest css-wide-keyword-in-a-box-shorthand-expands-to-all-four-longhands
+  ;; The shorthand has to expand or the longhands an author rule already
+  ;; wrote survive underneath it -- which is exactly what left
+  ;; `:cascade/revert-drops-to-the-user-agent-value` reporting 0.
+  (let [st (wide-keyword-doc "" "margin: 8px; margin: initial")]
+    (is (= [0 0 0 0] [(:style/margin-top st) (:style/margin-right st)
+                      (:style/margin-bottom st) (:style/margin-left st)]))))
+
+(deftest css-wide-keyword-is-only-a-keyword-as-the-whole-declaration
+  ;; `margin: 1px revert` is not valid CSS, and admitting the keyword
+  ;; per-token would make it look like one. Left unexpanded, as this
+  ;; expander already leaves `margin: 1px solid 3px dashed` -- so the UA
+  ;; sheet's own `p { margin-top: 1em }` (14 at this base size) survives
+  ;; untouched, where an expansion would have written 1 or reverted.
+  (let [st (wide-keyword-doc "" "margin: 1px revert")]
+    (is (= 14 (:style/margin-top st)))))
 
 
 ;; ---- `em` / `rem` resolution and the computed font size ----

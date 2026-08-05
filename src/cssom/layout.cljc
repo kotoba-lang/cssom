@@ -2853,6 +2853,77 @@
     (+ (reduce max 0 (filter pos? ms))
        (reduce min 0 (filter neg? ms)))))
 
+(defn- self-collapsing-block?
+  "Whether a laid-out block child's OWN top and bottom margins are
+   adjoining (CSS 2.1 SS8.3.1), so that they collapse with each other and
+   the box does not separate what is above it from what is below it. This
+   engine had adjacent-sibling and parent-child collapsing and not this
+   third case, so an empty `<p>` between two others separated them by two
+   margins where a browser shows one.
+
+   Measured in Brave 151 on 2026-08-05, fifteen shapes, `margin: 14px 0`
+   on the empty box and 20px-tall siblings around it. The four conditions
+   below are exactly the four the shapes separate:
+
+     empty box, then a sibling          both at y=0, container 20 tall
+     sibling, empty box, sibling        the empty box and the second
+                                        sibling BOTH at y=34
+     empty box with `padding-top: 1px`  1px tall at y=0, sibling at y=15
+     empty box with `border-top`        the same -- NOT self-collapsing
+     empty box with `padding-left`      self-collapsing, so it is the
+                                        BLOCK-axis padding that matters
+     `height: 0` WITH text in it        NOT self-collapsing (sibling at
+                                        y=14): the line box is in-flow
+                                        content, which is the condition
+                                        `child-h` alone cannot see
+     `min-height: 1px`                  not self-collapsing (1px tall)
+     `overflow: hidden`                 NOT self-collapsing: a block
+                                        formatting context's own margins
+                                        never collapse through it
+     an empty box whose only child is
+     another empty box                  self-collapsing, chained
+
+   `draw` is the child's own draw-ops, and the `:text` test in it is the
+   `height: 0` shape above -- the only one where a zero-height box still
+   holds a line box. A nested `:node` op does not disqualify it, which is
+   what makes the chained shape work.
+
+   The block-axis border is tested TWICE, and the second test reads the
+   node's raw declarations rather than `st`: this engine's box model has
+   ONE uniform `border-width`, so `border-top: 1px solid red` -- which the
+   cascade stores verbatim and no reader consumes -- leaves `st`'s
+   `:border-width` at 0. Without the raw test that box would be treated as
+   self-collapsing when a browser gives it a 1px border and 35px of
+   container. It is deliberately over-conservative: a declared
+   `border-top: none` disqualifies too, because deciding otherwise means
+   parsing a shorthand this file does not otherwise read. The real fix is
+   per-side borders in the box model, which is a much larger change and
+   would make this test one line.
+
+   SCOPE, otherwise: the formatting-context test is `border-width` /
+   `scroll-container?` / `flow-root` / `:independent-fc?`, which is
+   `layout-block`'s own `fc-free?` minus its `multicol` and `fieldset`
+   terms -- both of those need more than the node, and both are already
+   excluded by the terms that are here (a fieldset carries a 2px UA
+   border; a zero-height multicol box with no content has nothing to
+   collapse). A `display: table` box is likewise not tested for: it cannot
+   reach zero height with content, and with none there is nothing to
+   separate."
+  [node st child-h draw]
+  (and (zero? child-h)
+       (some? st)
+       (zero? (:border-width st))
+       (zero? (or (:padding-top st) (:padding st) 0))
+       (zero? (or (:padding-bottom st) (:padding st) 0))
+       (not-any? #(some? (style node %))
+                 [:border-top :border-bottom :border-block
+                  :border-top-width :border-bottom-width
+                  :border-top-style :border-bottom-style])
+       (not (scroll-container? st))
+       (not= "flow-root" (:display st))
+       (not (:independent-fc? st))
+       (not-any? #(= :text (:draw/op %)) draw)))
+
 (def ^:private line-height-multiplier-pattern
   "A `line-height` written as a multiple of the element's own `font-size`:
    a bare unitless number (`1.5`), an `em` length (`1.5em`), or a
@@ -9756,6 +9827,34 @@
        :baseline max-ascent
        :pieces pieces})))
 
+(defn- inline-hit-region
+  "An inline box's hit region: ONE rectangle per line box, not one per
+   fragment. Fragments on the same line are merged into their horizontal
+   union.
+
+   An inline element's content is split into a fragment per text run, so a
+   `<q>` with a nested `<q>` inside it produces THREE fragments on one
+   line, with the box's own spaces falling in the two gaps between them.
+   A browser has one inline box per line and answers `elementFromPoint`
+   for the whole of it. Measured in Brave 151 on 2026-08-05, `x <q>a
+   <q>b</q> c</q> y`: at x=80 -- the space between the inner `<q>` and the
+   `c` -- `elementFromPoint` answers the OUTER `<q>`, where this engine's
+   per-fragment region answered the `<p>`, and the conformance harness's
+   paint-order axis reported all four of that case's sample points.
+
+   Merging is only ever within a line (grouped on `y` and `h`), so the
+   thing this region exists for is untouched: a `<b>` wrapped across two
+   lines still carries two rectangles, and a point inside the union but on
+   neither line still answers the containing block."
+  [fragments]
+  (->> fragments
+       (group-by (juxt :y :h))
+       (sort-by key)
+       (mapv (fn [[[y h] rs]]
+               (let [x0 (apply min (map :x rs))
+                     x1 (apply max (map #(+ (:x %) (:w %)) rs))]
+                 {:x x0 :y y :w (- x1 x0) :h h})))))
+
 (defn- inline-owner-ops
   "Background + `:node` draw-ops for the inline ELEMENTS a laid-out run
    passed through, derived from where their own text fragments actually
@@ -9813,8 +9912,8 @@
                        :x x0 :y y0 :w (- x1 x0) :h (- y1 y0)
                        :class (attr node :class) :listeners (listeners node)
                        :opacity opacity}
-                      (when (next fragments)
-                        {:hit (mapv #(select-keys % [:x :y :w :h]) fragments)})
+                      (when-let [hit (seq (inline-hit-region fragments))]
+                        (when (next hit) {:hit (vec hit)}))
                       (style-passthrough st))))
            ordered)))))
 
@@ -10906,11 +11005,47 @@
                                           [0 0])]
                             (mapv #(-> % (update :x + auto-dx rx)
                                        (update :y + gap-before ry))
-                                  ls)))]
-          (recur (rest remaining) (+ y advance) (into draws draw) (into floats escaped) fdraws
+                                  ls)))
+              ;; ---- the child's own two margins are adjoining ----
+              ;;
+              ;; See `self-collapsing-block?` for the fifteen shapes this
+              ;; was measured on. Such a child does not separate what is
+              ;; above it from what is below: the running Y does NOT
+              ;; advance past it (so its own drawn position, still shifted
+              ;; by `gap-before`, is the only place its top margin shows),
+              ;; and its top and bottom margins JOIN the pending one, which
+              ;; the next sibling's own top margin then collapses with.
+              ;;
+              ;; Measured, sibling / empty(margin-top 5, bottom 30) /
+              ;; sibling: the empty box is at y=25 -- its own top margin
+              ;; below the first sibling -- and the second sibling is at
+              ;; y=50, i.e. `collapse(5, 30)` below it, not 25+30. Those
+              ;; are two different numbers off the same box, which is why
+              ;; the drawn position and the flow position are computed
+              ;; separately here.
+              ;;
+              ;; And when the collapsed set is escaping the container's own
+              ;; top edge (`first?` and `collapse-top?`), the child does not
+              ;; end that either: `first?` stays true, so the NEXT child's
+              ;; top margin escapes through the same edge. Measured:
+              ;; `<div><p></p><p>x</p></div>` is 20px tall in Brave with
+              ;; both paragraphs at y=0, and this engine made it 34 with
+              ;; the second at y=14.
+              self-collapsing? (self-collapsing-block? child cst child-h (:draw laid))
+              escaping-top? (and self-collapsing? first? collapse-top?)]
+          (recur (rest remaining)
+                 (if self-collapsing? y (+ y advance))
+                 (into draws draw) (into floats escaped) fdraws
                  (if child-ink (into ink child-ink) ink)
-                 (+ height advance) mb* false
-                 (if (and first? collapse-top?) mt* out-mt)
+                 (if self-collapsing? height (+ height advance))
+                 (if self-collapsing?
+                   (if escaping-top? prev-mb (collapse-margins prev-mb mt* mb*))
+                   mb*)
+                 (if escaping-top? first? false)
+                 (cond
+                   escaping-top? (collapse-margins out-mt mt* mb*)
+                   (and first? collapse-top?) mt*
+                   :else out-mt)
                  oof)))
       ;; ^ closes: if / recur / let / cond
       {:draw (if (seq fdraws) (into draws fdraws) draws)
