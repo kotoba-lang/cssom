@@ -20,7 +20,11 @@
 
 (deftest parses-attribute-selectors-and-important-declarations
   (let [rules (css/parse-rules "input[required], [data-mode=\"edit\"] { border-width: 2px !important; color: red }")]
-    (is (= {:border-width 2 :color "red"}
+    ;; `border-width` is a 1-to-4 shorthand over the four sides, like
+    ;; `margin`/`padding`, so it expands and keeps the uniform key beside
+    ;; the longhands (see `expand-border-box-shorthand`).
+    (is (= {:border-width 2 :border-top-width 2 :border-right-width 2
+            :border-bottom-width 2 :border-left-width 2 :color "red"}
            (:rule/declarations (first rules))))
     (is (= [{:attr/name :required :attr/operator nil :attr/value nil :attr/case-insensitive? false}]
            (-> rules first :rule/selectors first :selector/parts first :selector/attrs)))
@@ -30,28 +34,99 @@
 
 ;; ---- `border` shorthand expansion ----
 
+(defn- border-longhands
+  "The twelve per-side border longhands a `border` shorthand writes, as one
+   map, so a test can name the three values once rather than twelve times."
+  [w st c]
+  (into {} (for [side ["top" "right" "bottom" "left"]
+                 [sub v] [["width" w] ["style" st] ["color" c]]]
+             [(keyword (str "border-" side "-" sub)) v])))
+
 (deftest border-shorthand-expands-into-its-three-longhands
   ;; The confirmed repro from the bug report: before this, `border` was
   ;; stored verbatim as a single :border key, which border-ops's own
   ;; :border-width/:border-color lookups never recognize -- a real,
   ;; extremely common author pattern like `border: 2px solid red`
   ;; silently painted no border at all.
+  ;;
+  ;; Since 2026-08-06 it writes the twelve PER-SIDE longhands as well as
+  ;; the three uniform keys, which is what real CSS's `border` sets. Those
+  ;; twelve are not decoration: they are how declaration ORDER resolves,
+  ;; and without them a `border` could not overwrite an earlier
+  ;; `border-top` -- see `expand-border-shorthand-with-sides`.
   (let [rules (css/parse-rules "#f { border: 2px solid #00ff00 }")]
-    (is (= {:border-width 2 :border-style "solid" :border-color "#00ff00"}
+    (is (= (merge {:border-width 2 :border-style "solid" :border-color "#00ff00"}
+                  (border-longhands 2 "solid" "#00ff00"))
            (:rule/declarations (first rules))))
     (is (not (contains? (:rule/declarations (first rules)) :border))
         "no bare :border key should remain -- it's fully expanded")))
 
 (deftest border-shorthand-is-order-independent-per-real-css-grammar
   (let [rules (css/parse-rules "#f { border: red 3px dashed }")]
-    (is (= {:border-color "red" :border-width 3 :border-style "dashed"}
+    (is (= (merge {:border-color "red" :border-width 3 :border-style "dashed"}
+                  (border-longhands 3 "dashed" "red"))
            (:rule/declarations (first rules))))))
 
 (deftest border-shorthand-omits-whichever-longhands-it-does-not-specify
   (let [rules (css/parse-rules "#f { border: solid red }")]
-    (is (= {:border-style "solid" :border-color "red"}
+    (is (= (merge {:border-style "solid" :border-color "red"}
+                  ;; the UNIFORM keys record only what was written -- but
+                  ;; each SIDE gets all three, because a shorthand resets
+                  ;; the components it omits to their initial values.
+                  ;; Measured in Brave 151 on 2026-08-06: `border: solid`
+                  ;; on a 300px block is 306 wide with its <p> at (3,3),
+                  ;; i.e. the omitted width IS `medium` = 3px, not 0.
+                  (border-longhands "medium" "solid" "red"))
            (:rule/declarations (first rules)))
         "a real, legal border shorthand may omit the width entirely")))
+
+(deftest per-side-border-shorthands-expand-into-that-sides-three-longhands
+  ;; The declaration cssom.layout could not see at all before 2026-08-06:
+  ;; `border-top` fell through to the generic path and was stored as the
+  ;; raw string "10px solid", which nothing reads. Brave 151: a 300px block
+  ;; with `border-top: 10px solid` is 26.797 tall with its <p> at y=10.
+  (is (= {:border-top-width 10 :border-top-style "solid" :border-top-color "#000"}
+         (:rule/declarations (first (css/parse-rules "#f { border-top: 10px solid #000 }")))))
+  ;; all three of the side's longhands are written even when the value
+  ;; names one, because that is what a shorthand does. Brave:
+  ;; `border-top: 10px` is 300x16.797 (style `none` zeroes the width) and
+  ;; `border-top: solid` is 300x19.797 (width `medium` = 3px).
+  (is (= {:border-top-width 10 :border-top-style "none" :border-top-color "currentcolor"}
+         (:rule/declarations (first (css/parse-rules "#f { border-top: 10px }")))))
+  (is (= {:border-top-width "medium" :border-top-style "solid" :border-top-color "currentcolor"}
+         (:rule/declarations (first (css/parse-rules "#f { border-top: solid }")))))
+  ;; ...which is what makes a LATER shorthand overwrite an earlier
+  ;; longhand. Brave resolves this pair to 2px, not 9px.
+  (is (= 2 (:border-top-width
+            (:rule/declarations
+             (first (css/parse-rules "#f { border-top-width: 9px; border-top: 2px solid }")))))))
+
+(deftest border-width-style-and-color-are-one-to-four-shorthands
+  ;; Measured in Brave 151 on 2026-08-06: `border-width: 10px 5px` with
+  ;; `border-style: solid` gives 10/5/10/5 and a 310x36.797 box, and
+  ;; `border-style: solid none` with `border-width: 10px` gives 10/0/10/0 --
+  ;; the STYLE shorthand carries per side too and zeroes the width on the
+  ;; sides it says `none` on.
+  (is (= {:border-width 10 :border-top-width 10 :border-right-width 5
+          :border-bottom-width 10 :border-left-width 5}
+         (:rule/declarations (first (css/parse-rules "#f { border-width: 10px 5px }")))))
+  (is (= {:border-style "solid" :border-top-style "solid" :border-right-style "none"
+          :border-bottom-style "solid" :border-left-style "none"}
+         (:rule/declarations (first (css/parse-rules "#f { border-style: solid none }")))))
+  (is (= {:border-color "red" :border-top-color "red" :border-right-color "blue"
+          :border-bottom-color "red" :border-left-color "blue"}
+         (:rule/declarations (first (css/parse-rules "#f { border-color: red blue }")))))
+  ;; the three named <line-width> values ride through as KEYWORDS -- this
+  ;; namespace holds specified values and cssom.layout resolves them.
+  ;; Brave: `border-width: thin medium thick 0` reports 1px/3px/5px/0px.
+  (is (= {:border-width "thin" :border-top-width "thin" :border-right-width "medium"
+          :border-bottom-width "thick" :border-left-width 0}
+         (:rule/declarations (first (css/parse-rules "#f { border-width: thin medium thick 0 }")))))
+  ;; a value with a token this cannot classify is left untouched for the
+  ;; generic path, the same degrade-don't-guess posture as every other
+  ;; expander here
+  (is (= {:border-style "wobbly"}
+         (:rule/declarations (first (css/parse-rules "#f { border-style: wobbly }"))))))
 
 (deftest border-shorthand-importance-applies-to-every-expanded-longhand
   (let [rules (css/parse-rules "#f { border: 2px solid red !important }")]
@@ -61,8 +136,14 @@
 
 (deftest border-longhands-declared-separately-are-unaffected-by-shorthand-expansion
   (let [rules (css/parse-rules "#f { border-width: 2px; border-color: #00ff00 }")]
-    (is (= {:border-width 2 :border-color "#00ff00"}
-           (:rule/declarations (first rules))))))
+    (is (= {:border-width 2 :border-top-width 2 :border-right-width 2
+            :border-bottom-width 2 :border-left-width 2
+            :border-color "#00ff00" :border-top-color "#00ff00"
+            :border-right-color "#00ff00" :border-bottom-color "#00ff00"
+            :border-left-color "#00ff00"}
+           (:rule/declarations (first rules))))
+    (is (not (contains? (:rule/declarations (first rules)) :border-style))
+        "neither shorthand names a style, and neither invents one")))
 
 ;; ---- `text-shadow` shorthand expansion ----
 
@@ -4032,8 +4113,12 @@
   ;; `border-inline` sets BOTH sides -- measured, `border-inline: 3px solid
   ;; #000` on a 300px block reports border-left-width AND border-right-width
   ;; of 3px.
+  ;; the omitted colour is reset to its initial `currentcolor`, like every
+  ;; other border shorthand -- see `border-shorthand-initials`
   (is (= {:border-inline-start-width 3 :border-inline-start-style "solid"
-          :border-inline-end-width 3 :border-inline-end-style "solid"}
+          :border-inline-start-color "currentcolor"
+          :border-inline-end-width 3 :border-inline-end-style "solid"
+          :border-inline-end-color "currentcolor"}
          (:rule/declarations (first (css/parse-rules "#f { border-inline: 3px solid }"))))))
 
 (deftest logical-properties-resolve-to-physical-ones-in-the-cascade

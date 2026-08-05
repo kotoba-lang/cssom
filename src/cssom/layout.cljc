@@ -310,6 +310,43 @@
                     fallback)
     :else fallback))
 
+(def ^:private medium-border-width
+  "CSS's initial `border-<side>-width`, the used value of the `medium`
+   keyword. Measured in Brave 151 on 2026-08-06: `border-style: solid`
+   with no width at all reports 3px on all four sides, and
+   `border-width: thin medium thick 0` reports 1px/3px/5px/0px."
+  3)
+
+(def ^:private line-width-keyword-px
+  "`thin`/`medium`/`thick`, in pixels -- the three named `<line-width>`
+   values, which `cssom.core` deliberately carries through the cascade as
+   keywords (specified values) for this side to resolve."
+  {"thin" 1 "medium" medium-border-width "thick" 5})
+
+(defn- unresolved-current-color->nil
+  "`v`, unless it is the literal `currentcolor` keyword -- see the
+   `:border-*-color` entries in `node-style` for why that is dropped rather
+   than painted."
+  [v]
+  (when-not (and (string? v) (= "currentcolor" (str/lower-case (str/trim v))))
+    v))
+
+(defn- border-px
+  "One declared border width as a number of pixels, or nil when nothing
+   was declared -- so a caller's `or` chain falls through to the next
+   source instead of a fallback silently winning with a zero (the same
+   nil-not-zero contract `gap-shorthand-axis` already established).
+
+   `0` is a real declared width and comes back as 0, which is why this
+   cannot be written as `(parse-int v nil)` alone: a `0` and an absent
+   value are the same to `or` only if the absent one is nil."
+  [v]
+  (cond
+    (number? v) (long v)
+    (string? v) (or (get line-width-keyword-px (str/lower-case (str/trim v)))
+                    (parse-int v nil))
+    :else nil))
+
 (defn- parse-dbl
   [x fallback]
   (cond
@@ -2232,7 +2269,73 @@
                   (attr node :ua/list-descendant))
              (assoc :margin-top 0 :margin-bottom 0))
         style (fn [node k] (or (get-in node [:attrs (keyword "style" (name k))])
-                               (get ua k)))]
+                               (get ua k)))
+        ;; ---- the four per-side USED border widths ----
+        ;;
+        ;; Real CSS resolves a border width per side, through that side's
+        ;; own `border-<side>-style`: a `none`/`hidden` side is 0px wide
+        ;; however many pixels it declares. Measured in Brave 151 on
+        ;; 2026-08-06, on a 300px block wrapping one `<p style="margin:0">`
+        ;; (bare box 16.797 tall, `<p>` at 0,0):
+        ;;
+        ;;   border-top: 10px solid          300x26.797, <p> at (0,10)
+        ;;   border-left: 5px solid          305x16.797, <p> at (5,0)
+        ;;   border-width: 10px 5px
+        ;;     + border-style: solid         310x36.797, <p> at (5,10)
+        ;;   border-width: 10px
+        ;;     + border-style: solid none    300x36.797, <p> at (0,10)
+        ;;   border-style: solid (no width)  306x22.797, <p> at (3,3)
+        ;;   border-width: 10px (no style)   300x16.797, <p> at (0,0)
+        ;;
+        ;; -- the last two are the pair that fixes the fallback order. An
+        ;; omitted WIDTH is `medium` = 3px, and an omitted STYLE is `none`,
+        ;; which zeroes whatever width was declared. So a fix for the
+        ;; per-side shorthands cannot simply start adding declared widths
+        ;; up, which is exactly what `:box/border-width-with-style-none-
+        ;; takes-no-space` is in the corpus to catch.
+        ;;
+        ;; The UA border (`ua-tag-box`/`ua-control-box`, e.g. a fieldset's
+        ;; 2px groove) sits between the author's uniform width and
+        ;; `medium`, and it also IMPLIES a style, which is why a control
+        ;; keeps its border without any `border-style` declaration
+        ;; anywhere -- the same gate the uniform `:border-width` above
+        ;; already applied, now applied per side.
+        ;;
+        ;; The author's and the UA sheet's values are read as two separate
+        ;; ORIGINS here rather than through the shadowed `style` accessor
+        ;; above, because a shorthand and a longhand meet in this one
+        ;; property and `style` resolves them per KEY: with a single chain,
+        ;; an `<iframe>`'s own `border-width: 0` lost to the UA sheet's
+        ;; `border-top-width: 2px` (the longhand that same sheet's
+        ;; `border-width: 2px` now expands to), and the iframe came back
+        ;; 304x154 with the border explicitly turned off. For a document
+        ;; that went through `apply-cascade` this cannot happen -- the
+        ;; author's shorthand expands to longhands there and wins on all
+        ;; four -- so this is the no-stylesheet host path alone, and
+        ;; ordering the two origins is what makes it agree with the
+        ;; cascaded one.
+        author (fn [k] (get-in node [:attrs (keyword "style" (name k))]))
+        border-used-width
+        (fn [side]
+          (let [ua-border (get ua-box :border 0)
+                side-name (name side)
+                side-style (keyword (str "border-" side-name "-style"))
+                side-width (keyword (str "border-" side-name "-width"))
+                declared-style (some-> (or (author side-style)
+                                           (author :border-style)
+                                           (get ua side-style)
+                                           (get ua :border-style)
+                                           (when (pos? ua-border) "solid"))
+                                       str str/lower-case str/trim)]
+            (if (or (nil? declared-style)
+                    (contains? #{"none" "hidden"} declared-style))
+              0
+              (or (border-px (author side-width))
+                  (border-px (author :border-width))
+                  (border-px (get ua side-width))
+                  (border-px (get ua :border-width))
+                  (when (pos? ua-border) ua-border)
+                  medium-border-width))))]
   {:display (style node :display)
    :position (or (style node :position) "static")
    :left (style node :left)
@@ -2415,6 +2518,11 @@
    ;; bare `border-width` and asserted a border, so they were asking for
    ;; something no browser draws; they now declare `border-style` and go on
    ;; testing borders.
+   ;;
+   ;; The UNIFORM value, kept unchanged: it is what every reader whose own
+   ;; axis has no per-side story yet still asks for (content-inset, the
+   ;; collapsed-table edge resolver). The four per-side used widths are
+   ;; the entry below it.
    :border-width (let [ua-border (get ua-box :border 0)
                        border-style (or (some-> (style node :border-style) str/lower-case)
                                         (when (pos? ua-border) "solid"))]
@@ -2422,7 +2530,28 @@
                            (contains? #{"none" "hidden"} border-style))
                      0
                      (parse-int (style node :border-width) ua-border)))
+   :border-top-width (border-used-width :top)
+   :border-right-width (border-used-width :right)
+   :border-bottom-width (border-used-width :bottom)
+   :border-left-width (border-used-width :left)
    :border-color (or (style node :border-color) "#000000")
+   ;; Per-side border COLOUR, for `border-ops` alone. The cascade writes
+   ;; one for every side a per-side shorthand touches (see
+   ;; `border-shorthand-initials`), and each edge is already its own
+   ;; `:rect` op, so honouring it costs nothing.
+   ;;
+   ;; An UNRESOLVED `currentcolor` is dropped rather than painted.
+   ;; `cssom.core/resolve-current-color` resolves the keyword only against
+   ;; a `color` the SAME element declares -- its own documented scope cut,
+   ;; because it has no inheritance machinery -- so `border: 2px solid` on
+   ;; an element with no `color` of its own leaves the literal keyword on
+   ;; all four sides. Dropping it falls through to the uniform
+   ;; `:border-color`, i.e. exactly the colour this box painted before the
+   ;; per-side keys existed.
+   :border-top-color (unresolved-current-color->nil (style node :border-top-color))
+   :border-right-color (unresolved-current-color->nil (style node :border-right-color))
+   :border-bottom-color (unresolved-current-color->nil (style node :border-bottom-color))
+   :border-left-color (unresolved-current-color->nil (style node :border-left-color))
    ;; parse-int'd (unlike :left/:top/:width/etc a few lines up, which
    ;; stay raw strings because real CSS auto/% are legitimate non-numeric
    ;; values those properties must preserve for explicit-length's own
@@ -3242,15 +3371,52 @@
          width (if-let [mx (length-or-percentage (:max-width st) basis)] (min width mx) width)]
      width)))
 
+(defn- border-side
+  "This box's USED border width on one side, resolved by `node-style` from
+   that side's own style and width (see `border-used-width` there).
+
+   The 0 fallback is for a caller holding a style map that never went
+   through `node-style` at all -- the same defensive shape every other
+   per-side reader in this file takes."
+  [st side]
+  (or (get st (keyword (str "border-" (name side) "-width"))) 0))
+
+(defn- border-x
+  "The two INLINE-axis border widths together: what a border box is wider
+   than its padding box by."
+  [st]
+  (+ (border-side st :left) (border-side st :right)))
+
+(defn- border-y
+  "The two BLOCK-axis border widths together."
+  [st]
+  (+ (border-side st :top) (border-side st :bottom)))
+
 (defn- content-inset
   "inset-side's UNIFORM sibling: the distance from a border-box edge to the
    content-box edge when every side is the same. Reads the uniform
-   `:padding` alone, so a box with per-side padding is measured against an
-   inset it does not have -- which is why layout-block, the one place that
-   needed to be right about it, reads inset-side per side instead. Kept for
-   the callers whose own axis has no per-side story yet (flex, grid, table,
-   the form controls), and for the intrinsic-width branches whose numbers
-   were fixed against it."
+   `:padding` and the uniform `:border-width` alone, so a box with per-side
+   padding OR per-side borders is measured against an inset it does not
+   have -- which is why layout-block, the one place that needed to be right
+   about it, reads inset-side per side instead. Kept for the callers whose
+   own axis has no per-side story yet (flex, grid, table, the form
+   controls), and for the intrinsic-width branches whose numbers were fixed
+   against it.
+
+   What that costs, measured in Brave 151 on 2026-08-06 so a future fix
+   does not have to measure it again. On a 300px-wide container with
+   `border-top: 10px solid; border-left: 4px solid` around one 50x20 item:
+
+     display: flex   container 300x30, item at (4,10)
+     display: grid   container 300x30, item at (4,10)
+     <td>            32 tall (10 + 1 UA padding + 20 + 1)
+
+   -- i.e. per-side borders offset flex and grid content exactly as they
+   offset block content, and this engine puts all three items at (0,0) in
+   a 300x20 box. Converting these three callers means converting their
+   per-side PADDING at the same time (the uniform `:padding` is the other
+   half of this function), which is a second change with its own
+   measurements."
   [st]
   (+ (:padding st) (:border-width st)))
 
@@ -3262,7 +3428,7 @@
   (+ (or (get st (keyword (str "padding-" (name side))))
          (:padding/declared st)
          0)
-     (:border-width st)))
+     (border-side st side)))
 
 (defn- inset-side
   "The content inset on ONE side: that side's own padding when the author
@@ -3301,7 +3467,7 @@
    left:0` child at x=7, not x=16."
   [st side]
   (+ (or (get st (keyword (str "padding-" (name side)))) (:padding st))
-     (:border-width st)))
+     (border-side st side)))
 
 (defn- intrinsic-inset-x
   "The horizontal inset an intrinsic width has to put around its content:
@@ -3867,17 +4033,17 @@
    holds a line box. A nested `:node` op does not disqualify it, which is
    what makes the chained shape work.
 
-   The block-axis border is tested TWICE, and the second test reads the
-   node's raw declarations rather than `st`: this engine's box model has
-   ONE uniform `border-width`, so `border-top: 1px solid red` -- which the
-   cascade stores verbatim and no reader consumes -- leaves `st`'s
-   `:border-width` at 0. Without the raw test that box would be treated as
-   self-collapsing when a browser gives it a 1px border and 35px of
-   container. It is deliberately over-conservative: a declared
-   `border-top: none` disqualifies too, because deciding otherwise means
-   parsing a shorthand this file does not otherwise read. The real fix is
-   per-side borders in the box model, which is a much larger change and
-   would make this test one line.
+   The block-axis border used to be tested TWICE, the second time against
+   the node's RAW declarations, because the box model had one uniform
+   `border-width` and `border-top: 1px solid red` -- which the cascade
+   stored verbatim and no reader consumed -- left `st`'s `:border-width`
+   at 0. That workaround is gone: `border-side` reads the used width of
+   the block-start and block-end sides directly, which is what the
+   workaround was approximating, and it is no longer over-conservative --
+   a declared `border-top: none` is 0px wide in real CSS and no longer
+   disqualifies (measured: Brave puts the sibling after an empty
+   `border-top: none` box at y=14, exactly where it puts it with no
+   declaration at all).
 
    SCOPE, otherwise: the formatting-context test is `border-width` /
    `scroll-container?` / `flow-root` / `:independent-fc?`, which is
@@ -3888,16 +4054,12 @@
    collapse). A `display: table` box is likewise not tested for: it cannot
    reach zero height with content, and with none there is nothing to
    separate."
-  [node st child-h draw]
+  [st child-h draw]
   (and (zero? child-h)
        (some? st)
-       (zero? (:border-width st))
+       (zero? (border-y st))
        (zero? (or (:padding-top st) (:padding st) 0))
        (zero? (or (:padding-bottom st) (:padding st) 0))
-       (not-any? #(some? (style node %))
-                 [:border-top :border-bottom :border-block
-                  :border-top-width :border-bottom-width
-                  :border-top-style :border-bottom-style])
        (not (scroll-container? st))
        (not= "flow-root" (:display st))
        (not (:independent-fc? st))
@@ -4121,14 +4283,32 @@
 
 (defn- border-ops
   [st x y w h opacity]
-  (when (pos? (:border-width st))
-    (let [bw (:border-width st)
-          color (:border-color st)
-          base {:draw/op :rect :border? true :color color :opacity opacity}]
-      [(assoc base :edge :top :x x :y y :w w :h bw)
-       (assoc base :edge :right :x (- (+ x w) bw) :y y :w bw :h h)
-       (assoc base :edge :bottom :x x :y (- (+ y h) bw) :w w :h bw)
-       (assoc base :edge :left :x x :y y :w bw :h h)])))
+  ;; One rect per side, each gated on ITS OWN used width -- a
+  ;; `border-top: 10px solid` paints one edge, not four, and not none.
+  ;; Before this every edge read the uniform `:border-width`, so a box
+  ;; with per-side borders painted a full ring or nothing at all.
+  (let [color (:border-color st)
+        edge (fn [side x y w h]
+               (let [bw (border-side st side)]
+                 (when (pos? bw)
+                   {:draw/op :rect :border? true :edge side :opacity opacity
+                    :color (or (get st (keyword (str "border-" (name side) "-color"))) color)
+                    :x x :y y :w w :h h})))
+        top (border-side st :top)
+        right (border-side st :right)
+        bottom (border-side st :bottom)
+        left (border-side st :left)]
+    (seq (keep identity
+               ;; The corner convention is unchanged: the two BLOCK-axis
+               ;; edges span the full width and the two inline-axis edges
+               ;; span the full height, so the corners are painted twice
+               ;; and the inline edge wins. A real browser mitres them;
+               ;; this engine has no triangle primitive, which is the same
+               ;; documented simplification the uniform version made.
+               [(edge :top x y w top)
+                (edge :right (- (+ x w) right) y right h)
+                (edge :bottom x (- (+ y h) bottom) w bottom)
+                (edge :left x y left h)]))))
 
 (defn- box-shadow-ops
   "Real CSS `box-shadow` (offset + spread + color -- blur-radius is
@@ -6827,7 +7007,7 @@
         ;; it 10px narrow.
         inset-x (+ (or (:padding-left st) (:padding st))
                    (or (:padding-right st) (:padding st))
-                   (* 2 (:border-width st)))
+                   (border-x st))
         natural
         (cond
           ;; A REPLACED element's width is its own, declared or not: it
@@ -7556,7 +7736,7 @@
         lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)
         half (/ (- lh (+ ascent descent)) 2)]
     (+ (or (:padding-top st) (:padding st) 0)
-       (:border-width st)
+       (border-side st :top)
        half
        ascent)))
 
@@ -8758,12 +8938,17 @@
         ;; Scope-cut, deliberate and load-bearing: this resolves border
         ;; WIDTHS only. Real CSS's conflict resolution also ranks
         ;; border-STYLE (`hidden` beats everything, `double` beats `solid`,
-        ;; ...) and picks the winner's COLOUR, and it resolves per EDGE --
-        ;; this engine's box model has one uniform border width per box, so
-        ;; a cell whose two vertical edges resolve differently paints the
-        ;; half of its OWN border on both sides and only its column width
-        ;; accounts for the neighbour. Nothing here reads border-style
-        ;; beyond the `none`/`hidden` gate node-style already applies.
+        ;; ...) and picks the winner's COLOUR, and it resolves per EDGE.
+        ;; A CELL is still read through its uniform `:border-width` here
+        ;; even though the box model now carries four (see `border-side`):
+        ;; the collapsed edge a cell contributes to depends on WHICH edge
+        ;; is being resolved (its left border at the boundary it starts on,
+        ;; its right at the one it ends on), and the half-border this then
+        ;; writes back at 8814 is uniform too, so splitting one without the
+        ;; other would make a cell paint an edge its column width did not
+        ;; reserve. The TABLE's own border is resolved per side just below.
+        ;; Nothing here reads border-style beyond the `none`/`hidden` gate
+        ;; node-style already applies.
         ;; (`collapse?` itself is bound above, where declared-avail needs it.)
         cell-border (fn [cell] (:border-width (node-style cell theme)))
         edge-max (fn [pick]
@@ -8775,16 +8960,27 @@
                               (cell-border (:cell a))))))
         n-cols* (max 1 (count base-widths))
         n-rows* (max 1 (count rows))
+        ;; The table's OWN border competes only at the outer edges, and it
+        ;; competes per side: the first column boundary against
+        ;; `border-left`, the last against `border-right`, and the row
+        ;; boundaries against top/bottom. The uniform value this read
+        ;; before agreed for every table in the corpus (all of them
+        ;; declare `border: <n>px solid`) and would have charged a
+        ;; `border-top` to all four edges.
         vedge (if collapse?
-                (mapv (fn [i] (if (or (zero? i) (= i n-cols*))
-                                (max (:border-width st) ((edge-max (juxt :col #(+ (:col %) (:colspan %)))) i))
-                                ((edge-max (juxt :col #(+ (:col %) (:colspan %)))) i)))
+                (mapv (fn [i] (let [inner ((edge-max (juxt :col #(+ (:col %) (:colspan %)))) i)]
+                                (cond
+                                  (zero? i) (max (border-side st :left) inner)
+                                  (= i n-cols*) (max (border-side st :right) inner)
+                                  :else inner)))
                       (range (inc n-cols*)))
                 [])
         hedge (if collapse?
-                (mapv (fn [j] (if (or (zero? j) (= j n-rows*))
-                                (max (:border-width st) ((edge-max (juxt :row #(+ (:row %) (:rowspan %)))) j))
-                                ((edge-max (juxt :row #(+ (:row %) (:rowspan %)))) j)))
+                (mapv (fn [j] (let [inner ((edge-max (juxt :row #(+ (:row %) (:rowspan %)))) j)]
+                                (cond
+                                  (zero? j) (max (border-side st :top) inner)
+                                  (= j n-rows*) (max (border-side st :bottom) inner)
+                                  :else inner)))
                       (range (inc n-rows*)))
                 [])
         half (fn [n] (quot n 2))
@@ -8916,9 +9112,27 @@
                                  ;; `widths` already applied across the
                                  ;; columns, applied down the rows by the
                                  ;; ordinary layout path.
+                                 ;;
+                                 ;; The four per-side longhands are
+                                 ;; REMOVED, not halved: this rewrite is the
+                                 ;; uniform `cell-border` speaking (see its
+                                 ;; scope-cut note above -- collapsed edges
+                                 ;; are not resolved per side here), so a
+                                 ;; surviving `border-top-width` would win
+                                 ;; over the halved value and the cell would
+                                 ;; keep its whole border. Measured before
+                                 ;; this dissoc: `:table/border-collapse`'s
+                                 ;; two `border: 2px solid` cells came back
+                                 ;; 26 tall against Brave's 24, because the
+                                 ;; cascade now expands that shorthand into
+                                 ;; longhands the halving did not touch.
                                  cell (if (and collapse? (pos? (cell-border (:cell a))))
-                                        (assoc-in (:cell a) [:attrs :style/border-width]
-                                                  (str (half (cell-border (:cell a))) "px"))
+                                        (-> (:cell a)
+                                            (update :attrs dissoc
+                                                    :style/border-top-width :style/border-right-width
+                                                    :style/border-bottom-width :style/border-left-width)
+                                            (assoc-in [:attrs :style/border-width]
+                                                      (str (half (cell-border (:cell a))) "px")))
                                         (:cell a))
                                  ;; A cell FILLS its column: its own declared
                                  ;; `width` has already been spent on sizing
@@ -10151,7 +10365,7 @@
                                  {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                                         (:font-style st) (:font-family st))
                                  lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)]
-                             (+ mt (or (:padding-top st) (:padding st) 0) (:border-width st)
+                             (+ mt (or (:padding-top st) (:padding st) 0) (border-side st :top)
                                 (leading-ascent ascent descent lh))))
                          ;; ...and a `vertical-align: <length>` then moves
                          ;; the whole box relative to the baseline it just
@@ -10435,15 +10649,16 @@
    is the only way a uniform `padding` shorthand can arrive unexpanded),
    never from the uniform `:padding`: that key falls back to the THEME's
    own block decoration, and charging 4px of host decoration to every
-   `<b>` on the page would move every word after it. BORDER is this
-   engine's single uniform `:border-width`, the same one every block box
-   reads -- per-side border widths are modelled nowhere in this file, and
-   an inline box is not the place to invent them."
+   `<b>` on the page would move every word after it. BORDER is read the
+   same way, per side, through `border-side` -- measured in Brave 151 on
+   2026-08-06, `a<span style=\"border-left:6px solid\">b</span>c` puts the
+   span 6px further right than the same span without it, and nothing on
+   the other three sides moves."
   [st side]
   (let [pad (or (get st (keyword (str "padding-" (name side))))
                 (:padding/declared st)
                 0)
-        border (:border-width st)
+        border (border-side st side)
         margin (or (get st (keyword (str "margin-" (name side)))) (:margin st) 0)]
     {:advance (+ margin border pad) :inset (+ border pad)}))
 
@@ -11253,9 +11468,10 @@
                             [odx ody] (:rel owner [0 0])
                             left (get pad-start (:idx owner) 0)
                             right (get pad-end (:idx owner) 0)
-                            border (:border-width ost)
-                            above (+ border (or (:padding-top ost) (:padding/declared ost) 0))
-                            below (+ border (or (:padding-bottom ost) (:padding/declared ost) 0))]
+                            above (+ (border-side ost :top)
+                                     (or (:padding-top ost) (:padding/declared ost) 0))
+                            below (+ (border-side ost :bottom)
+                                     (or (:padding-bottom ost) (:padding/declared ost) 0))]
                         [(update rects (:idx owner)
                                  (fn [entry]
                                    (-> (or entry {:node (:node owner) :st (:st owner)
@@ -12188,7 +12404,7 @@
               ;; `<div><p></p><p>x</p></div>` is 20px tall in Brave with
               ;; both paragraphs at y=0, and this engine made it 34 with
               ;; the second at y=14.
-              self-collapsing? (self-collapsing-block? child cst child-h (:draw laid))
+              self-collapsing? (self-collapsing-block? cst child-h (:draw laid))
               escaping-top? (and self-collapsing? first? collapse-top?)]
           (recur (rest remaining)
                  (if self-collapsing? y (+ y advance))
@@ -12584,16 +12800,15 @@
         ;; the oracle's popup internals, not implementing CSS.
         option-ops
         (when (select-multiple? node)
-          (let [bw (:border-width st)
-                row-h (select-option-height control-font-size)
+          (let [row-h (select-option-height control-font-size)
                 options (filterv #(and (map? %) (= :option (:tag %))) (:children node))]
             (vec (mapcat
                   (fn [i option]
-                    (let [oy (+ y bw (* i row-h))
-                          ox (+ x bw)
+                    (let [oy (+ y (border-side st :top) (* i row-h))
+                          ox (+ x (border-side st :left))
                           label (->> (:children option) (filter string?) (str/join ""))]
                       (cond-> [{:draw/op :node :id (:node/id option) :tag :option
-                                :x ox :y oy :w (max 0 (- w (* 2 bw))) :h row-h
+                                :x ox :y oy :w (max 0 (- w (border-x st))) :h row-h
                                 :class (attr option :class) :opacity opacity}]
                         (seq label)
                         (conj {:draw/op :text :control? true :node/id (:node/id option)
@@ -12674,6 +12889,60 @@
              ;; after the control's own :node op, so the option rows paint
              ;; on top of its background exactly as a real listbox does
              option-ops (into option-ops))}))
+
+(defn- details-summary-band
+  "The block-start band a `<details>` with NO `<summary>` child reserves
+   for the summary a browser generates for it, in pixels -- 0 for every
+   other element, and for a `<details>` that has one.
+
+   Real HTML: a summary-less `<details>` still has a summary. Chromium
+   puts a `<summary>Details</summary>` in the element's SHADOW tree, which
+   is why the light DOM has nothing to lay out and why this is a band
+   rather than a child. Measured in Brave 151 on 2026-08-06 with
+   `elementsFromPoint` and a `Range`: every interior point of the box
+   reports `DETAILS` (not `SUMMARY`, the way a real `<summary>` child
+   does), and a Range over the element reads only the author's own text.
+   An engine that emitted a `summary` element box here would report a box
+   the oracle has not got.
+
+   The band is ONE LINE BOX in the element's own line-height -- not its
+   font size, and not a constant. On the same page (`line-height: 20px`,
+   `font: 14px monospace`, a 300px wrapper, `<details><p>Body</p>
+   </details>`):
+
+     closed                       300x20, the <p> at y=20 (never painted)
+     open                         300x40, the <p> at y=20
+     line-height: 40px            300x40
+     font-size: 30px              300x20   -- line-height, not font-size
+     padding: 8px                 300x36, the <p> at (8,28)
+     border: 5px solid            300x30, the <p> at (5,25)
+     no children at all           300x20
+     with a <summary>             300x20 and the summary IS the 20
+
+   -- the padding and border rows are what make this an inset rather than
+   an addition to the height: the band sits INSIDE both, exactly where a
+   real first child would.
+
+   What is deliberately NOT generated is the label. Chromium draws the
+   word `Details` and a disclosure triangle in that band; both are shadow
+   content the oracle's own `Range` cannot read (measured: the Range over
+   a summary-less `<details>` returns the author's text alone), and both
+   are localised -- an `en-US` browser's string is not a rule. Reserving
+   the line and drawing nothing in it is the honest half.
+
+   Scope cut, measured alongside and not implemented: Chromium renders the
+   first `<summary>` in DOM order FIRST wherever it sits, so
+   `<details><p>A</p><summary>S</summary></details>` puts the SUMMARY at
+   y=0 and the `<p>` at y=20. This engine keeps a late summary at its own
+   index. No corpus case has one."
+  [theme inherited st node]
+  (if (and (= :details (:tag node))
+           (not-any? #(and (map? %) (= :summary (:tag %))) (:children node)))
+    (let [fs (parse-px (:font-size st) (:font-size inherited (:font-size theme)))]
+      (or (parse-int (:line-height st) nil)
+          (inherited-line-height inherited fs)
+          fs))
+    0))
 
 (defn- fieldset-legend
   "The RENDERED legend of a `<fieldset>`: the box HTML lifts out of the
@@ -13195,14 +13464,23 @@
                    (measure-child theme content-w opacity inherited legend true))
         legend-h (if legend-m (:h (:box legend-m)) 0)
         legend-mb (if legend-st (margin-side legend-st :bottom) 0)
-        band (max (:border-width st) (+ legend-h legend-mb))
+        ;; The legend sits in the fieldset's block-START border band, so
+        ;; the band is measured against the TOP border alone -- the
+        ;; uniform value it read before happened to agree because a
+        ;; fieldset's UA border is 2px on all four sides.
+        band (max (border-side st :top) (+ legend-h legend-mb))
         ;; how much taller than an ordinary block the block-start edge is.
         ;; Folded into the top inset rather than added to the height
         ;; separately, so content placement and the box's own height cannot
         ;; drift apart -- and so an EXPLICIT height on the fieldset keeps
         ;; meaning what it meant (this only moves the content box's top).
-        legend-extra (if legend (max 0 (- band (:border-width st))) 0)
-        inset-t (+ inset-t0 legend-extra)
+        legend-extra (if legend (max 0 (- band (border-side st :top))) 0)
+        ;; A `<details>` with no `<summary>` gets a UA-generated one, and
+        ;; it is folded into the block-start inset for exactly the reason
+        ;; the legend band above is: the box's own height and where its
+        ;; content starts then cannot drift apart. See
+        ;; `details-summary-band`.
+        inset-t (+ inset-t0 legend-extra (details-summary-band theme inherited st node))
         content-y (+ y inset-t)
         legend-draw (when legend-m
                       (translate-ops (+ content-x (margin-side legend-st :left))
@@ -13289,7 +13567,16 @@
         ;; above for what it then does with its children.
         mc (multicol-spec node st content-w (:font-size inherited))
         fc-free? (and (nil? mc)
-                      (zero? (:border-width st))
+                      ;; BLOCK-axis borders only. A border stops margins
+                      ;; collapsing through the edge it is ON, and the two
+                      ;; inline-axis borders are not on either edge a
+                      ;; margin collapses through -- measured in Brave 151
+                      ;; on 2026-08-06, a `border-left: 5px solid` parent
+                      ;; still lets its first child's 20px top margin
+                      ;; collapse out (the child is at y=0 and the parent
+                      ;; carries the margin), where `border-top: 1px` puts
+                      ;; the same child at y=21.
+                      (zero? (border-y st))
                       (not (scroll-container? st))
                       (not= "flow-root" (:display st))
                       (not fieldset?)
@@ -13373,11 +13660,10 @@
         ;; ancestor: the corner-pinned child sits at (5,5) there and sat at
         ;; (20,20) here, off by exactly the padding. The padding box is the
         ;; border box inset by the border alone.
-        bw (:border-width st)
-        pad-x (+ x bw)
-        pad-y (+ y bw)
-        pad-w (max 0 (- node-w (* 2 bw)))
-        pad-h (max 0 (- node-h (* 2 bw)))
+        pad-x (+ x (border-side st :left))
+        pad-y (+ y (border-side st :top))
+        pad-w (max 0 (- node-w (border-x st)))
+        pad-h (max 0 (- node-h (border-y st)))
         ;; The static positions came back in the SCROLLED coordinate space
         ;; the flow above ran in; `pad-*` is unscrolled, and so were the
         ;; static positions before this. Undoing the scroll here keeps the

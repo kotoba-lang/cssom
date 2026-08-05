@@ -813,6 +813,203 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round thirty-nine: four numbers where there was one, and the summary a browser writes for you
+
+Two gaps, each named in three earlier rounds from three directions and
+each declined for the same reason: the box model carried ONE uniform
+`:border-width`.
+
+```
+                    LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
+before   546/556    1915/1973  545/581                   14426/14514  558/581     27735/27740
+after    546/556    1926/1973  549/581                   14450/14514  561/581     27735/27740
+```
+
+**Five cases changed in the whole 581-case op dump**, all in the intended
+direction, all now matching the oracle exactly:
+`:box/border-top-width-only`, `:box/border-left-width-only`,
+`:logical/border-inline-start`,
+`:box/margin-top-percentage-is-of-the-width` and
+`:interactive/details-with-no-summary`. The paint axis reads **100%** for
+the first time.
+
+#### The per-side shorthand was not read at all
+
+Round twenty-six named "per-side border widths" as not implemented on the
+grounds that the engine has one uniform width. Measured, it was sharper
+than that: `border-top` fell through to the generic declaration path and
+was stored as the raw string `"10px solid"`, which nothing reads — not ten
+pixels on four sides, **zero on all of them**.
+
+Twenty-seven declarations on one probe page in Brave 151, 2026-08-06, each
+on a 300px block wrapping one `<p style="margin:0">` (bare box 16.797
+tall, `<p>` at 0,0):
+
+| declaration | box | `<p>` at | computed widths |
+|---|---|---|---|
+| `border-top: 10px solid` | 300x26.797 | (0,10) | 10 0 0 0 |
+| `border-left: 5px solid` | 305x16.797 | (5,0) | 0 0 0 5 |
+| `border-width: 10px 5px` + `border-style: solid` | 310x36.797 | (5,10) | 10 5 10 5 |
+| `border-width: 10px` + `border-style: solid none` | 300x36.797 | (0,10) | 10 0 10 0 |
+| `border-style: solid` (no width) | 306x22.797 | (3,3) | 3 3 3 3 |
+| `border-width: 10px` (no style) | 300x16.797 | (0,0) | 0 0 0 0 |
+| `border-top: solid` | 300x19.797 | (0,3) | 3 0 0 0 |
+| `border-top: 10px` | 300x16.797 | (0,0) | 0 0 0 0 |
+| `border-width: thin medium thick 0` + `border-style: solid` | 303x22.797 | (0,1) | 1 3 5 0 |
+| `border: 5px solid` + `border-top: none` | 310x21.797 | (5,0) | 0 5 5 5 |
+| `border-top-width: 9px` then `border-top: 2px solid` | 300x18.797 | (0,2) | 2 0 0 0 |
+| `border-top: 2px solid` then `border-top-width: 9px` | 300x25.797 | (0,9) | 9 0 0 0 |
+| `border-top: 10px solid red` then `border: 2px solid blue` | 304x20.797 | (2,2) | 2 2 2 2 |
+| `border: 2px solid blue` then `border-top: 10px solid red` | 304x28.797 | (2,10) | 10 2 2 2 |
+
+The last six are what constrain the fix, and none of them is guessable
+from the first two. **An omitted width is `medium` = 3px** and **an omitted
+style is `none`, which zeroes whatever width was declared** — so
+`border-top: solid` costs three pixels and `border-top: 10px` costs none.
+And because a shorthand resets the components its value does not name, a
+`border` shorthand has to write **all twelve** per-side longhands or a
+later `border` cannot overwrite an earlier `border-top`: the two order
+rows above differ only in which declaration comes second.
+
+That is the whole cascade half. `cssom.core` now expands the four
+`border-<side>` shorthands into three longhands each, the three
+`border-width`/`-style`/`-color` 1-to-4 shorthands into four each
+(**keeping the uniform key beside them**, the way `expand-box-side-
+shorthand` already did, so every existing reader goes on working), and
+`border` into all fifteen. `thin`/`medium`/`thick` ride through as
+keywords, because this namespace holds SPECIFIED values and `cssom.layout`
+resolves them.
+
+#### Four numbers, and the twenty-two places that read one
+
+`node-style` resolves four USED widths, each through its own side's style,
+falling back author-side → author-uniform → UA-sheet-side →
+UA-sheet-uniform → the control constant → `medium`. **The author and the
+UA sheet are read as two separate origins here**, not through the shadowed
+`style` accessor every other property uses, and that is not tidiness: a
+shorthand and a longhand meet in this one property, `style` resolves per
+KEY, and a single chain let the UA sheet's expanded `border-top-width: 2px`
+beat an `<iframe>`'s own `border-width: 0` — the iframe came back 304x154
+with its border explicitly turned off. A document that went through
+`apply-cascade` cannot hit that (the author's shorthand expands and wins on
+all four); this is the no-stylesheet host path, and ordering the origins is
+what makes it agree with the cascaded one.
+
+`border-side`/`border-x`/`border-y` read the four, and every site was
+converted one at a time rather than by a global rename: `inset-side`,
+`declared-inset-side`, `border-ops` (one `:rect` per side, each gated on
+its OWN width — before this a box with a per-side border painted a full
+ring or nothing), the intrinsic-width inset, both baseline paths, the
+inline edge advance, the inline owner rects, `<select multiple>`'s option
+box, the fieldset legend band, the collapsed table's outer edges, the
+absolutely positioned descendant's padding box, `fc-free?` and
+`self-collapsing-block?`.
+
+**Two workarounds went with it.** `self-collapsing-block?` tested the
+block-axis border TWICE, the second time against the node's raw
+declarations, with a comment saying so — precisely because `st` could not
+see a `border-top`. Its docstring called the real fix "a much larger change
+[that] would make this test one line", and it is now that one line. It also
+stopped being over-conservative, which the browser had to settle:
+
+| empty box, `margin: 14px 0`, sibling below | container | sibling |
+|---|---|---|
+| no border | 20 | y=0 |
+| `border-top: 1px solid` | 35 | y=15 |
+| `border-bottom: 1px solid` | 35 | y=15 |
+| `border-top: none` | 20 | y=0 |
+| `border-left: 5px solid` | 20 | y=0 |
+
+The last two are the ones the raw-declaration test got wrong. And the last
+one is why both gates read **block-axis borders only**: measured on the
+same page, a `border-left: 5px solid` parent still lets its first child's
+20px top margin collapse out (child at y=0, parent 10 tall), where
+`border-top: 1px` puts the same child at y=21.
+
+#### One regression, caught by the dump and fixed rather than accepted
+
+`:table/border-collapse` went 26 → 28 tall on the first run. Under
+`border-collapse: collapse` a cell keeps half its own border, which the
+table implements by rewriting the cell's uniform `:style/border-width` —
+and the cascade now also puts `border-top-width: 2px` and friends on that
+same cell, which the halving did not touch, so the cell kept its whole
+border. The four longhands are removed with the rewrite. The net scoreboard
+would have shown this as +7 and hidden it; the corpus-wide op diff named it.
+
+#### Left uniform, with the numbers a future fix will need
+
+Flex, grid and table CONTAINERS still read `content-inset`, whose other
+half is the uniform `:padding` — converting one means converting the other,
+which is a second change with its own measurements. Written at that
+function: on a 300px container with `border-top: 10px solid; border-left:
+4px solid` around one 50x20 item, Brave puts the item at **(4,10)** in a
+300x30 box for `display:flex` and for `display:grid` alike, and a `<td>`
+with the same borders is **32** tall; this engine puts all three at (0,0)
+in 300x20. A collapsed table's CELL border is also still uniform, and that
+one is deliberate: which edge a cell contributes to depends on which edge
+is being resolved, and the half-border written back is uniform too, so
+splitting one without the other would make a cell paint an edge its column
+width did not reserve.
+
+#### A `<details>` with no `<summary>`
+
+The largest single paint residual left in the corpus, and a previous round
+declined it with a reason worth checking: *"the oracle also reports a `<p>`
+box the engine cannot emit, so the case cannot go clean on geometry
+anyway."* **That is true, and it is not a reason to leave the other three
+boxes wrong.** Brave reports the closed `<p>` as a real 300x20 box at y=34
+and never paints it — Chromium hides a closed `<details>`'s content with
+`content-visibility: hidden`, not `display: none` — and an engine that
+emits draw-ops cannot report a box it does not paint. That is exactly the
+limit `:interactive/details-closed-shows-only-the-summary` already records,
+and it now applies to one box in this case rather than four.
+
+What Brave actually generates, measured with `getBoundingClientRect`,
+`elementsFromPoint` and a `Range` on 2026-08-06:
+
+| markup (`line-height: 20px`) | box | `<p>` at |
+|---|---|---|
+| `<details><p>Body</p></details>` | 300x20 | y=20, never painted |
+| `<details open><p>Body</p></details>` | 300x40 | y=20 |
+| `line-height: 40px` | 300x40 | |
+| `font-size: 30px` | 300x20 | |
+| `padding: 8px` | 300x36 | (8,28) |
+| `border: 5px solid` | 300x30 | (5,25) |
+| `<details></details>` | 300x20 | |
+
+Three readings decide the implementation. The band is **one line box in the
+element's own line-height** — not its font size and not a constant. It sits
+**inside** the padding and the border, where a real first child would. And
+the generated summary is **shadow content**: every interior point of the
+box reports `DETAILS` rather than `SUMMARY` (a real `<summary>` child
+reports `SUMMARY`), and a `Range` over the element reads only the author's
+own text. So an engine that synthesised a `<summary>` ELEMENT would report
+a box the oracle has not got, and `details-summary-band` reserves a band
+instead — folded into the block-start inset exactly as the fieldset legend
+band is, so the box's height and where its content starts cannot drift
+apart.
+
+**The label is deliberately not drawn.** Chromium paints the word
+`Details` and a disclosure triangle in that band; both are shadow content
+the oracle's own `Range` cannot read, and both are localised — an `en-US`
+browser's string is not a rule. Reserving the line and drawing nothing in
+it is the honest half, and it is what the geometry and paint axes actually
+compare.
+
+Measured alongside and **not** implemented, recorded at the same function:
+Chromium renders the first `<summary>` in DOM order FIRST wherever it sits,
+so `<details><p>A</p><summary>S</summary></details>` puts the SUMMARY at
+y=0 and the `<p>` at y=20. This engine keeps a late summary at its own
+index. No corpus case has one.
+
+#### One repository downstream
+
+`htmldom`'s inline-`style` tests assert the shape of
+`parse-declarations-with-importance`'s output directly, so five of them
+moved with this change and one was added — a test-only update, landed
+separately as `kotoba-lang/htmldom` `agent/border-longhand-expectations`.
+`browser` (754/0) and `dom-gpu` (130/0) are unchanged.
+
 ### Round thirty-eight: a resource this engine cannot see, and a gap that has to be measured twice
 
 Two gaps that round thirty-seven and round thirty-six each named and left,
@@ -1347,7 +1544,8 @@ site needs is its own **basis**, and there are three:
   mapping neither layout axis of this corpus could check. So the rename is
   **gated** on `horizontal-tb` instead and a logical property stays
   unmapped under a vertical mode, exactly where it was before.
-- **Per-side borders.** This is the *only* reason the remaining two cases
+- **Per-side borders.** *(Fixed in round thirty-nine; all three cases named
+  here now agree.)* This is the *only* reason the remaining two cases
   of the fifteen still diverge, and it is one gap rather than two:
   `:logical/border-inline-start` cascades to `border-left-width: 5px`
   correctly and cssom.layout reads one uniform `:border-width`, so the
@@ -1859,7 +2057,10 @@ inline-block setting a 46px line box, Brave puts a 10px one at y=**0**
 **18** (`12px`) and **20** (`50%`); this engine leaves it on the baseline
 at 30 in all six.
 
-**Per-side border shorthands — 2 cases.** Round twenty-six named
+**Per-side border shorthands — 2 cases.** *(Fixed in round thirty-nine,
+which measured twenty-seven declarations rather than these two and found
+the two rules that constrain any fix: an omitted width is `medium` = 3px,
+an omitted style is `none`.)* Round twenty-six named
 "per-side border widths" as not implemented, on the grounds that this
 engine has one uniform `:border-width`. Measured, it is sharper than that:
 a per-side SHORTHAND is not read *at all*. `border-top: 10px solid` gives
@@ -2092,7 +2293,9 @@ block. Left alone deliberately: it cannot be right until `fit-content`
 (above) is, and adding the padding alone would move the numbers without
 converging on them.
 
-**A `<details>` with no `<summary>`** — 1 case. Brave synthesises one and
+**A `<details>` with no `<summary>`** — 1 case. *(Fixed in round
+thirty-nine: the band is reserved, the label is not drawn, and the case is
+paint-clean. Its geometry still cannot be — see there.)* Brave synthesises one and
 the element is 20px tall; this engine renders it as empty.
 `with-details-visibility`'s docstring already says a summary-less
 `<details>` is out of scope, so this is that scope-cut, measured.

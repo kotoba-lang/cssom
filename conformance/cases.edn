@@ -2184,6 +2184,21 @@
   :group :interactive
   ;; A `<details>` with no `<summary>` gets a UA-generated one; its own
   ;; children are still hidden while closed.
+  ;;
+  ;; PAINT AGREES since 2026-08-06 (10 sample points, the largest single
+  ;; paint residual the corpus had); GEOMETRY does not, and cannot. Brave
+  ;; reports the closed `<p>` as a real 300x20 box at y=34 and never
+  ;; paints it -- Chromium hides a closed `<details>`'s content with
+  ;; `content-visibility: hidden`, not `display: none` -- and an engine
+  ;; that emits draw-ops cannot report a box it does not paint. That is
+  ;; the same limit `:interactive/details-closed-shows-only-the-summary`
+  ;; already records, and it is the ONLY box left disagreeing here: the
+  ;; `<details>` itself, the wrapper and the `after` div all land.
+  ;;
+  ;; The generated summary is SHADOW content: measured with
+  ;; `elementsFromPoint`, every interior point of the box reports
+  ;; `DETAILS` rather than `SUMMARY`, so the engine reserves a band and
+  ;; emits no `summary` element box -- see `details-summary-band`.
   :oracle/blind true
   :html "<div style=\"width: 300px\"><details><p>Body</p></details><div style=\"height: 20px\">after</div></div>"}
 
@@ -2984,13 +2999,12 @@
  ;; ordinary specificity and source order with no code of their own. See
  ;; `logical->physical-by-flow` there for the browser measurements.
  ;;
- ;; The twelfth, `border-inline-start`, still diverges and it is NOT this
- ;; cause: the cascade resolves it to `border-left-width`/`-style`/`-color`
- ;; correctly, and cssom.layout has no per-side border to read them with
- ;; (it carries one uniform `:border-width`). `border-left: 5px solid #000`
- ;; -- the physical spelling -- lays out identically wrong, which is what
- ;; makes it one gap and not two; `:box/border-left-width-only` records it
- ;; from the physical side.
+ ;; The twelfth, `border-inline-start`, diverged until 2026-08-06 and it
+ ;; was never this cause: the cascade resolved it to
+ ;; `border-left-width`/`-style`/`-color` correctly and cssom.layout had no
+ ;; per-side border to read them with, so `border-left: 5px solid #000` --
+ ;; the physical spelling -- laid out identically wrong. Both land now; see
+ ;; the border group below.
 
  {:id :logical/margin-inline-start
   :group :logical
@@ -3065,11 +3079,9 @@
  {:id :logical/border-inline-start
   :group :logical
   ;; Brave: the bordered div is 305 wide (auto width + the 5px border) and
-  ;; its <p> is at x=5 w=300. STILL DIVERGES -- the one of the twelve that
-  ;; is not the logical mapping. The cascade resolves this to
-  ;; `border-left-width: 5px` correctly; cssom.layout has only a uniform
-  ;; `:border-width`, so `border-left: 5px solid #000` is equally
-  ;; unrendered (see the group header).
+  ;; its <p> is at x=5 w=300. AGREES since 2026-08-06 -- it was the one of
+  ;; the twelve that was not the logical mapping, and the fix was the
+  ;; per-side border it resolved to, not the resolution.
   :html "<div style=\"width: 300px; border-inline-start: 5px solid #000\"><p style=\"margin: 0\">p</p></div>"}
 
  ;; ---- replaced elements and their default size ----
@@ -3454,13 +3466,12 @@
   ;; child's top margin collapsing through it, which would take the
   ;; number out of the case.
   ;;
-  ;; STILL DIVERGES, and since 2026-08-06 for the border alone: the 10%
-  ;; margin now resolves to 30px like the three cases around it, and then
-  ;; collapses straight out through a parent this engine sees no border on
-  ;; (`border-top` as a per-side shorthand is not parsed, and there is no
-  ;; per-side border to parse it into -- see the border group below).
-  ;; Swapping the border for `padding-top: 1px` puts both sides at y=31,
-  ;; which is what layout_test asserts.
+  ;; AGREES since 2026-08-06. It diverged for the border alone after the
+  ;; percentage landed: the 10% resolved to 30px like the three cases
+  ;; around it and then collapsed straight out through a parent this
+  ;; engine saw no border on, because `border-top` was not parsed as a
+  ;; per-side shorthand and there was no per-side border to parse it into.
+  ;; Both halves are there now.
   :html "<div style=\"width: 300px; border-top: 1px solid #000\"><div style=\"margin-top: 10%; height: 20px\">m</div></div>"}
 
  {:id :box/margin-left-percentage
@@ -3551,32 +3562,36 @@
 
  ;; ---- borders: per side, and the two that take no space ----
  ;; Round twenty-six named "per-side border widths" as not implemented --
- ;; "this engine has one uniform `:border-width`". Measured, it is sharper
- ;; than that: a per-side SHORTHAND is not read at all, so `border-top:
- ;; 10px solid` contributes nothing rather than ten pixels on four sides.
+ ;; "this engine has one uniform `:border-width`". Measured, it was sharper
+ ;; than that: a per-side SHORTHAND was not read at all, so `border-top:
+ ;; 10px solid` contributed nothing rather than ten pixels on four sides.
+ ;; Both halves landed on 2026-08-06 -- the cascade expands the four
+ ;; per-side shorthands and the three 1-to-4 ones, and `node-style`
+ ;; resolves four used widths through each side's own style.
 
  {:id :box/border-top-width-only
   :group :box
   ;; Brave: the bordered div is 30 tall and its <p> is at y=10 with the
-  ;; full w=300 -- a top border costs height and nothing else. This
-  ;; engine: 20 tall, <p> at y=0.
+  ;; full w=300 -- a top border costs height and nothing else. AGREES
+  ;; since 2026-08-06; this engine was 20 tall with the <p> at y=0.
   :html "<div style=\"width: 300px\"><div style=\"border-top: 10px solid #000\"><p style=\"margin: 0\">p</p></div></div>"}
 
  {:id :box/border-left-width-only
   :group :box
   ;; The mirror: Brave puts the <p> at x=20 with w=280 and the div stays
   ;; 300 wide. A uniform border would have taken 20 off all four sides;
-  ;; this engine takes none off any of them.
+  ;; this engine took none off any of them. AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"border-left: 20px solid #000\"><p style=\"margin: 0\">p</p></div></div>"}
 
  {:id :box/border-width-with-style-none-takes-no-space
   :group :box
-  ;; AGREES, and it is the control that keeps the two above honest:
-  ;; `border-style: none` makes the computed `border-width` ZERO however
-  ;; wide it was declared, which is CSS's own rule and not a rendering
-  ;; shortcut. Brave and this engine both put the <p> at x=0 w=300 in a
-  ;; 20-tall div, i.e. the 10px is not there at all -- so a fix for the
-  ;; two cases above must not simply start adding declared widths up.
+  ;; AGREES, and it is the control that kept the two above honest, before
+  ;; and after the fix: `border-style: none` makes the computed
+  ;; `border-width` ZERO however wide it was declared, which is CSS's own
+  ;; rule and not a rendering shortcut. Brave and this engine both put the
+  ;; <p> at x=0 w=300 in a 20-tall div, i.e. the 10px is not there at all
+  ;; -- so the fix for the two cases above could not simply start adding
+  ;; declared widths up, and does not.
   :html "<div style=\"width: 300px\"><div style=\"border-width: 10px; border-style: none\"><p style=\"margin: 0\">p</p></div></div>"}
 
  {:id :box/outline-takes-no-space
