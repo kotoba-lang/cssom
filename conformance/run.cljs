@@ -671,7 +671,26 @@
                [])
        (mapv (fn [line]
                (->> (:words line)
-                    (sort-by :left)
+                    ;; The tie-break is part of the rule, and it is the
+                    ;; same rule on both sides. Two words at the SAME
+                    ;; `left` on the same line have no left-to-right order
+                    ;; to read -- they are stacked on top of each other --
+                    ;; so `sort-by :left` alone falls through to whatever
+                    ;; order the words arrived in, and the two sides do
+                    ;; not arrive in the same one: the browser walks text
+                    ;; nodes in DOCUMENT order while cssom.layout emits
+                    ;; draw-ops in PAINT order. Six corpus cases are built
+                    ;; on exactly that shape (an overlapping pair pulled
+                    ;; together by `margin-top: -60px`, so `a` and `b` are
+                    ;; both at x=0), and the stacking round made the
+                    ;; engine's paint order correct -- which flipped the
+                    ;; pair and read as `want ["a b"] got ["b a"]` on an
+                    ;; axis that is not about paint order at all. Sorting
+                    ;; coincident words by their own text is deterministic,
+                    ;; symmetric, and gives up nothing: it can only reorder
+                    ;; words whose positions are identical, and identical
+                    ;; positions carry no order to preserve.
+                    (sort-by (juxt :left #(normalize (:text %))))
                     (map :text)
                     (map normalize)
                     (remove str/blank?)
@@ -1058,15 +1077,41 @@
                              boxless)}
             tags)))
 
+(defn- wrapper-op-ids
+  "The `:node/id`s of the two boxes that are the HARNESS's own, not the
+   case's: the document node and the `<div id=\"root\">` `cascaded-document`
+   wraps every case in. Read off the document tree, by identity.
+
+   This used to be read off the op vector by POSITION -- `engine-boxes`
+   took the first `:div` node op as the root, and `engine-topmost-at` took
+   the first two node ops as the wrappers. Both are true only while the
+   engine emits ops in document order, and the stacking round ended that:
+   a `z-index: -1` box whose nearest stacking context is the ROOT is
+   painted in Appendix E's step 2, i.e. before every other box in the
+   document, so it is now the first `:div` op and the second op overall.
+   Positionally, the harness read that box as its own wrapper and
+   subtracted its origin from every box in the case --
+   `:stacking/negative-z-index`, whose geometry is exact on both sides,
+   came out with all four boxes shifted by -120px. The reordering is
+   correct (Brave paints that box under everything and reports its box at
+   x=120 all the same); the harness's assumption about where it would
+   appear was not."
+  [c]
+  (let [tree (dom/tree (cascaded-document c))]
+    (into #{(:node/id tree)}
+          (->> (tree-seq map? #(filter map? (:children %)) tree)
+               (filter #(= "root" (get-in % [:attrs :id])))
+               (map :node/id)))))
+
 (defn- engine-boxes
   "Element boxes from the engine's own `:node` draw-ops, relative to the
    root box, in the same shape the oracle reports."
-  [ops]
+  [ops wrapper-ids]
   (let [nodes (filterv #(= :node (:draw/op %)) ops)
-        root (first (filter #(= :div (:tag %)) nodes))
+        root (first (filter #(and (= :div (:tag %)) (contains? wrapper-ids (:id %))) nodes))
         rx (:x root 0) ry (:y root 0)]
     (->> nodes
-         (remove #(identical? % root))
+         (remove #(contains? wrapper-ids (:id %)))
          (remove #(= :document (:tag %)))
          (mapv (fn [op] {:tag (name (:tag op))
                          :x (- (:x op) rx) :y (- (:y op) ry)
@@ -1452,7 +1497,7 @@
    hosts would too. Reading the two keys is not re-deriving stacking here
    -- it is reading one more field of the answer the engine already
    emitted, exactly like `:hit`."
-  [ops x y]
+  [ops wrapper-ids x y]
   (let [;; Both sides wrap the case, and neither wrapper is an answer: the
         ;; browser page puts the markup in a `.kotoba-case` div and the
         ;; oracle reports null when a point lands on it, while
@@ -1463,11 +1508,11 @@
         ;; which for a case's own top-level text IS the wrapper -- read as
         ;; `none -> div`. That single asymmetry was 2246 of 2523
         ;; disagreements on the first run.
-        wrapper-ids (->> ops
-                         (filter #(= :node (:draw/op %)))
-                         (take 2)
-                         (map :id)
-                         set)]
+        ;;
+        ;; `wrapper-ids` arrives from wrapper-op-ids rather than being
+        ;; taken as the first two node ops here -- see there for the
+        ;; measured reordering that broke the positional version.
+        ]
     (->> ops
          ;; Half-open, like every other rectangle test here: a box spanning
          ;; [0,400) does not contain x=400. With the far edges inclusive,
@@ -1504,9 +1549,9 @@
   (if cls (str (name tag) "." cls) (name tag)))
 
 (defn- paint-order-agreement
-  [oracle-hits ops]
+  [oracle-hits ops wrapper-ids]
   (reduce (fn [acc {:keys [x y tag cls]}]
-            (let [mine (engine-topmost-at ops x y)
+            (let [mine (engine-topmost-at ops wrapper-ids x y)
                   want (when tag [(keyword tag) cls])]
               (if (= want mine)
                 (update acc :agree inc)
@@ -1522,9 +1567,12 @@
    (both from cssom.layout), and the cascade-resolved style of every
    element (from cssom.core alone)."
   [c width char-w]
-  (let [ops (engine-ops c width char-w)]
+  (let [ops (engine-ops c width char-w)
+        wrapper-ids (wrapper-op-ids c)]
     {:lines (engine-lines c width char-w)
-     :boxes (engine-boxes ops)
+     :boxes (engine-boxes ops wrapper-ids)
+     ;; the harness's own two boxes, by identity -- see wrapper-op-ids
+     :wrapper-ids wrapper-ids
      ;; the raw op vector, kept for the paint-order axis: `engine-boxes`
      ;; distils ops into rects and loses the ORDER, which is the whole
      ;; subject here.
@@ -1540,7 +1588,8 @@
         geo (when-not (:error rendered)
               (geometry-agreement (:boxes oracle-data) (:boxes rendered)))
         paint (when-not (:error rendered)
-                (paint-order-agreement (:hits oracle-data) (:boxes-ops rendered)))
+                (paint-order-agreement (:hits oracle-data) (:boxes-ops rendered)
+                                       (:wrapper-ids rendered)))
         sty (when-not (:error rendered)
               (-> (computed-style-agreement (:styles oracle-data) (:styles rendered) ua)
                   (update :diffs (fn [ds] (mapv #(assoc % :id (:id c)) ds)))
