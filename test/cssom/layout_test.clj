@@ -7105,7 +7105,18 @@
         [_div input] (block-boxes [[:div {} "a " [:input {:value "hi"}] " b"]])]
     (is (== 22 (:w empty-select)))
     (is (= :input (:tag input)))
-    (is (= 21 (:h input)))))
+    (is (== 21.3333 (:h input))
+        "21.3333 rather than the browser's 21 in THIS test only, and it is
+         the default `font-metrics` approximation showing, not the control
+         box. These boxes are built with no host hooks at all, so a
+         control's `line-height: normal` content area is the default
+         `ascent = font-size, descent = 0.2em` -- 13.3333 + 2 -- where a
+         real font's is 12 + 3 = 15. It used to come out at exactly 21
+         because ua-control-font was TRUNCATED to 13 and the two errors
+         cancelled; the size is now the browser's own 13.3333 (see
+         ua-control-font), so the approximation shows its own 0.33.
+         Any host with real metrics -- dom-gpu's WebGL/WebGPU hosts, the
+         conformance oracle -- gets 12 + 3 and reports the browser's 21.")))
 
 ;; ---- display types: CSS-declared tables, and `display: contents` ----
 ;;
@@ -7547,11 +7558,16 @@
 ;; cssom.layout keeps its documented `ascent = font-size, descent = 0.2em`
 ;; approximation and there is nothing to check against a browser.
 
+;; `:x-height` is the ink top of a lowercase `x` in the same face, measured
+;; the same way on 2026-08-05 (canvas `actualBoundingBoxAscent`), and it
+;; scales as linearly as the other two: monospace is 4.53125 at 10px,
+;; 6.34375 at 14 and 10.875 at 24, i.e. 0.453125em every time. It is what
+;; `vertical-align: middle` centres against.
 (def ^:private brave-faces
-  {:normal {:ascent 12 :descent 3 :ref 14}
-   :bold {:ascent 14 :descent 4 :ref 14}
-   :italic {:ascent 14 :descent 4 :ref 14}
-   :control {:ascent 12 :descent 3 :ref 13.3333}})
+  {:normal {:ascent 12 :descent 3 :x-height 6.34375 :ref 14}
+   :bold {:ascent 14 :descent 4 :x-height 7.875 :ref 14}
+   :italic {:ascent 14 :descent 4 :x-height 7.65625 :ref 14}
+   :control {:ascent 12 :descent 3 :x-height 6.912333965301514 :ref 13.3333}})
 
 (def ^:private brave-theme
   {:padding 0 :gap 0 :font-size 14 :line-height 20
@@ -7561,7 +7577,8 @@
                                                   (= "italic" style) :italic
                                                   :else :normal))
                          k (/ (or font-size (:ref f)) (:ref f))]
-                     {:ascent (* k (:ascent f)) :descent (* k (:descent f))}))})
+                     {:ascent (* k (:ascent f)) :descent (* k (:descent f))
+                      :x-height (* k (:x-height f))}))})
 
 (defn- metric-ops
   "draw-ops for an inline run laid out with the measured faces, in a
@@ -7637,13 +7654,14 @@
   ;; owners the ATOMIC's box instead, which is what made every <label>
   ;; around a control 6px too tall and 3px too high.
   (let [boxes (metric-boxes [[:label {} "Name " [:input {}]] " after"])]
-    (is (= [:label 2 15] (second boxes))
-        "y=2 rather than Brave's 3 for the one reason left in the control
-         box: ua-control-font charges 13px where the browser computes
-         13.3333, so the control's internal baseline lands at 14 instead of
-         15. That 0.33px is deliberately still there -- it cancels an
-         opposite error in the intrinsic WIDTH model, and fixing either
-         alone makes the result worse (see ua-control-font)")
+    (is (= [:label 3 15] (second boxes))
+        "y=3, which is Brave's own number. It was 2 until 2026-08-05 for
+         the one reason left in the control box: ua-control-font charged
+         13px where the browser computes 13.3333, so the control's internal
+         baseline landed at 14 instead of 15. That 0.33px was one half of a
+         pair of cancelling errors and could not move alone; both halves
+         moved together when the average-advance metric turned out to be
+         measurable (see avg-advance / max-advance)")
     (is (= 21 (last (first boxes)))
         "and the line box is the input's 21, since the control's own
          internal baseline (15) reaches further down than the strut's")))
@@ -7720,16 +7738,76 @@
         "...where a BOTTOM-aligned box of the same size pushes the baseline
          20px down instead, because the line grew above it")))
 
-(deftest vertical-align-middle-is-still-unmodelled-and-says-so
-  ;; A pin of a documented scope cut, not a claim: `middle` centres the box
-  ;; on `baseline + x-height/2`, and `font-metrics` reports no x-height (see
-  ;; vertical-align-shift). Brave puts this line at 20.828125 with the span
-  ;; 0.828125 lower than baseline-aligned; this engine leaves it on the
-  ;; baseline. Asserted so the day an x-height hook arrives, this test is
-  ;; the one that fails and points at it.
-  (is (= (metric-boxes ["base " [:span {:font-size 24} "top"] " end"])
-         (metric-boxes ["base " [:span {:vertical-align "middle" :font-size 24} "top"] " end"]))
-      "middle still lays out exactly as baseline"))
+(deftest vertical-align-middle-centres-the-box-on-half-the-parents-x-height
+  ;; This test used to pin the OPPOSITE -- `middle` laying out exactly as
+  ;; `baseline` -- as a documented scope cut, and said it would be the test
+  ;; that fails the day an x-height hook arrives. It arrived on 2026-08-05
+  ;; (font-metrics' `:x-height`), so here is the measurement it was waiting
+  ;; for.
+  ;;
+  ;; Every number below is Brave 151 at this harness's own frame (800px,
+  ;; monospace 14px / line-height 20px), probed on 2026-08-05. The parent's
+  ;; x-height there is 6.34375, so `middle` puts each box's midpoint
+  ;; 3.171875px above the baseline -- and the line box that comes out of it
+  ;; is 20.828125px tall for every one of the three inline cases, which is
+  ;; the signature of the rule: whatever the box's own size, its midpoint
+  ;; lands in the same place and the line grows only underneath it.
+  ;;
+  ;;   child           baseline                middle
+  ;;   14px span       line 20,   top 2        line 20.828125, top 2.828125
+  ;;   10px span       line 21,   top 5        line 20.828125, top 4.828125
+  ;;   24px span       line 24,   top -3       line 20.828125, top -2.171875
+  ;;   20px inline-blk line 26,   top 0        line 20.828125, top 0.828125
+  ;;
+  ;; Note the 10px child moves UP and the 24px child moves DOWN: `middle` is
+  ;; not a direction, it is a fixed point.
+  (let [mid (fn [attrs] (metric-boxes ["base " [:span (assoc attrs :vertical-align "middle")
+                                                "top"] " end"]))
+        base (fn [attrs] (metric-boxes ["base " [:span attrs "top"] " end"]))]
+    (is (not= (base {:font-size 24}) (mid {:font-size 24}))
+        "middle no longer lays out as baseline")
+    ;; The engine's own numbers, and where they differ from Brave's and why.
+    ;; A 14px child is the one case where `brave-theme` hands over the
+    ;; measured face unscaled (k = 1), so this one is exact:
+    (is (= [[:div 0 21] [:span 2.828125 15.0]] (mid {}))
+        "a same-size child: 2.828125 down, exactly Brave's -- and a 21px
+         line where Brave reports 20.828125, which is this file's
+         long-standing `:h` ceil (see inline-line-metrics), not the shift")
+    (is (= [[:div 0 20] [:span 2 15]] (base {}))
+        "...against 20/2 on the baseline, so the shift itself is 0.828125")
+    ;; A 24px child is scaled from the 14px face by brave-theme, so its
+    ;; ascent/descent are 20.571/5.143 where Brave's real ones are 21/5;
+    ;; that 0.43 is the linear-scaling residual this theme documents, and it
+    ;; is the whole difference between -2.171875 and this:
+    (let [[[_ _ h] [_ y]] (mid {:font-size 24})]
+      (is (= 21 h) "line box within a pixel of Brave's 20.828125")
+      (is (< -3.0 y -2.0) "and a 24px child moves DOWN, to Brave's -2.171875"))
+    (let [[[_ _ h] [_ y]] (mid {:font-size 10})
+          [[_ _ _] [_ by]] (base {:font-size 10})]
+      (is (= 21 h))
+      (is (< y by) "...where a 10px child moves UP rather than down")
+      (is (== 0.171875 (- by y))
+          "by exactly the 0.171875 Brave moves it -- the box's ABSOLUTE
+           position is 5.2567 against Brave's 4.828125 only because
+           brave-theme scales the 14px face down to a 8.571px ascent where
+           the real 10px face is 9, which is this theme's documented linear
+           residual and not the shift"))))
+
+(deftest vertical-align-middle-centres-an-atomic-inline-the-same-way
+  ;; The same fixed point for a box that brings its own baseline: an
+  ;; inline-block's midpoint goes 3.171875px above the parent's baseline
+  ;; too, so its `baseline-offset` is `h/2 + x-height/2` and nothing about
+  ;; what is inside it matters. Measured in Brave at the same frame: a 20px
+  ;; inline-block reports `top: 0.828125` on a 20.828125px line, against
+  ;; `top: 0` on a 26px line when it sits on the baseline.
+  (let [box (fn [va] (->> (metric-ops ["base " [:span (cond-> {:display "inline-block"
+                                                               :width 10 :height 20}
+                                                       va (assoc :vertical-align va))] " end"])
+                          (filter #(and (= :node (:draw/op %)) (= :span (:tag %))))
+                          first))]
+    (is (= 0 (:y (box nil))) "on the baseline its bottom edge is the baseline")
+    (is (= 0.828125 (:y (box "middle")))
+        "and `middle` puts it 0.828125 down, exactly Brave's number")))
 
 (deftest a-lone-inline-element-still-gets-a-real-inline-box
   ;; `<td><a href="/x">link</a></td>` reports the <a> at (0, 2, 28, 15) in
@@ -8038,8 +8116,12 @@
   ;; `text/rtl-block-alignment`: a 60px block in a 200px rtl container is at
   ;; x=140 in Brave (CSS 2.1 SS10.3.3 resolves margin-LEFT under rtl), and
   ;; an explicit auto margin still overrides the direction's own side.
-  ;; Nothing here asserts anything about INLINE content: there is no bidi
-  ;; algorithm in this engine and none is claimed.
+  ;; Nothing here asserts anything about INLINE content -- that is the
+  ;; two deftests below, which arrived later and are what made this rule
+  ;; stop applying to a bare TEXT child (see layout-children-block's own
+  ;; `rtl?`: a text child is an anonymous block box that fills its
+  ;; container, so this rule has nothing to place, and with both rules in
+  ;; force such a child was shifted right twice).
   (let [x-of (fn [decl]
                (:x (last (cascaded-boxes (str ".outer{direction:rtl;width:200px} .inner{" decl "}")
                                          nest))))]
@@ -8049,6 +8131,174 @@
     (is (= 0 (x-of ""))
         "an auto-width block fills an rtl container exactly as it does an
          ltr one -- there is no leftover space to place")))
+
+;; ---- `direction: rtl` INSIDE a line ----
+;;
+;; Every number below was measured in a real headless Brave 151 over CDP,
+;; on a page shaped like the conformance corpus's own (800px root, 14px
+;; monospace, 20px line-height), BEFORE the code that produces it was
+;; written. The engine's own coordinates are not the browser's -- it has no
+;; glyph shaping, so its char width is `(long (* 0.6 14))` = 8 against
+;; Brave's 7.0 for this face -- so what is asserted here is the RELATION
+;; each measurement established (which edge, which order, one offset per
+;; line), with the corpus cases named so the absolute numbers can be
+;; checked where they are comparable. See conformance/cases.edn's
+;; `:text/rtl-*` and `:text/ltr-*` for those.
+
+(defn- rtl-texts
+  "The `:text` draw-ops of one <div>-rooted inline layout, as [text x]."
+  [style specs]
+  (mapv (juxt :text :x)
+        (text-draw-ops (inline-ops specs style {:width 300 :theme {:padding 0 :gap 0}}))))
+
+(deftest an-rtl-line-packs-against-the-right-edge-without-reordering-latin
+  ;; `:text/rtl-with-inline-elements` and `:text/rtl-two-inline-elements`.
+  ;; Measured in Brave, `alpha <b>beta</b> gamma` in a 300px rtl block sits
+  ;; at 185.48/227.48/265 where the SAME markup with `direction: ltr` sits
+  ;; at 0/42/79.52 -- the same order, every word shifted by the same
+  ;; 185.48, which is 300 minus the line's own width. UAX #9 gives exactly
+  ;; that for a line whose every word is strong left-to-right: one
+  ;; left-to-right run, placed at the line's inline-end.
+  ;;
+  ;; This is the assertion the previous round of this work declined to
+  ;; make, on the reasoning that the <b> would land near Brave's x "by
+  ;; symmetry" while the words were still in the wrong order. The second
+  ;; half of that is what measuring disproved -- Brave does not reorder
+  ;; this line -- which is why the two-inline case below is asserted
+  ;; alongside it: nothing about `aa <b>bbbb</b> cccccc <i>d</i> ee` is
+  ;; symmetric, so no coincidence can produce it.
+  (let [ltr (rtl-texts {} ["alpha " [:b {} "beta"] " gamma"])
+        rtl (rtl-texts {:direction "rtl"} ["alpha " [:b {} "beta"] " gamma"])
+        shift (- (second (first rtl)) (second (first ltr)))]
+    (is (= (mapv first ltr) (mapv first rtl))
+        "an all-Latin line is NOT reordered by an rtl paragraph direction")
+    (is (pos? shift))
+    (is (= (mapv #(+ shift (second %)) ltr) (mapv second rtl))
+        "every piece shifted by the same amount -- the line moved, the
+         pieces did not move within it")
+    (is (= (- 300 (apply max (map (fn [[t x]] (+ x (* 8 (count t)))) ltr))) shift)
+        "and that amount is the line's own leftover in the content width"))
+  (let [ltr (rtl-texts {} ["aa " [:b {} "bbbb"] " cccccc " [:i {} "d"] " ee"])
+        rtl (rtl-texts {:direction "rtl"} ["aa " [:b {} "bbbb"] " cccccc " [:i {} "d"] " ee"])
+        shift (- (second (first rtl)) (second (first ltr)))]
+    (is (= (mapv first ltr) (mapv first rtl)))
+    (is (= (mapv #(+ shift (second %)) ltr) (mapv second rtl))
+        "the asymmetric shape, where a right edge reached by symmetry
+         would not line up")))
+
+(deftest text-align-start-and-end-are-direction-relative
+  ;; `:text/rtl-text-align-end-is-the-left-edge`,
+  ;; `:text/ltr-text-align-end-is-the-right-edge` and
+  ;; `:text/rtl-text-align-left-overrides-the-direction`. Measured in
+  ;; Brave, all four combinations of {ltr, rtl} x {start, end} on
+  ;; `alpha <b>beta</b> gamma` in a 300px block: the <b> is at 42 for
+  ;; ltr+start and rtl+end, and at 227.48 for ltr+end and rtl+start.
+  ;; A PHYSICAL value still means the physical thing it says.
+  (let [x-of (fn [dir align]
+               (second (first (rtl-texts (cond-> {} dir (assoc :direction dir)
+                                                 align (assoc :text-align align))
+                                         ["alpha " [:b {} "beta"] " gamma"]))))
+        left 0
+        right (x-of "rtl" nil)]
+    (is (pos? right))
+    (is (= left (x-of "ltr" nil)))
+    (is (= left (x-of "ltr" "start")))
+    (is (= right (x-of "ltr" "end")))
+    (is (= right (x-of "rtl" "start")))
+    (is (= left (x-of "rtl" "end")))
+    (is (= left (x-of "rtl" "left")) "a physical value is still physical")
+    (is (= right (x-of "rtl" "right")))
+    (is (= right (x-of "rtl" "justify"))
+        "`justify` degrades to `start`, which in rtl is the right edge --
+         measured, the LAST line of a justified rtl paragraph (the one a
+         real justifier does not stretch either) sits there")))
+
+(deftest each-wrapped-line-of-an-rtl-block-is-placed-on-its-own
+  ;; `:text/rtl-wraps-then-places-each-line`. Measured in Brave, a 160px
+  ;; rtl paragraph puts line one at 33.17..160 and line two at 62..160 --
+  ;; two different offsets, which no single shift of the whole box can
+  ;; produce. Both lines end at the container's right edge.
+  (let [t (rtl-texts {:direction "rtl"} ["one two three four five six seven"])
+        ops (text-draw-ops (inline-ops ["one two " [:b {} "three"] " four five six seven"]
+                                       {:direction "rtl"} {:width 160 :theme {:padding 0 :gap 0}}))
+        by-line (group-by :y ops)]
+    (is (= 1 (count t)) "the single-text-child path is one op per line")
+    (is (< 1 (count by-line)) "the inline path really did wrap")
+    (is (apply not= (map (fn [[_ ops]] (apply min (map :x ops))) by-line))
+        "the two lines start at DIFFERENT offsets")
+    (is (every? (fn [[_ ops]]
+                  (= 160 (apply max (map (fn [o] (+ (:x o) (* 8 (count (:text o))))) ops))))
+                by-line)
+        "...and both end at the right edge")))
+
+(deftest strong-rtl-runs-are-reordered-and-latin-runs-are-not
+  ;; `:text/rtl-hebrew-reverses-the-words`,
+  ;; `:text/rtl-hebrew-keeps-an-embedded-latin-run-in-order` and
+  ;; `:text/ltr-hebrew-run-reverses-inside-a-latin-line`. This is the half
+  ;; that placing a line cannot explain, and the reason placing it is not a
+  ;; shortcut: UAX #9 rule L2 reverses same-direction runs, so an all-rtl
+  ;; line comes out backwards, an embedded left-to-right run inside it does
+  ;; NOT, and an rtl run inside an ltr line does.
+  ;;
+  ;; Measured in Brave at 300px, all three:
+  ;;   rtl `\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd \u05d0\u05d1\u05d2`  -> 193.58 / 225.78 / 266.38, i.e. reversed
+  ;;   rtl `\u05e9\u05dc\u05d5\u05dd one two \u05d0\u05d1\u05d2` -> \u05d0\u05d1\u05d2 178.17, one 210.39, two 238.39,
+  ;;                              \u05e9\u05dc\u05d5\u05dd 266.39 -- one still before two
+  ;;   ltr `alpha \u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd beta` -> alpha 0, \u05e2\u05d5\u05dc\u05dd 42, \u05e9\u05dc\u05d5\u05dd 82.59,
+  ;;                                    beta 123.22 -- only the pair swapped
+  (let [visual (fn [style specs] (mapv first (sort-by second (rtl-texts style specs))))]
+    (is (= ["אבג" "עולם" "שלום"]
+           (visual {:direction "rtl"} ["שלום עולם אבג"]))
+        "a lone text child, reversed, one op per run")
+    (is (= ["אבג" "עולם" "שלום"]
+           (visual {:direction "rtl"} ["שלום " [:b {} "עולם"] " אבג"]))
+        "...and the same across an inline box boundary")
+    (is (= ["אבג" "one two" "שלום"]
+           (visual {:direction "rtl"} ["שלום one two אבג"]))
+        "the embedded left-to-right run keeps its own internal order, and
+         stays ONE op -- which is what preserves it")
+    (is (= ["alpha" "עולם" "שלום" "beta"]
+           (visual {} ["alpha שלום עולם beta"]))
+        "an LTR paragraph reverses the rtl run inside it and leaves the
+         Latin words alone -- this is not an rtl-only branch")
+    (is (= ["أهلا" "عليكم" "السلام"]
+           (visual {:direction "rtl"} ["السلام عليكم أهلا"]))
+        "Arabic too: the character class is a class, not a Hebrew case")))
+
+(deftest nothing-without-a-strong-rtl-character-is-reordered
+  ;; The guarantee that makes the mechanism above safe to have at all: it
+  ;; is inert for every line that is not in an rtl script, INCLUDING in an
+  ;; rtl block, because UAX #9's own levels make it the identity there (all
+  ;; runs at level 2, reversed at 2 and again at 1). Asserted as a
+  ;; property rather than a number, because it is the property that keeps
+  ;; every other test in this file from having to know about bidi.
+  (let [specs ["aa " [:b {} "bbbb"] " cccccc " [:i {} "d"] " ee"]]
+    (doseq [dir [nil "ltr" "rtl"]
+            align [nil "left" "right" "center"]]
+      (is (= (mapv first (rtl-texts {} specs))
+             (mapv first (rtl-texts (cond-> {} dir (assoc :direction dir)
+                                            align (assoc :text-align align))
+                                    specs)))
+          (str "order unchanged for direction=" dir " text-align=" align)))))
+
+(deftest a-br-sits-at-the-inline-end-edge-of-its-line
+  ;; `:text/rtl-br-sits-at-the-left-end-of-its-line`. Measured in Brave,
+  ;; `<p style="direction:rtl;width:300px">aaa<br>bb cc</p>` reports the
+  ;; <br> at x=279 -- the LEFT end of a line whose only word runs
+  ;; 279..300. In ltr the same box is at the line's right end.
+  (let [br-x (fn [style]
+               (->> (inline-ops ["aaa" [:br {}] "bb cc"] style
+                                {:width 300 :theme {:padding 0 :gap 0}})
+                    (filterv #(and (= :node (:draw/op %)) (= :br (:tag %))))
+                    first :x))
+        first-line-x (fn [style]
+                       (->> (text-draw-ops (inline-ops ["aaa" [:br {}] "bb cc"] style
+                                                       {:width 300 :theme {:padding 0 :gap 0}}))
+                            first :x))]
+    (is (= (+ (first-line-x {}) 24) (br-x {}))
+        "ltr: at the end of the text it terminates")
+    (is (= (first-line-x {:direction "rtl"}) (br-x {:direction "rtl"}))
+        "rtl: at the LEFT end of that line, which is its inline-end")))
 
 (deftest a-negative-margin-collapses-instead-of-being-dropped
   ;; `box/negative-margin-pulls-up` and its bottom-side twin

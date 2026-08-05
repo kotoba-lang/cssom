@@ -256,6 +256,24 @@
                     fallback)
     :else fallback))
 
+(defn- parse-px
+  "A CSS length in px with its FRACTION kept -- `parse-int`'s regex stops at
+   the decimal point, which is right for a border-width and wrong for a
+   font size.
+
+   It exists because a real UA control font is 13.3333px (see
+   ua-control-font), not 13: every `parse-int` on the way from node-style to
+   a measurement truncated that third of a pixel, and the truncation was
+   load-bearing in a pair of cancelling errors this file used to carry.
+   Numbers pass through unchanged, so an integer size stays an integer and
+   nothing downstream sees a new type it did not already get from a
+   fractional width."
+  [x fallback]
+  (cond
+    (number? x) x
+    (string? x) (if-let [m (re-find #"-?\d+(?:\.\d+)?" x)] (parse-dbl m fallback) fallback)
+    :else fallback))
+
 (defn- attr [node k] (get-in node [:attrs k]))
 (defn- style [node k] (get-in node [:attrs (keyword "style" (name k))]))
 
@@ -434,6 +452,203 @@
             candidate
             (recur (dec n))))))))
 
+;; ---- `direction: rtl` inside a line ----
+;;
+;; What this engine implements of the Unicode bidirectional algorithm
+;; (UAX #9) is stated once, here, because three call sites share it
+;; (layout-text, inline-line-breaker, layout-inline-run) and a boundary
+;; repeated three times is a boundary that drifts. What is IMPLEMENTED is
+;; UAX #9's two OUTPUTS at the granularity of whole words:
+;;
+;;   1. WHERE THE LINE SITS. In an rtl block a line is packed against the
+;;      inline-END edge, which is the RIGHT one -- see line-align-offset.
+;;   2. WHAT ORDER THE RUNS COME IN. Maximal sequences of same-direction
+;;      words are reversed per UAX #9 rule L2 -- see bidi-visual-order.
+;;
+;; What is NOT implemented is stated at each of those two functions, but
+;; the one cut that governs both is here: a WORD is the smallest thing
+;; that carries a direction. Nothing below a word is resolved -- no
+;; per-character bidi classes, no W-rules for numbers, no explicit
+;; embedding/override/isolate controls (U+202A..U+2069), and no
+;; `unicode-bidi` property. Measured in Brave, that costs exactly one
+;; shape: a single word with strong characters of BOTH directions in it
+;; (`שלוםabc`) is split by the browser into two runs at the boundary
+;; inside the word and this engine keeps it whole. Everything measured
+;; that puts the direction change at a word boundary -- which is every
+;; ordinary sentence -- comes out in the browser's order.
+
+(def ^:private strong-rtl-re
+  "The Unicode blocks whose letters are bidi class R or AL. Hebrew,
+   Arabic, Syriac, Thaana, N'Ko, Samaritan and the Arabic presentation
+   forms, i.e. every right-to-left script that lives in the BMP.
+
+   A REGEX rather than a codepoint predicate on purpose: this file is
+   .cljc and `Character/getDirectionality` (Clojure) has no ClojureScript
+   counterpart, while `\\uXXXX` ranges in a character class mean the same
+   thing to both readers. Supplementary-plane RTL scripts (Cypriot,
+   Adlam, Old Hebrew...) are outside the class and therefore outside
+   this engine -- they are surrogate PAIRS, which a BMP character class
+   cannot express, and no measurement here uses one."
+  #"[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFC]")
+
+(defn- strong-rtl?
+  "True when `s` contains at least one strong right-to-left character.
+
+   ANY such character makes the whole word an RTL run, rather than the
+   FIRST strong one deciding (which is what UAX #9's own P2 does for a
+   paragraph). The two rules only disagree for a word that mixes
+   directions internally, which is the documented cut above -- and the
+   `contains` form is also the exact question inline-line-breaker has to
+   ask before merging two words into one draw-op, so one predicate serves
+   both rather than two nearly-identical ones drifting apart."
+  [s]
+  (boolean (re-find strong-rtl-re (str s))))
+
+(defn- line-align-offset
+  "How far into `content-w` a line of width `line-w` starts, from
+   `text-align` and the containing block's `direction`.
+
+   `text-align`'s `start`/`end` are DIRECTION-RELATIVE, and the value in
+   force when nothing is declared is `start` -- so an rtl block's lines
+   pack against its RIGHT edge with no `text-align` anywhere. Measured in
+   Brave on `<p style=\"direction: rtl; width: 300px\">alpha beta
+   gamma</p>`: the three words sit at 188/230/265 where an ltr paragraph
+   of the same markup puts them at 0/42/77, i.e. every one of them shifted
+   by exactly 188 = 300 - 112, the leftover of the line's own width. The
+   whole `text-align` matrix was measured the same way and all eight
+   combinations are reproduced here: rtl+start and rtl+(nothing) are
+   right, rtl+end is left, ltr+start is left, ltr+end is right, and
+   left/right/center mean the physical thing they say in both.
+
+   `justify` degrades to `start` rather than to `left`, which is a change
+   only for rtl (in ltr the two are the same edge and this is byte for
+   byte what the old `case`'s default did). This engine has no per-space
+   stretch-justification, and measured in Brave the LAST line of a
+   justified rtl paragraph -- the one line a real justifier does not
+   stretch either -- sits at the right edge, so `start` is the honest
+   degrade rather than a second wrong guess."
+  [text-align direction line-w content-w]
+  (let [rtl? (= "rtl" direction)
+        leftover (max 0 (- content-w line-w))]
+    (case text-align
+      "center" (/ leftover 2)
+      "right" leftover
+      "left" 0
+      "end" (if rtl? 0 leftover)
+      ;; nil / "start" / "justify" / anything unrecognized
+      (if rtl? leftover 0))))
+
+(defn- bidi-levels
+  "UAX #9 embedding levels for one line, at word granularity, over an
+   INTERLEAVED sequence of `[:run <rtl?>]` and `[:gap]` entries -- a gap
+   being the whitespace between two runs, which is a NEUTRAL and takes its
+   level from what surrounds it.
+
+   The paragraph level is 1 for an rtl block and 0 for an ltr one. A run
+   of strong-rtl characters resolves to level 1 in both; anything else
+   resolves to the next even level up from the paragraph (2 in rtl, 0 in
+   ltr), which is UAX #9 I1/I2's answer for both strong-L text AND for
+   European numbers -- the reason `שלום 123 אבג` keeps `123` reading
+   left-to-right in the middle of a reversed line, as Brave does.
+
+   A gap takes the level of its neighbours when they agree and the
+   paragraph level when they do not (UAX #9 N1/N2), which is what puts
+   the space between two Hebrew words INSIDE their reversed run and the
+   space between a Hebrew word and a Latin one at the boundary between
+   the two runs. The documented cut: a run of two or more ADJACENT
+   neutral words between two rtl runs (`שלום - - אבג`) resolves to the
+   surrounding direction in real bidi and stays in logical order here,
+   because a neutral word is levelled as if it were strong-L. One
+   neutral word between two rtl runs -- overwhelmingly the common shape,
+   and the one measured -- is a single-item run either way and comes out
+   identical."
+  [rtl? entries]
+  (let [para (if rtl? 1 0)
+        run-level (fn [r?] (if r? 1 (if rtl? 2 0)))
+        levels (mapv (fn [[kind r?]] (when (= :run kind) (run-level r?))) entries)]
+    (vec (map-indexed
+          (fn [i lvl]
+            (or lvl
+                ;; a gap: N1 when the neighbours agree, N2 otherwise
+                (let [before (some identity (reverse (subvec levels 0 i)))
+                      after (some identity (subvec levels (inc i)))]
+                  (if (and before after (= before after)) before para))))
+          levels))))
+
+(defn- bidi-visual-order
+  "UAX #9 rule L2 applied to one line's runs: the display order of
+   `entries`, as a vector of indices into it.
+
+   L2 reads, verbatim: \"From the highest level found in the text to the
+   lowest odd level on each line, including intermediate levels not
+   actually present in the text, reverse any contiguous sequence of
+   characters that are at that level or higher.\" That is implemented
+   literally below -- the ranges are found in the FIXED levels array by
+   original index, and each pass reverses that index range of the order
+   vector, so the nested higher-level reversals survive the lower-level
+   ones that contain them.
+
+   Two consequences worth naming because they are what makes this
+   implementable at all. An ltr line with no rtl character anywhere has
+   max level 0, so the loop does not run and the order is the identity.
+   An RTL line with no rtl character has every entry at level 2, so it is
+   reversed at level 2 and reversed again at level 1 -- also the
+   identity. Both are exactly what Brave does, and together they are why
+   nothing that does not contain a strong rtl character can move."
+  [rtl? entries]
+  (let [levels (bidi-levels rtl? entries)
+        n (count entries)
+        top (reduce max 0 levels)]
+    (loop [lvl top order (vec (range n))]
+      (if (< lvl 1)
+        order
+        (recur (dec lvl)
+               (loop [i 0 order order]
+                 (if (>= i n)
+                   order
+                   (if (>= (nth levels i) lvl)
+                     (let [j (loop [j i] (if (and (< j n) (>= (nth levels j) lvl)) (recur (inc j)) j))]
+                       (recur j (vec (concat (subvec order 0 i)
+                                             (reverse (subvec order i j))
+                                             (subvec order j)))))
+                     (recur (inc i) order)))))))))
+
+(defn- bidi-reorder-pieces
+  "One line's pieces, re-`:x`ed into UAX #9 visual order.
+
+   `pieces` arrive in LOGICAL (document) order, each `{:x :w :rtl?}` plus
+   whatever its own kind carries, and come back with `:x` rewritten and
+   the vector itself in visual order. The gaps BETWEEN pieces -- the
+   collapsed whitespace the line breaker already charged for -- are
+   carried through the reordering as neutral entries of their own rather
+   than recomputed, so a reversal keeps each space with the pair of words
+   it separated, and the line's total width is unchanged by construction.
+
+   Returns `pieces` untouched when the line holds no strong rtl character
+   at all. That is not an optimization: it is the guarantee that this
+   whole mechanism is INERT for every line that does not contain an rtl
+   script, which is every line in this engine's conformance corpus except
+   the ones added to measure it."
+  [rtl? pieces]
+  (if-not (some :rtl? pieces)
+    pieces
+    (let [;; [piece gap piece gap piece ...], gaps measured from the x/w
+          ;; the line breaker already assigned
+          entries (vec (mapcat (fn [[a b]]
+                                 (if b
+                                   [[:run (:rtl? a) a] [:gap nil (- (:x b) (+ (:x a) (:w a)))]]
+                                   [[:run (:rtl? a) a]]))
+                               (partition-all 2 1 pieces)))
+          order (bidi-visual-order rtl? entries)
+          x0 (:x (first pieces))]
+      (loop [os order x x0 out []]
+        (if-let [o (first os)]
+          (let [[kind _ payload] (nth entries o)]
+            (if (= :run kind)
+              (recur (rest os) (+ x (:w payload)) (conj out (assoc payload :x x)))
+              (recur (rest os) (+ x payload) out)))
+          out)))))
+
 (defn- layout-text
   "Word-wraps and lays out `text` as one or more :text draw-ops -- exactly
    the algorithm layout-node's real-DOM-text-node branch uses, factored out
@@ -511,10 +726,24 @@
    (see resolve-width's `avail` fallback), so `text-align: center` on a
    plain `<div>` centers within that full block width exactly like a real
    browser, not within some auto-shrunk width that would make centering
-   invisible. Deliberately scoped to `left`/`center`/`right` -- `justify`
-   falls back to `left` (this engine has no per-space stretch-justification
-   of its own), a safe degrade rather than a wrong guess, matching this
-   codebase's existing convention for other unimplemented keyword values.
+   invisible. `left`/`center`/`right`/`start`/`end` all resolve through
+   line-align-offset, which is where the direction-relative half of them
+   and `justify`'s degrade to `start` are documented -- this engine has
+   no per-space stretch-justification of its own, a safe degrade rather
+   than a wrong guess, matching this codebase's existing convention for
+   other unimplemented keyword values.
+
+   `direction` reaches here for the same two reasons line-align-offset
+   and bidi-reorder-pieces exist: it decides which edge a line packs
+   against when nothing declares an alignment, and it is the paragraph
+   level UAX #9 rule L2 reorders against. A line that holds no strong
+   right-to-left character is emitted as the ONE draw-op per line it has
+   always been; a line that does holds one op per directional run, which
+   is the granularity a host can paint without re-reordering what this
+   function already reordered (handing a host a single string whose words
+   are in visual order would be double-reversed by any text stack that
+   applies bidi itself, which every real one does). See bidi-visual-order
+   for what a run is here and what is not resolved below a word.
 
    `text-transform` (see apply-text-transform above) rewrites `text`
    itself, BEFORE word-wrapping, so `uppercase`/`lowercase`/`capitalize`
@@ -623,7 +852,9 @@
    `text-shadow` (a single `{:x :y :blur :color}` map arg -- consolidated
    from 4 separate positional args to keep this fn's own arity under
    Clojure's hard 20-positional-parameter limit, hit for real once
-   `text-overflow` below pushed the previous flat-arg signature to 21)
+   `text-overflow` below pushed the previous flat-arg signature to 21;
+   `direction` took the last free slot, so the property AFTER it has to
+   consolidate something the way `text-shadow` did rather than add a 21st)
    -- real CSS's own `text-shadow` shorthand is expanded into four
    longhand-shaped attrs at cascade-parse time (see
    `cssom.core/expand-text-shadow-shorthand`) and bundled into this map
@@ -675,7 +906,7 @@
    own truncation intent) rather than a spec-accuracy claim."
   [theme x y avail-width opacity color font-size line-height font-weight font-style font-family
    text-shadow
-   text-decoration text-align text-transform white-space text-overflow overflow-wrap text]
+   text-decoration text-align direction text-transform white-space text-overflow overflow-wrap text]
   (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -726,28 +957,66 @@
                      (apply max 0 (map #(* (count %) char-w) lines)))
         w (min avail-width (+ max-line-w (* 2 padding)))
         h (+ (* (count lines) line-height) (* 2 padding))
-        align-offset (fn [line]
-                       (case text-align
-                         "center" (/ (max 0 (- content-w (line-w line))) 2)
-                         "right" (max 0 (- content-w (line-w line)))
-                         0))]
+        align-offset (fn [line] (line-align-offset text-align direction (line-w line) content-w))
+        ;; One line, split into the directional RUNS it will be painted
+        ;; as, each `[text x-within-the-line]`. A line with no strong
+        ;; right-to-left character is one run holding the whole line at
+        ;; x=0 -- literally the pre-existing single op, produced without
+        ;; measuring a single word -- so this is inert for every line
+        ;; that is not in an rtl script. A line that HAS one is split at
+        ;; its spaces, adjacent same-direction words are rejoined (so an
+        ;; embedded Latin phrase stays one op and one string, which is
+        ;; what keeps its own internal order readable), and the resulting
+        ;; runs are placed by bidi-reorder-pieces.
+        ;;
+        ;; The space between two runs is charged as one measured space,
+        ;; which is exact here for the same reason the line breaker's own
+        ;; separator is: `white-space: normal` has already collapsed
+        ;; every whitespace run to a single space by this point. Under a
+        ;; `pre`-family value it is an approximation -- runs of preserved
+        ;; spaces are re-charged as one each -- which is why this path is
+        ;; entered only when the line really does need reordering.
+        visual-runs
+        (fn [line]
+          (if-not (strong-rtl? line)
+            [[line 0]]
+            (let [sp (line-w " ")
+                  words (remove str/blank? (str/split (str line) #" "))
+                  ;; adjacent words of the SAME direction are one run
+                  runs (reduce (fn [acc word]
+                                 (let [r? (strong-rtl? word)]
+                                   (if (and (seq acc) (= r? (:rtl? (peek acc))) (not r?))
+                                     (conj (pop acc) (update (peek acc) :text str " " word))
+                                     (conj acc {:text word :rtl? r?}))))
+                               [] words)
+                  placed (loop [rs runs cursor 0 out []]
+                           (if-let [r (first rs)]
+                             (let [rw (line-w (:text r))]
+                               (recur (rest rs) (+ cursor rw sp) (conj out (assoc r :x cursor :w rw))))
+                             out))]
+              (mapv (juxt :text :x)
+                    (bidi-reorder-pieces (= "rtl" direction) placed)))))]
     {:box {:x x :y y :w w :h h}
      :draw (vec (mapcat
                  (fn [i line]
                    (let [line-x (+ x padding (align-offset line))
-                         line-y (+ y padding (* i line-height))
-                         base (cond-> {:text line :font-size font-size :opacity opacity}
-                                font-weight (assoc :font-weight font-weight)
-                                font-style (assoc :font-style font-style)
-                                font-family (assoc :font-family font-family))
-                         shadow-op (when (and (:color text-shadow) (not= "none" (:color text-shadow)))
-                                     (assoc base :draw/op :text
-                                            :x (+ line-x (or (:x text-shadow) 0))
-                                            :y (+ line-y (or (:y text-shadow) 0))
-                                            :color (:color text-shadow)))
-                         main-op (cond-> (assoc base :draw/op :text :x line-x :y line-y :color color)
-                                   text-decoration (assoc :text-decoration text-decoration))]
-                     (if shadow-op [shadow-op main-op] [main-op])))
+                         line-y (+ y padding (* i line-height))]
+                     (mapcat
+                      (fn [[run-text run-dx]]
+                        (let [run-x (+ line-x run-dx)
+                              base (cond-> {:text run-text :font-size font-size :opacity opacity}
+                                     font-weight (assoc :font-weight font-weight)
+                                     font-style (assoc :font-style font-style)
+                                     font-family (assoc :font-family font-family))
+                              shadow-op (when (and (:color text-shadow) (not= "none" (:color text-shadow)))
+                                          (assoc base :draw/op :text
+                                                 :x (+ run-x (or (:x text-shadow) 0))
+                                                 :y (+ line-y (or (:y text-shadow) 0))
+                                                 :color (:color text-shadow)))
+                              main-op (cond-> (assoc base :draw/op :text :x run-x :y line-y :color color)
+                                        text-decoration (assoc :text-decoration text-decoration))]
+                          (if shadow-op [shadow-op main-op] [main-op])))
+                      (visual-runs line))))
                  (range) lines))}))
 
 ;; ---- per-node computed style bag ----
@@ -814,7 +1083,7 @@
 
 (def ^:private ua-control-font
   "Form controls do NOT inherit the page font. Every browser's UA
-   stylesheet gives them their own -- measured directly in Chrome on this
+   stylesheet gives them their own -- measured directly in Brave on this
    platform, an `<input>` inside a `font-family: monospace; font-size: 14px`
    container computes to `Arial 13.3333px` regardless -- which is why this
    engine's controls came out ~7px narrower than the browser's however
@@ -824,66 +1093,54 @@
    it is the platform default, not a guess, and a host that measures text
    (see draw-ops' `:measure-text`) needs a family it can actually measure.
 
-   The size is the browser's 13.3333 TRUNCATED to 13, and that 0.33px is
-   load-bearing in a way worth writing down, because it is the only reason
-   any control box still disagrees with the browser. Measured 2026-08-04:
+   The size is the browser's own 13.3333, and it was 13 -- the same number
+   TRUNCATED -- from 2026-08-04 to 2026-08-05, deliberately and with the
+   reason written down. That third of a pixel was one half of a pair of
+   cancelling errors: it made the `0` glyph this file measured a control
+   with come out 7.2364 instead of 7.4135, which happened to sit close to
+   the font's real AVERAGE advance of 7. Charging 20 characters of it gave
+   152.7 against the browser's 153. Raising the size without an
+   average-advance hook would have made inputs worse (156.3 against 153) and
+   leaving it truncated left long control text ~2.5% narrow, so three
+   agents in a row correctly moved neither half.
 
-   - Chrome sizes a text `<input>` at `7 * size + 5` px of content in this
-     face -- exactly 7 per character across size=1/2/5/10/20/40 (12, 19,
-     40, 75, 145, 285), i.e. the font's OS/2 average advance plus one
-     `maxCharWidth - avgCharWidth` slack. This engine has no average-advance
-     hook: `:measure-text` measures a STRING, and the closest proxy it can
-     ask for is the `0` glyph, which is 7.4219 at 13.3333. Charged at 13
-     that proxy becomes 7.2364, and `20 * 7.2364 + 8` is 152.7 against the
-     browser's 153 -- the two errors cancel almost exactly at the default
-     size=20, and diverge at other sizes (size=40 gives 297.5 against 293).
-   - So raising the size to the true 13.3333 WITHOUT an average-advance
-     hook makes inputs worse (156.3 against 153), while leaving it at 13
-     leaves long control text ~2.5% narrow -- which is why
-     `:form/select-with-long-option` still reports a 24-character option
-     label as 156px against the browser's 160.
+   Both halves moved on 2026-08-05, because the metric turned out to be
+   measurable rather than merely nameable. See avg-advance and max-advance
+   for the two laws and the 3,080 observations behind them; what matters
+   here is that the size is no longer carrying anyone else's error, so it is
+   the browser's own number.
 
-   Fixing that honestly needs the font's average advance, i.e. a new host
-   hook alongside `:measure-text`/`:font-metrics`, and a re-derivation of
-   the `size`-based input width against it. Deliberately NOT faked here by
-   scaling the `0` advance by a fudge factor: that would fit these two
-   measurements and mislead the next one.
+   A note for whoever changes this next, because it was the previous
+   attempt's dead end. Blink's `avgCharWidth` is NOT a mean over an advance
+   table. A hook fed from the mean of the ASCII advances tracks it to ~0.3%
+   at 13.3333px -- 7.02 against 7.0 -- and is 5.4% out at 26.6666px and
+   40px, i.e. right at exactly the size the corpus uses and 22px wrong on a
+   20-column textarea at 40px. The mean is a coincidence at one size; the
+   `x` advance is the metric (avg-advance).
 
-   2026-08-05, measured, on whether that hook can be BUILT from what a host
-   like the conformance harness actually has -- a per-character advance
-   table. It cannot, and the reason is worth writing down so the next
-   attempt does not spend the afternoon finding it again.
+   The FAMILY is not the same for every control, which is what
+   ua-control-font-family next door is for."
+  {:family "Arial" :size 13.3333})
 
-   Blink's `avgCharWidth` is the FONT's own OS/2 summary metric, not a mean
-   over any set of glyphs, and at small sizes it is a hinted whole number.
-   Measured in Brave via `<textarea cols=N>` (whose intrinsic width is
-   exactly `ceil(avg * cols)` plus a constant gutter, so it reads the metric
-   off directly) at three sizes and six families:
+(def ^:private ua-control-font-family
+  "The controls whose UA family is not ua-control-font's Arial.
 
-     face        13.3333px   26.6666px   40px    mean of the ASCII table
-     Arial          7.0        13.33     20.0      7.02 / 14.05 / 21.08
-     Georgia        7.0        13.47     20.21     7.33 / 14.66 / 22.00
-     monospace      7.0        13.33     20.0      6.67 / 13.33 / 20.00
-     Verdana        8.0        16.0      24.0      8.20 / 16.40 / 24.61
-     Courier        8.0        16.0      24.0      8.00 / 16.00 / 24.00
+   Exactly one of them is: measured with `getComputedStyle` in Brave on
+   2026-08-05, a `<textarea>` reports `13.3333px monospace` on the same
+   page where an `<input>`, a `<button>` and a `<select>` all report
+   `13.3333px Arial`. It is a real UA rule, not a platform accident --
+   HTML's rendering section says a textarea's font is monospace.
 
-   The table mean tracks the real metric to ~0.3% at 13.3333px for the
-   control face -- 7.02 against 7.0 -- and to 5.4% at 26.6666 and 40px,
-   because at 13.3333 the font's true 0.5-em advance (6.67) is HINTED UP to
-   a whole 7 and the mean happens to sit in the same place. A hook fed from
-   the table would therefore be right at exactly the size the corpus uses
-   and 22px wrong on a 20-column textarea at 40px. That is the trap the
-   paragraph above names, reached by a different road.
-
-   So the pair stays. What is left of it, measured after the textarea's own
-   two structural bugs were fixed (see atomic-intrinsic-width): the `0`
-   proxy is 7.23 where Brave's average is 7.0, which over 20 columns is the
-   whole of `:form/textarea-in-sentence`'s remaining 5px. Closing it needs a
-   real font's `xAvgCharWidth` AND its `maxCharWidth` (an `<input size=n>`
-   is `ceil(avg * n) + round(max) - avg`, measured: 12 and 145 of content
-   for n=1 and n=20 in this face, i.e. avg 7 and max 12), from a host that
-   has font tables rather than an advance table. Both halves, or neither."
-  {:family "Arial" :size 13})
+   It costs nothing on a textarea's WIDTH, which is why it could be
+   ignored until now: both faces' `x` advance rounds to the same 7 at
+   13.3333px (see avg-advance), so `cols` characters is the same number
+   either way. What it costs is the ROW HEIGHT, and a textarea is the one
+   control with more than one row. Measured, monospace at 13.3333px is
+   ascent 11 / descent 3 -- a 14px row -- where Arial at the same size is
+   12 / 3, a 15px row, and `<textarea rows=3>` multiplies the difference
+   by three. Reported as Arial, `:form/textarea-with-rows` came out 3px
+   tall against Brave; reported as its own face it agrees."
+  {:textarea "monospace"})
 
 (def ^:private ua-control-box
   "UA padding and border for form controls, read straight off
@@ -1440,7 +1697,9 @@
                   (when-let [scale (get ua-font-scale (:tag node))]
                     (long (* scale (:font-size theme)))))
    :font-family (or (style node :font-family)
-                    (when (contains? form-control-tags (:tag node)) (:family ua-control-font)))
+                    (when (contains? form-control-tags (:tag node))
+                      (or (get ua-control-font-family (:tag node))
+                          (:family ua-control-font))))
    :line-height (or (style node :line-height)
                     ;; A control's UA `font:` shorthand resets line-height to
                     ;; NORMAL, so an inherited page line-height never applies
@@ -1458,7 +1717,9 @@
                             (font-metrics theme fs
                                           (style node :font-weight)
                                           (style node :font-style)
-                                          (or (style node :font-family) (:family ua-control-font)))]
+                                          (or (style node :font-family)
+                                              (get ua-control-font-family (:tag node))
+                                              (:family ua-control-font)))]
                         (+ ascent descent))))
    :font-weight (style node :font-weight)
    :font-style (style node :font-style)
@@ -4833,7 +5094,7 @@
    affect measured width), so an item with its own font-size/font-weight
    override still measures against the right metrics."
   [theme opacity inherited st text]
-  (let [font-size (parse-int (:font-size st) (:font-size inherited))
+  (let [font-size (parse-px (:font-size st) (:font-size inherited))
         text-inherited (assoc inherited
                               :color (or (:color st) (:color inherited))
                               :font-size font-size
@@ -4958,7 +5219,7 @@
 
 (declare inline-fragments inline-tokens inline-flow-candidate? inline-inherited
          inline-max-content-width block-max-content-width intrinsic-flow-children
-         font-metrics measure-child)
+         font-metrics avg-advance max-advance measure-child)
 
 (defn- atomic-intrinsic-width
   "The available width an atomic inline is laid out at — its intrinsic
@@ -4987,7 +5248,7 @@
    fills its container, which is what a browser does too."
   [theme content-w opacity inherited child st]
   (let [tag (:tag child)
-        font-size (parse-int (:font-size st) (:font-size theme))
+        font-size (parse-px (:font-size st) (:font-size theme))
         measure-text (:measure-text theme)
         ;; Use the host's real measurement when it has one -- a control's
         ;; width is `size` characters of ITS OWN font (see ua-control-font),
@@ -4997,6 +5258,17 @@
         char-w (if measure-text
                  (measure-text "0" font-size (:font-weight st) (:font-style st) (:font-family st))
                  (long (* 0.6 font-size)))
+        ;; ...and the two metrics a FORM CONTROL is actually sized from,
+        ;; which no amount of string measurement produces. See avg-advance
+        ;; and max-advance: `char-w` above is the fallback for both, so a
+        ;; host with neither hook keeps exactly the widths it had.
+        avg-w (avg-advance theme font-size (:font-weight st) (:font-style st)
+                           (:font-family st) char-w)
+        max-w (max-advance theme font-size (:font-weight st) (:font-style st)
+                           (:font-family st) avg-w)
+        ;; one glyph's worth of slack, the difference between the widest
+        ;; character the font can draw and an average one
+        advance-slack (max 0 (- max-w avg-w))
         ;; the intrinsic size is a BORDER box, and the HORIZONTAL padding
         ;; is what matters for a width -- a <button>'s UA padding is 6px at
         ;; the sides and 1px top/bottom, so charging the uniform value left
@@ -5031,7 +5303,18 @@
           (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
             (if (contains? #{"checkbox" "radio"} input-type)
               13
-              (+ (* char-w (parse-int (get-in child [:attrs :size]) inline-atomic-default-input-chars))
+              ;; `size` AVERAGE characters plus one glyph's worth of slack,
+              ;; rounded up once at the end -- Blink's own formula, measured
+              ;; against 1,540 `<input size=n>` widths (see avg-advance and
+              ;; max-advance). The slack is why an `<input size=1>` is 12px
+              ;; of content in the control face where one average character
+              ;; is 7, and why charging `avg * n` alone would have made every
+              ;; input 5px narrow at exactly the moment the average stopped
+              ;; being 6% too wide.
+              (+ (long (Math/ceil
+                        (+ (* avg-w (parse-int (get-in child [:attrs :size])
+                                               inline-atomic-default-input-chars))
+                           advance-slack)))
                  inset-x)))
 
           ;; A `<textarea>` is `cols` characters (HTML's own attribute, and
@@ -5043,15 +5326,16 @@
           ;; ignored outright and every textarea was 20 characters), and it
           ;; reserved nothing for the scrollbar.
           ;;
-          ;; `char-w` is still the `0`-glyph proxy for the font's average
-          ;; advance, and it is still ~0.23px/char too wide at the control
-          ;; size this engine charges -- see ua-control-font, which explains
-          ;; why that error is load-bearing and why HALF of it cannot be
-          ;; fixed. Over 20 columns that is 4.6px, and it is what is left of
-          ;; this case's deficit once the gutter is reserved. Deliberately
-          ;; not absorbed into the gutter: the gutter is 16 in every family
-          ;; and at every size, and bending it to 11.4 to close one case
-          ;; would make every other textarea wrong.
+          ;; `cols` AVERAGE characters, not `cols` of the `0` glyph: the
+          ;; proxy was 7.23 where the control face's average is 7, which
+          ;; over 20 columns was the whole of `:form/textarea-in-sentence`'s
+          ;; remaining 5px deficit. See avg-advance -- and note there is no
+          ;; max-advance slack here, which is measured too: a
+          ;; `<textarea cols=n>` is exactly `ceil(avg * n)` plus the gutter,
+          ;; where an `<input size=n>` carries one glyph's worth on top.
+          ;; The gutter is deliberately NOT where this was absorbed: it is
+          ;; 16 in every family and at every size, and bending it to 11.4
+          ;; to close one case would have made every other textarea wrong.
           ;; `long` around the ceil for the reason leading-ascent spells
           ;; out: this number becomes a `:w` a host paints with and a test
           ;; compares, and a 162.0 where every other control says 162 is a
@@ -5059,7 +5343,7 @@
           ;; branch above hands back a bare double; that is pre-existing
           ;; and not this change's to move.)
           (= :textarea tag)
-          (+ (long (Math/ceil (* char-w (textarea-cols child))))
+          (+ (long (Math/ceil (* avg-w (textarea-cols child))))
              (if (textarea-reserves-gutter? st) textarea-scrollbar-gutter 0)
              inset-x)
 
@@ -5450,7 +5734,7 @@
              (nil? (:min-width st))
              (overflow-visible? st))
     (let [measure-text (:measure-text theme)
-          fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
+          fs (parse-px (:font-size st) (:font-size inherited (:font-size theme)))
           words (->> (tree-seq map? :children child)
                      (keep real-text-child)
                      (mapcat #(str/split (str %) #"\s+"))
@@ -5554,7 +5838,7 @@
    its font's first-line baseline here, which for the common case (an
    empty or single-line box) is the same place."
   [theme inherited st]
-  (let [fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
+  (let [fs (parse-px (:font-size st) (:font-size inherited (:font-size theme)))
         {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                (:font-style st) (:font-family st))
         lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)
@@ -6500,7 +6784,7 @@
         caption-w (if caption
                     (let [measure-text (:measure-text theme)
                           cst (node-style caption theme)
-                          fs (parse-int (:font-size cst) (:font-size theme))
+                          fs (parse-px (:font-size cst) (:font-size theme))
                           words (->> (:children caption)
                                      (keep real-text-child)
                                      (mapcat #(str/split (str %) #"\s+"))
@@ -7483,16 +7767,18 @@
    in inline-line-metrics, in the second pass this map cannot express -- see
    line-edge-aligned, which is the set of values that get that treatment.
 
-   `middle` is still unmodelled and still falls back to the baseline. It
-   needs one metric this engine does not have: the PARENT font's x-height,
-   against which `middle` centres the box (`baseline + x-height/2`).
-   Measured in Brave, a 14px monospace parent puts that half-x-height at
-   3.171875px, i.e. an x-height of 6.34375 -- but `font-metrics` reports
-   only ascent and descent, so there is nowhere honest to read it from, and
-   charging a fixed em fraction would fit this one face and mislead the
-   next. `text-top`/`text-bottom` are absent for a related reason: they
-   align against the parent's CONTENT AREA rather than the line box, which
-   this function's callers do not track per owner."
+   `middle` is not here either, and for a third reason: it is not a
+   fraction of the parent's font size, it is the box's own midpoint placed
+   against the parent's half-x-height, so it needs the box's metrics as
+   well. It is resolved in inline-fragments, which has both -- see the
+   middle-shift branch there for the measured law and for what an absent
+   x-height falls back to. `font-metrics` grew an `:x-height` on 2026-08-05
+   to make that possible; before then there was nowhere honest to read the
+   metric from at all.
+
+   `text-top`/`text-bottom` are absent for a related reason: they align
+   against the parent's CONTENT AREA rather than the line box, which this
+   function's callers do not track per owner."
   {"super" 0.404 "sub" -0.271})
 
 (def ^:private line-edge-aligned
@@ -7516,7 +7802,7 @@
    it is laid out as a block row (layout-node) or as a fragment inside a
    line box (inline-fragments)."
   [inherited st]
-  (let [font-size (parse-int (:font-size st) (:font-size inherited))]
+  (let [font-size (parse-px (:font-size st) (:font-size inherited))]
     (assoc inherited
            :color (or (:color st) (:color inherited))
            :font-size font-size
@@ -7639,8 +7925,36 @@
                          ;; <input> as exactly the input's height (21px),
                          ;; where treating the bottom edge as the baseline
                          ;; adds the strut's descent under it and gives 27.
+                         ;; the PARENT's x-height, which is what
+                         ;; `vertical-align: middle` centres against (see
+                         ;; the first branch below). `inherited` is the
+                         ;; parent's text context here -- an atomic is a
+                         ;; leaf, so nothing has replaced it yet.
+                         parent-x-height
+                         (:x-height (font-metrics theme (:font-size inherited)
+                                                  (:font-weight inherited)
+                                                  (:font-style inherited)
+                                                  (:font-family inherited)))
                          baseline-offset
                          (cond
+                           ;; `vertical-align: middle` overrides every rule
+                           ;; below it, because it does not ask where the
+                           ;; box's own baseline is at all: it puts the
+                           ;; box's vertical MIDPOINT half an x-height above
+                           ;; the parent's baseline, so the box's baseline
+                           ;; offset is `h/2 + x-height/2` whatever is
+                           ;; inside it. Same law as the inline-box branch
+                           ;; further down (see the middle-shift there),
+                           ;; with `h/2` standing in for the midpoint of a
+                           ;; line-height box, and measured the same way:
+                           ;; in Brave at the harness frame, a 20px
+                           ;; inline-block reports `top: 0.828125` on a
+                           ;; 20.828125px line and a 30px `<img>` puts the
+                           ;; text beside it at 6.171875 -- both exactly
+                           ;; `h/2 + 3.171875` above the baseline.
+                           (and (= "middle" (:vertical-align st)) parent-x-height)
+                           (+ (/ h 2) (/ parent-x-height 2))
+
                            (= :img (:tag child))
                            ;; a REPLACED box sits ON the baseline
                            h
@@ -7706,7 +8020,7 @@
                            ;; the bottom edge as the baseline stacks the
                            ;; strut's descent underneath and gives 36 and
                            ;; 27.
-                           (let [fs (parse-int (:font-size st) (:font-size inherited))
+                           (let [fs (parse-px (:font-size st) (:font-size inherited))
                                  {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                                         (:font-style st) (:font-family st))
                                  lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)]
@@ -7766,6 +8080,15 @@
                                ;; size made the line box 1.5px short and put
                                ;; the subscript ~2.5px high.
                                parent-fs (:font-size inherited)
+                               ;; ...and the parent's X-HEIGHT, read the same
+                               ;; way and for the same reason: `middle`
+                               ;; centres a box on the PARENT's half-x-height
+                               ;; (see the middle-shift branch below).
+                               parent-x-height
+                               (:x-height (font-metrics theme parent-fs
+                                                        (:font-weight inherited)
+                                                        (:font-style inherited)
+                                                        (:font-family inherited)))
                                inherited (inline-inherited inherited st)
                                ;; a `vertical-align` on an inline box moves
                                ;; that box AND everything inside it
@@ -7773,6 +8096,54 @@
                                            (assoc inherited :vertical-align/shift
                                                   (* f parent-fs))
                                            inherited)
+                               ;; `middle` is not a fraction of anything, so
+                               ;; it cannot live in vertical-align-shift: it
+                               ;; puts the box's own vertical MIDPOINT on
+                               ;; `baseline - x-height/2`, which needs the
+                               ;; box's own metrics as well as the parent's.
+                               ;;
+                               ;; Measured in Brave 151 on 2026-08-05 across
+                               ;; 60 parent/child font-size and line-height
+                               ;; combinations, every unconfounded one exact
+                               ;; to LayoutUnit's own 1/64:
+                               ;;
+                               ;;   raise = x-height/2 + line-height/2
+                               ;;           - leading-ascent(a, d, line-height)
+                               ;;
+                               ;; -- i.e. the midpoint of the box CSS 2.1
+                               ;; gives an inline box (`line-height` tall,
+                               ;; `leading-ascent` of it above the baseline),
+                               ;; not the midpoint of the font's content
+                               ;; area. The two differ whenever a declared
+                               ;; line-height is not the font's own: measured,
+                               ;; a 14px child at `line-height: 10px` sits
+                               ;; 0.5px higher than the same child at
+                               ;; `normal`, and it is leading-ascent's FLOOR
+                               ;; that puts it there (half-leading -2.5
+                               ;; floors to -3 while `lh/2` does not).
+                               ;;
+                               ;; Gated on the host reporting an x-height at
+                               ;; all: without one there is nothing honest to
+                               ;; centre against, and `middle` keeps the
+                               ;; documented baseline fallback it has always
+                               ;; had rather than getting an invented em
+                               ;; fraction. Measured, the fraction is not a
+                               ;; constant to invent -- x-height is 0.453em
+                               ;; in this platform's monospace, 0.5186em in
+                               ;; Arial, 0.4816em in Georgia and 0.545em in
+                               ;; Verdana.
+                               inherited
+                               (if (and (= "middle" (:vertical-align st)) parent-x-height)
+                                 (let [fs (:font-size inherited)
+                                       lh (or (:line-height inherited) fs)
+                                       {:keys [ascent descent]}
+                                       (font-metrics theme fs (:font-weight inherited)
+                                                     (:font-style inherited)
+                                                     (:font-family inherited))]
+                                   (assoc inherited :vertical-align/shift
+                                          (+ (/ parent-x-height 2)
+                                             (- (/ lh 2) (leading-ascent ascent descent lh)))))
+                                 inherited)
                                ;; ...and a `top`/`bottom` box carries a MODE
                                ;; instead of a shift, because the shift it
                                ;; needs is not known until the line box is
@@ -7902,6 +8273,21 @@
    exactly the granularity a host needs to paint two different colors/
    weights on one line.
 
+   A word holding a strong RIGHT-TO-LEFT character never merges, with
+   anything, in either direction. Two adjacent rtl words are two runs
+   that layout-inline-run may have to REVERSE against each other (see
+   bidi-reorder-pieces), and a run that has been concatenated into its
+   neighbour's draw-op can no longer move independently of it. The cost
+   is one draw-op per word for rtl-script text and nothing at all for
+   anything else -- `strong-rtl?` is false for every character in every
+   Latin, CJK, Greek or Cyrillic word, so the merge behaviour of every
+   line this engine laid out before is unchanged. Adjacent LEFT-to-right
+   words still merge as they always did, which is not just an
+   optimization: an embedded Latin phrase inside rtl text is ONE
+   left-to-right run in UAX #9 too, and keeping it one piece is what
+   keeps its own words in their own order when the line around it
+   reverses.
+
    Widths come from the host's real `:measure-text` when the theme
    supplies one, else this file's `(long (* 0.6 font-size))` per-character
    approximation — identical to layout-text's own `line-w`, so wrap
@@ -7971,17 +8357,20 @@
           (let [st (:style t)
                 word (:text t)
                 ww (w-of word st)
+                rtl? (strong-rtl? word)
                 sep (if (and (content? pieces) (:space-before? t))
                       (w-of " " (or (:space-style t) st))
                       0)]
             (if (and (content? pieces) (> (+ x sep ww) content-w))
               (recur (rest ts) ww
                      [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww
-                       :shift (:shift t 0) :valign (:valign t)}]
+                       :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}]
                      (flush lines pieces x st))
               (let [last-piece (peek pieces)
                     merge? (and last-piece
                                 (not= :marker (:kind last-piece))
+                                (not rtl?)
+                                (not (:rtl? last-piece))
                                 (= (:style last-piece) st)
                                 (= (:owners last-piece) (:owners t))
                                 (= (:opacity last-piece) (:opacity t))
@@ -7996,7 +8385,7 @@
                                       :w (- x' (:x last-piece))))
                          (conj pieces {:text word :style st :owners (:owners t)
                                        :opacity (:opacity t) :x (+ x sep) :w ww
-                                       :shift (:shift t 0) :valign (:valign t)}))
+                                       :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}))
                        lines))))
           )
         (cond
@@ -8024,11 +8413,111 @@
    Chrome, 14px monospace is ascent 12 / descent 3 (content 15, not 16.8),
    its BOLD face is 14 / 4 (content 18), and 24px is 21 / 5 (content 26).
    Those are the numbers that decide how tall a line is and where each
-   inline box sits inside it."
+   inline box sits inside it.
+
+   A host MAY also report an `:x-height`, and one thing needs it:
+   `vertical-align: middle` centres a box on `baseline - x-height/2` (see
+   inline-fragments). It is optional rather than required because it is
+   optional for a host too -- a browser reads it off a canvas as the ink
+   top of a lowercase `x` (measured, 14px monospace is 6.34375, and reading
+   the same number back off a real `middle` box agrees to 1/64px), but a
+   host with only vertical extents has no way to produce it. There is no
+   default: `middle` keeps its baseline fallback rather than being handed
+   an em fraction, because measured across four families the fraction
+   ranges 0.453em to 0.545em and no single one of them is right."
   [theme font-size weight style family]
   (let [fs (or font-size (:font-size theme) 14)]
     (or (when-let [f (:font-metrics theme)] (f fs weight style family))
         {:ascent fs :descent (long (* 0.2 fs))})))
+
+(defn- avg-advance
+  "The font's AVERAGE character advance, from the host's optional
+   `:avg-advance` theme hook -- the third member of the `:measure-text` /
+   `:font-metrics` family, and the same bargain as both: a host that has
+   the font can answer, a host that does not gets the documented fallback
+   the caller already had.
+
+   It exists because a form control's intrinsic width is `size` (or `cols`)
+   of THIS metric and nothing else, and no amount of string measurement
+   produces it: `:measure-text` measures a string, and the closest proxy
+   this file could ask for was the `0` glyph, which is 6% too wide in the
+   control face (see ua-control-font for the pair of cancelling errors that
+   proxy used to be half of).
+
+   What it actually is, measured in Brave 151 on 2026-08-05 over 10
+   families x 11 sizes x 14 column counts (1,540 `<textarea cols=n>` widths,
+   whose intrinsic width is exactly `ceil(avg * cols)` plus a constant
+   gutter, so each one reads the metric off directly):
+
+     avg = max(w, round(w))   where w is the `x` glyph's advance
+
+   -- i.e. the `x` advance, rounded UP to a whole pixel when its fraction
+   is over a half and left alone when it is under. All 1,540 predictions
+   were exact. The rounding is half-UP, not half-to-even, and there is a
+   witness: Zapfino at 20px has an `x` advance of exactly 12.5 and its
+   controls are sized from 13. It is not the mean of an advance table (that is 5.4% out at
+   26.6666px, see ua-control-font), it is not the `0` advance, and it is not
+   a fixed em fraction: measured, `x` is 0.5em in Arial, 0.5918em in
+   Verdana, 0.536em in this platform's `sans-serif` and 0.5049em in Georgia.
+
+   There is a second path, and it is keyed on the FAMILY NAME rather than
+   on anything measurable about the font: Blink keeps a list of families
+   whose summary metric it distrusts, and for those an `<input>`/
+   `<textarea>` is sized from the `0` advance with no max-advance slack at
+   all. Measured by the same method on 2026-08-05, fifteen families on
+   this platform take that path -- American Typewriter, Arial Hebrew,
+   Chalkboard, Cochin, Courier, Euphemia UCAS, Geneva, Gill Sans,
+   Helvetica, Hoefler Text, Lucida Grande, Marker Felt, Monaco, Osaka and
+   Times -- while Skia, Thonburi and Zapfino, which older copies of that
+   list also name, do NOT. `Arial` and `Helvetica` are the sharpest
+   demonstration that it is the NAME: their canvas metrics are identical
+   here to the last bit, and their controls are 6% different widths.
+
+   That is the HOST's business, not this file's: the hook answers for
+   whatever family it is handed, and this note is here so the host has
+   somewhere to read the list off.
+
+   `fallback` is what the caller measured for itself, so a host with no
+   hook keeps its own answer byte for byte."
+  [theme font-size weight style family fallback]
+  (or (when-let [f (:avg-advance theme)] (f font-size weight style family))
+      fallback))
+
+(defn- max-advance
+  "The font's MAXIMUM character width, from the host's optional
+   `:max-advance` theme hook.
+
+   Only an `<input size=n>` needs it, and it needs it because Blink's
+   intrinsic width for one is `ceil(avg * n + (max - avg))` -- `n` average
+   characters plus one glyph's worth of slack, which is why an
+   `<input size=1>` is 12px of content in the control face where one average
+   character is 7.
+
+   Measured the same way and on the same day as avg-advance, over the 1,540
+   `<input size=n>` widths beside the textareas: this quantity is the
+   font's ASCENT, exactly. Not a max over any advance table (in Arial the
+   widest ASCII glyph is 1.015em where this is 0.9em), not a per-family em
+   ratio (no single ratio reproduces it across sizes for monospace, Arial,
+   Times New Roman, sans-serif or serif), and not otherwise derivable from
+   glyph measurement -- but a host that can answer `:font-metrics` already
+   has it, because it IS `:font-metrics`' ascent. Blink says so out loud:
+   `SimpleFontData::PlatformInit` falls back to `-fAscent` when the
+   platform's font tables carry no max-char-width, and macOS is a platform
+   that carries none.
+
+   The blocklisted families avg-advance names get no slack at all here
+   (measured: an `<input size=n>` in Helvetica or Courier is exactly
+   `ceil(avg * n)`), which is Blink refusing to trust that font's metrics
+   twice over rather than a separate rule.
+
+   With all 1,540 input widths and all 1,540 textarea widths, the two hooks
+   together predicted 3,080 of 3,080 exactly.
+
+   The fallback is `avg` -- no slack -- because that is what this file
+   charged before the hook existed."
+  [theme font-size weight style family fallback]
+  (or (when-let [f (:max-advance theme)] (f font-size weight style family))
+      fallback))
 
 (defn- inline-line-metrics
   "One line box's own height and baseline offset, built the way real CSS
@@ -8242,6 +8731,22 @@
    line breaker wrapped against. Returns the `{:draw :h}` shape
    layout-children-block already advances on.
 
+   `direction` enters at exactly two points, both of which come from the
+   containing block's own value and neither of which is a special case
+   for `rtl`. Which EDGE a line packs against is line-align-offset's
+   answer to `text-align` and `direction` together, the same one
+   layout-text gets. What ORDER a line's pieces come out in is
+   bidi-reorder-pieces' -- applied per line, AFTER breaking, because a
+   browser breaks in logical order and reorders each resulting line
+   (measured: a wrapped rtl Hebrew paragraph puts words 1-3 on line one
+   and 4-5 on line two, each line reversed within itself, not the whole
+   paragraph reversed and then broken). A `<br>`'s own zero-width box
+   moves with the same rule: it sits at the line's inline-END edge, which
+   is the RIGHT of the line's content in ltr and its LEFT in rtl
+   (measured in Brave, `<p style=\"direction:rtl;width:300px\">aaa<br>bb
+   cc</p>` reports the `<br>` at x=279, the left end of a line whose text
+   runs 279..300).
+
    Scope-cuts, all deliberate and each documented at the function that
    owns it: replaced/form-control elements are not inline-level here
    (inline-level-tags), an inline box containing a block box falls back to
@@ -8256,6 +8761,8 @@
         {fragments :fragments oof :out-of-flow} (inline-fragments theme inherited opacity inner-w items)
         lines (inline-line-breaker theme inner-w (inline-tokens fragments))
         text-align (:text-align inherited)
+        direction (:direction inherited)
+        rtl? (= "rtl" direction)
         ;; An out-of-flow descendant of one of this run's inline boxes,
         ;; ready for layout-absolute-children -- see inline-fragments for
         ;; how it got here and layout-children-block's own out-of-flow
@@ -8304,11 +8811,19 @@
         (if-let [line (first ls)]
           (let [{line-h :h baseline-off :baseline line-pieces :pieces}
                 (inline-line-metrics line inherited theme)
-                align-offset (case text-align
-                               "center" (/ (max 0 (- inner-w (:w line))) 2)
-                               "right" (max 0 (- inner-w (:w line)))
-                               0)
+                align-offset (line-align-offset text-align direction (:w line) inner-w)
                 base-x (+ content-x padding align-offset)
+                ;; UAX #9 rule L2, on this line only, in visual order. An
+                ;; OUTSIDE list marker is held out of it: it is painted at
+                ;; its own negative x, before the line's content edge,
+                ;; and it is not a run on the line at all (see
+                ;; inline-line-breaker for why it does not move the pen
+                ;; either). Which side of an rtl list item its marker sits
+                ;; on is a separate, unmeasured question and is left
+                ;; exactly where it was.
+                line-pieces (let [marker? #(= :marker (:kind %))]
+                              (into (vec (filter marker? line-pieces))
+                                    (bidi-reorder-pieces rtl? (vec (remove marker? line-pieces)))))
                 baseline (+ y baseline-off)
                 ;; One inline ELEMENT's own box on this line, for every
                 ;; owner the piece passed through. An inline box's height
@@ -8340,7 +8855,7 @@
                    (reduce
                     (fn [[rects face] owner]
                       (let [ost (:st owner)
-                            face {:fs (parse-int (:font-size ost) (:fs face))
+                            face {:fs (parse-px (:font-size ost) (:fs face))
                                   :weight (or (:font-weight ost) (:weight face))
                                   :style (or (:font-style ost) (:style face))
                                   :family (or (:font-family ost) (:family face))}
@@ -8455,8 +8970,11 @@
                    ;; 1.2em approximation centred in the line box.
                    ;; Measured in Brave, `<p>a<br>b</p>` reports the <br>
                    ;; at (7, 2, 0, 15) where the 1.2em rule gave h=16.
+                   ;; "The end of the line" is the inline-END edge, which
+                   ;; is the line's LEFT in an rtl block -- see this fn's
+                   ;; own docstring for the measurement.
                    (owner-fragments rects (:break-owners line) 0
-                                    (+ base-x (:w line)) 0 opacity)))
+                                    (+ base-x (if rtl? 0 (:w line))) 0 opacity)))
           {:draw (into (inline-owner-ops theme rects) text-draws)
            :h (+ (- y content-y) padding)
            :out-of-flow (finish-oof rects)})))))
@@ -9133,7 +9651,30 @@
               ;; 300px `margin: 0 auto` block in a 200px container sits at
               ;; x=0 and is 300 wide, NOT centred at x=-50.
               free (max 0 (- content-w ml mr child-w))
-              rtl? (= "rtl" (:direction inherited))
+              ;; ...but a bare TEXT child is not a block box, and this rule
+              ;; is not its rule. Real CSS wraps such a child in an
+              ;; ANONYMOUS block box that is as wide as its containing
+              ;; block, so the equation above leaves it no `free` at all --
+              ;; where the words sit inside it is `text-align`'s and
+              ;; `direction`'s question about a LINE, which is
+              ;; line-align-offset's answer inside layout-text.
+              ;;
+              ;; The distinction only became visible when that answer
+              ;; existed: layout-text's box SHRINK-WRAPS its widest line
+              ;; (a reporting convenience -- see its own `w`), so a text
+              ;; child looked like a narrow block here and got shifted to
+              ;; the rtl edge by this rule, which was the right ANSWER
+              ;; reached by the wrong mechanism. With both in force
+              ;; `<p style="direction: rtl">alpha beta</p>` was shifted
+              ;; right TWICE and its text left the paragraph entirely.
+              ;; The line rule is the one kept because it is the one that
+              ;; generalizes: it places each WRAPPED line by its own
+              ;; width, where this rule can only move the whole box by the
+              ;; widest line's leftover, and it is the only one of the two
+              ;; that `text-align` can override.
+              rtl? (and (= "rtl" (:direction inherited))
+                        (nil? (real-text-child child))
+                        (not (generated-node? child)))
               auto-dx (cond
                         (and ml-auto? mr-auto?) (quot free 2)
                         ml-auto? free
@@ -9449,7 +9990,7 @@
   (let [tag (:tag node)
         w (resolve-width st avail-width)
         inset (content-inset st)
-        control-font-size (parse-int (:font-size st) (:font-size theme))
+        control-font-size (parse-px (:font-size st) (:font-size theme))
         ;; A control's content box is `rows` LINE BOXES of its own font at
         ;; its own `line-height: normal` -- i.e. `rows * (ascent + descent)`
         ;; -- and NOT the page's line-height, which the control's UA `font:`
@@ -10372,7 +10913,7 @@
      (generated-node? node)
      (let [gstyle (:generated/style node)
            color (or (:color gstyle) (:color inherited))
-           font-size (parse-int (:font-size gstyle) (:font-size inherited))
+           font-size (parse-px (:font-size gstyle) (:font-size inherited))
            line-height (resolve-line-height (:line-height gstyle) font-size
                                             (or (inherited-line-height inherited font-size) (:line-height theme)))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
@@ -10389,7 +10930,7 @@
            text-overflow (or (:text-overflow gstyle) (:text-overflow inherited))]
        (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family
                     {:x text-shadow-x :y text-shadow-y :blur text-shadow-blur :color text-shadow-color}
-                    text-decoration text-align text-transform white-space text-overflow
+                    text-decoration text-align (:direction inherited) text-transform white-space text-overflow
                     (:overflow-wrap inherited) (:generated/text node)))
 
      (text-node? node)
@@ -10398,7 +10939,8 @@
                   {:x (:text-shadow-x inherited) :y (:text-shadow-y inherited)
                    :blur (:text-shadow-blur inherited) :color (:text-shadow-color inherited)}
                   (:text-decoration inherited)
-                  (:text-align inherited) (:text-transform inherited) (:white-space inherited)
+                  (:text-align inherited) (:direction inherited)
+                  (:text-transform inherited) (:white-space inherited)
                   (:text-overflow inherited) (:overflow-wrap inherited) node)
 
      (= :text (:node/type node))
@@ -10429,7 +10971,7 @@
                opacity (* opacity (:opacity st)
                           (if (contains? #{"hidden" "collapse"} (:visibility st)) 0 1))
                color (or (:color st) (:color inherited))
-               font-size (parse-int (:font-size st) (:font-size inherited))
+               font-size (parse-px (:font-size st) (:font-size inherited))
                line-height (resolve-line-height (:line-height st) font-size
                                                 (or (inherited-line-height inherited font-size)
                                                     (:line-height theme))
@@ -10451,31 +10993,48 @@
                ;; ---- how much of `direction: rtl` this engine implements ----
                ;;
                ;; `direction` is an inherited property, so it travels on the
-               ;; same map every other inherited property does. What reads it
-               ;; is layout-children-block, and ONLY for the block-level
-               ;; question: which edge the leftover space of an
-               ;; over-constrained block goes to. In an rtl containing block a
-               ;; block narrower than its container sits against the RIGHT
-               ;; edge, because CSS 2.1 SS10.3.3 solves the over-constrained
-               ;; equation by ignoring the specified `margin-LEFT` under rtl
-               ;; where it ignores `margin-right` under ltr. Measured in
-               ;; Brave: a 60px block in a 200px rtl container is at x=140
-               ;; there and was at x=0 here.
+               ;; same map every other inherited property does. THREE places
+               ;; read it, and each documents its own half:
                ;;
-               ;; What is NOT implemented, and is not a matter of wiring one
-               ;; more property through: the Unicode bidirectional algorithm.
-               ;; There is no reordering of inline content here at all -- no
-               ;; resolved embedding levels, no neutral resolution, no
-               ;; reversal of runs -- so a line of text in an rtl block comes
-               ;; out in DOM order. `text/rtl-with-inline-elements` measures
-               ;; exactly that gap and is expected to keep failing;
-               ;; `text-align`'s own direction-relative `start`/`end` values
-               ;; are deliberately left alone too, because right-aligning
-               ;; an rtl line would make that case's `<b>` land near the
-               ;; browser's x by symmetry (its text either side of the `<b>`
-               ;; is the same width) while the words on the line were still
-               ;; in the wrong order. A number improved by a coincidence is
-               ;; worse than a number that says the gap is still there.
+               ;; - layout-children-block, for the block-level question of
+               ;;   which edge the leftover space of an over-constrained
+               ;;   block goes to. In an rtl containing block a block
+               ;;   narrower than its container sits against the RIGHT edge,
+               ;;   because CSS 2.1 SS10.3.3 solves the over-constrained
+               ;;   equation by ignoring the specified `margin-LEFT` under
+               ;;   rtl where it ignores `margin-right` under ltr. Measured
+               ;;   in Brave: a 60px block in a 200px rtl container is at
+               ;;   x=140 there and was at x=0 here.
+               ;; - line-align-offset, for which edge a LINE packs against
+               ;;   and for `text-align`'s direction-relative `start`/`end`.
+               ;; - bidi-visual-order / bidi-reorder-pieces, for UAX #9 rule
+               ;;   L2 at word granularity.
+               ;;
+               ;; The last two arrived together, and only together, because
+               ;; separately either one of them is a coincidence. Until
+               ;; 2026-08-05 this comment said `text-align`'s
+               ;; direction-relative values were "deliberately left alone",
+               ;; on the reasoning that right-aligning an rtl line would
+               ;; land `text/rtl-with-inline-elements`'s `<b>` near the
+               ;; browser's x by symmetry "while the words on the line were
+               ;; still in the wrong order". Measuring it says otherwise:
+               ;; Brave does NOT reorder that line, because every word on it
+               ;; is strong LEFT-to-right and UAX #9 resolves an all-L line
+               ;; in an rtl paragraph to a single left-to-right run placed
+               ;; at the line's right end. `alpha <b>beta</b> gamma` sits at
+               ;; 185.48/227.48/265 against the ltr layout's 0/42/79.52 --
+               ;; the SAME order, every word shifted by the same 185.48. The
+               ;; shift was never the coincidence; believing the words had
+               ;; to move was the error. What genuinely does reverse is
+               ;; strong-rtl text, and that is what bidi-visual-order does
+               ;; and what `text/rtl-hebrew-*` measures -- which is why both
+               ;; halves are here rather than the placement half alone.
+               ;;
+               ;; What is still NOT implemented is stated at strong-rtl?:
+               ;; nothing below a word carries a direction, so per-character
+               ;; bidi classes, the W-rules for numbers, the explicit
+               ;; embedding/override/isolate controls and the `unicode-bidi`
+               ;; property are all absent.
                direction (or (:direction st) (:direction inherited))
                inherited (assoc inherited
                                 :direction direction
@@ -10622,6 +11181,29 @@
    `opts` map -- can supply `:measure-text` to make this engine's
    word-wrap decisions agree with how the text will actually be painted,
    with no other call-site changes needed anywhere in that chain.
+
+   Three more OPTIONAL font hooks sit beside it, all the same bargain --
+   absent means this file keeps the answer it always had, present means a
+   host that can see the font supplies a fact this engine cannot derive:
+
+   - `:font-metrics` -- `(fn [font-size weight style family]
+     {:ascent px :descent px :x-height px})`. Ascent and descent are what
+     a line box is actually built from; `:x-height` (itself optional
+     within the map) is what `vertical-align: middle` centres against. A
+     browser host reads all three off the same canvas
+     `TextMetrics` object it already holds -- `fontBoundingBoxAscent`,
+     `fontBoundingBoxDescent`, and the `actualBoundingBoxAscent` of a
+     lowercase `x`.
+   - `:avg-advance` -- `(fn [font-size weight style family] px)`, the
+     font's average character advance. A form control's intrinsic width is
+     `size` (or `cols`) of THIS and nothing else, and no string
+     measurement produces it. See avg-advance for the measured law that
+     recovers it from the `x` glyph.
+   - `:max-advance` -- `(fn [font-size weight style family] px)`, the
+     font's maximum character width, which an `<input size=n>` adds one
+     glyph's worth of on top of its `n` average characters. Measured, it
+     is the font's ascent, so a host that can answer `:font-metrics`
+     already has it. See max-advance.
 
    `opts` also accepts an OPTIONAL `:height` -- the viewport's height.
    Nothing about normal flow needs it (a document is as tall as its
