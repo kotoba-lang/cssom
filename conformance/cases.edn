@@ -2398,6 +2398,33 @@
   :group :gap
   :html "<div style=\"width: 300px; display: flex; flex-wrap: wrap; gap: 6px 18px\"><div style=\"width: 100px; height: 20px\">a</div><div style=\"width: 100px; height: 20px\">b</div><div style=\"width: 100px; height: 20px\">c</div></div>"}
 
+ {:id :gap/percentage-row-gap-with-a-definite-height
+  :group :gap
+  ;; The non-cyclic half of the pair above, and the control that says the
+  ;; 4px there is a SECOND PASS rather than a small percentage: with the
+  ;; grid's height declared there is nothing to compute first, and Brave
+  ;; puts the second row at y=40 -- 10% of 200, not of the 40px of content.
+  :html "<div style=\"width: 300px; height: 200px; display: grid; grid-template-columns: 1fr; grid-template-rows: 20px 20px; row-gap: 10%\"><div>a</div><div>b</div></div>"}
+
+ {:id :gap/percentage-row-gap-on-an-auto-flex-column
+  :group :gap
+  ;; The same declaration on a flex container instead of a grid, and it
+  ;; does something else: measured in Brave 151 on 2026-08-06, a
+  ;; `flex-direction: column` box with an AUTO height resolves a
+  ;; percentage row gap to ZERO -- second item at y=20, container 40, no
+  ;; overflow -- at 10%, 50% and 200% alike. Blink gives a flex
+  ;; container's block axis no second pass; only a definite `height` does
+  ;; (and a min/max clamp does not, where on a grid it does).
+  :html "<div style=\"width: 300px; display: flex; flex-direction: column; row-gap: 10%\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div></div>"}
+
+ {:id :gap/percentage-column-gap-on-an-inline-grid
+  :group :gap
+  ;; The INLINE axis is cyclic too, wherever the width is not definite,
+  ;; and it takes the same two passes. Brave: this box is 120 wide -- the
+  ;; gap-free sum of its two 60px tracks -- with a 12px gap that overflows
+  ;; it, putting the second column at x=72.
+  :html "<div style=\"width: 400px\"><div style=\"display: inline-grid; grid-template-columns: 60px 60px; column-gap: 10%\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div></div></div>"}
+
  ;; ---------------------------------------------------------------------
  ;; Scroll containers.
  ;; ---------------------------------------------------------------------
@@ -3071,37 +3098,58 @@
  ;; cssom.core's UA stylesheet for the 4px that separates 304x154 from
  ;; 300x150.
  ;;
- ;; The <img> cases beside them measure the other half, which is NOT
- ;; fixed and is the scope line of that round: an intrinsic RATIO, which
- ;; this engine has never had to read because every image in the corpus
- ;; until now was a 1x1 GIF with both dimensions declared. The image here
- ;; is a 40x20 SVG as a data URI, so the 2:1 ratio is a property of the
- ;; resource rather than of the attributes -- and a resource's own size is
- ;; a property of the bytes at the far end of a URL, which this engine has
- ;; no loader, no decoder and no image draw-op for. See
- ;; `replaced-intrinsic-size`, which is where a host-supplied hook of the
- ;; same shape as `:measure-text` would deliver one.
+ ;; The <img> cases beside them measure the other half: an intrinsic
+ ;; RATIO, which this engine had never had to read because every image in
+ ;; the corpus until 2026-08-06 was a 1x1 GIF with both dimensions
+ ;; declared. The image here is a 40x20 SVG as a data URI, so the 2:1
+ ;; ratio is a property of the RESOURCE rather than of the attributes --
+ ;; and a resource's own size is a property of the bytes at the far end of
+ ;; a URL, which no pure layout engine can see.
+ ;;
+ ;; They agree now, through the OPTIONAL `:image-size` theme hook
+ ;; `(fn [src] {:w .. :h ..})` -- the same bargain as `:measure-text`, and
+ ;; `replaced-intrinsic-size` is where the answer arrives. This harness
+ ;; plays the host by reading each src's decoded size off the ORACLE's own
+ ;; decoder (see the measurement script's `__images__` probe for why it is
+ ;; not decoded here instead: the 1x1 GIF ten other cases use has a
+ ;; well-formed header saying 1x1 and no image data, so a header-sniffing
+ ;; decoder in the harness would disagree with Brave -- which reports 0 and
+ ;; paints a broken-image icon -- and that disagreement would be scored as
+ ;; a layout bug). The engine still emits no image draw-op: what the hook
+ ;; buys is the BOX a browser reserves for the picture, exactly as the
+ ;; 300x150 default object size does for a <video> nothing here decodes.
 
  {:id :replaced/img-intrinsic-size
   :group :replaced
-  ;; Brave: 40x20, from the resource alone. Engine: 0x0, and 0x0 is right
-  ;; for what this engine knows -- measured, a bare <img> and an <img>
-  ;; whose src 404s are BOTH 0x0 in Brave, so the divergence here is
-  ;; entirely "the data URI decodes to 40x20" and not the box model.
+  ;; Brave: 40x20, from the resource alone, and this engine agrees once a
+  ;; host answers `:image-size`.
+  ;;
+  ;; HONEST LIMIT OF THIS ONE CASE: a bare <img>'s box IS its intrinsic
+  ;; size, and the harness's host answer comes from the oracle's decoder,
+  ;; so this case asserts that the size is consulted at all and nothing
+  ;; more. The two beside it are where the ALGORITHM is measured -- there
+  ;; the box (200x100, 120x60) is not the fact (40x20) and has to be
+  ;; derived from it.
+  ;;
+  ;; Without a hook it is 0x0, which is also what Brave gives an <img>
+  ;; with no `src` at all -- see `replaced-default-size`, and note that a
+  ;; BROKEN src is a third thing again (a 16x16 broken-image icon), which
+  ;; this engine does not model and which no case here exercises.
   :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\"></div>"}
 
  {:id :replaced/img-width-only-keeps-the-ratio
   :group :replaced
   ;; Brave: 200x100 -- the declared width and the resource's 2:1 ratio.
-  ;; Engine: 200x0, i.e. the width alone. The ratio machinery to solve the
-  ;; other axis EXISTS (replaced-content-size does exactly this for a
-  ;; <canvas>); what is missing is only the resource's size to build a
-  ;; ratio from.
+  ;; The ratio machinery to solve the other axis was already here
+  ;; (replaced-content-size does exactly this for a <canvas>); what was
+  ;; missing was only the resource's size to build a ratio from, which is
+  ;; why closing this needed a host hook and not a box-model change. It
+  ;; was 200x0 until 2026-08-06.
   :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\" style=\"width: 200px\"></div>"}
 
  {:id :replaced/img-height-only-keeps-the-ratio
   :group :replaced
-  ;; The mirror: Brave 120x60, engine 0x60.
+  ;; The mirror: Brave 120x60, and 0x60 here until the hook existed.
   :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\" style=\"height: 60px\"></div>"}
 
  {:id :replaced/img-attribute-height-survives-a-css-width
@@ -3119,6 +3167,23 @@
   :group :replaced
   ;; AGREES: 40x20 on both sides, with nothing to load.
   :html "<div style=\"width: 400px\"><img width=\"40\" height=\"20\"></div>"}
+
+ {:id :replaced/img-max-width-clamps-before-the-ratio
+  :group :replaced
+  ;; Where the clamp goes, which is the one thing the ratio path can get
+  ;; backwards: Brave says 20x10 -- min/max has its say on the WIDTH and
+  ;; the ratio then solves the height from the clamped number, rather than
+  ;; the resource's 40x20 being clipped to 20 wide and left 20 tall.
+  :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\" style=\"max-width: 20px\"></div>"}
+
+ {:id :replaced/img-border-and-padding-sit-outside-the-resource-size
+  :group :replaced
+  ;; A resource's size is a CONTENT size in both box-sizing modes, which
+  ;; is the same fact an <iframe>'s UA `border: 2px inset` establishes from
+  ;; the other side. Brave: 216x116 here (a 200x100 content box plus 8px
+  ;; of border+padding on each edge), and 200x108 for the same declaration
+  ;; under `box-sizing: border-box` (a 184x92 content box).
+  :html "<div style=\"width: 400px\"><img src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg==\" style=\"width: 200px; border: 5px solid #000; padding: 3px\"></div>"}
 
  {:id :replaced/canvas-default-size
   :group :replaced
