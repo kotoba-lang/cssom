@@ -7446,17 +7446,45 @@
                                [:div {:height 20} "a"]])]
     (is (= 20 (:h root)))
     (is (= 0 (:y after))))
-  ;; a declared block-axis border stops it too, read from the raw
-  ;; declaration because this engine's box model has one uniform
-  ;; border-width -- see `self-collapsing-block?`
+  ;; a block-axis border stops it too, and now costs its own pixel:
+  ;; measured in Brave 151 on 2026-08-06, the empty box is 1px tall at y=0,
+  ;; the sibling is at y=15 and the container is 35. This used to be 34/14
+  ;; -- the box did not collapse (a raw-declaration test in
+  ;; `self-collapsing-block?` saw the shorthand) but drew no border, so it
+  ;; was 0 tall. The declarations are written as the LONGHANDS the cascade
+  ;; produces, because these helpers build attrs directly and never run it.
+  (let [[root empty-box after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14
+                                      :border-top-width 1 :border-top-style "solid"}]
+                               [:div {:height 20} "a"]])]
+    (is (= 35 (:h root)))
+    (is (= 1 (:h empty-box)))
+    (is (= 15 (:y after))))
+  ;; the BOTTOM one does it too, and by the same numbers
   (let [[root _ after]
         (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14
-                                      :border-top "1px solid red"}]
+                                      :border-bottom-width 1 :border-bottom-style "solid"}]
                                [:div {:height 20} "a"]])]
-    (is (= 34 (:h root))
-        "not the browser's 35 -- this engine draws no per-side border, so
-         the box is 0 tall rather than 1 -- but it does NOT collapse")
-    (is (= 14 (:y after)))))
+    (is (= 35 (:h root)))
+    (is (= 15 (:y after))))
+  ;; ...and the two that do NOT, both measured on the same page: an
+  ;; INLINE-axis border is not on an edge a margin collapses through
+  ;; (Brave: container 20, sibling at y=0), and a `border-top: none` is
+  ;; 0px wide, so it is not a border at all. The second used to
+  ;; disqualify, because the raw-declaration test could not read a
+  ;; shorthand's style.
+  (let [[root _ after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14
+                                      :border-left-width 5 :border-left-style "solid"}]
+                               [:div {:height 20} "a"]])]
+    (is (= 20 (:h root)))
+    (is (= 0 (:y after))))
+  (let [[root _ after]
+        (root-and-block-boxes [[:div {:margin-top 14 :margin-bottom 14
+                                      :border-top-width 1 :border-top-style "none"}]
+                               [:div {:height 20} "a"]])]
+    (is (= 20 (:h root)))
+    (is (= 0 (:y after)))))
 
 (deftest a-zero-height-box-with-content-in-it-is-not-self-collapsing
   ;; The shape `child-h` alone cannot tell apart. Brave, `height: 0` with
@@ -10710,21 +10738,99 @@
          (tm-boxes (str "<div style=\"width: 300px; direction: rtl; padding-inline-start: 50px\">"
                         "<p style=\"margin: 0\">p</p></div>")))))
 
-(deftest a-logical-border-has-no-per-side-border-to-land-on
-  ;; SCOPE CUT, asserted rather than left as prose. The cascade resolves
-  ;; `border-inline-start: 5px solid #000` to `border-left-*` correctly (see
-  ;; cssom.core-test), and cssom.layout reads a single UNIFORM
-  ;; `:border-width` -- so nothing changes here, and
-  ;; `:logical/border-inline-start` stays a divergence for the SAME reason
-  ;; `:box/border-left-width-only` already is, not a new one.
-  ;; Brave: the div is 305 wide with its <p> at x=5.
-  (is (= [[:div 0 0 300 20] [:p 0 0 300 20]]
+(deftest a-logical-border-lands-on-the-physical-side-it-resolved-to
+  ;; Was `a-logical-border-has-no-per-side-border-to-land-on`, a scope cut
+  ;; asserted rather than left as prose: the cascade resolved
+  ;; `border-inline-start: 5px solid #000` to `border-left-*` correctly and
+  ;; cssom.layout read one UNIFORM `:border-width`, so the physical
+  ;; spelling rendered identically wrong. Both now land.
+  ;;
+  ;; Brave 151, 2026-08-06: the div is 305 wide with its <p> at x=5 -- a
+  ;; content-box `width: 300px` plus the border outside it.
+  (is (= [[:div 0 0 305 20] [:p 5 0 300 20]]
          (tm-boxes (str "<div style=\"width: 300px; border-inline-start: 5px solid #000\">"
                         "<p style=\"margin: 0\">p</p></div>"))))
-  ;; the physical spelling, identical, which is what makes it one gap
-  (is (= [[:div 0 0 300 20] [:p 0 0 300 20]]
+  ;; the physical spelling, identical, which is what makes it one rule
+  (is (= [[:div 0 0 305 20] [:p 5 0 300 20]]
          (tm-boxes (str "<div style=\"width: 300px; border-left: 5px solid #000\">"
-                        "<p style=\"margin: 0\">p</p></div>")))))
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  ;; and the block-axis mirror: Brave gives `border-top: 10px solid` a
+  ;; 26.797-tall box with the <p> at y=10 and the full 300 wide -- a top
+  ;; border costs height and nothing else.
+  (is (= [[:div 0 0 300 30] [:p 0 10 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border-top: 10px solid #000\">"
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  ;; the control that keeps all three honest: `border-style: none` makes
+  ;; the computed width ZERO however wide it was declared. Brave puts the
+  ;; <p> at (0,0) in a 300x16.797 box.
+  (is (= [[:div 0 0 300 20] [:p 0 0 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border-width: 10px; border-style: none\">"
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  ;; ...and the other half of that control: an omitted STYLE is `none`, so
+  ;; a width-only per-side shorthand takes no space either (Brave:
+  ;; 300x16.797, <p> at 0,0), while an omitted WIDTH is `medium` = 3px, so
+  ;; a style-only one takes three (Brave: 306x22.797, <p> at 3,3).
+  (is (= [[:div 0 0 300 20] [:p 0 0 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border-top: 10px\">"
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  (is (= [[:div 0 0 306 26] [:p 3 3 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border: solid\">"
+                        "<p style=\"margin: 0\">p</p></div>"))))
+  ;; declaration ORDER, which is why the `border` shorthand has to write
+  ;; all twelve longhands: Brave resolves this pair to 2px on all four
+  ;; sides (304x20.797) and the reverse order to 10/2/2/2 (304x28.797).
+  (is (= [[:div 0 0 304 24] [:p 2 2 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border-top: 10px solid red;"
+                        " border: 2px solid blue\"><p style=\"margin: 0\">p</p></div>"))))
+  (is (= [[:div 0 0 304 32] [:p 2 10 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px; border: 2px solid blue;"
+                        " border-top: 10px solid red\"><p style=\"margin: 0\">p</p></div>")))))
+
+(deftest a-details-with-no-summary-reserves-the-band-a-browser-generates-one-in
+  ;; Was out of scope: `with-details-visibility` hid every child and the
+  ;; element came out 0px tall, so the whole page below it moved up.
+  ;; Chromium puts a `<summary>Details</summary>` in the SHADOW tree, so
+  ;; the light DOM has nothing to lay out -- see `details-summary-band`
+  ;; for why this is a band and not a synthesised child.
+  ;;
+  ;; Measured in Brave 151 on 2026-08-06 at `line-height: 20px`, which is
+  ;; the corpus page's own: a summary-less `<details><p>Body</p></details>`
+  ;; in a 300px wrapper is 300x20 CLOSED (its `<p>` reported at y=20 and
+  ;; never painted) and 300x40 OPEN.
+  (is (= [[:div 0 0 300 40] [:details 0 0 300 20] [:div 0 20 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px\"><details><p>Body</p></details>"
+                        "<div style=\"height: 20px\">after</div></div>"))))
+  (is (= [[:div 0 0 300 60] [:details 0 0 300 40] [:p 0 20 300 20] [:div 0 40 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px\"><details open>"
+                        "<p style=\"margin: 0\">Body</p></details>"
+                        "<div style=\"height: 20px\">after</div></div>"))))
+  ;; a `<details>` that HAS one is unchanged: the summary IS the 20
+  (is (= [[:div 0 0 300 40] [:details 0 0 300 20] [:summary 0 0 300 20] [:div 0 20 300 20]]
+         (tm-boxes (str "<div style=\"width: 300px\"><details><summary>More</summary>"
+                        "<p>Body</p></details><div style=\"height: 20px\">after</div></div>"))))
+  ;; ...and an empty one still reserves it (Brave: `<details></details>`
+  ;; is 300x20)
+  (is (= [[:div 0 0 300 20] [:details 0 0 300 20]]
+         (tm-boxes "<div style=\"width: 300px\"><details></details></div>")))
+  ;; the band is one LINE BOX, not a constant and not the font size.
+  ;; Brave: `line-height: 40px` makes it 40, and `font-size: 30px` at the
+  ;; page's own `line-height: 20px` leaves it 20.
+  (is (= [[:div 0 0 300 40] [:details 0 0 300 40]]
+         (tm-boxes "<div style=\"width: 300px\"><details style=\"line-height: 40px\"><p>B</p></details></div>")))
+  (is (= [[:div 0 0 300 20] [:details 0 0 300 20]]
+         (tm-boxes "<div style=\"width: 300px\"><details style=\"font-size: 30px\"><p>B</p></details></div>")))
+  ;; and it sits INSIDE the padding and the border, where a real first
+  ;; child would. Brave: `padding: 8px` is 36 tall with the <p> at (8,28),
+  ;; `border: 5px solid` is 30 tall with the <p> at (5,25).
+  (is (= [[:div 0 0 300 36] [:details 0 0 300 36]]
+         (tm-boxes "<div style=\"width: 300px\"><details style=\"padding: 8px\"><p>B</p></details></div>")))
+  (is (= [[:div 0 0 300 30] [:details 0 0 300 30]]
+         (tm-boxes "<div style=\"width: 300px\"><details style=\"border: 5px solid #000\"><p>B</p></details></div>")))
+  ;; NOT the label. Chromium draws the word `Details` and a disclosure
+  ;; triangle in that band; both are shadow content the oracle's own Range
+  ;; cannot read, and both are localised. The band is reserved and nothing
+  ;; is drawn in it.
+  (is (= [] (tm-texts "<div style=\"width: 300px\"><details><p>Body</p></details></div>"))))
 
 ;; ---- stacking contexts and paint order (CSS 2.1 Appendix E) -------------
 ;;

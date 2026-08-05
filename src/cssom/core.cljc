@@ -1004,9 +1004,26 @@
 (def ^:private border-style-keywords
   #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
 
+(def ^:private line-width-keywords
+  "CSS's three named `<line-width>` values. Kept as the KEYWORD here, not
+   as the pixel number, because this namespace holds SPECIFIED values and
+   cssom.layout resolves them (`border-px`) -- the same split every other
+   non-length value in this file already takes.
+
+   Measured in Brave 151 on 2026-08-06:
+   `border-style: solid; border-width: thin medium thick 0` reports
+   `1px 3px 5px 0px`, and `border: medium solid` reports 3px on all four
+   sides. `medium` is also the INITIAL value of every `border-*-width`
+   longhand, which is why `border-top: solid` -- a shorthand with no width
+   token at all -- is 3px rather than 0 (measured: a 300px block with
+   `border-top: solid` is 19.797 tall against a 16.797 bare one)."
+  #{"thin" "medium" "thick"})
+
 (defn- border-shorthand-width-token?
   [tok]
-  (boolean (or (re-matches #"-?\d+" tok) (re-matches #"-?\d+px" tok))))
+  (boolean (or (re-matches #"-?\d+" tok)
+               (re-matches #"-?\d+px" tok)
+               (contains? line-width-keywords (str/lower-case tok)))))
 
 (defn- expand-border-shorthand
   "Parses a `border` shorthand value (real CSS's own order-independent
@@ -1369,6 +1386,37 @@
    "border-inline" [:inline-start :inline-end]
    "border-block" [:block-start :block-end]})
 
+(def ^:private border-sides
+  "The four physical sides, in CSS's own clockwise order -- which is also
+   the order `expand-box-side-shorthand`'s 1-to-4 rule fills."
+  [:top :right :bottom :left])
+
+(def ^:private border-shorthand-initials
+  "What a `border`/`border-<side>` SHORTHAND writes for a component its
+   value omits. A shorthand always sets all of its longhands: the omitted
+   ones are reset to their INITIAL values, not left standing.
+
+   That reset is the whole reason this map exists rather than the omitted
+   components simply being dropped, and it is measured, not assumed. In
+   Brave 151 on 2026-08-06:
+
+     border-top-width: 9px; border-top: 2px solid   ->  2px   (not 9px)
+     border: 5px solid;     border-top: none        ->  0px   (style none)
+     border-top: solid                              ->  3px   (medium)
+     border-top: 10px                               ->  0px   (style none)
+
+   -- the third and fourth are the pair that pins it down: an omitted
+   width is `medium` (3px, visible), and an omitted STYLE is `none`, which
+   zeroes the used width however wide it was declared."
+  {:border-width "medium" :border-style "none" :border-color "currentcolor"})
+
+(defn- border-side-longhand-values
+  "`parts` (whatever of `:border-width`/`:border-style`/`:border-color` a
+   shorthand actually named) completed with `border-shorthand-initials`,
+   so the caller can write all three longhands of a side."
+  [parts]
+  (merge border-shorthand-initials parts))
+
 (defn- expand-logical-border-shorthand
   "Expands one of `logical-border-shorthand-sides`' six shorthands into
    per-logical-side `-width`/`-style`/`-color` longhands, reusing
@@ -1376,26 +1424,111 @@
    its documented token-form scope cut) rather than writing a second copy
    of it.
 
-   Honest scope note, stated here because this is where a reader will look
-   for it: cssom.layout has NO per-side border at all -- it reads a single
-   uniform `:border-width`/`:border-style`/`:border-color` (see
-   `node-style`) -- so the `:border-left-width` these ultimately become is
-   correct in `getComputedStyle` and invisible in layout. That is a
-   pre-existing gap with its own corpus case (`:box/border-left-width-only`,
-   where the physical `border-left-width` is equally unread), not one this
-   function introduces: measured, Brave renders
-   `<div style=\"width:300px;border-inline-start:5px solid #000\">` 305 wide
-   with its `<p>` at x=5, and this engine renders 300 / x=0 both before and
-   after this change."
+   The scope note this carried until 2026-08-06 -- that cssom.layout had
+   no per-side border at all, so the `:border-left-width` these become was
+   correct in `getComputedStyle` and invisible in layout -- is gone.
+   `node-style` resolves four used widths and `border-side` reads them, so
+   `border-inline-start: 5px solid #000` on a 300px block now makes it 305
+   wide with its `<p>` at x=5, which is what Brave 151 renders."
   [prop v]
   (when-let [sides (get logical-border-shorthand-sides prop)]
     (let [parts (expand-border-shorthand v)]
       (when (seq parts)
         (into {}
               (for [side sides
-                    [k v] parts
+                    [k v] (border-side-longhand-values parts)
                     :let [sub (subs (name k) (count "border-"))]]
                 [(keyword (str "border-" (name side) "-" sub)) v]))))))
+
+(defn- expand-border-side-shorthand
+  "Expands one of the four per-side `border-<side>` shorthands into that
+   side's three longhands, reusing `expand-border-shorthand`'s own
+   order-independent parse.
+
+   This is the declaration cssom.layout could not see at all before
+   2026-08-06. Measured in Brave 151: a 300px-wide block with
+   `border-top: 10px solid` is 26.797 tall with its `<p>` at y=10 and the
+   full 300 wide -- a top border costs height and nothing else -- against
+   16.797/y=0 here, because `border-top` fell through to the generic path
+   and was stored as the raw string `\"10px solid\"`, which nothing reads.
+   Not \"ten pixels on four sides\": zero on all of them.
+
+   All three longhands are written even when the value names one of them,
+   because that is what a shorthand DOES -- see
+   `border-shorthand-initials` for the four browser readings that pin the
+   reset down. Writing only the named components would leave an earlier
+   `border-top-width: 9px` standing under a later `border-top: 2px solid`,
+   which Brave resolves to 2px."
+  [prop v]
+  (when-let [side (get {"border-top" :top "border-right" :right
+                        "border-bottom" :bottom "border-left" :left}
+                       prop)]
+    (when-not (css-wide-keyword v)
+      (let [parts (expand-border-shorthand v)]
+        (when (seq parts)
+          (into {}
+                (for [[k value] (border-side-longhand-values parts)
+                      :let [sub (subs (name k) (count "border-"))]]
+                  [(keyword (str "border-" (name side) "-" sub)) value])))))))
+
+(defn- expand-border-box-shorthand
+  "Expands `border-width`/`border-style`/`border-color` -- each of which is
+   a 1-to-4 shorthand over the four sides, exactly like `margin`/`padding`
+   -- into its four per-side longhands, KEEPING the uniform key beside them
+   the way `expand-box-side-shorthand` does (every existing reader of the
+   uniform `:border-width` goes on working unchanged).
+
+   Measured in Brave 151 on 2026-08-06:
+   `border-width: 10px 5px; border-style: solid` gives 10/5/10/5 and a
+   310x36.797 box; `border-width: 10px; border-style: solid none` gives
+   10/0/10/0, i.e. the STYLE shorthand carries per side too and zeroes the
+   width on the sides it says `none` on.
+
+   Unlike the length-only `expand-box-side-shorthand`, the admitted tokens
+   differ per property, so each one checks its own: a width is a length or
+   one of `thin`/`medium`/`thick`, a style is one of the ten
+   `border-style-keywords`, and a colour is any single whitespace-free
+   token (the same scope cut `expand-border-shorthand` already documents).
+   A value with a token this cannot classify is left completely untouched
+   for the generic path to store raw -- the same degrade-don't-guess
+   posture as every other expander here."
+  [prop v]
+  (when-let [token-ok?
+             (get {"border-width" border-shorthand-width-token?
+                   "border-style" #(contains? border-style-keywords (str/lower-case %))
+                   "border-color" #(not (str/blank? %))}
+                  prop)]
+    (let [tokens (box-shorthand-tokens v)
+          n (count tokens)]
+      (when (and (pos? n) (<= n 4) (every? token-ok? tokens))
+        (let [[t r b l] (map #(get tokens % (last tokens))
+                             (get box-side-picks n [0 0 0 0]))]
+          (into {(keyword prop) (parse-style-value (tokens 0))}
+                (map (fn [[side value]]
+                       [(keyword (str "border-" (name side) "-"
+                                      (subs prop (count "border-"))))
+                        (parse-style-value value)]))
+                (map vector border-sides [t r b l])))))))
+
+(defn- expand-border-shorthand-with-sides
+  "The `border` shorthand: the three uniform keys `expand-border-shorthand`
+   already produced, PLUS all twelve per-side longhands.
+
+   The twelve are not decoration. Real CSS's `border` sets every one of
+   them, and the cascade is where declaration ORDER is resolved, so a
+   `border` that did not write them could not overwrite an earlier
+   `border-top: 10px solid`. Measured in Brave 151 on 2026-08-06:
+   `border-top: 10px solid red; border: 2px solid blue` is 2px on all four
+   sides (304x20.797), and the same pair in the other order is
+   10/2/2/2 (304x28.797)."
+  [v]
+  (let [parts (expand-border-shorthand v)]
+    (when (seq parts)
+      (into parts
+            (for [side border-sides
+                  [k value] (border-side-longhand-values parts)
+                  :let [sub (subs (name k) (count "border-"))]]
+              [(keyword (str "border-" (name side) "-" sub)) value])))))
 
 (defn- expand-text-shadow-shorthand
   "Parses a `text-shadow` shorthand value (real CSS's own grammar,
@@ -1761,10 +1894,21 @@
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-logical-border-shorthand (str/lower-case k) value))
 
-                         (= "border" (str/lower-case k))
+                         (some? (expand-border-side-shorthand (str/lower-case k) value))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
-                              (expand-border-shorthand value))
+                              (expand-border-side-shorthand (str/lower-case k) value))
+
+                         (some? (expand-border-box-shorthand (str/lower-case k) value))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-border-box-shorthand (str/lower-case k) value))
+
+                         (and (= "border" (str/lower-case k))
+                              (some? (expand-border-shorthand-with-sides value)))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-border-shorthand-with-sides value))
 
                          (= "text-shadow" (str/lower-case k))
                          (map (fn [[longhand longhand-value]]
@@ -5940,7 +6084,14 @@
   "The color-valued properties (other than `color` itself) this namespace
    threads onto `:style/*` attrs that real CSS lets take the `currentColor`
    keyword."
-  #{:border-color :box-shadow-color :outline-color :text-shadow-color})
+  ;; The four per-side border colours are here because a per-side
+  ;; SHORTHAND writes one whether or not the author named a colour:
+  ;; `border-top: 10px solid` resets `border-top-color` to its initial
+  ;; `currentcolor` (see `border-shorthand-initials`), so leaving them out
+  ;; would hand cssom.layout the literal keyword to paint with.
+  #{:border-color :border-top-color :border-right-color
+    :border-bottom-color :border-left-color
+    :box-shadow-color :outline-color :text-shadow-color})
 
 (defn- resolve-current-color
   "Real CSS: the `currentColor` keyword, used in any color-valued property
