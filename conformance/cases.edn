@@ -333,6 +333,13 @@
  ;; rects for the fixed box and for the flow text occupy the same band.
  {:id :position/fixed-leaves-flow
   :group :position
+  ;; Measured on its OWN page (see run.cljs's isolated-oracle): a fixed box
+  ;; is positioned against the viewport, so on the shared corpus page its
+  ;; case-relative y is only "how far down the page this case sits" -- a
+  ;; number that changes when a case is inserted above it. On its own page
+  ;; the case is at the viewport origin and the browser's answer means what
+  ;; it says.
+  :oracle/isolated true
   :html "<div><div style=\"position: fixed; left: 300px; top: 0\">fixed</div><div>a</div><div>b</div></div>"}
 
  ;; ---- text ----
@@ -1653,6 +1660,16 @@
 
  {:id :stacking/positioned-covers-later-flow-content
   :group :stacking
+  ;; LINE-AXIS BLIND. The two words overlap exactly, so the line axis is
+  ;; being asked a question with no answer -- see the measurement below.
+  ;; The case's real subject, which side is ON TOP, is scored by the
+  ;; paint-order axis, and its boxes are scored by geometry; only the
+  ;; ordering of two coincident words is excluded.
+  ;;
+  ;; Marked here rather than left failing because a permanently red case
+  ;; that nobody may fix teaches the next reader nothing, while a marked
+  ;; one carries why.
+  :oracle/blind true
   ;; Position alone is enough to paint above in-flow content that follows.
   ;;
   ;; Its LINE-axis failure (`want ["over under"] got ["under over"]`) is
