@@ -2940,22 +2940,41 @@
  ;; ---- logical properties: the flow-relative half of the box model ----
  ;; `margin-inline-*`, `padding-inline-*`, `padding-block-*`,
  ;; `inline-size`, `block-size`, `border-inline-*` and `inset-inline-*`
- ;; match NOTHING in src/ -- a repo-wide grep for each is zero in both
- ;; cssom.core and cssom.layout -- so all twelve diverge and they are one
- ;; cause. They are here because they are not exotic: they are how a
- ;; stylesheet that supports both writing directions is written today, and
- ;; two of them are the only cases in the corpus that can tell a physical
- ;; property from a logical one -- the ones that FLIP under `direction:
- ;; rtl`, where `margin-inline-start` is a right margin.
+ ;; matched NOTHING in src/ when these twelve were written -- a repo-wide
+ ;; grep for each was zero in both cssom.core and cssom.layout -- so all
+ ;; twelve diverged and they were one cause. They are here because they are
+ ;; not exotic: they are how a stylesheet that supports both writing
+ ;; directions is written today, and two of them are the only cases in the
+ ;; corpus that can tell a physical property from a logical one -- the ones
+ ;; that FLIP under `direction: rtl`, where `margin-inline-start` is a
+ ;; right margin.
+ ;;
+ ;; ELEVEN OF THE TWELVE now agree (2026-08-06). The cause really was one:
+ ;; the rename to the physical property happens at computed-value time in
+ ;; cssom.core's cascade, keyed on the element's OWN resolved `direction`,
+ ;; between the cascade's sort and its per-property winner selection -- so
+ ;; a logical and a physical declaration for the same side compete by
+ ;; ordinary specificity and source order with no code of their own. See
+ ;; `logical->physical-by-flow` there for the browser measurements.
+ ;;
+ ;; The twelfth, `border-inline-start`, still diverges and it is NOT this
+ ;; cause: the cascade resolves it to `border-left-width`/`-style`/`-color`
+ ;; correctly, and cssom.layout has no per-side border to read them with
+ ;; (it carries one uniform `:border-width`). `border-left: 5px solid #000`
+ ;; -- the physical spelling -- lays out identically wrong, which is what
+ ;; makes it one gap and not two; `:box/border-left-width-only` records it
+ ;; from the physical side.
 
  {:id :logical/margin-inline-start
   :group :logical
-  ;; Brave: inner div x=40 w=260 inside its 300px parent. Engine: 0/300.
+  ;; Brave: inner div x=40 w=260 inside its 300px parent. Engine was
+  ;; 0/300; AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"margin-inline-start: 40px\">m</div></div>"}
 
  {:id :logical/margin-inline-two-values
   :group :logical
   ;; `margin-inline: <start> <end>`. Brave: x=20 w=220 (300 - 20 - 60).
+  ;; AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"margin-inline: 20px 60px\">m</div></div>"}
 
  {:id :logical/margin-inline-mirrors-under-rtl
@@ -2963,58 +2982,67 @@
   ;; The same declaration in an rtl containing block: start is the RIGHT
   ;; side. Brave: x=60 w=220 -- the 20px is now on the right and the 60px
   ;; on the left. This is the case that distinguishes a logical property
-  ;; from an alias for the physical one.
+  ;; from an alias for the physical one, and AGREES since 2026-08-06.
   :html "<div style=\"width: 300px; direction: rtl\"><div style=\"margin-inline: 20px 60px\">m</div></div>"}
 
  {:id :logical/padding-inline-two-values
   :group :logical
   ;; Brave: the padded div is 340 wide (auto width + 40 of padding) and
-  ;; its <p> is at x=10 with w=300.
+  ;; its <p> is at x=10 with w=300. AGREES since 2026-08-06.
   :html "<div style=\"width: 300px; padding-inline: 10px 30px\"><p style=\"margin: 0\">p</p></div>"}
 
  {:id :logical/padding-inline-start-mirrors-under-rtl
   :group :logical
   ;; Brave: div w=350, <p> at x=0 w=300 -- the 50px landed on the RIGHT,
   ;; so the <p>'s own box is the same as it would be with no padding at
-  ;; all and only the outer box records the difference.
+  ;; all and only the outer box records the difference. AGREES since
+  ;; 2026-08-06.
   :html "<div style=\"width: 300px; direction: rtl; padding-inline-start: 50px\"><p style=\"margin: 0\">p</p></div>"}
 
  {:id :logical/padding-block
   :group :logical
-  ;; Brave: div h=56 (12 + 20 + 24), <p> at y=12.
+  ;; Brave: div h=56 (12 + 20 + 24), <p> at y=12. AGREES since 2026-08-06.
   :html "<div style=\"width: 300px; padding-block: 12px 24px\"><p style=\"margin: 0\">p</p></div>"}
 
  {:id :logical/margin-block
   :group :logical
   ;; Brave: the second div is at y=40 (10px sibling + a 30px block-start
-  ;; margin) and the wrapper is 60 tall. Engine: y=10, wrapper 30.
+  ;; margin) and the wrapper is 60 tall. Engine was y=10, wrapper 30;
+  ;; AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"height: 10px\"></div><div style=\"margin-block: 30px 0\">m</div></div>"}
 
  {:id :logical/inline-size-is-width
   :group :logical
-  ;; Brave: w=120. This engine reads `width` only, so the box fills 300.
+  ;; Brave: w=120. This engine read `width` only, so the box filled 300.
+  ;; AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"inline-size: 120px\">i</div></div>"}
 
  {:id :logical/block-size-is-height
   :group :logical
-  ;; Brave: h=60.
+  ;; Brave: h=60. AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"block-size: 60px\">b</div></div>"}
 
  {:id :logical/max-inline-size
   :group :logical
   ;; Brave: w=80, and the text does NOT wrap at it (`alpha beta` is 70px),
-  ;; so what this measures is the box and not the line.
+  ;; so what this measures is the box and not the line. AGREES since
+  ;; 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"max-inline-size: 80px\">alpha beta</div></div>"}
 
  {:id :logical/inset-inline-start
   :group :logical
-  ;; Brave: the absolutely positioned box is at x=30.
+  ;; Brave: the absolutely positioned box is at x=30. AGREES since
+  ;; 2026-08-06.
   :html "<div style=\"width: 300px; height: 40px; position: relative\"><div style=\"position: absolute; inset-inline-start: 30px; top: 0\">a</div></div>"}
 
  {:id :logical/border-inline-start
   :group :logical
   ;; Brave: the bordered div is 305 wide (auto width + the 5px border) and
-  ;; its <p> is at x=5 w=300.
+  ;; its <p> is at x=5 w=300. STILL DIVERGES -- the one of the twelve that
+  ;; is not the logical mapping. The cascade resolves this to
+  ;; `border-left-width: 5px` correctly; cssom.layout has only a uniform
+  ;; `:border-width`, so `border-left: 5px solid #000` is equally
+  ;; unrendered (see the group header).
   :html "<div style=\"width: 300px; border-inline-start: 5px solid #000\"><p style=\"margin: 0\">p</p></div>"}
 
  ;; ---- replaced elements and their default size ----
@@ -3312,24 +3340,46 @@
  ;; CSS 2.1 SS8.3/SS8.4: a percentage margin or padding resolves against
  ;; the containing block's INLINE size on all four sides, top and bottom
  ;; included. It is the rule behind the padding-bottom aspect-ratio idiom,
- ;; and nothing in the corpus asked for it. Measured, this engine reads
- ;; the number and drops the unit -- `padding-bottom: 50%` is 50px --
- ;; which is the same defect round thirty-two recorded for percentage
- ;; GAPS ("node-style runs parse-int on the string, and it has no
- ;; available size to resolve a percentage against").
+ ;; and nothing in the corpus asked for it. When these four were written
+ ;; this engine read the number and dropped the unit -- `padding-bottom:
+ ;; 50%` was 50px -- the same defect round thirty-two recorded for
+ ;; percentage GAPS ("node-style runs parse-int on the string, and it has
+ ;; no available size to resolve a percentage against").
+ ;;
+ ;; THREE OF THE FOUR now agree (2026-08-06): node-style carries the raw
+ ;; value beside the coerced one and `resolve-box-percentages` rewrites it
+ ;; wherever the containing block's inline size is in scope. The fourth,
+ ;; `margin-top-percentage-is-of-the-width`, is blocked on the SAME missing
+ ;; per-side border as `:logical/border-inline-start` -- its 1px
+ ;; `border-top` is there to stop the margin collapsing through the parent,
+ ;; and this engine cannot see it, so the (now correctly resolved) 30px
+ ;; margin collapses out. With the parent's `padding-top: 1px` instead of a
+ ;; border, both sides put the child at y=31 (asserted in layout_test).
+ ;;
+ ;; It did NOT cover the two percentage GAP cases, and that is a rule
+ ;; difference rather than an oversight: a percentage margin/padding is of
+ ;; the containing block's inline size on all four sides, a percentage
+ ;; `top`/`left` is of the containing block's size in its OWN axis (those
+ ;; already agreed), and a percentage `row-gap` is of the container's own
+ ;; content BLOCK size -- which for an auto-height container is cyclic.
+ ;; Measured in Brave: a 10% row gap on a 40px-tall auto grid is 4px AND
+ ;; the container stays 40 tall, i.e. the gap is resolved against a height
+ ;; computed without it and the content then overflows. Three bases, one
+ ;; shared `percentage-of`.
 
  {:id :box/padding-top-percentage-is-of-the-width
   :group :box
   ;; Brave: 10% of the 300px container is 30px of padding, so the inner
   ;; box is 50 tall and its text sits at y=32. Resolving against the
   ;; parent's 40px HEIGHT would have given 4, and reading the bare number
-  ;; gives 10 -- which is what this engine does (h=30).
+  ;; gives 10 -- which is what this engine did (h=30). AGREES since
+  ;; 2026-08-06.
   :html "<div style=\"width: 300px; height: 40px\"><div style=\"padding-top: 10%\">p</div></div>"}
 
  {:id :box/padding-bottom-percentage-makes-a-ratio-box
   :group :box
   ;; The idiom itself. Brave: 300x150 from `padding-bottom: 50%` alone,
-  ;; with no height anywhere. Engine: 300x50.
+  ;; with no height anywhere. Engine was 300x50; AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"padding-bottom: 50%\"></div></div>"}
 
  {:id :box/margin-top-percentage-is-of-the-width
@@ -3337,15 +3387,23 @@
   ;; Same rule for margins. Brave: child at y=31, parent 51 tall. The 1px
   ;; border on the parent is not the subject -- it is there to stop the
   ;; child's top margin collapsing through it, which would take the
-  ;; number out of the case. (This engine reads neither: `border-top` as a
-  ;; per-side shorthand is not parsed either, see the border group below.)
+  ;; number out of the case.
+  ;;
+  ;; STILL DIVERGES, and since 2026-08-06 for the border alone: the 10%
+  ;; margin now resolves to 30px like the three cases around it, and then
+  ;; collapses straight out through a parent this engine sees no border on
+  ;; (`border-top` as a per-side shorthand is not parsed, and there is no
+  ;; per-side border to parse it into -- see the border group below).
+  ;; Swapping the border for `padding-top: 1px` puts both sides at y=31,
+  ;; which is what layout_test asserts.
   :html "<div style=\"width: 300px; border-top: 1px solid #000\"><div style=\"margin-top: 10%; height: 20px\">m</div></div>"}
 
  {:id :box/margin-left-percentage
   :group :box
-  ;; The inline-axis control for the three above, and it fails the same
-  ;; way: Brave x=30 w=270, this engine x=10 w=290. So the percentage is
-  ;; not a block-axis problem -- the unit is dropped on every side.
+  ;; The inline-axis control for the three above, and it failed the same
+  ;; way: Brave x=30 w=270, this engine x=10 w=290. So the percentage was
+  ;; not a block-axis problem -- the unit was dropped on every side.
+  ;; AGREES since 2026-08-06.
   :html "<div style=\"width: 300px\"><div style=\"margin-left: 10%; height: 20px\">m</div></div>"}
 
  ;; ---- vertical-align, at every value that moves a box ----

@@ -813,7 +813,7 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
-### Round thirty-six: the box a browser reserves for something it cannot draw
+### Round thirty-seven: the box a browser reserves for something it cannot draw
 
 Five tags — `<canvas>`, `<video>`, `<svg>`, `<iframe>`, and `<img>` beside
 them — plus `<progress>`, `<meter>` and three `<input>` types had **no
@@ -937,6 +937,159 @@ Twelve cases changed and **none regressed** (`--dump-ops`, corpus-wide,
 before and after): the six `:replaced/` default-size cases, `:form/progress`,
 `:form/meter`, `:form/input-range`, `:form/input-color`,
 `:form/input-file` (its `<div>` only), and `:inline/vertical-align-length`.
+
+### Round thirty-six: logical properties, and the percentage that is always of the width
+
+Two gaps, fifteen cases between them, and the interesting part of both is
+*where* the fix belongs rather than what the numbers are.
+
+**Before → after**, both measured on the corpus of 576 at this round's
+merge base (`dac2240`, i.e. with the stacking round already in — the two
+rounds ran concurrently, and the paint column moved under this one):
+
+| axis | before | after |
+|---|---|---|
+| line structure | 540/551 | 540/551 |
+| geometry (boxes) | 1851/1959 | **1870/1959** |
+| geometry (clean cases) | 510/576 | **524/576** |
+| paint order (points) | 14181/14389 | **14207/14389** |
+| paint order (clean cases) | 538/576 | **542/576** |
+| computed style (values) | 27514/27544 | **27525/27544** |
+| computed style (clean cases) | 563/576 | **570/576** |
+| computed style (no cascade-attributed mismatch) | 565/576 | **572/576** |
+
+`--dump-ops` diffed corpus-wide names **14 changed cases and no others** —
+the eleven `:logical/` cases that now agree and three of the four
+percentage ones. Nothing moved in either direction anywhere else.
+
+#### Where a logical property becomes a physical one
+
+`margin-inline-start` is not an alias for `margin-left`: which side it
+lands on depends on the element's `direction`, so it cannot be rewritten
+at parse time. Three measurements in Brave 151 decided where it *can* be:
+
+- `<div style="max-inline-size: 80px">` reports **`maxWidth: 80px`** from
+  `getComputedStyle`, and `margin-inline: 20px 60px` reports
+  `marginLeft 20px / marginRight 60px`. The physical longhand genuinely
+  holds the value by the time `getComputedStyle` can be asked — which is
+  the definition of computed-value time. A layout-time mapping would
+  leave the cascade, `cssom.core/computed-style`, and a live page's
+  `getComputedStyle` all reporting nothing, the same architectural
+  mistake ADR-2800003100 corrected for the UA sheet.
+- The direction it reads is the element's **own**, not its containing
+  block's: `<div style="direction: rtl; margin-inline: 20px 60px">` puts
+  the box at x=60, exactly as declaring `direction: rtl` on the *parent*
+  does. Both were measured side by side, because they are
+  indistinguishable in every case where only the parent declares it.
+- And the sharpest one — what happens when both spellings are declared:
+
+  | declaration block | Brave's `marginLeft` |
+  |---|---|
+  | `margin-left: 5px; margin-inline-start: 40px` | 40px |
+  | `margin-inline-start: 40px; margin-left: 5px` | 5px |
+  | `margin: 1px; margin-inline-start: 40px` | 40px |
+  | `margin-inline-start: 40px; margin: 1px` | 1px |
+  | `#a { margin-left: 5px }` then `.a { margin-inline-start: 40px }` | **5px** |
+
+  Source order decides at equal specificity, and specificity still
+  outranks source order. Under `direction: rtl` the first pair gives
+  `marginLeft 5px / marginRight 40px` in **both** orders — because there
+  the two declarations no longer collide. So the collision is decided
+  *after* the rename, not before.
+
+That last row is the whole implementation. `resolve-style-for` already
+sorts every declaration by importance/origin/inline/layer/specificity/
+order and then takes the last of each property group; the rename is one
+`map` over that sorted list, below the sort and above the group-by. Every
+row of the table above falls out with no ordering code of its own.
+
+The element's flow (`{:writing-mode :direction}`) is threaded down
+`run-cascade-walk` exactly like `parent-font-size` and `parent-display`
+already were, because both properties inherit. Because the rename happens
+*inside* the cascade rather than after it, `margin-inline-start: 2em` and
+`margin-inline: var(--gap) 5px` need no new entries anywhere: they arrive
+at `resolve-relative-lengths` and `resolve-style-map` already wearing
+their physical names.
+
+#### The percentage rule is one rule, and it is the surprising one
+
+A percentage margin or padding resolves against the containing block's
+**inline size on all four sides**. Measured:
+
+| containing block | declaration | computed |
+|---|---|---|
+| 300x40 | `padding-top: 10%` | 30px |
+| 300 wide, no height | `padding-bottom: 50%` | 150px (a 300x150 box) |
+| 300 wide | `margin-left: 10%` | 30px |
+| **200 wide, 400 tall** | `padding-top: 10%` | **20px** |
+| **200 wide, 400 tall** | `margin-top: 10%` | **20px** |
+| 300 wide, `padding: 50px` | `padding-top: 10%` | 30px (the *content* width) |
+| 300 wide | `margin-left: -10%` | -30px |
+
+The 200x400 rows settle it: a perfectly definite containing-block height
+is available and the block-axis percentage still resolves against the
+width. It is also why `padding-bottom: 50%` is the aspect-ratio idiom.
+
+`node-style` now carries the raw value beside the coerced one — the same
+thing it already did for `margin`'s `auto`, and for the same reason: the
+coercion that makes every other reader safe is exactly what erases a
+percentage. `resolve-box-percentages` rewrites the map once, at the sites
+that know the containing block's inline size, so all ~56 call sites of
+`margin-side`/`inset-side` are fixed without one of them being touched.
+The sites that genuinely do not know it keep the documented `parse-int`
+approximation, which is the same split `explicit-length` vs
+`length-or-percentage` already draws in that file.
+
+#### One fix did not cover the gaps, and the reason is a rule difference
+
+The percentage machinery (`percentage-of`) was already there; what each
+site needs is its own **basis**, and there are three:
+
+- **margin/padding** → the containing block's inline size, all four sides.
+- **`top`/`left`/`right`/`bottom`** → the containing block's size in the
+  value's *own* axis. Measured: `left: 50%` of a 200x60 block is 100 and
+  `top: 50%` is 30. These already agreed
+  (`:position/absolute-percentage-offsets`,
+  `:position/relative-percentage-offset`) and are untouched.
+- **`row-gap`** → the container's own content *block* size, which for an
+  auto-height container is cyclic. Measured in Brave, a 10% row gap on a
+  40px-tall auto grid is 4px **and the container stays 40 tall** — the gap
+  is resolved against a height computed without it and the content then
+  overflows. That is a two-pass rule and its own round; the two `:gap/`
+  percentage cases are unchanged.
+
+#### What is still out, with the numbers a fix will need
+
+- **`writing-mode`.** Under `vertical-rl` the whole mapping rotates:
+  `inline-size: 70px; block-size: 20px` is a box **20 wide and 70 tall**
+  (this engine: 300x20), `margin-inline-start: 40px` is a **margin-top**,
+  `padding-block-start: 12px` is a **padding-right**, and `padding-top:
+  10%` of a 200px-tall parent is **20px** — i.e. the percentage basis is
+  the inline size, which is the *height* there. Adding the four rotated
+  rows to `logical-flow-sides` is two minutes' work and would make
+  `getComputedStyle` right while every box stayed laid out horizontally, a
+  mapping neither layout axis of this corpus could check. So the rename is
+  **gated** on `horizontal-tb` instead and a logical property stays
+  unmapped under a vertical mode, exactly where it was before.
+- **Per-side borders.** This is the *only* reason the remaining two cases
+  of the fifteen still diverge, and it is one gap rather than two:
+  `:logical/border-inline-start` cascades to `border-left-width: 5px`
+  correctly and cssom.layout reads one uniform `:border-width`, so the
+  physical `border-left: 5px solid #000` renders identically wrong
+  (`:box/border-left-width-only` records it from that side). And
+  `:box/margin-top-percentage-is-of-the-width` now resolves its 10% to
+  30px and then collapses it straight out through a parent whose 1px
+  `border-top` — the thing that is there to stop exactly that — this
+  engine cannot see. Swap the border for `padding-top: 1px` and both sides
+  put the child at y=31, which is what `layout_test` asserts.
+- **An absolutely positioned box's margins**, which are not applied at
+  all: measured through this engine, `position:absolute; left:0;
+  margin-left: 20px` is at x=0 for a plain px margin as much as for a
+  percentage. Brave says 20 — and 34 for `margin-left: 10%`, i.e. 10% of
+  the containing block's 340px **padding** box, the one place the basis is
+  not a content width. Resolving a percentage there would have produced a
+  correct number nothing reads, so it was left out and the basis to pass
+  is recorded in `percentage-box-basis`.
 
 ### Round thirty-five: stacking contexts, and the difference between painting above and confining
 
