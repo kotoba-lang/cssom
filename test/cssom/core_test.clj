@@ -1021,6 +1021,87 @@
     (is (= "!" (:content style-after))
         "single-quoted content literals are supported too")))
 
+;; ---- generated quotes: `content: open-quote` / `close-quote` ----
+;;
+;; Measured in Brave 151 on 2026-08-05, in the conformance corpus's own
+;; 14px monospace page. The characters are not read off a spec: the same
+;; markup was rendered with `quotes: auto` and with
+;; `quotes: "\201C" "\201D" "\2018" "\2019"` and every `<q>` box came out
+;; byte-identical, which is what identifies them. See `quote-marks`.
+
+(defn- nest-tags
+  "Builds `tags` as a chain of nested elements under a root <p> and returns
+   `[document ids]`, ids outermost first. Built with the DOM API rather
+   than parsed, because this namespace must not depend on htmldom -- cssom
+   is htmldom's dependency, not the other way round."
+  [tags]
+  (let [[root doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc root)
+        [doc ids _] (reduce (fn [[doc ids parent] tag]
+                              (let [[id doc] (dom/create-element doc tag)
+                                    doc (dom/append-child doc parent id)]
+                                [doc (conj ids id) id]))
+                            [doc [] root]
+                            tags)]
+    [doc ids]))
+
+(defn- q-quotes
+  "The generated ::before/::after text of `depth` nested `<q>` elements,
+   outermost first, after a real cascade with no author CSS."
+  [depth]
+  (let [[doc ids] (nest-tags (repeat depth :q))
+        doc (css/apply-cascade doc [])
+        [_ doc] (dom/consume-ops doc)]
+    (mapv (fn [id] [(get-in doc [:nodes id :attrs :pseudo/before :content])
+                    (get-in doc [:nodes id :attrs :pseudo/after :content])])
+          ids)))
+
+(deftest a-q-gets-its-quotation-marks-from-the-user-agent-sheet
+  ;; The rule is `q::before { content: open-quote }`, which needed the UA
+  ;; origin to be matched per PSEUDO-ELEMENT -- it used to be skipped for
+  ;; pseudo-elements outright, which was only correct while the sheet had
+  ;; no ::before rule in it.
+  (is (= [["“" "”"]] (q-quotes 1))))
+
+(deftest a-nested-q-uses-the-second-quote-level
+  ;; Brave: the outer <q> is 91px wide and the inner 35 on this page, which
+  ;; is only consistent with two DIFFERENT pairs -- the four characters all
+  ;; advance 14px here where an ASCII `"` advances 7.
+  (is (= [["“" "”"] ["‘" "’"]] (q-quotes 2)))
+  ;; and a third level reuses the second's pair, which is CSS's own rule
+  ;; for a depth deeper than the `quotes` list. Measured: 147 / 91 / 35.
+  (is (= [["“" "”"] ["‘" "’"] ["‘" "’"]] (q-quotes 3))))
+
+(deftest quote-depth-counts-only-the-quote-generating-ancestors
+  ;; A `<q>` inside a `<span>` is still at level 1 -- measured in Brave, a
+  ;; `<q>` inside a `<span>` and one inside a `<blockquote>` are both 28px
+  ;; wider than their text, exactly like a bare one.
+  (let [[doc ids] (nest-tags [:span :q])
+        doc (css/apply-cascade doc [])
+        [_ doc] (dom/consume-ops doc)]
+    (is (= "“" (get-in doc [:nodes (second ids) :attrs :pseudo/before :content])))))
+
+(deftest an-author-can-suppress-the-generated-quotes
+  ;; `content: none` is not a value this engine renders (see
+  ;; `parse-content-value`), so an author rule beating the UA one removes
+  ;; the quote entirely -- measured in Brave, the same `<q>` is then 35px
+  ;; wide rather than 63.
+  (let [[doc ids] (nest-tags [:q])
+        doc (css/apply-cascade doc (css/parse-rules "q::before, q::after { content: none }"))
+        [_ doc] (dom/consume-ops doc)
+        q (first ids)]
+    (is (nil? (get-in doc [:nodes q :attrs :pseudo/before :content])))
+    (is (nil? (get-in doc [:nodes q :attrs :pseudo/after :content])))))
+
+(deftest the-ua-pseudo-rule-does-not-leak-onto-the-element-itself
+  ;; `ua-style-for` answers what the UA sheet says about the ELEMENT, and
+  ;; `q::before { content: open-quote }` says nothing about a `<q>`.
+  (is (nil? (:content (css/ua-style-for {:node/type :element :tag :q :attrs {}}))))
+  (let [[doc ids] (nest-tags [:q])
+        doc (css/apply-cascade doc [])
+        [_ doc] (dom/consume-ops doc)]
+    (is (nil? (get-in doc [:nodes (first ids) :attrs :style/content])))))
+
 (deftest before-content-empty-string-is-a-real-declared-value-not-absent
   (let [[span doc] (dom/create-element dom/empty-document :span)
         doc (dom/set-root doc span)

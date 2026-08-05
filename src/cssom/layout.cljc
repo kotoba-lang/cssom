@@ -9612,6 +9612,34 @@
        :baseline max-ascent
        :pieces pieces})))
 
+(defn- inline-hit-region
+  "An inline box's hit region: ONE rectangle per line box, not one per
+   fragment. Fragments on the same line are merged into their horizontal
+   union.
+
+   An inline element's content is split into a fragment per text run, so a
+   `<q>` with a nested `<q>` inside it produces THREE fragments on one
+   line, with the box's own spaces falling in the two gaps between them.
+   A browser has one inline box per line and answers `elementFromPoint`
+   for the whole of it. Measured in Brave 151 on 2026-08-05, `x <q>a
+   <q>b</q> c</q> y`: at x=80 -- the space between the inner `<q>` and the
+   `c` -- `elementFromPoint` answers the OUTER `<q>`, where this engine's
+   per-fragment region answered the `<p>`, and the conformance harness's
+   paint-order axis reported all four of that case's sample points.
+
+   Merging is only ever within a line (grouped on `y` and `h`), so the
+   thing this region exists for is untouched: a `<b>` wrapped across two
+   lines still carries two rectangles, and a point inside the union but on
+   neither line still answers the containing block."
+  [fragments]
+  (->> fragments
+       (group-by (juxt :y :h))
+       (sort-by key)
+       (mapv (fn [[[y h] rs]]
+               (let [x0 (apply min (map :x rs))
+                     x1 (apply max (map #(+ (:x %) (:w %)) rs))]
+                 {:x x0 :y y :w (- x1 x0) :h h})))))
+
 (defn- inline-owner-ops
   "Background + `:node` draw-ops for the inline ELEMENTS a laid-out run
    passed through, derived from where their own text fragments actually
@@ -9669,8 +9697,8 @@
                        :x x0 :y y0 :w (- x1 x0) :h (- y1 y0)
                        :class (attr node :class) :listeners (listeners node)
                        :opacity opacity}
-                      (when (next fragments)
-                        {:hit (mapv #(select-keys % [:x :y :w :h]) fragments)})
+                      (when-let [hit (seq (inline-hit-region fragments))]
+                        (when (next hit) {:hit (vec hit)}))
                       (style-passthrough st))))
            ordered)))))
 

@@ -2603,7 +2603,18 @@ correctness is covered by unit tests.
 
 12 of the 292 carry the marker as of round twenty-one; the two added that
 round are `display/list-item-on-a-div` (a `<div>` made a list item generates
-a marker) and `doc/long-list-of-items` (16 `<li>`s).
+a marker) and `doc/long-list-of-items` (16 `<li>`s). 22 of the 501 carry it
+now.
+
+The two most recent are worth naming, because they show the marker being
+earned rather than granted: `inline/q-adds-quotation-marks` and
+`inline/nested-q-uses-the-second-quote-level` scored on the line axis for
+the whole of their life and stopped the day the engine learned to generate
+the quotes a `<q>` gets from the UA sheet. Both sides used to read
+`he said hello loudly`, for the same wrong reason — neither produced a
+quotation mark at all. Now the engine reads `he said “hello” loudly` and
+the oracle still cannot: no `Range` reaches a `::before`. Their geometry
+went 0/3 boxes to 3/3 in the same change.
 
 ## How the oracle is driven (measured, not assumed)
 

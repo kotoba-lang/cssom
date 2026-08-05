@@ -2621,10 +2621,21 @@
   ;; The oracle's per-word Ranges cannot see generated content, so the LINE
   ;; axis is blind here -- but the <q>'s own BOX is two characters wider on
   ;; each side, and geometry reads that directly.
+  ;;
+  ;; The marker was added when the engine LEARNED to generate the quotes
+  ;; (`q::before { content: open-quote }` in cssom.core's UA sheet). Before
+  ;; that both sides read the same plain text for the same wrong reason --
+  ;; neither produced a quote at all -- and the case scored on the line
+  ;; axis by accident. It is the same situation
+  ;; `:generated/before-content-joins-line` has carried from the start.
+  :oracle/blind true
   :html "<p>he said <q>hello</q> loudly</p>"}
 
  {:id :inline/nested-q-uses-the-second-quote-level
   :group :inline
+  ;; blind for the same reason as the case above, and doubly so: the outer
+  ;; quotes and the inner ones are different characters.
+  :oracle/blind true
   :html "<p>x <q>a <q>b</q> c</q> y</p>"}
 
  {:id :generated/counter-numbers-the-items

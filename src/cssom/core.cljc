@@ -729,18 +729,57 @@
   (when-let [[_ counter-name] (re-matches content-counter-pattern (str/trim (str v)))]
     {:content/counter-name counter-name}))
 
+(defn- parse-content-none-ref
+  "A `content` term that is `none` or `normal` -- the two keywords meaning
+   'generate no box' -- as a `{:content/none true}` marker.
+
+   It has to be a MARKER rather than nil, and that only started mattering
+   when the user-agent sheet grew a `::before` rule of its own. Returning
+   nil drops the declaration at PARSE time, so it never enters the cascade
+   and never beats anything; an author writing `q::before { content: none }`
+   got the UA sheet's quotation marks anyway. Measured in Brave 151 on
+   2026-08-05: that rule makes `<q>hello</q>` 35px wide instead of 63.
+   `resolve-content-value` turns the marker back into nil, so every reader
+   downstream sees exactly what it saw before -- an absent `:content`."
+  [v]
+  (when (contains? #{"none" "normal"} (str/lower-case (str/trim (str v))))
+    {:content/none true}))
+
+(def ^:private content-quote-keywords
+  "CSS Generated Content's quote keywords, as `:content/quote` markers. The
+   character each one stands for is not knowable here: it depends on the
+   element's QUOTE DEPTH, which is a property of the tree and not of the
+   declaration -- see `quote-marks` and `resolve-quote-content`, which is
+   where the marker is finally turned into text.
+
+   `no-open-quote`/`no-close-quote` produce no text and still move the
+   depth, which is the entire reason they exist in CSS."
+  {"open-quote" :open "close-quote" :close
+   "no-open-quote" :no-open "no-close-quote" :no-close})
+
+(defn- parse-content-quote-ref
+  "A `content` term that is one of the four quote keywords, as a
+   `{:content/quote <kw>}` marker, or nil."
+  [v]
+  (when-let [kw (get content-quote-keywords (str/lower-case (str/trim (str v))))]
+    {:content/quote kw}))
+
 (defn- parse-content-term
   "Parses a single content TERM -- no combination with any other term --
    into whichever of `parse-content-literal` (a quoted string literal),
-   `parse-content-attr-ref` (a bare `attr(name)` call), or
-   `parse-content-counter-ref` (a bare `counter(name)` call) matches, or nil
-   if none does. Used both for the common single-term case and, by
+   `parse-content-attr-ref` (a bare `attr(name)` call),
+   `parse-content-counter-ref` (a bare `counter(name)` call) or
+   `parse-content-quote-ref` (one of the four quote keywords) matches, or
+   nil if none does. Used both for the common single-term case and, by
    `parse-content-value`, for each term of a multi-term composed value."
   [v]
   (let [literal (parse-content-literal v)]
     (if (some? literal)
       literal
-      (or (parse-content-attr-ref v) (parse-content-counter-ref v)))))
+      (or (parse-content-attr-ref v)
+          (parse-content-counter-ref v)
+          (parse-content-quote-ref v)
+          (parse-content-none-ref v)))))
 
 (defn- content-ws-char? [c] (boolean (re-matches #"\s" (str c))))
 
@@ -801,11 +840,21 @@
       in), the WHOLE declaration is dropped (nil) rather than silently
       rendering a partial string.
 
+   5. One of the four quote keywords (`parse-content-quote-ref`) -- returns
+      a `{:content/quote <kw>}` marker, because the character it stands for
+      depends on the element's quote DEPTH and not on the declaration (see
+      `resolve-quote-content`).
+   6. `none`/`normal` (`parse-content-none-ref`) -- returns a
+      `{:content/none true}` marker that `resolve-content-value` turns back
+      into nil. It is a marker rather than a straight nil so that it can
+      WIN the cascade over the user-agent sheet's own `content`; see that
+      function for the measurement.
+
    Anything else this engine doesn't support (`counter()`'s two-argument
-   `name, <list-style-type>` form, `url(...)`, `none`/`normal`,
-   unquoted/unmatched text, `attr()`'s extended `name type, fallback`
-   syntax) returns nil rather than guessing -- callers treat nil exactly
-   like `content` being absent: no generated-content box, no crash."
+   `name, <list-style-type>` form, `url(...)`, unquoted/unmatched text,
+   `attr()`'s extended `name type, fallback` syntax) returns nil rather
+   than guessing -- callers treat nil exactly like `content` being absent:
+   no generated-content box, no crash."
   [v]
   (or (parse-content-term v)
       (let [terms (split-content-terms v)]
@@ -3920,7 +3969,94 @@
                            (contains? value :content/counter-name)))
     (resolve-content-term node counters value)
 
+    ;; `none`/`normal`: a real declaration that generates no box. It
+    ;; travelled this far as a marker only so it could WIN the cascade over
+    ;; the user-agent sheet's own `content` -- see `parse-content-none-ref`
+    ;; -- and becomes the absent `:content` every reader already knows.
+    (and (map? value) (contains? value :content/none))
+    nil
+
     :else value))
+
+;; ---- generated quotes ----
+
+(def ^:private quote-marks
+  "The characters `open-quote`/`close-quote` produce, one pair per QUOTE
+   DEPTH -- CSS's `quotes` property, at the `auto` value every element in
+   this engine has, resolved for this oracle's locale.
+
+   Measured in Brave 151 on 2026-08-05, and measured rather than looked up
+   because `quotes: auto` is locale-dependent and nothing in the CSS text
+   names a character: the same markup was rendered twice, once with
+   `quotes: auto` and once with `quotes: \"\\201C\" \"\\201D\" \"\\2018\"
+   \"\\2019\"`, and every `<q>` box came out BYTE-IDENTICAL in both -- 63px
+   for `<q>hello</q>`, 91 and 35 for a nested pair. The characters are
+   therefore U+201C/U+201D at depth 1 and U+2018/U+2019 at depth 2.
+
+   Two more numbers from the same page, because they are what makes the
+   depth observable at all: each of those four characters advances 14px in
+   this page's monospace 14px face (a plain ASCII `\"` advances 7 -- they
+   fall back to a proportional face), and a THREE-deep nest measures 147 /
+   91 / 35, i.e. depth 3 reuses depth 2's pair, which is what CSS says
+   happens once the list runs out."
+  [["\u201C" "\u201D"] ["\u2018" "\u2019"]])
+
+(defn- quote-mark
+  "The `open`/`close` character for `depth` (0-indexed), reusing the last
+   pair once the list runs out -- real CSS's own rule for a depth deeper
+   than the `quotes` list."
+  [depth open?]
+  (let [pair (nth quote-marks (min depth (dec (count quote-marks))))]
+    (if open? (first pair) (second pair))))
+
+(defn- quote-marker
+  "The `:content/quote` keyword a resolved pseudo-element style's `content`
+   holds, or nil -- see `parse-content-quote-ref`."
+  [pseudo-style]
+  (let [v (:content pseudo-style)]
+    (when (map? v) (:content/quote v))))
+
+(defn- resolve-quote-content
+  "Turns the `:content/quote` markers on `style`'s `:pseudo/before` and
+   `:pseudo/after` into real text, and answers what quote depth this
+   element's CHILDREN are at. Returns `[style child-depth]`.
+
+   Depth is a property of the tree, which is why this runs in
+   `style-element` (where the walk has it) rather than in
+   `resolve-style-for` (where the declaration is): an element's own two
+   pseudo-elements both sit at `depth` -- a `::after`'s `close-quote`
+   closes the quote its own `::before` opened, not a deeper one -- and only
+   its DESCENDANTS are one deeper. Measured in Brave, `x <q>a <q>b</q> c
+   </q> y`: the outer `<q>` is 91px wide with U+201C/U+201D and the inner
+   35 with U+2018/U+2019, and the outer's closing mark is the wide one.
+
+   `no-open-quote`/`no-close-quote` move the depth and generate nothing,
+   which this expresses by dropping the `:content` key entirely -- the same
+   thing every other unresolvable `content` value does, so no reader needs
+   to learn a new shape.
+
+   SCOPE: the depth is carried down the tree only, so a `close-quote` with
+   no matching `open-quote` above it reads as depth 0 rather than being an
+   error, and a sibling's quote does not affect the next sibling's depth.
+   Real CSS keeps ONE running counter in document order, which differs from
+   this only for markup where the two do not nest -- and `quotes` itself is
+   not modelled at all, so an author cannot change the characters."
+  [style depth]
+  (let [resolve-one
+        (fn [m open?]
+          (if-let [kw (quote-marker m)]
+            (case kw
+              :open (assoc m :content (quote-mark depth true))
+              :close (assoc m :content (quote-mark depth false))
+              (dissoc m :content))
+            m))
+        before (:pseudo/before style)
+        after (:pseudo/after style)
+        opens? (contains? #{:open :no-open} (quote-marker before))
+        style (cond-> style
+                before (assoc :pseudo/before (resolve-one before true))
+                after (assoc :pseudo/after (resolve-one after false)))]
+    [style (if opens? (inc depth) depth)]))
 
 ;; ---- resolving the CSS-wide keywords ----
 ;;
@@ -4335,6 +4471,8 @@
   pre { white-space: pre }
   a[href] { color: #0000EE }
   hr { color: #808080 }
+  q::before { content: open-quote }
+  q::after { content: close-quote }
   input:disabled, textarea:disabled { color: #545454 }
   select:disabled { color: #808080 }
   button:disabled, input[type=\"button\"]:disabled,
@@ -4489,10 +4627,18 @@
    being probed against a detached node -- and here it would be actively
    wrong: `ul ul { margin-block: 0 }` would then zero the margins of every
    list on the page, nested or not. Skipping means a caller with no
-   document gets the no-ancestors answer, which is the honest one."
+   document gets the no-ancestors answer, which is the honest one.
+
+   A selector with a PSEUDO-ELEMENT is skipped outright. This answers what
+   the UA sheet says about the ELEMENT, and `q::before { content:
+   open-quote }` says nothing about a `<q>` -- merging it in would put a
+   `content` on the element itself, which real CSS does not render and
+   this engine's only caller (`cssom.layout`, on a document that was never
+   cascaded) has no generated box to hang it on."
   [document node]
   (->> (for [rule (ua-rules-for node)
              selector (:rule/selectors rule)
+             :when (nil? (pseudo-element-of selector))
              :when (if document
                      (matches? document node selector)
                      (and (<= (count (:selector/parts selector [selector])) 1)
@@ -4653,13 +4799,47 @@
    `root-px` is the root element's, which is what `rem` means.
 
    nil for the ABSOLUTE keywords (`medium`, `small`, `x-large`, ...) on
-   purpose rather than for want of a table: measured in Brave 151,
-   `font-size: medium` reports 13px and `x-large` 20px on a page whose
-   font-family is monospace, against 16 and 24 on a proportional one --
-   the keyword table is keyed on the default font of the FAMILY in use,
-   which this cascade has no way to know. Guessing 16 would be wrong by
-   3px on every monospace page. An unresolved value is left exactly as
-   the author wrote it, which is this namespace's posture everywhere else."
+   purpose rather than for want of a table: the keyword table is keyed on
+   the DEFAULT font size of the family in use, which this cascade has no
+   way to know. Guessing 16 would be wrong by 3px on every monospace page.
+   An unresolved value is left exactly as the author wrote it, which is
+   this namespace's posture everywhere else.
+
+   The whole table, measured in Brave 151 on 2026-08-05 so a future fix
+   does not have to go and get it -- the SAME page twice, once in its
+   `font-family: monospace` (whose default size is 13) and once with
+   `font-family: Arial` (16), with every keyword on a `<p>`:
+
+     keyword      monospace page   Arial page (= serif page)
+     xx-small           10*             10*
+     x-small            10              10
+     small              12              13
+     medium             13              16
+     large              16              18
+     x-large            20              24
+     xx-large           26              32
+     xxx-large          39              48
+
+   Three things read off it. It is not a ratio -- 16/13 is not 18/16, so
+   the two columns are two ROWS of a table and not one row scaled. It is
+   keyed on the family's default SIZE and not on the family: `Arial` and
+   `serif` produce byte-identical columns, and both differ from
+   `monospace` only because Chrome's default fixed size is 13 where its
+   default proportional size is 16. And the starred entries are the one
+   place the reported value and the value `em` resolves against DISAGREE:
+   `xx-small` reports 10px in every family while the same element's
+   `margin: 1em` measures 9, so the row's own value is 9 and something
+   clamps only the reported one. Anything built on this table should
+   assert against the margin, not against the reported size.
+
+   What a fix needs beyond the table is a font-family model: the row is
+   chosen by the family's default size, so `font-family` has to reach the
+   cascade first. This engine's sheet has no font-family rule at all (see
+   `ua-stylesheet-text`'s note on the control font, which is the same
+   gap). Until then the corpus's own `:text/font-size-absolute-keyword`
+   stays divergent -- and its cost is not the font size, which the
+   harness excludes as non-absolute, but the UA `p { margin: 1em 0 }`
+   underneath it, which then resolves against 14 instead of 16."
   [v parent-px root-px]
   (cond
     (number? v) v
@@ -4962,14 +5142,18 @@
          ;; The USER-AGENT origin, at the bottom of the cascade: every
          ;; author declaration of the same importance beats it, which is
          ;; the whole of what "UA stylesheet" means and is why :origin sits
-         ;; between :important? and :inline? in the sort tuple below. It is
-         ;; only ever consulted for the element itself -- this sheet has no
-         ;; ::before/::after rule (a real one has `li::marker`, which this
-         ;; engine does not model), so a pseudo-element resolution is
-         ;; unchanged from before this origin existed.
-         ua-declarations (when (nil? pseudo-element)
-                           (for [rule (ua-rules-for node)
+         ;; between :important? and :inline? in the sort tuple below.
+         ;;
+         ;; Matched per PSEUDO-ELEMENT, exactly like the author rules
+         ;; above: the sheet's `q::before { content: open-quote }` must
+         ;; reach a ::before resolution and must NOT reach the element's
+         ;; own. It used to be skipped for pseudo-elements outright, which
+         ;; was correct only while the sheet had no ::before/::after rule
+         ;; in it. `li::marker` -- a real UA sheet's other one -- is still
+         ;; not here, because this engine has no marker box to style.
+         ua-declarations (for [rule (ua-rules-for node)
                                  selector (:rule/selectors rule)
+                                 :when (= pseudo-element (pseudo-element-of selector))
                                  ;; Same no-document rule as `ua-style-of`,
                                  ;; and for the same reason: `matches?`'s
                                  ;; 1-arity tests only the SUBJECT compound,
@@ -4997,7 +5181,7 @@
                               :specificity (specificity selector)
                               :inline? false
                               :layer 0
-                              :order (:rule/order rule)}))
+                              :order (:rule/order rule)})
          node-inline-importance (inline-style-importance node)
          inline-declarations (when (nil? pseudo-element)
                                 (map-indexed (fn [idx [property value]]
@@ -5009,35 +5193,35 @@
                                                 :inline? true
                                                 :layer max-layer-priority
                                                 :order idx})
-                                             (inline-style node)))]
-     (let [sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
-                           (concat ua-declarations declarations inline-declarations))
-           ;; Grouped per property rather than reduced straight into a map,
-           ;; because `revert` needs the LOSING entries too -- it rolls the
-           ;; cascade back to the previous origin rather than to nothing.
-           ;; `sort-by` is stable and `group-by` preserves input order
-           ;; within each group, so the last entry of each group is the
-           ;; same winner the old straight reduce ended on.
-           m (reduce-kv
-              (fn [m property entries]
-                (let [{:keys [value] :as winner} (peek entries)]
-                  (if-let [kind (css-wide-keyword value)]
-                    (let [resolved (resolve-css-wide-keyword
-                                    document node property kind
-                                    (when (= :revert kind)
-                                      (filterv #(< (:origin %) (:origin winner)) entries)))]
-                      (if (= drop-declaration resolved)
-                        m
-                        (assoc m property resolved)))
-                    (assoc m property value))))
-              {}
-              (group-by :property sorted))]
-       (if (contains? m :content)
-         (let [resolved (resolve-content-value node counters (:content m))]
-           (if (nil? resolved)
-             (dissoc m :content)
-             (assoc m :content resolved)))
-         m)))))
+                                             (inline-style node)))
+         sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
+                         (concat ua-declarations declarations inline-declarations))
+         ;; Grouped per property rather than reduced straight into a map,
+         ;; because `revert` needs the LOSING entries too -- it rolls the
+         ;; cascade back to the previous origin rather than to nothing.
+         ;; `sort-by` is stable and `group-by` preserves input order within
+         ;; each group, so the last entry of each group is the same winner
+         ;; the old straight reduce ended on.
+         m (reduce-kv
+            (fn [m property entries]
+              (let [{:keys [value] :as winner} (peek entries)]
+                (if-let [kind (css-wide-keyword value)]
+                  (let [resolved (resolve-css-wide-keyword
+                                  document node property kind
+                                  (when (= :revert kind)
+                                    (filterv #(< (:origin %) (:origin winner)) entries)))]
+                    (if (= drop-declaration resolved)
+                      m
+                      (assoc m property resolved)))
+                  (assoc m property value))))
+            {}
+            (group-by :property sorted))]
+     (if (contains? m :content)
+       (let [resolved (resolve-content-value node counters (:content m))]
+         (if (nil? resolved)
+           (dissoc m :content)
+           (assoc m :content resolved)))
+       m))))
 
 (defn computed-style
   "Cascade-resolved style map for `node`. Regular declarations are flat
@@ -5443,7 +5627,7 @@
    its own computed display except for `display: contents` -- see
    `children-container-display`."
   [document rules node-id inherited-env inherited-counters container-ctx
-   parent-font-size root-font-size parent-display]
+   parent-font-size root-font-size parent-display parent-quote-depth]
   (let [node (get-in document [:nodes node-id])
         [style node-counters] (style-with-counters document rules node inherited-counters container-ctx)
         pseudo-keys #{:pseudo/before :pseudo/after}
@@ -5463,9 +5647,11 @@
                                                 node-font-size
                                                 (or root-font-size node-font-size)))]))
                               pseudo)
-        final-style (-> (merge resolved-custom resolved-normal resolved-pseudo)
-                        resolve-current-color
-                        (blockify-display parent-display))
+        [final-style child-quote-depth]
+        (-> (merge resolved-custom resolved-normal resolved-pseudo)
+            resolve-current-color
+            (blockify-display parent-display)
+            (resolve-quote-content (or parent-quote-depth 0)))
         document (reduce-kv
                   (fn [d k v]
                     (if (contains? pseudo-keys k)
@@ -5474,7 +5660,8 @@
                   (clear-style-attrs document node-id)
                   final-style)]
     [document node-env node-counters node-font-size
-     (children-container-display final-style parent-display)]))
+     (children-container-display final-style parent-display)
+     child-quote-depth]))
 
 (defn- run-cascade-walk
   "The actual top-down tree walk apply-cascade performs (see its own
@@ -5504,27 +5691,31 @@
    has no ancestor chain to read either number off."
   [document rules container-ctx base-font-size]
   (letfn [(walk [document node-id inherited-env inherited-counters visited
-                 parent-font-size root-font-size parent-display]
+                 parent-font-size root-font-size parent-display quote-depth]
             (let [node (get-in document [:nodes node-id])
                   element? (= :element (:node/type node))
-                  [document node-env node-counters node-font-size node-display]
+                  [document node-env node-counters node-font-size node-display
+                   node-quote-depth]
                   (if element?
                     (style-element document rules node-id inherited-env inherited-counters
                                    container-ctx parent-font-size root-font-size
-                                   parent-display)
+                                   parent-display quote-depth)
                     ;; a text node establishes no formatting context of its
                     ;; own, so its (impossible) children would still be
-                    ;; blockified against this node's parent
-                    [document inherited-env inherited-counters parent-font-size parent-display])
+                    ;; blockified against this node's parent -- and it
+                    ;; generates no quote, so the depth passes straight
+                    ;; through it
+                    [document inherited-env inherited-counters parent-font-size parent-display
+                     quote-depth])
                   root-font-size (if element? (or root-font-size node-font-size) root-font-size)
                   visited (conj visited node-id)]
               (reduce (fn [[document visited counters] child-id]
                         (walk document child-id node-env counters visited
-                              node-font-size root-font-size node-display))
+                              node-font-size root-font-size node-display node-quote-depth))
                       [document visited node-counters]
                       (:children node))))]
     (let [[document visited] (if-let [root (:root document)]
-                                (walk document root {} {} #{} base-font-size nil nil)
+                                (walk document root {} {} #{} base-font-size nil nil 0)
                                 [document #{}])]
       (reduce-kv
        (fn [document node-id node]
@@ -5532,8 +5723,11 @@
            ;; a detached subtree has no ancestor chain to read a container
            ;; display off either -- the same honest simplification the empty
            ;; inherited environment above it already makes
+           ;; a detached subtree has no ancestor chain to read a quote
+           ;; depth off either -- it starts at 0, the same honest
+           ;; simplification as the two above
            (first (style-element document rules node-id {} {} container-ctx
-                                 base-font-size base-font-size nil))
+                                 base-font-size base-font-size nil 0))
            document))
        document
        (:nodes document)))))
