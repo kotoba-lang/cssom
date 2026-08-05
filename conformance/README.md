@@ -813,6 +813,253 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round thirty-eight: a resource this engine cannot see, and a gap that has to be measured twice
+
+Two gaps that round thirty-seven and round thirty-six each named and left,
+because each one needed something the code around it did not have: a fact
+only a host knows, and a size that is not known until after it is used.
+
+**Before → after**, both measured on the corpus of **576** at this round's
+merge base (`f1c0db4`), so the columns are the same cases either side and
+the movement is entirely `src/`:
+
+| axis | before | after |
+|---|---|---|
+| line structure | 541/551 | 541/551 |
+| geometry (boxes) | 1892/1959 | **1901/1959** |
+| geometry (clean cases) | 535/576 | **540/576** |
+| paint order (points) | 14285/14389 | **14301/14389** |
+| paint order (clean cases) | 550/576 | **553/576** |
+| computed style (values) | 27539/27544 | 27539/27544 |
+| computed style (clean cases) | 573/576 | 573/576 |
+
+`--dump-ops` diffed corpus-wide names **five changed cases and no others**,
+in one direction: `:gap/percentage-column-gap-on-a-grid`,
+`:gap/percentage-row-gap-on-a-grid`, `:replaced/img-intrinsic-size`,
+`:replaced/img-width-only-keeps-the-ratio` and
+`:replaced/img-height-only-keeps-the-ratio`. All five now agree with Brave
+exactly. Nothing moved anywhere else in either direction.
+
+Five cases were then **added** for rules this round measured that the
+corpus had no case for, taking it to 581, and all five agree:
+`:gap/percentage-row-gap-with-a-definite-height`,
+`:gap/percentage-row-gap-on-an-auto-flex-column`,
+`:gap/percentage-column-gap-on-an-inline-grid`,
+`:replaced/img-max-width-clamps-before-the-ratio` and
+`:replaced/img-border-and-padding-sit-outside-the-resource-size`. On 581:
+line 546/556, geometry 1915/1973 (545/581 clean), paint 14426/14514
+(558/581 clean), computed style 27735/27740 (578/581 clean).
+
+#### An image's size is not in the document, and the hook that says so
+
+`replaced-content-size` could already solve either axis of a replaced box
+from a ratio — it does exactly that for a `<canvas>`, whose bitmap is its
+attributes. What it had no way to reach was the size of an `<img>`'s
+**resource**, which is a property of the bytes at the far end of a URL.
+This engine has no loader, no decoder and no network: `cssom.layout` is
+handed a DOM tree and a theme.
+
+So the answer arrives on the theme, as the OPTIONAL
+**`:image-size`** hook — `(fn [src] {:w <px> :h <px>})`, nil for a
+resource the host has not resolved — the fourth member of the
+`:measure-text` / `:font-metrics` / `:avg-advance` family and the same
+bargain as all three: **absent means the engine keeps exactly the answer
+it always had**, which for an `<img>` is 0x0. `cssom.layout` runs on hosts
+that have no images at all (the JVM test suite is one), so that absence is
+part of the API and
+`replaced-image-without-an-image-size-hook-is-unchanged` in
+`test/cssom/layout_test.clj` asserts it — including that a hook returning
+`nil`, or a zero size, is indistinguishable from no hook.
+
+Every number below was measured in Brave 151 over CDP on 2026-08-06, on
+the corpus's own 40x20 SVG data URI, **before** any of it was written:
+
+| declaration | Brave | where the answer comes from |
+|---|---|---|
+| (none) | 40x20 | the resource, both axes |
+| `width: 200px` | 200x100 | CSS width, the ratio solves the height |
+| `height: 60px` | 120x60 | CSS height, the ratio solves the width |
+| `max-width: 20px` | 20x10 | the clamp lands **before** the ratio |
+| `width:200;height:60` | 200x60 | both declared, the ratio unused |
+| `height="40"` attribute | 80x40 | a HINT is a declaration too |
+| `width="80" height="40"` + `width:200px` | 200x40 | **not** 200x100 |
+
+That last row is the control that made this a resource finding rather than
+a box-model one, and it passed before the hook existed and still passes:
+the attributes are presentational hints, i.e. ordinary lowest-priority
+declarations, so a CSS `width` replaces the width hint, the height hint
+stands, and the resource's 2:1 ratio has nothing to solve. What was
+missing was never the ratio machinery.
+
+**The engine still emits no image draw-op.** `cssom.layout`'s four ops are
+`:node`, `:rect`, `:text` and `:clip`, and `dom-gpu` has no `drawImage`
+path. What the hook buys is the **box** a browser reserves for the
+picture, which is the same thing the 300x150 default object size buys for
+a `<video>` nothing here can decode either.
+
+#### How the harness learns an image's size honestly
+
+The harness has to play the host, and there were two candidate decoders:
+its own, or the oracle's. It uses the **oracle's** — a per-src
+`naturalWidth`/`naturalHeight` table read off the corpus page, alongside
+the per-character advance table and the per-face metrics that are already
+measured there — and the reason is in this corpus rather than in a
+principle.
+
+Ten cases use the data URI `R0lGODlhAQABAAAAACw=`. It has a **well-formed
+GIF header saying 1x1 and no image data at all**. A header-sniffing
+decoder in the harness reports 1x1; Brave rejects it, reports
+`naturalWidth` 0, and paints a 16x16 broken-image icon. Feeding the engine
+1x1 for it would make an `<img style="width: 200px">` come out 200x200
+here against Brave's 16x16 — an argument between two decoders, dressed up
+as a layout bug. Measuring the fact in the oracle removes the one
+difference this comparison cannot legitimately judge (whether the harness
+has a decoder) and leaves the actual question — what **box** the engine
+builds from a size, a ratio and the declarations — entirely on the engine.
+
+It is not laundering the answer, with exactly one honest exception. In
+`:replaced/img-width-only-keeps-the-ratio` the fact is 40x20 and the box
+is 200x100; in `:replaced/img-height-only-keeps-the-ratio` it is 120x60.
+In `:replaced/img-intrinsic-size` the box **is** the fact, so that case
+asserts the size is consulted at all and nothing more, and its comment in
+`cases.edn` says so.
+
+`complete` is reported per image alongside the size, and the harness
+prints a WARNING if any image had not finished loading when the page
+measured, so a load race can never quietly look like a resource of size
+zero.
+
+#### What an `<img>` does when the resource is BROKEN, and why it is out
+
+Round thirty-seven recorded that "a bare `<img>` and an `<img>` whose src
+404s are **both** 0x0 in Brave". The first half is right; **the second half
+was wrong**, and re-measuring it was the first thing this round did. A
+broken image (a connection-refused URL, or that truncated GIF) is a
+broken-image **icon**, and it stops behaving like a replaced box at all:
+
+| declaration on the broken `<img>` | Brave |
+|---|---|
+| (none) | 16x16 |
+| `width: 200px` | **16x16** — the width is ignored |
+| `width: 200px; height: 50px` | 200x50 |
+| `width: 200px; display: block` | 200x16 |
+| `width="40" height="20"` | 40x20 |
+| `alt="some alt text here"` | 142x20 — the alt text, laid out |
+
+i.e. an inline broken image with fewer than two definite axes is sized
+like **non-replaced inline content** — its icon, or its alt text — which
+is why the CSS width alone does not take. This engine keeps 0x0 for all
+six rows and that is now recorded as a scope cut rather than as agreement.
+No corpus case is affected: every `<img>` in the corpus that uses the
+truncated GIF declares **both** axes, the one row where 0x0 and the
+browser reach the same box anyway.
+
+Also measured and deliberately not wired to the hook, each with the number
+a fix needs: a `<video poster=...>` with no `src` **is** 40x20 (the poster
+is the intrinsic size while there is no video, but a `<video src>` takes
+its size from frames, which is not an image decode); an
+`<object data=...>` pointing at the same SVG is 40x20 too, but `<object>`
+is not a replaced element here at all (its fallback renders); an
+`<iframe srcdoc>` is 304x154 whatever document is inside it. And the one
+shape the hook's contract cannot express: an SVG with a `viewBox` and no
+`width`/`height` is an intrinsic **ratio with no intrinsic size**, which
+reports `naturalWidth` 300x150 and which Brave lays out at **400x200** in a
+400px block (200x100 under `width: 200px`) — closing that needs a hook
+that can answer a ratio with no size.
+
+One older bug this work uncovered and did **not** fix, recorded at
+`replaced-content-size`: a **percentage `width` on an inline-level replaced
+box is resolved twice**, once by `inline-max-content-width` to get the
+atomic inline's natural width and again by `layout-node`'s replaced branch
+against that answer. Measured through this engine in a 400px block,
+`width: 50%` is 100, `25%` is 25 and `10%` is 4, where Brave says 200, 100
+and 40 — the error grows with the square of the percentage. It is
+identical for `<canvas>`, `<video>`, `<svg>` and `<iframe>`, so it belongs
+to the atomic-inline plumbing rather than to any resource, and
+`display: block` on the same element gives Brave's answer today.
+
+#### A percentage gap is resolved against a size that does not exist yet
+
+Round thirty-six landed percentage margins and paddings and stopped at
+`row-gap`, naming it "a two-pass rule and its own round". This is that
+round, and the measurement is the whole of it.
+
+**The rule.** A percentage `row-gap`/`column-gap` resolves against the
+container's own **content-box** size in that axis. When that size is
+definite, that is the end of it. When it is **not** — an auto height, a
+shrink-to-fit width — the size is first computed with the gap treated as
+**zero**, the percentage then resolves against that result, and the gap is
+applied for positioning only: the container does **not** grow, and the
+content overflows.
+
+Measured in Brave 151 on 2026-08-06:
+
+| markup | container | gap | evidence |
+|---|---|---|---|
+| grid, two 20px rows, `row-gap: 10%` | 40 tall | **4** | 2nd row y=24, `scrollHeight` 44 |
+| the same with `row-gap: 4px` | **44** tall | 4 | the px control — the container grows |
+| grid, three 20px rows, `row-gap: 10%` | 60 tall | **6** | y 0/26/52, `scrollHeight` 72 |
+| grid, rows of 30 and 50, `row-gap: 10%` | 80 tall | **8** | 2nd row y=38 |
+| grid, two 20px rows, `row-gap: 200%` | 40 tall | **80** | 2nd row y=100 |
+
+The three-row row is what says it is exactly **one** pass and not a fixed
+point: 10% of the gap-free 60 is 6, and a second round against the
+resulting 72 would be 7.2.
+
+The inline axis has the same rule wherever the width is indefinite:
+`inline-grid` with two 60px columns and `column-gap: 10%` is **120** wide
+with a **12px** gap that overflows it, and `inline-flex` with two 60px
+items is 120 wide with a 12px gap the items **shrink** to fit (54 each,
+because a flex item's `flex-shrink` is 1 and a grid track's size is not
+negotiable). For a block-level container the width is definite from the
+start: `width: 300px` with `column-gap: 10%` is 30, and the basis is the
+**content** box in both `box-sizing` modes — `padding: 0 50px` gives 30
+under `content-box` (the content width is 300) and **20** under
+`border-box` (it is 200). It is the container's own size and not its
+tracks': two 60px columns in a **100px** grid get a 10px gap and overflow.
+
+**And flex is not grid, which was the surprise.** Blink gives a flex
+container's **block axis** no second pass at all:
+
+| container | Brave's gap |
+|---|---|
+| grid, auto height, `row-gap: 10%` / `200%` | 4 / 80 |
+| flex column, auto height, `row-gap: 10%` / `50%` / `200%` | **0** / **0** / **0** |
+| flex column, `height: 200px`, `row-gap: 10%` | 20 |
+| flex column, `min-height: 100px`, `row-gap: 10%` | **0** |
+| grid, `min-height: 100px`, `row-gap: 10%` | 10 |
+| flex column, `max-height: 30px`, `row-gap: 10%` | **0** |
+| grid, `max-height: 30px`, `row-gap: 10%` | 3 |
+
+Only a definite `height` resolves it on a flex container, and a min/max
+clamp does not count — where on a grid the clamp is part of the **basis**
+rather than something applied after it. That pair of rows is the sharpest
+measurement of the round: the same two declarations give 0 and 10, and 0
+and 3. A flex container's **inline** axis behaves like a grid's
+throughout.
+
+**Where it lands.** `node-style` now carries `:row-gap/raw` and
+`:column-gap/raw` beside the coerced pair, for the same reason
+`:margin/raw` sits beside `:margin` — `parse-int "10%"` is 10 PIXELS, and
+the coercion that makes every other reader safe is exactly what erases a
+percentage. Two functions read them: `gap-for-intrinsic-size` (zero for a
+percentage, which is what the container's own size is computed with) and
+`used-gap` (the percentage resolved against a basis the caller supplies,
+and 0 when the caller has none — the state only a flex container reaches).
+`layout-grid` binds each axis's used gap the moment that axis's content
+size is known, and `layout-flex` hands `used-gap` its `cw` for the inline
+axis and its definite content height, or nil, for the block one. Multicol
+already resolved percentages correctly (`multicol-gap-px`) and is
+untouched.
+
+Two rules this measured and did not implement, with their numbers: a
+grid with spare block space **stretches** its auto rows
+(`min-height: 100px` over two 20px rows makes them 45 each, so Brave's
+second row is at y=55 where this engine says 30 — the 10px gap is right,
+the stretch is missing), and `align-content` on a wrapping flex container
+already does the equivalent (`height: 200px` with `row-gap: 10%` puts the
+second line at y=110 on both sides).
+
 ### Round thirty-seven: the box a browser reserves for something it cannot draw
 
 Five tags — `<canvas>`, `<video>`, `<svg>`, `<iframe>`, and `<img>` beside
@@ -900,20 +1147,22 @@ its bottom edge and moves with the height, and file's is 18px down from its
 **What was cut, with the numbers a fix needs.** Two things, both stated in
 code at the function that owns them:
 
-- **An `<img>`'s intrinsic ratio.** `:replaced/img-width-only-keeps-the-
-  ratio` is still 200×0 against Brave's 200×100. The ratio machinery exists
-  and does exactly this for a `<canvas>`; what is missing is the resource's
-  own size, which is a property of the bytes at the far end of a URL. This
-  stack has no loader, no decoder and no image draw-op — `cssom.layout`'s
-  four ops are `:node`, `:rect`, `:text` and `:clip`, and `dom-gpu` has no
-  `drawImage` path. A fix is a host-supplied `(fn [src] {:w .. :h ..})` on
-  the theme, the same shape as `:measure-text`, which exists for exactly
-  this class of fact; `replaced-intrinsic-size` is where the answer would
-  arrive. The control case in the corpus is what makes this a resource
-  finding rather than a box-model one: with `width`/`height` **attributes**
-  both sides already agree at 200×20, and a bare `<img>` and an `<img>`
-  whose src 404s are **both 0×0** in Brave, which is what this engine
-  already produced.
+- **An `<img>`'s intrinsic ratio.** **CLOSED by round thirty-eight**,
+  through the `:image-size` host hook this paragraph correctly predicted —
+  see that round for the hook, its measurements, and how the harness
+  supplies it. The rest of the diagnosis stood up: the ratio machinery
+  existed and did exactly this for a `<canvas>`, what was missing was only
+  the resource's own size, and the control case (with `width`/`height`
+  **attributes** both sides already agreed at 200×20) is what made it a
+  resource finding rather than a box-model one. `cssom.layout` still emits
+  no image draw-op and `dom-gpu` still has no `drawImage` path; what the
+  hook buys is the box, not the pixels.
+
+  One claim here did **not** stand up, and round thirty-eight corrects it:
+  a bare `<img>` is 0×0 in Brave, but an `<img>` whose src 404s is a
+  **16×16 broken-image icon**, and it stops behaving like a replaced box
+  at all — a CSS `width: 200px` alone does not even apply to it. That is
+  still a scope cut, now with its own measured table.
 - **`input[type=file]`'s width.** Brave says 253. The shadow `<button>`
   holding the browser's own "Choose File" is 87.141 wide and "No file
   chosen" in the UA control face is 84.484 — 171.625, **81 short** — so the
@@ -1079,8 +1328,11 @@ site needs is its own **basis**, and there are three:
   auto-height container is cyclic. Measured in Brave, a 10% row gap on a
   40px-tall auto grid is 4px **and the container stays 40 tall** — the gap
   is resolved against a height computed without it and the content then
-  overflows. That is a two-pass rule and its own round; the two `:gap/`
-  percentage cases are unchanged.
+  overflows. That is a two-pass rule and its own round. **That round is
+  thirty-eight**, and both `:gap/` percentage cases agree now; it also
+  found that the inline axis is cyclic in the same way whenever the width
+  is indefinite, and that a *flex* container's block axis follows a
+  different rule from a grid's.
 
 #### What is still out, with the numbers a fix will need
 

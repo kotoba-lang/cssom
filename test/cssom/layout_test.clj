@@ -7958,6 +7958,193 @@
     (is (= 70 (:x b)))
     (is (= 30 (:y c)))))
 
+;; ---- percentage gaps: the two-pass rule ----
+;;
+;; Every number in this section was measured in Brave 151 over CDP on
+;; 2026-08-06, before any of the code that produces it was written. The
+;; rule and the whole measured table live at `used-gap` and
+;; `gap-for-intrinsic-size` in cssom.layout.
+
+(defn- grid-boxes-with-container
+  "`grid-item-boxes`, but keeping the container's own box as the first
+   entry -- half of what a percentage row gap asserts is that the
+   CONTAINER does not grow to hold it."
+  ([container-style specs] (grid-boxes-with-container container-style specs 400))
+  ([container-style specs width]
+   (let [[g doc] (dom/create-element dom/empty-document :div)
+         doc (dom/set-root doc g)
+         doc (dom/set-style doc g (merge {:display "grid"} container-style))
+         doc (build-inline-children doc g specs)
+         [_ doc] (dom/consume-ops doc)
+         ops (layout/draw-ops (dom/tree doc) {:width width :theme {:padding 0 :gap 0}})]
+     (mapv #(select-keys % [:x :y :w :h])
+           (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)))))
+
+(deftest a-percentage-column-gap-resolves-against-the-content-width
+  ;; Brave: two `1fr` tracks in a 300px grid with `column-gap: 10%` are 135
+  ;; each with the second at x=165 -- a 30px gap. This engine read "10%"
+  ;; through parse-int and laid out 10 PIXELS, which is the same defect
+  ;; `percentage-of` was written for everywhere else.
+  (let [[c a b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr 1fr" :column-gap "10%" :width 300}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 300 (:w c)))
+    (is (= [0 135] [(:x a) (:w a)]))
+    (is (= [165 135] [(:x b) (:w b)])))
+  ;; the basis is the CONTAINER's content box, not the tracks: two 60px
+  ;; columns in a 100px grid get a 10px gap and overflow it (Brave: the
+  ;; second column at x=70 in a 100px box)
+  (let [[c a b] (grid-boxes-with-container
+                 {:grid-template-columns "60px 60px" :column-gap "10%" :width 100}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 100 (:w c)))
+    (is (= [0 60] [(:x a) (:w a)]))
+    (is (= 70 (:x b))))
+  ;; three tracks, two gaps: 300 - 2x30 = 240 over three 1fr tracks
+  (let [[_ a b d] (grid-boxes-with-container
+                   {:grid-template-columns "1fr 1fr 1fr" :column-gap "10%" :width 300}
+                   [[:div {:height 20} "a"] [:div {:height 20} "b"] [:div {:height 20} "c"]])]
+    (is (= [80 80 80] [(:w a) (:w b) (:w d)]))
+    (is (= [0 110 220] [(:x a) (:x b) (:x d)]))))
+
+(deftest a-percentage-row-gap-resolves-against-a-height-computed-without-it
+  ;; The cyclic axis, and the whole of the two-pass rule. Brave: two 20px
+  ;; rows with `row-gap: 10%` make a **40px** container whose second row
+  ;; sits at **y=24** and whose scrollHeight is 44 -- the percentage
+  ;; resolves against the height the grid has with NO gap, the container
+  ;; does not grow, and the content overflows.
+  (let [[c a b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :row-gap "10%" :width 300}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 40 (:h c)) "the container is the height it was measured at")
+    (is (= 0 (:y a)))
+    (is (= 24 (:y b)) "and the 4px gap pushes the second row past its edge"))
+  ;; the px control, which is what says this is about the percentage and
+  ;; not about grids: `row-gap: 4px` on the same markup makes it 44 tall
+  (let [[c _ b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :row-gap 4 :width 300}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 44 (:h c)))
+    (is (= 24 (:y b))))
+  ;; exactly ONE pass, not a fixed point: three 20px rows are a 60px
+  ;; container with 6px gaps (Brave: y 0/26/52), not the 7.2 a second round
+  ;; against the resulting 72 would give
+  (let [[c a b d] (grid-boxes-with-container
+                   {:grid-template-columns "1fr" :row-gap "10%" :width 300}
+                   [[:div {:height 20} "a"] [:div {:height 20} "b"] [:div {:height 20} "c"]])]
+    (is (= 60 (:h c)))
+    (is (= [0 26 52] [(:y a) (:y b) (:y d)])))
+  ;; a proportion of the whole, not of anything per-track: rows of 30 and
+  ;; 50 give an 80px container and an 8px gap (Brave: second row at y=38)
+  (let [[c _ b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :row-gap "10%" :width 300}
+                 [[:div {:height 30} "a"] [:div {:height 50} "b"]])]
+    (is (= 80 (:h c)))
+    (is (= 38 (:y b))))
+  ;; and it scales past the container: `row-gap: 200%` of the same 40px
+  ;; grid is 80, with the second row at y=100 (Brave, scrollHeight 120)
+  (let [[c _ b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :row-gap "200%" :width 300}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 40 (:h c)))
+    (is (= 100 (:y b)))))
+
+(deftest a-definite-height-makes-a-percentage-row-gap-non-cyclic
+  ;; Nothing two-pass about it when the height is declared. Brave, on a
+  ;; 200px grid with `grid-template-rows: 20px 20px`: `row-gap: 10%` puts
+  ;; the second row at y=40 and `row-gap: 50%` at y=120.
+  (let [[_ _ b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :grid-template-rows "20px 20px"
+                  :height 200 :row-gap "10%" :width 300}
+                 [[:div {} "a"] [:div {} "b"]])]
+    (is (= 40 (:y b))))
+  (let [[_ _ b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :grid-template-rows "20px 20px"
+                  :height 200 :row-gap "50%" :width 300}
+                 [[:div {} "a"] [:div {} "b"]])]
+    (is (= 120 (:y b))))
+  ;; the CLAMP is part of the basis rather than applied after it: Brave
+  ;; gives `max-height: 30px` with `row-gap: 10%` a **3px** gap (10% of
+  ;; 30), not the 4 its 40px of content would give
+  (let [[_ _ b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :max-height 30 :row-gap "10%" :width 300}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 23 (:y b))))
+  ;; and `min-height: 100px` gives 10, for the same reason from the other
+  ;; side. (Brave also STRETCHES the two auto rows to 45 each there, which
+  ;; is `align-content: normal` on a grid with spare room and which this
+  ;; engine does not do -- so its second row lands at y=30 where Brave says
+  ;; 55. The GAP is what this asserts; the stretch is a separate gap of its
+  ;; own, recorded here with the number a fix needs.)
+  (let [[c _ b] (grid-boxes-with-container
+                 {:grid-template-columns "1fr" :min-height 100 :row-gap "10%" :width 300}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 100 (:h c)))
+    (is (= 30 (:y b)))))
+
+(deftest an-inline-grid-resolves-its-column-gap-against-its-shrunk-width
+  ;; The inline axis is cyclic too when the width is not definite, and it
+  ;; takes the same two passes. Brave: `inline-grid` with two 60px columns
+  ;; and `column-gap: 10%` is **120** wide (the gap-free track sum) with a
+  ;; **12px** gap that overflows it -- second column at x=72.
+  (let [[c a b] (grid-boxes-with-container
+                 {:display "inline-grid" :grid-template-columns "60px 60px"
+                  :column-gap "10%"}
+                 [[:div {:height 20} "a"] [:div {:height 20} "b"]])]
+    (is (= 120 (:w c)))
+    (is (= [0 60] [(:x a) (:w a)]))
+    (is (= 72 (:x b)))))
+
+(deftest a-flex-containers-block-axis-percentage-gap-needs-a-definite-height
+  ;; Where flex and grid part company, measured rather than reasoned about.
+  ;; A grid resolves an auto-height percentage row gap against its own
+  ;; gap-free height; Blink gives a FLEX container's block axis no second
+  ;; pass at all. Measured on `flex-direction: column` over two 20px items:
+  ;; `row-gap: 10%`, `50%` and `200%` ALL put the second item at y=20.
+  (doseq [g ["10%" "50%" "200%"]]
+    (let [[_ b] (flex-item-boxes {:flex-direction "column" :row-gap g :width 300}
+                                 [{:height 20} {:height 20}])]
+      (is (= 20 (second b)) (str "flex column, auto height, row-gap " g " -> no gap"))))
+  ;; a definite `height` does resolve it: Brave puts the second item at
+  ;; y=40 for `height: 200px; row-gap: 10%` and at y=70 for
+  ;; `height: 100px; row-gap: 50%`
+  (let [[_ b] (flex-item-boxes {:flex-direction "column" :height 200 :row-gap "10%" :width 300}
+                               [{:height 20} {:height 20}])]
+    (is (= 40 (second b))))
+  (let [[_ b] (flex-item-boxes {:flex-direction "column" :height 100 :row-gap "50%" :width 300}
+                               [{:height 20} {:height 20}])]
+    (is (= 70 (second b))))
+  ;; but a min/max clamp does NOT, which is the sharpest half of the
+  ;; difference: the same two declarations that give a grid 10 and 3 give a
+  ;; flex container 0 and 0
+  (let [[_ b] (flex-item-boxes {:flex-direction "column" :min-height 100 :row-gap "10%" :width 300}
+                               [{:height 20} {:height 20}])]
+    (is (= 20 (second b))))
+  (let [[_ b] (flex-item-boxes {:flex-direction "column" :max-height 30 :row-gap "10%" :width 300}
+                               [{:height 20} {:height 20}])]
+    (is (= 20 (second b)))))
+
+(deftest a-flex-containers-inline-axis-percentage-gap-behaves-like-a-grids
+  ;; The other axis is not special at all. Brave: `column-gap: 10%` on a
+  ;; 300px flex row puts the second 100px item at x=130.
+  (let [[_ b] (flex-item-boxes {:column-gap "10%" :width 300}
+                               [{:width 100 :height 20} {:width 100 :height 20}])]
+    (is (= 130 (first b))))
+  ;; and a wrapping row's CROSS gap follows the block-axis rule: 0 under an
+  ;; auto height (Brave: two wrapped 20px lines at y 0 and 20)...
+  (let [[_ b] (flex-item-boxes {:flex-wrap "wrap" :row-gap "10%" :column-gap 8 :width 200}
+                               [{:width 120 :height 20} {:width 120 :height 20}])]
+    (is (= 20 (second b))))
+  ;; ...and 20 under `height: 200px`, where Brave puts that second line at
+  ;; **y=110** -- the two lines are stretched to 90 each by align-content
+  ;; and then separated by the 20px gap. This engine already stretched
+  ;; them, so the whole y falls out and is asserted as the browser's own
+  ;; number rather than as the gap alone.
+  (let [[_ b] (flex-item-boxes {:flex-wrap "wrap" :height 200 :row-gap "10%"
+                                :column-gap 8 :width 200}
+                               [{:width 120 :height 20} {:width 120 :height 20}])]
+    (is (= 110 (second b)))))
+
 (deftest justify-items-sizes-the-item-to-its-content-and-places-it-in-the-track
   ;; Brave: a one-character item in a 120px column is 9.2px wide, at x=55.4
   ;; under `center` and x=110.8 under `end`. Under the default `stretch` it
@@ -8139,6 +8326,36 @@
 (defn- replaced-box [tag attrs style]
   (first (filter #(= tag (first %)) (replaced-boxes tag attrs style))))
 
+(defn- replaced-box-with-theme
+  "`replaced-box`, but with extra keys merged onto the theme -- the only
+   way to reach an OPTIONAL host hook, which is exactly what the
+   `:image-size` cases below are testing the presence and the ABSENCE of."
+  [tag attrs style theme-extra]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (dom/set-style doc root {:width 400 :line-height 20})
+        [el doc] (dom/create-element doc tag)
+        doc (dom/append-child doc root el)
+        doc (reduce-kv (fn [d k v] (dom/set-attribute d el k (str v))) doc attrs)
+        doc (if (seq style) (dom/set-style doc el style) doc)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc)
+                             {:width 800 :theme (merge brave-theme theme-extra)})]
+    (first (filter #(= tag (first %))
+                   (mapv (juxt :tag :x :y :w :h)
+                         (filterv #(= :node (:draw/op %)) ops))))))
+
+;; A stand-in for a host that has a decoder: the corpus's own 40x20 SVG
+;; data URI, and nothing else resolves. `nil` for anything it does not know
+;; is the contract a real host meets too (unloaded, broken, or a scheme it
+;; does not fetch).
+(def ^:private svg-40x20
+  (str "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmc"
+       "vMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSIyMCIvPg=="))
+
+(def ^:private image-size-hook
+  {:image-size (fn [src] (when (= src svg-40x20) {:w 40 :h 20}))})
+
 (deftest a-replaced-element-with-no-resource-reserves-the-default-object-size
   ;; Brave: 300x150 for every one of these, whether or not it can decode a
   ;; single pixel. This engine used to lay each one out as a BLOCK that
@@ -8155,12 +8372,120 @@
 
 (deftest an-img-is-not-given-the-default-object-size
   ;; The measured exception, and the reason `replaced-default-size` exists
-  ;; rather than one constant: a bare <img> and an <img> whose src 404s are
-  ;; both 0x0 in Brave, where a bare <video> on the same page is 300x150.
-  ;; A browser reserves the default object size for a replaced element
-  ;; whose RESOURCE has no intrinsic size; a missing image gets nothing.
+  ;; rather than one constant: a bare <img> is 0x0 in Brave, where a bare
+  ;; <video> on the same page is 300x150. A browser reserves the default
+  ;; object size for a replaced element whose RESOURCE has no intrinsic
+  ;; size; an image with no resource at all gets nothing.
   (is (= [:img 0 14 0 0] (replaced-box :img {} {})))
+  ;; A BROKEN image is a different thing, and the second `is` below used to
+  ;; carry the comment "an <img> whose src 404s is 0x0 in Brave too". That
+  ;; was wrong. Re-measured in Brave 151 on 2026-08-06, a broken image is a
+  ;; 16x16 broken-image ICON, and a broken image with only ONE definite
+  ;; axis is sized like non-replaced inline content -- `width: 200px` alone
+  ;; leaves it at 16x16, `alt="some alt text here"` makes it 142x20, and
+  ;; only `width: 200px; height: 50px` (both axes) gives 200x50. This
+  ;; engine keeps 0x0 for all of them, which the numbers below now say is a
+  ;; SCOPE CUT rather than agreement; see `replaced-default-size` for the
+  ;; whole table and for why no conformance case is affected by it.
   (is (= [:img 0 14 0 0] (replaced-box :img {:src "/nope.png"} {}))))
+
+(deftest replaced-image-without-an-image-size-hook-is-unchanged
+  ;; The absence of the host hook IS the API, and this is the assertion
+  ;; that pins it: `cssom.layout` runs on hosts that have no images at all
+  ;; (the JVM test suite is one), and on those every <img> has to keep
+  ;; exactly the box it had before `:image-size` existed. Same numbers as
+  ;; `an-img-is-not-given-the-default-object-size` above, reached through a
+  ;; src that a host WITH a decoder would resolve.
+  (is (= [:img 0 14 0 0] (replaced-box :img {:src svg-40x20} {})))
+  (is (= [:img 0 14 200 0] (replaced-box :img {:src svg-40x20} {:width 200})))
+  (is (= [:img 0 0 0 60] (replaced-box :img {:src svg-40x20} {:height 60})))
+  ;; and a hook that answers `nil` -- an unresolved or broken resource --
+  ;; is indistinguishable from no hook at all
+  (is (= [:img 0 14 0 0]
+         (replaced-box-with-theme :img {:src "/nope.png"} {}
+                                  {:image-size (fn [_] nil)})))
+  (is (= [:img 0 14 200 0]
+         (replaced-box-with-theme :img {:src "/nope.png"} {:width 200}
+                                  {:image-size (fn [_] nil)})))
+  ;; a hook that answers a zero or negative size is treated the same way,
+  ;; because that is what a browser reports for an image it could not
+  ;; decode (`naturalWidth` 0) and 0x0 is not a ratio
+  (is (= [:img 0 14 200 0]
+         (replaced-box-with-theme :img {:src "/x"} {:width 200}
+                                  {:image-size (fn [_] {:w 0 :h 0})}))))
+
+(deftest an-image-size-hook-supplies-the-resource-size-and-its-ratio
+  ;; Every number measured in Brave 151 on 2026-08-06 against the corpus's
+  ;; own 40x20 SVG data URI, in the harness's own 400px block, BEFORE the
+  ;; hook was written. See `replaced-intrinsic-size` for the table.
+  (let [img (fn [style] (replaced-box-with-theme :img {:src svg-40x20} style
+                                                 image-size-hook))]
+    (is (= [:img 0 0 40 20] (img {}))
+        "the resource sizes both axes")
+    (is (= [:img 0 0 200 100] (img {:width 200}))
+        "a declared width, and the resource's 2:1 ratio solves the height")
+    (is (= [:img 0 0 120 60] (img {:height 60}))
+        "the mirror: a declared height solves the width")
+    (is (= [:img 0 0 200 60] (img {:width 200 :height 60}))
+        "both declared, so the ratio has nothing to solve")
+    (is (= [:img 0 4 20 10] (img {:max-width 20}))
+        "the clamp lands BEFORE the ratio -- 20x10, not 40x20 clipped
+         (y=4 because a 10px-tall atomic inline sits on the 20px line's
+         baseline at y=14, which is where every other case here is 0
+         because its own height fills the line)")
+    (is (= [:img 0 0 400 200] (img {:min-width 400}))
+        "and so does the min clamp")))
+
+(deftest a-declared-length-still-beats-the-resource-ratio
+  ;; The control that says what was missing was the RESOURCE and not the
+  ;; box model, and the one case in this group that already agreed with
+  ;; Brave before the hook existed. `width="80" height="40"` are HINTS,
+  ;; i.e. ordinary lowest-priority declarations, so a CSS `width: 200px`
+  ;; replaces the width hint and the HEIGHT hint stands on its own:
+  ;; measured 200x40, NOT the 200x100 the 2:1 resource would give.
+  (is (= [:img 0 0 200 40]
+         (replaced-box-with-theme :img {:src svg-40x20 :width 80 :height 40}
+                                  {:width 200} image-size-hook)))
+  ;; and with the hint on ONE axis only, the resource's ratio does solve
+  ;; the other: `height="40"` alone is 80x40 in Brave.
+  (is (= [:img 0 0 80 40]
+         (replaced-box-with-theme :img {:src svg-40x20 :height 40}
+                                  {} image-size-hook))))
+
+(deftest the-image-size-hook-is-consulted-for-img-alone
+  ;; A host hook is an API, and this pins its surface. `<canvas>` reads its
+  ;; own attributes and never asks (its bitmap is in the markup), and a
+  ;; `<video>`/`<svg>`/`<iframe>` is not an image resource -- measured, an
+  ;; `<iframe srcdoc>` is 304x154 whatever document is inside it. A hook
+  ;; that threw on being called would fail this test rather than silently
+  ;; resizing a box the browser leaves alone.
+  (let [boom {:image-size (fn [src] (throw (ex-info "asked for a non-image" {:src src})))}]
+    (is (= [:canvas 0 0 300 150] (replaced-box-with-theme :canvas {} {} boom)))
+    (is (= [:canvas 0 0 200 100] (replaced-box-with-theme :canvas {} {:width 200} boom)))
+    (is (= [:video 0 0 300 150] (replaced-box-with-theme :video {} {} boom)))
+    (is (= [:svg 0 0 300 150] (replaced-box-with-theme :svg {} {} boom)))
+    (is (= [:iframe 0 0 304 154] (replaced-box-with-theme :iframe {} {} boom)))
+    ;; nor for an <img> with no src to ask about
+    (is (= [:img 0 14 0 0] (replaced-box-with-theme :img {} {} boom)))
+    (is (= [:img 0 14 0 0] (replaced-box-with-theme :img {:src ""} {} boom)))))
+
+(deftest a-replaced-box-with-insets-sizes-its-content-box
+  ;; The size a resource supplies is a CONTENT size in both box-sizing
+  ;; modes, which is the same fact an <iframe>'s UA `border: 2px inset`
+  ;; already established from the other direction. Measured in Brave 151 on
+  ;; 2026-08-06, on the 40x20 image with `width: 200px`:
+  ;;   box-sizing: border-box; border: 5px; padding: 3px  -> 200x108
+  ;;   content-box (the default), same border and padding -> 216x116
+  (is (= [:img 0 0 200 108]
+         (replaced-box-with-theme :img {:src svg-40x20}
+                                  {:box-sizing "border-box" :width 200
+                                   :border-width 5 :border-style "solid" :padding 3}
+                                  image-size-hook)))
+  (is (= [:img 0 0 216 116]
+         (replaced-box-with-theme :img {:src svg-40x20}
+                                  {:width 200 :border-width 5 :border-style "solid"
+                                   :padding 3}
+                                  image-size-hook))))
 
 (deftest a-canvas-is-sized-by-its-attributes-and-keeps-their-ratio
   ;; A <canvas>'s width/height ATTRIBUTES are its bitmap, i.e. a real
