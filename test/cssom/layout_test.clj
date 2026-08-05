@@ -1,6 +1,6 @@
 (ns cssom.layout-test
   (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [are deftest is]]
             [cssom.core :as css]
             [cssom.layout :as layout]
             [htmldom.core :as html]
@@ -4436,8 +4436,16 @@
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
-        node-ops (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
-    (is (= [4 28] (mapv :y node-ops)))))
+        ;; Selected BY NODE ID rather than by position in the op vector:
+        ;; `position: sticky` establishes a stacking context (see
+        ;; stacking-context?), so the sticky box's ops now paint LAST,
+        ;; after its static sibling's, and reading them off in emitted
+        ;; order returns them the other way round. That reordering is the
+        ;; point of the stacking round and is not what this test is about
+        ;; -- it is about the sticky box still taking its place in normal
+        ;; FLOW, which is `:y`, and `:y` is unchanged.
+        y-of (fn [id] (:y (first (filterv #(and (= :node (:draw/op %)) (= id (:id %))) ops))))]
+    (is (= [4 28] [(y-of sticky-el) (y-of static-el)]))))
 
 ;; ---- negative z-index on a positioned child must paint BEHIND its
 ;;      stacking context's own in-flow content (layout-absolute-children
@@ -4449,8 +4457,14 @@
   "Shared harness: a position:relative container with an in-flow sibling
    and an absolutely-positioned, fully-overlapping child styled by
    `abs-extra-style` (must include its own z-index); returns the real
-   paint-order colors (background, sibling, positioned child)."
-  [abs-extra-style]
+   paint-order colors (background, sibling, positioned child).
+
+   The optional second argument is extra style for the CONTAINER, which
+   is what decides whether it is a stacking context at all -- see
+   negative-z-index-sinks-past-a-container-that-is-not-a-stacking-context
+   and its pair."
+  ([abs-extra-style] (z-index-stacking-colors abs-extra-style ""))
+  ([abs-extra-style container-extra-style]
   (let [[root doc] (dom/create-element dom/empty-document :main)
         doc (dom/set-root doc root)
         doc (dom/set-attribute doc root :class "container")
@@ -4461,7 +4475,8 @@
         doc (dom/append-child doc root abs-el)
         doc (dom/set-attribute doc abs-el :class "positioned")
         rules (css/parse-rules
-               (str ".container { position: relative; width: 200; height: 100; padding: 0; background: blue } "
+               (str ".container { position: relative; width: 200; height: 100; padding: 0; background: blue; "
+                    container-extra-style " } "
                     ".sibling { width: 200; height: 100; background: green } "
                     ".positioned { position: absolute; top: 0; left: 0; width: 200; height: 100; background: red; "
                     abs-extra-style " }"))
@@ -4469,13 +4484,31 @@
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})]
-    (mapv :color (filterv #(= :rect (:draw/op %)) ops))))
+    (mapv :color (filterv #(= :rect (:draw/op %)) ops)))))
 
-(deftest negative-z-index-positioned-child-paints-behind-in-flow-content
-  ;; Real bug this guards, confirmed via direct REPL reproduction before
-  ;; touching source: a z-index:-1 absolutely positioned red box painted
-  ;; LAST (topmost) over the in-flow green sibling instead of behind it.
-  (is (= ["blue" "red" "green"] (z-index-stacking-colors "z-index: -1"))))
+(deftest negative-z-index-sinks-past-a-container-that-is-not-a-stacking-context
+  ;; This assertion used to read ["blue" "red" "green"] -- the red above
+  ;; the container's own background and below its in-flow sibling -- which
+  ;; is Appendix E's step 2, and step 2 belongs to the nearest STACKING
+  ;; CONTEXT. `position: relative` with no `z-index` is not one, so this
+  ;; container is not where the -1 lands: it sinks past it into the root
+  ;; context, where the container's own blue background is ordinary step-3
+  ;; content painted over it.
+  ;;
+  ;; Measured in Brave 151 on 2026-08-06, on the pair that discriminates
+  ;; it (the green sibling removed, because it covers both boxes and hides
+  ;; the difference): with `position: relative` alone on the container,
+  ;; `elementFromPoint` answers the CONTAINER at all 20 interior sample
+  ;; points -- its blue is on top of the red. Add `z-index: 0` and the
+  ;; same probe answers the -1 CHILD at all 20. One declaration apart,
+  ;; opposite answers; the test below is the second half.
+  (is (= ["red" "blue" "green"] (z-index-stacking-colors "z-index: -1"))))
+
+(deftest negative-z-index-stays-above-a-container-that-is-a-stacking-context
+  ;; The other half. `z-index: 0` makes the container a stacking context,
+  ;; so the -1 child is painted in ITS step 2: above its own background,
+  ;; below its in-flow content.
+  (is (= ["blue" "red" "green"] (z-index-stacking-colors "z-index: -1" "z-index: 0"))))
 
 (deftest positive-z-index-positioned-child-still-paints-on-top
   ;; Regression guard: this fix must not flip the already-correct
@@ -6430,8 +6463,14 @@
 ;; its content, not its container.
 
 (defn- td-widths
+  "The cells' widths in COLUMN order, which is `:x` order -- not the order
+   the ops happen to be emitted in. A `position: relative` cell (which one
+   of these tests deliberately has) establishes nothing but it does paint
+   in the positioned band, so its ops now come after its plainer siblings'
+   and reading them off in emitted order pairs each assertion with the
+   wrong cell."
   [rows]
-  (mapv :w (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) (table-ops rows))))
+  (mapv :w (sort-by :x (filterv #(and (= :node (:draw/op %)) (= :td (:tag %))) (table-ops rows)))))
 
 (deftest an-absolutely-positioned-child-does-not-widen-its-table-cell
   ;; Real CSS excludes out-of-flow boxes from intrinsic sizing outright.
@@ -7230,8 +7269,15 @@
         doc (build-inline-children doc row [[:div {:position "relative" :top 8} "moved"] [:div {} "still"]])
         [_ doc] (dom/consume-ops doc)
         ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
-        items (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)
-        [_ moved still] items]
+        ;; In `:x` order (the flex main axis), not emitted order: the
+        ;; `position: relative` item paints in the positioned band now, so
+        ;; it is emitted after its static sibling. Both items keep their
+        ;; own `:x` -- relative positioning here shifts only `top` -- so
+        ;; the main axis still names them unambiguously.
+        items (sort-by :x (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))
+                                         (not= row (:id %)))
+                                   ops))
+        [moved still] items]
     (is (= 8 (:y moved)))
     (is (= 0 (:y still)) "and its sibling does not move with it")))
 
@@ -8883,7 +8929,15 @@
         [_ doc] (dom/consume-ops doc)
         boxes (->> (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
                    (filterv #(= :node (:draw/op %))))
-        [_root moved still] boxes]
+        ;; By NODE ID, not by index: a `transform` makes an element a
+        ;; stacking context, so the transformed box now paints after its
+        ;; static sibling instead of before it. That reordering is real
+        ;; CSS (measured: a `transform: translateY(0)` box is answered by
+        ;; `elementFromPoint` over a later overlapping sibling in Brave)
+        ;; and it is not what this test measures -- it measures that the
+        ;; transform moved the box's PAINT and nothing else's LAYOUT.
+        by-id (fn [id] (first (filterv #(= id (:id %)) boxes)))
+        moved (by-id a) still (by-id b)]
     (is (= 50.0 (:x moved)) "the transformed box paints 50px to the right")
     (is (= 0 (:x still)) "and the sibling does not move with it")
     (is (= 20 (:y still)) "nor does it move UP into the space the transform vacated")))
@@ -10341,3 +10395,188 @@
                                 "<td style=\"width: 100px\">bb</td>"
                                 "<td>cccc</td></tr></table>"))
                  3))))
+
+;; ---- stacking contexts and paint order (CSS 2.1 Appendix E) -------------
+;;
+;; Every shape below was read out of a real headless Brave 151 first, on
+;; 2026-08-05/06, through the same CDP path the conformance harness uses:
+;; the markup in an isolating `overflow: hidden` wrapper, sampled with
+;; `document.elementFromPoint` on a 5x5 interior grid, reporting the hit
+;; element's own `data-p` marker. The engine's answer to the same question
+;; is the LAST `:node` op containing the point -- i.e. the end of the
+;; vectors below -- which is what both real hit-testers
+;; (`browser.session/node-at`, dom-gpu's `retained`) compute.
+
+(defn- stack-order
+  "The `class` of every element `:node` op that has one, in the order the
+   engine emits them. That order IS the paint order (later covers
+   earlier), so the LAST entry is what a click at a point all the boxes
+   cover would answer."
+  [html]
+  (->> (tm-ops html)
+       (filter #(and (= :node (:draw/op %)) (:class %)))
+       (mapv :class)))
+
+(defn- lift-pair
+  "The corpus's own discriminating shape: two 60px boxes pulled onto each
+   other by `margin-top: -60px`, so document order alone would always
+   answer the later one. `a-style` is whatever is being tested on the
+   EARLIER box."
+  [a-style]
+  (stack-order (str "<div style=\"height:60px\">"
+                    "<section class=\"a\" style=\"height:60px;background:#f00;" a-style "\">a</section>"
+                    "<article class=\"b\" style=\"height:60px;margin-top:-60px;background:#0f0\">b</article>"
+                    "</div>")))
+
+(deftest document-order-alone-answers-the-later-box
+  ;; The control every case below is measured against. Brave answers
+  ;; `article` at all 25 points with nothing declared.
+  (is (= ["a" "b"] (lift-pair ""))))
+
+(deftest a-stacking-context-lifts-a-box-above-a-later-in-flow-sibling
+  ;; Six triggers, one rule: a box that paints in Appendix E's step 6 is
+  ;; above ALL of its context's non-positioned in-flow content, including
+  ;; a later sibling that overlaps it. Brave answers `section` at all 25
+  ;; points for every one of these.
+  (are [style] (= ["b" "a"] (lift-pair style))
+    "opacity:0.99"
+    "transform:translateY(0px)"
+    "filter:blur(0px)"
+    "position:relative"
+    "isolation:isolate"
+    "contain:paint"))
+
+(deftest the-triggers-that-do-not-make-a-stacking-context-lift-nothing
+  ;; The negative half, and it is the half that makes the positive one a
+  ;; rule rather than a list. Each of these was probed in Brave and
+  ;; answered `article` -- the later box -- exactly as the bare control
+  ;; does. `container-type` is the one that departs from a plain reading
+  ;; of css-contain (a size container has `layout` containment, and
+  ;; `contain: layout` DOES lift above); Brave lifts nothing for it.
+  (are [style] (= ["a" "b"] (lift-pair style))
+    "opacity:1"
+    "transform:none"
+    "filter:none"
+    "z-index:5"
+    "overflow:hidden"
+    "container-type:inline-size"
+    "will-change:color"
+    "contain:size"
+    "mix-blend-mode:normal"
+    "isolation:auto"))
+
+(defn- confine-pair
+  "The second discriminating shape, and the one that separates `paints in
+   the positioned band` from `is a stacking context`: a `z-index: 5` box
+   inside a wrapper carrying `p-style`, against a `z-index: 2` box that is
+   the wrapper's own sibling. `a` last means the 5 escaped the wrapper and
+   beat the 2; `b` last means the wrapper confined it."
+  [p-style]
+  (stack-order (str "<div style=\"position:relative;height:60px\">"
+                    "<div class=\"p\" style=\"" p-style "\">"
+                    "<section class=\"a\" style=\"position:absolute;left:0;top:0;width:700px;height:60px;"
+                    "background:#f00;z-index:5\">a</section></div>"
+                    "<article class=\"b\" style=\"position:absolute;left:0;top:0;width:700px;height:60px;"
+                    "background:#0f0;z-index:2\">b</article></div>")))
+
+(deftest a-z-index-auto-wrapper-does-not-confine-its-positioned-descendant
+  ;; Brave answers `section` at all 20 interior points for all three: a
+  ;; positioned box with `z-index: auto` is NOT a stacking context, so the
+  ;; 5 competes in the ROOT context and beats the 2. This is the half the
+  ;; engine got wrong -- it confined in every shape, and so was right by
+  ;; accident on the pair below.
+  (is (= ["p" "b" "a"] (confine-pair "")))
+  (is (= ["p" "b" "a"] (confine-pair "position:relative")))
+  (is (= ["p" "b" "a"] (confine-pair "position:absolute;left:0;top:0;width:700px;height:60px")))
+  ;; and through TWO of them: the flattening rule, measured (a wrapper
+  ;; inside a wrapper, both `position: relative`, still lets the 5 out).
+  (is (= ["p" "b" "a"]
+         (stack-order (str "<div style=\"position:relative;height:60px\">"
+                           "<div class=\"p\" style=\"position:relative\"><div style=\"position:relative\">"
+                           "<section class=\"a\" style=\"position:absolute;left:0;top:0;width:700px;"
+                           "height:60px;background:#f00;z-index:5\">a</section></div></div>"
+                           "<article class=\"b\" style=\"position:absolute;left:0;top:0;width:700px;"
+                           "height:60px;background:#0f0;z-index:2\">b</article></div>")))))
+
+(deftest a-stacking-context-wrapper-does-confine-its-positioned-descendant
+  ;; One declaration apart from the test above, opposite answer: Brave
+  ;; answers `article` at all 20 points for each of these, because the
+  ;; wrapper is now a stacking context and the 5 is a level INSIDE it,
+  ;; competing as the wrapper's own 0 (or auto) against the sibling's 2.
+  (are [style] (= ["p" "a" "b"] (confine-pair style))
+    "position:relative;z-index:0"
+    "isolation:isolate"
+    "opacity:0.99"
+    "transform:translateY(0px)"
+    "filter:blur(0px)"
+    "contain:paint"
+    "position:sticky"))
+
+(deftest z-index-applies-to-a-flex-item-without-position
+  ;; The one place the `z-index on a static box is ignored` control does
+  ;; not apply. Brave answers `section` over the columns the negative
+  ;; margin pulls the article across, and `article` past the section's
+  ;; 700px -- i.e. the section is on top wherever they overlap.
+  (let [flex (fn [z] (stack-order
+                      (str "<div style=\"display:flex;height:60px\">"
+                           "<section class=\"a\" style=\"width:700px;height:60px;background:#f00;"
+                           z "margin-right:-650px\">a</section>"
+                           "<article class=\"b\" style=\"width:700px;height:60px;background:#0f0\">b</article>"
+                           "</div>")))]
+    (is (= ["b" "a"] (flex "z-index:2;")))
+    (is (= ["b" "a"] (flex "z-index:0;")) "an item's z-index: 0 is a stacking context too")
+    (is (= ["a" "b"] (flex "")) "and without one the later item wins, as in any flow")))
+
+(deftest a-negative-z-index-child-sits-above-its-own-contexts-background
+  ;; Appendix E steps 1 and 2, and the pair that measures them. With
+  ;; `z-index: 0` on the parent the parent IS the context, so the -1 child
+  ;; is painted after the parent's own box and before anything else in it
+  ;; -- Brave answers the CHILD at all 20 interior points. Drop the
+  ;; `z-index: 0` and the parent is no longer a context: the -1 sinks past
+  ;; it into the root, where the parent's own background is ordinary
+  ;; step-3 content painted over it, and Brave answers the PARENT.
+  (let [neg (fn [p-style]
+              (stack-order (str "<div style=\"height:60px\"><section class=\"p\" style=\"" p-style
+                                ";height:60px;background:#00f\">"
+                                "<article class=\"a\" style=\"position:absolute;left:0;top:0;width:700px;"
+                                "height:60px;background:#f00;z-index:-1\">a</article></section></div>")))]
+    (is (= ["p" "a"] (neg "position:relative;z-index:0")))
+    (is (= ["a" "p"] (neg "position:relative")))))
+
+(deftest levels-sort-ascending-and-ties-keep-document-order
+  ;; `z-index: 0` and `z-index: auto` paint in the SAME step and are
+  ;; separated only by tree order -- measured both ways round in Brave
+  ;; (with the earlier box at 0 and the later at auto the later wins, and
+  ;; with the two swapped the later wins again). A higher level beats
+  ;; document order outright.
+  (let [rel (fn [a b] (stack-order
+                       (str "<div style=\"height:60px\">"
+                            "<section class=\"a\" style=\"position:relative;height:60px;background:#f00;"
+                            a "\">a</section>"
+                            "<article class=\"b\" style=\"position:relative;height:60px;margin-top:-60px;"
+                            "background:#0f0;" b "\">b</article></div>")))]
+    (is (= ["a" "b"] (rel "" "")))
+    (is (= ["a" "b"] (rel "z-index:0" "")))
+    (is (= ["a" "b"] (rel "" "z-index:0")))
+    (is (= ["b" "a"] (rel "z-index:3" "z-index:1")))))
+
+(deftest content-visibility-hidden-paints-its-own-box-and-nothing-inside-it
+  ;; Brave: all 25 sample points answer the `<section>`, and the
+  ;; `<article>` still reports a real 800x60 box that a Range reads
+  ;; `inner` out of. So the inner box survives (geometry, line structure)
+  ;; and stops being paintable or clickable -- `:opacity 0` and `:hit []`,
+  ;; the two channels this engine already has for exactly that.
+  (let [ops (tm-ops (str "<div style=\"height:60px\"><section class=\"s\" "
+                         "style=\"content-visibility:hidden;height:60px;background:#eee\">"
+                         "<article class=\"i\" style=\"height:60px;background:#f00\">inner</article>"
+                         "</section></div>"))
+        node (fn [cls] (first (filter #(and (= :node (:draw/op %)) (= cls (:class %))) ops)))]
+    (is (= [0 0 800 60] ((juxt :x :y :w :h) (node "i")))
+        "the inner box is still laid out and still reported")
+    (is (= [] (:hit (node "i"))) "and answers no clicks")
+    (is (nil? (:hit (node "s"))) "while the element itself keeps its own hit region")
+    (is (= 0 (:opacity (node "i"))) "nothing inside it paints")
+    (is (= 1.0 (:opacity (node "s"))) "and its own background does")
+    (is (every? #(zero? (:opacity %))
+                (filter #(and (= :text (:draw/op %)) (= "inner" (:text %))) ops))
+        "including its text")))
