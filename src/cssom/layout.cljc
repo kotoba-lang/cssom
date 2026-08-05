@@ -187,9 +187,12 @@
    an element, so the conformance oracle has no box to report for it (see
    with-implicit-list-markers, PLACEMENT). `inside` keeps the marker as the
    first thing on the item's first line, which is measurable and measured
-   (list-style-inside?) -- though its WIDTH here is the width of the marker
-   string, 13.7px for the bullet and its space, where Brave's own inside
-   marker advance is 19px at the same size.
+   (list-style-inside?) -- exactly right for an `<ol>`, whose inside marker
+   advance in Brave IS the width of the number and its space (21px for
+   `1. `, 28 for `10. `, 35 for `100. ` at 14px monospace), and 5.3px short
+   for a `<ul>`, whose disc marker box Brave sizes from the font-size alone
+   (19px at 14px, 14 at 10px, 37 at 28px, the same for every family and
+   every bullet-ish list-style-type) rather than from the glyph.
 
    Explicitly out of scope: the full `list-style-type` property (circle/
    square/roman/alpha/...), the `list-style` SHORTHAND (only the
@@ -4071,6 +4074,15 @@
    by 19px there and by nothing at all here. The same pair inside a `<td>`
    shrink-wraps the cell to 63px and 82px respectively -- so this is not
    only where the marker paints, it is whether the item is 19px wider.
+
+   The `inside` advance this engine produces is the WIDTH OF THE MARKER
+   STRING, which is exactly what Brave uses for an `<ol>` (measured: 21px
+   for `1. `, 28 for `10. `, 35 for `100. `) and 5.3px more than it uses
+   for a `<ul>`, where Brave's disc marker box is 19px at 14px, 14 at 10px
+   and 37 at 28px -- a function of the font-size only, identical for Arial
+   and monospace and for `list-style-type: square`, i.e. not the bullet
+   glyph's own advance (6.7px) at all. No corpus case measures `inside`, so
+   that 5.3px is recorded here rather than modelled from three points.
 
    Deliberately as narrow as list-style-none? above, and for the same
    reason: the `list-style` SHORTHAND is not parsed (`list-style: disc
