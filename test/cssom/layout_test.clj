@@ -5952,6 +5952,83 @@
         "a single-fragment inline box carries no :hit at all -- its union
          IS its fragment, and every consumer already reads the box")))
 
+(deftest inline-padding-moves-the-pen-and-widens-the-box
+  ;; Real CSS applies HORIZONTAL padding/border/margin to an inline box.
+  ;; Measured in Brave 151 (see inline-box-edge for the readings), `a
+  ;; <span style="padding-left:40px">b</span> c` puts the span's border
+  ;; edge where the pen already was, `b` 40px further along, and `c` 40px
+  ;; right of where it would otherwise sit.
+  (let [ops (inline-ops ["a " [:span {:padding-left "40px"} "b"] " c"])
+        t (text-draw-ops ops)
+        span (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
+    (is (= ["a" "b" "c"] (mapv :text t)))
+    (is (= [8.0 64.0 80.0] (mapv (comp double :x) t))
+        "content origin 8, `a` is one 8px char, one 8px space, then the
+         span's 40px of padding before `b`, and `c` a space after it")
+    (is (= [24.0 48.0] [(double (:x span)) (double (:w span))])
+        "the box starts where the pen was -- padding is INSIDE it -- and
+         is 40 + 8 wide")))
+
+(deftest inline-padding-on-the-right-shifts-what-follows
+  (let [ops (inline-ops ["a " [:span {:padding-right "40px"} "b"] " c"])
+        t (text-draw-ops ops)
+        span (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
+    (is (= [8.0 24.0 80.0] (mapv (comp double :x) t))
+        "`b` is NOT moved by its own trailing padding; `c` is -- 24 + 8
+         for `b`, then the 40px of padding, THEN the separating space,
+         which is source order because the space lives outside the span")
+    (is (= [24.0 48.0] [(double (:x span)) (double (:w span))]))))
+
+(deftest inline-margin-is-outside-the-box-where-padding-is-inside
+  (let [ops (inline-ops ["a " [:span {:margin-left "30px" :margin-right "10px"} "b"] " c"])
+        t (text-draw-ops ops)
+        span (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
+    (is (= [8.0 54.0 80.0] (mapv (comp double :x) t)))
+    (is (= [54.0 8.0] [(double (:x span)) (double (:w span))])
+        "both margins move the pen, neither is part of the border box --
+         measured in Brave, the same shape reports the span at x=44 w=7
+         in a 7px-per-char font")))
+
+(deftest inline-vertical-padding-grows-the-box-and-not-the-line
+  ;; Measured in Brave: `a <span style="padding:40px">b</span> c` reports
+  ;; the span 40px above and below its content area, on a line box still
+  ;; 20px tall. A uniform `padding` shorthand with no cascade behind it to
+  ;; expand it is the :padding/declared path.
+  (let [plain (inline-ops ["a " [:span {} "b"]])
+        padded (inline-ops ["a " [:span {:padding-top "10px" :padding-bottom "4px"} "b"]])
+        box-of (fn [ops] (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)))
+        p (box-of plain) q (box-of padded)]
+    (is (== (- (:y p) 10) (:y q)) "the box grows UP by its top padding")
+    (is (== (+ (:h p) 14) (:h q)) "and down by its bottom padding")
+    (is (== (:x p) (:x q)) "vertical padding moves nothing along the line")
+    (is (= (mapv :y (text-draw-ops plain)) (mapv :y (text-draw-ops padded)))
+        "and the text on the line does not move either -- vertical padding
+         on an inline box contributes nothing to the line box")))
+
+(deftest inline-closing-padding-cannot-be-broken-away-from-its-content
+  ;; Measured in Brave 151 in a 200px paragraph: `aaa bbb <span
+  ;; style="padding-left:30px;padding-right:30px">ccc ddd eee fff</span>
+  ;; ggg` breaks before `fff`, which would itself have fitted -- it is the
+  ;; 30px of padding behind it that does not. Same shape here at 8px/char
+  ;; in a 112px content width, with the ONLY difference between the two
+  ;; runs being the closing padding, so nothing else can explain the move.
+  (let [run (fn [span-style]
+              (let [t (text-draw-ops
+                       (inline-ops ["aa " [:span span-style "bb cc dd"] " ee"]
+                                   {} {:width 128}))]
+                (mapv (fn [y] (mapv :text (filter #(= y (:y %)) t)))
+                      (sort (distinct (mapv :y t))))))]
+    (is (= [["aa" "bb cc dd"] ["ee"]]
+           (run {:padding-left "24px"}))
+        "`dd` ends exactly at the 112px content edge and stays on line one
+         (the span's three words share one merged draw-op, as they always
+         have -- see inline-line-breaker)")
+    (is (= [["aa" "bb cc"] ["dd" "ee"]]
+           (run {:padding-left "24px" :padding-right "24px"}))
+        "adding 24px of padding AFTER `dd` moves `dd` itself to line two --
+         the closing edge is charged to the wrap test one token early,
+         because it cannot be broken away from the content it follows")))
+
 (deftest nested-inline-elements-inherit-and-override
   (let [t (text-draw-ops
            (inline-ops ["x " [:span {:color "#00ff00"} "outer " [:b {:font-weight "bold"} "inner"]]]))]
