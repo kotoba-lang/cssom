@@ -2247,6 +2247,27 @@
   :group :table
   ;; `empty-cells: hide` suppresses the BORDER and background of an empty
   ;; cell under `border-separate`; the cell still occupies its slot.
+  ;;
+  ;; NOT IMPLEMENTED, and measured to be unscoreable by this harness rather
+  ;; than assumed to be. Brave 151 (2026-08-05), this table with `hide` and
+  ;; with `show`: identical boxes to three decimals (128.625 / 59.375 here,
+  ;; and 153.813 / 34.188 on the background spelling), and
+  ;; `elementFromPoint` answers `td` over the empty cell either way. The
+  ;; property changes which pixels are FILLED, and neither the geometry
+  ;; axis nor the paint-order axis compares a fill. The case stays in
+  ;; because it is the only thing standing between "we do not implement
+  ;; empty-cells" and someone implementing it as a layout change.
+  ;;
+  ;; Its one-point paint-order residual is not this property either: Brave
+  ;; hit-tests every element from ONE PIXEL ABOVE and LEFT of its box.
+  ;; Swept at 0.05px on this table (`td` at y=4..26), `elementFromPoint`
+  ;; answers `table` at y=3.00 and `td` from y=3.05, and stops at y=26.00
+  ;; exactly -- and the same 1px slop appears on a plain `<p>` in a padded
+  ;; `<div>` (box at y=36, hit from y=35.05) and on a bare `<span>`, in x
+  ;; as well as y. It is a property of `elementFromPoint`, not of tables,
+  ;; and this engine's own half-open [x, x+w) test is the honest answer to
+  ;; the question the axis asks. Whether a sample point lands inside that
+  ;; 1px band depends on where the case happens to sit on the corpus page.
   :html "<table style=\"width: 200px; border-spacing: 4px; empty-cells: hide\"><tr><td style=\"border: 2px solid #888\">a</td><td style=\"border: 2px solid #888\"></td></tr></table>"}
 
  {:id :table/tfoot-renders-after-tbody
@@ -2260,8 +2281,11 @@
   ;; A bare `<col>` with no `<colgroup>` around it. Two separate things are
   ;; measured: whether the declared 200px survives the table's surplus
   ;; hand-out, and whether the parser synthesises the implicit
-  ;; `<colgroup>` a real HTML parser inserts (Brave reports one box for it,
-  ;; htmldom does not -- an htmldom finding, not a cssom one).
+  ;; `<colgroup>` a real HTML parser inserts. The second half was an
+  ;; htmldom finding rather than a cssom one, and was fixed THERE
+  ;; (`maybe-insert-implied-table-structure`, 2026-08-05): Brave wraps
+  ;; consecutive bare `<col>`s in ONE synthesised `<colgroup>`, and puts
+  ;; one that arrives after a row group in a group of its own beside it.
   :html "<table style=\"width: 300px\"><col style=\"width: 200px\"><col><tr><td>a</td><td>b</td></tr></table>"}
 
  {:id :table/cell-percentage-width

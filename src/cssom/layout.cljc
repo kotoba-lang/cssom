@@ -2005,6 +2005,12 @@
    ;; engine already did".
    :border-collapse (some-> (style node :border-collapse) str/lower-case)
    :table-layout (some-> (style node :table-layout) str/lower-case)
+   ;; `caption-side` is an INHERITED property in real CSS, so layout-table
+   ;; reads it as `(or (:caption-side st) (:caption-side inherited))` --
+   ;; measured in Brave 151 (2026-08-05), `<div style="caption-side:
+   ;; bottom"><table><caption>Cap</caption>...` puts the caption at the
+   ;; BOTTOM even though the `<table>` declares nothing.
+   :caption-side (some-> (style node :caption-side) str/lower-case str/trim)
    :margin (parse-int (style node :margin) 0)
    ;; Real CSS resolves the USED border width through `border-style`,
    ;; whose initial value is `none`: a `none`/`hidden` border is 0px wide
@@ -7329,6 +7335,80 @@
       ;; uses, so the two agree wherever they overlap.
       (distribute-excess widths avail))))
 
+(defn- table-declared-column-widths
+  "The width each COLUMN is fixed at by its own cells' declared `width`,
+   nil for a column no cell declared one for.
+
+   Two facts, both measured in Brave 151 on 2026-08-05, and neither one
+   guessable from the other:
+
+   **A length sizes the CELL; a percentage sizes the COLUMN.** In a 300px
+   table (2px `border-spacing`, so 294px of column space),
+   `<td style=\"width: 100px\">` gives a 102px column -- the declared 100
+   plus the `<td>`'s own 1px UA padding on each side, ordinary
+   `content-box` arithmetic -- while `<td style=\"width: 25%\">` gives
+   73.5, which is 25% of 294 EXACTLY and not 25% of anything plus padding.
+   The percentage is a constraint on the column (CSS 2.1 SS17.5.2), and the
+   cell then fills it. `padding: 8px` gives 116 and `border: 3px` gives
+   108, both confirming the length side; `border-spacing: 10px` gives 67.5
+   = 25% of 270, confirming that the percentage's basis is the space left
+   for COLUMNS after every gap, not the table's content width.
+
+   **The declared width is floored at the COLUMN's min-content width, not
+   the declaring cell's.** `<td style=\"width: 10px\">averylongword</td>`
+   is 93 (13 chars x 7px + 2px padding), and a `width: 50px` cell in row 1
+   whose column holds `averylongcellword` in row 2 is 121 (17 x 7 + 2) --
+   the floor comes from the widest word anywhere in the column.
+
+   `avail` is the space the columns share (see the caller). `definite?`
+   says the table's own width is not `auto`: a percentage against an auto
+   table is circular, and Brave does something this engine does not model
+   -- measured, `<table><tr><td style=\"width:25%\">a</td><td>b</td></tr>`
+   is 42px wide overall with columns 9 and 27, where 25% of anything in
+   sight is none of those numbers. So a percentage on an auto-width table
+   is left to the ordinary max-content path, which is what it already got.
+
+   Scope cuts, each with the number a fix will need:
+
+   - A cell with a `colspan` contributes nothing here, exactly as it
+     contributes nothing to table-column-widths' own `base`. Measured,
+     `<td colspan=\"2\" style=\"width:50%\">` over a 300px table gives its
+     two columns 73 and 73 (146 = 50% of 292, split evenly).
+   - The declared width is not CAPPED by what the other columns need.
+     Measured, `width: 500px` in a 200px table gives 185, not 502: the
+     other column keeps its 9px min-content and the declared column takes
+     the rest. This engine leaves 502 and lets table-column-widths' own
+     proportional scale-down handle the overflow, which is what it did
+     before any of this existed.
+   - A percentage beats a length in the same column, whichever is larger.
+     Measured, `width: 20%` in row 1 and `width: 200px` in row 2 gives
+     58.797 = 20% of 294, not 202. Here the two are simply maxed.
+   - A `calc()` width falls through to the max-content path rather than
+     being read here, so a `calc(50% - 10px)` column is sized from its
+     content. measure-child already resolves it for `:natural`, which is
+     where it stays."
+  [theme inherited avail n-cols assigns definite?]
+  (vec
+   (for [col (range n-cols)]
+     (let [cells (for [a assigns
+                       :when (and (= 1 (:colspan a)) (= col (:col a)))]
+                   (:cell a))
+           declared (keep (fn [c]
+                            (let [cst (node-style c theme)
+                                  raw (:width cst)]
+                              (if (percentage? raw)
+                                (when definite? (percentage-of raw avail))
+                                (when (some? (parse-int raw nil))
+                                  (resolve-width cst avail)))))
+                          cells)]
+       (when (seq declared)
+         (apply max
+                (concat declared
+                        (keep (fn [c]
+                                (flex-item-min-content-width
+                                 theme inherited c (node-style c theme)))
+                              cells))))))))
+
 (defn- table-column-widths
   "Real CSS's automatic table layout, in the one form that matters for a
    readable table: every column is as wide as its widest cell needs to be,
@@ -7350,18 +7430,29 @@
    browser uses whenever it is the larger of the two, which is the case
    every `<col>` in the wild is written for.
 
+   `declared-cols` is the same thing from the CELLS (see
+   table-declared-column-widths). Where both exist the LARGER wins:
+   measured in Brave, `<col style=\"width:80px\">` against a
+   `<td style=\"width:200px\">` gives a 202px column and the mirror pair
+   (`<col>` 200 against a `<td>` 80) gives 200.
+
    Deliberately NOT implemented: border collapsing (layout-table's own
    `collapse?` path handles that), and the surplus hand-out when a table is
    WIDER than its columns want (distribute-excess, applied by layout-table
    once the caption and the table's own declared width are known)."
-  [content-w spacing col-widths assigns]
+  [content-w spacing col-widths declared-cols assigns]
   (let [n-cols (apply max 0 (map #(+ (:col %) (:colspan %)) assigns))
         base (vec (for [col (range n-cols)]
-                    (or (nth col-widths col nil)
+                    (let [cw (nth col-widths col nil)
+                          dw (nth declared-cols col nil)]
+                      (cond
+                        (and cw dw) (max cw dw)
+                        (or cw dw) (or cw dw)
+                        :else
                         (apply max 1
                                (for [a assigns
                                      :when (and (= 1 (:colspan a)) (= col (:col a)))]
-                                 (:natural a))))))
+                                 (:natural a)))))))
         natural (reduce (fn [widths a]
                           (if (= 1 (:colspan a))
                             widths
@@ -7411,18 +7502,38 @@
    the element's OWN tag, so a div-table reports `div` boxes -- it used to
    emit one op tagged `table` whatever the element was.
 
+   A `<caption>` is laid out in the TABLE WRAPPER box, which is what the
+   `<table>` element's own box is here and in Brave: the caption spans the
+   table's whole BORDER-box width and sits outside its border and padding,
+   above the rows under `caption-side: top` (the initial value) and below
+   them under `bottom`. Measured in Brave 151 (2026-08-05) on
+   `width: 200px; border: 6px; padding: 9px` with a `Cap` caption: the
+   table is 200x76 either way, the caption is 200x20 at y=0 (top) or y=56
+   (bottom), and the rows start at y=37 (top: 20 caption + 6 border + 9
+   padding + 2 spacing) or y=17 (bottom: the same minus the caption). The
+   caption is therefore INSIDE the table's height on both sides, which is
+   why a following block sits at the table's full height either way.
+
    Honest scope-cuts, all of them real CSS features this does NOT do:
-   `<caption>` placement (a caption is laid out as an ordinary block row
-   above the rows, never below), `caption-side`, anonymous CELL boxes
+   anonymous CELL boxes
    around a non-cell child of a table or a row (such a child is dropped),
    an anonymous TABLE box around a stray `display: table-cell` outside any
    table (it lays out as an ordinary block instead -- measured in Brave,
-   two such divs sit side by side in a generated table), `empty-cells`,
+   two such divs sit side by side in a generated table),
    `visibility: collapse` on a row or column, and full border-conflict
    resolution under `border-collapse` (widths only -- see collapse? below).
    Before this existed a table rendered as one stacked column of every cell
    in document order -- the two conformance cases scored 0/2 -- so this is
-   a large step from nothing, not a complete table implementation."
+   a large step from nothing, not a complete table implementation.
+
+   `empty-cells` is NOT implemented and, measured, cannot be seen from
+   here: it suppresses the painted background and border of an EMPTY cell
+   under separate borders, and changes nothing this corpus compares. Brave
+   151 (2026-08-05), the same table with `hide` and with `show`: identical
+   boxes to three decimals (128.625 / 59.375 with cell borders, 153.813 /
+   34.188 with backgrounds), and `elementFromPoint` answers `td` over the
+   empty cell either way. What differs is which pixels get filled, which no
+   axis here compares."
   [theme x y avail-width opacity inherited st node]
   (let [;; A cell's containing block is the cell, not the block that set the
         ;; percentage-height basis on the way in -- same reasoning, and same
@@ -7438,13 +7549,37 @@
                      (vec (for [c (range (inc (apply max -1 (map :col columns))))]
                             (get m c))))
         fixed? (and (= "fixed" (:table-layout st)) (some? (:width st)) (seq assigns))
+        ;; Read here rather than at its old position further down: the
+        ;; space a percentage COLUMN width resolves against is what is
+        ;; left for the columns after every gap, and a collapsed table has
+        ;; no gaps. Measured in Brave, `border-collapse: collapse` with a
+        ;; `width: 25%` cell in a 300px table gives 75 (25% of the whole
+        ;; 300) where the separate-border form gives 73.5 (25% of 294).
+        collapse? (= "collapse" (:border-collapse st))
+        ;; What the columns share. Approximate under `collapse`, and
+        ;; knowingly so: the outer halves of the outermost collapsed
+        ;; borders (lead-x/trail-x below) also come off, but they are not
+        ;; known until the column widths are, and they are zero whenever
+        ;; the cells have no border -- which is every collapsed shape this
+        ;; corpus holds.
+        declared-avail (let [n (max (count col-widths)
+                                    (apply max 0 (map #(+ (:col %) (:colspan %)) assigns)))]
+                         (max 0 (- avail-content
+                                   (if collapse? 0 (* (:border-spacing st) (inc n))))))
+        declared-cols (if fixed?
+                        []
+                        (table-declared-column-widths
+                         theme inherited declared-avail
+                         (apply max 0 (map #(+ (:col %) (:colspan %)) assigns))
+                         assigns (some? (:width st))))
         base-widths (if fixed?
                       (table-fixed-column-widths
                        avail-content (:border-spacing st) col-widths
                        (filter #(zero? (:row %)) assigns)
                        (max (count col-widths)
                             (apply max 0 (map #(+ (:col %) (:colspan %)) assigns))))
-                      (table-column-widths avail-content (:border-spacing st) col-widths assigns))
+                      (table-column-widths avail-content (:border-spacing st) col-widths
+                                           declared-cols assigns))
         ;; A CAPTION participates in the table's width: real CSS makes the
         ;; table at least as wide as the caption needs, and the extra width
         ;; goes to the columns. Measured: a two-cell table under a
@@ -7506,7 +7641,7 @@
         ;; half of its OWN border on both sides and only its column width
         ;; accounts for the neighbour. Nothing here reads border-style
         ;; beyond the `none`/`hidden` gate node-style already applies.
-        collapse? (= "collapse" (:border-collapse st))
+        ;; (`collapse?` itself is bound above, where declared-avail needs it.)
         cell-border (fn [cell] (:border-width (node-style cell theme)))
         edge-max (fn [pick]
                    (fn [i]
@@ -7579,6 +7714,18 @@
                  widths)
         n-cols (count widths)
         natural-w (+ (reduce + 0 widths) (* spacing (max 0 (dec n-cols))) lead-x trail-x)
+        ;; SCOPE CUT, measured and left alone: a `<table>`'s declared width
+        ;; is its BORDER box in Blink whatever `box-sizing` says, and
+        ;; resolve-width gives it the ordinary content-box treatment.
+        ;; Measured in Brave 151 (2026-08-05),
+        ;; `<table style="width:200px; border:6px solid; padding:9px">` is
+        ;; 200 wide with its rows in 166 of it; this engine makes it 230
+        ;; with the same 166 of rows, so every y is right and only the
+        ;; outer width (and therefore a caption's) is 2x(border+padding)
+        ;; too big. Not fixed here because it is a different rule from
+        ;; anything this change is about, it moves every bordered table at
+        ;; once, and no case in the corpus has a table with both a declared
+        ;; width and a border.
         w (if (:width st)
             (resolve-width st avail-width)
             (min (resolve-width st avail-width) (+ natural-w (* 2 inset))))
@@ -7594,15 +7741,43 @@
                  widths
                  (distribute-excess widths (- content-w (* spacing (max 0 (dec n-cols)))
                                               lead-x trail-x)
-                                    ;; a column a `<col>` gave a width KEEPS it;
-                                    ;; only the auto ones absorb the surplus.
-                                    (into #{} (keep-indexed (fn [i w] (when w i)) col-widths))))
+                                    ;; a column a `<col>` OR a cell gave a width
+                                    ;; KEEPS it; only the auto ones absorb the
+                                    ;; surplus. Measured in Brave, a 300px table
+                                    ;; whose first cell declares `width: 25%`
+                                    ;; puts its columns at 73.5 and 220.5 -- the
+                                    ;; declared column holds still and the other
+                                    ;; one takes the whole surplus -- where
+                                    ;; growing both in proportion to their demand
+                                    ;; gave this engine 263 and 29.
+                                    (into #{} (for [i (range n-cols)
+                                                    :when (or (nth col-widths i nil)
+                                                              (nth declared-cols i nil))]
+                                                i))))
         col-offsets (vec (reductions (fn [acc cw] (+ acc cw spacing))
                                      lead-x
                                      widths))
-        caption-layout (when caption
-                         (layout-node theme content-x content-y content-w opacity inherited caption))
-        rows-y0 (+ content-y lead-y (if caption-layout (:h (:box caption-layout)) 0))
+        ;; The caption sits in the TABLE WRAPPER box: it spans the table's
+        ;; whole BORDER-box width (so a table border does not indent it) and
+        ;; goes above or below everything else according to `caption-side`,
+        ;; which is an INHERITED property and so may have been declared on an
+        ;; ancestor rather than here. See the docstring for the measurement.
+        ;;
+        ;; Measured at zero cost to the top case: with no border and no
+        ;; padding `content-x`/`content-w` and the wrapper's own edges are
+        ;; the same numbers, which is why every caption case in the corpus
+        ;; agreed on x and w before this.
+        ;;
+        ;; Laid out at the origin and TRANSLATED once its final y is known,
+        ;; the same technique inline-fragments/layout-flex/layout-grid use
+        ;; and safe for the same reason (layout-node only ever ADDS its
+        ;; x/y). A `caption-side: bottom` caption cannot be positioned until
+        ;; the rows have been measured, and laying it out twice to find out
+        ;; how tall it is would double the cost of every captioned table.
+        caption-bottom? (= "bottom" (or (:caption-side st) (:caption-side inherited)))
+        caption-render (when caption (layout-node theme 0 0 w opacity inherited caption))
+        caption-h (if caption-render (:h (:box caption-render)) 0)
+        rows-y0 (+ content-y lead-y (if caption-bottom? 0 caption-h))
         ;; Row heights: single-row cells set their own row, then a
         ;; rowspan cell grows its LAST row if the rows it covers cannot
         ;; already hold it -- the same shortfall rule colspan uses across
@@ -7622,6 +7797,29 @@
                                         (assoc-in (:cell a) [:attrs :style/border-width]
                                                   (str (half (cell-border (:cell a))) "px"))
                                         (:cell a))
+                                 ;; A cell FILLS its column: its own declared
+                                 ;; `width` has already been spent on sizing
+                                 ;; the column (table-declared-column-widths)
+                                 ;; and resolving it a second time against the
+                                 ;; column would apply it twice. Measured in
+                                 ;; Brave, `<td style="width: 25%">` in a 300px
+                                 ;; table reports a 73.5px box -- the column's
+                                 ;; own width -- where re-resolving 25% against
+                                 ;; the 73px column gave this engine 21; and
+                                 ;; `width: 500px` in a 200px table reports 185,
+                                 ;; the column again and not the 502 it asked
+                                 ;; for. DROPPED rather than overwritten with
+                                 ;; `cw`: a column width is routinely
+                                 ;; fractional (50.5625 for `go <b>now</b>` in
+                                 ;; the corpus) and writing it back as a
+                                 ;; declared length puts it through
+                                 ;; resolve-width's integer parse, which
+                                 ;; truncated the cell to 50 and wrapped its
+                                 ;; content onto a second line -- 5 boxes wrong
+                                 ;; in :table/cell-with-inline-content, to fix
+                                 ;; 2 elsewhere. With no declaration at all the
+                                 ;; cell takes the `avail` it is given, exactly.
+                                 cell (update cell :attrs dissoc :style/width)
                                  m (layout-node theme 0 0 cw opacity inherited cell)
                                  ;; How tall the cell's CONTENT is, as
                                  ;; opposed to its box: a cell that declares
@@ -7786,6 +7984,15 @@
          {:draws [] :groups {}}
          (map-indexed (fn [i r] (assoc r :row-idx i)) rows))
         height (+ (reduce + 0 row-heights) (* spacing (max 0 (dec (count row-heights)))) trail-y)
+        ;; The wrapper's own left edge and, on the bottom side, everything
+        ;; below the rows: the trailing border-spacing (already in `height`)
+        ;; and then the table's own bottom padding and border (`inset`).
+        caption-draw (when caption-render
+                       (translate-ops (+ x (:margin st))
+                                      (if caption-bottom?
+                                        (+ rows-y0 height inset)
+                                        (+ y (:margin st)))
+                                      (:draw caption-render)))
         group-ops (mapv (fn [[g {:keys [y h]}]]
                           (merge {:draw/op :node :id (:node/id g) :tag (:tag g)
                                   :x (+ content-x lead-x) :y y
@@ -7824,7 +8031,10 @@
                                     :class (attr g :class) :listeners (listeners g)
                                     :opacity opacity}
                                    (style-passthrough (node-style g theme)))))
-        table-h (clamp-height st (+ (- rows-y0 y) height inset))
+        table-h (clamp-height st (+ (- rows-y0 y) height inset
+                                    ;; a TOP caption is already inside
+                                    ;; rows-y0; a bottom one is not
+                                    (if caption-bottom? caption-h 0)))
         table-w w]
     {:box {:x x :y y :w table-w :h table-h}
      :draw (vec (concat
@@ -7844,7 +8054,7 @@
                           :class (attr node :class) :listeners (listeners node)
                           :opacity opacity}
                          (style-passthrough st))]
-                 (:draw caption-layout)
+                 caption-draw
                  colgroup-ops
                  col-ops
                  group-ops
@@ -8519,7 +8729,12 @@
            ;; exactly where it sits without it). The run's indent comes
            ;; from the containing block, in layout-inline-run.
            :letter-spacing (or (:letter-spacing st) (:letter-spacing inherited))
-           :word-spacing (or (:word-spacing st) (:word-spacing inherited)))))
+           :word-spacing (or (:word-spacing st) (:word-spacing inherited))
+           ;; carried for the same reason it is carried down the block
+           ;; path (see layout-node): `caption-side` inherits, and the
+           ;; element that reads it is the TABLE, which may be several
+           ;; boxes below the one that declared it.
+           :caption-side (or (:caption-side st) (:caption-side inherited)))))
 
 (defn- inline-fragments
   "Flattens an inline run (a vector of adjacent inline-flow-candidate?
@@ -12540,7 +12755,16 @@
                                 :text-overflow text-overflow
                                 :overflow-wrap overflow-wrap
                                 :letter-spacing letter-spacing :word-spacing word-spacing
-                                :text-indent text-indent :tab-size tab-size)
+                                :text-indent text-indent :tab-size tab-size
+                                ;; `caption-side` inherits in real CSS and
+                                ;; is read by layout-table, which is
+                                ;; usually not the element that declared
+                                ;; it -- measured in Brave, a
+                                ;; `caption-side: bottom` on a wrapping
+                                ;; `<div>` moves the caption of a
+                                ;; `<table>` inside it.
+                                :caption-side (or (:caption-side st)
+                                                  (:caption-side inherited)))
                tag (:tag node)
                children (laid-out-children theme node)]
            ;; ---- the one place a `transform` is applied ----

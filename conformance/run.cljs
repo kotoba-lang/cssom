@@ -64,6 +64,7 @@
         "--debug-geometry" (recur (rest args) (assoc out :debug-geometry true))
         "--debug-style" (recur (rest args) (assoc out :debug-style true))
         "--debug-paint" (recur (rest args) (assoc out :debug-paint true))
+        "--dump-ops" (recur (drop 2 args) (assoc out :dump-ops (second args)))
         (recur (rest args) out))
       out)))
 
@@ -1665,6 +1666,40 @@
                     (sort-by key)
                     (mapv (fn [[g rs]]
                             [g (count (filter #(= :pass (:status %)) rs)) (count rs)])))]
+  ;; `--dump-ops <file>` writes EVERY case's `:node` ops, in emitted order,
+  ;; as one line per op under its case id -- a plain-text file made to be
+  ;; `diff`ed between two commits.
+  ;;
+  ;; The scoreboard cannot answer "did this change break anything": it is
+  ;; four sums over 501 cases, and a sum hides an exchange. This corpus has
+  ;; already been bitten by one -- a 5/5 -> 0/5 regression on the table
+  ;; group went unnoticed in a round where three other cases improved by as
+  ;; much. Per-case ops are the granularity at which an exchange is
+  ;; visible, and the ORDER is part of it (that order IS the paint order,
+  ;; and read backwards the hit-test order), which is why this prints ops
+  ;; rather than the sorted box list the geometry axis compares.
+  ;;
+  ;; Unscorable and blind cases are dumped too: they still lay out, and a
+  ;; change that moves their boxes is still a change.
+  (when-let [f (:dump-ops (parse-args *command-line-args*))]
+    (fs/writeFileSync
+     f
+     (str/join
+      "\n"
+      (for [r results
+            line (cons (str "CASE " (:id r))
+                       (if (:engine-ops r)
+                         (for [op (filter #(= :node (:draw/op %)) (:engine-ops r))]
+                           (str "  " (pad-right (name (:tag op)) 10)
+                                (pad-left (:x op) 9) (pad-left (:y op) 9)
+                                (pad-left (:w op) 9) (pad-left (:h op) 9)
+                                (when-let [hit (:hit op)]
+                                  (str "  hit=" (pr-str (mapv (juxt :x :y :w :h) hit))))))
+                         [(str "  <no ops: " (name (:status r))
+                               (some->> (:detail r) (str " -- ")) ">")]))]
+        line))
+     "utf8")
+    (println (str "ops dumped: " f "\n")))
   (when (:debug-geometry (parse-args *command-line-args*))
     (doseq [r results :when (seq (:oracle-boxes r))]
       (println "GEO" (:id r))
