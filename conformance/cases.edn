@@ -1360,6 +1360,118 @@
   :group :text
   :html "<p style=\"direction: rtl; width: 300px\">alpha <b>beta</b> gamma</p>"}
 
+ {:id :text/rtl-two-inline-elements
+  :group :text
+  ;; The asymmetric counterpart of the case above, whose text either side
+  ;; of its <b> happens to be the same width: here nothing is symmetric,
+  ;; so a line that merely LOOKS right-placed cannot score. Measured in
+  ;; Brave the five words sit at 159.45/180.45/221.58/270.58/286 against
+  ;; the identical ltr markup's 0/21/62.13/111.13/126.55 -- the same
+  ;; order, every one shifted by the same 159.45.
+  :html "<p style=\"direction: rtl; width: 300px\">aa <b>bbbb</b> cccccc <i>d</i> ee</p>"}
+
+ {:id :text/rtl-text-align-end-is-the-left-edge
+  :group :text
+  ;; `start`/`end` are direction-RELATIVE: in an rtl block `end` is the
+  ;; LEFT edge, and Brave puts this <b> at x=42, exactly where the same
+  ;; markup with no direction at all puts it.
+  :html "<p style=\"direction: rtl; width: 300px; text-align: end\">alpha <b>beta</b> gamma</p>"}
+
+ {:id :text/ltr-text-align-end-is-the-right-edge
+  :group :text
+  ;; ...and the other half of the same rule, which this engine also did
+  ;; not have: in an ltr block `end` is the RIGHT edge. Brave: <b> at
+  ;; 227.48.
+  :html "<p style=\"direction: ltr; width: 300px; text-align: end\">alpha <b>beta</b> gamma</p>"}
+
+ {:id :text/rtl-text-align-left-overrides-the-direction
+  :group :text
+  ;; A PHYSICAL `text-align` still means the physical thing it says. An
+  ;; rtl block told `left` puts its line on the left (Brave: <b> at 42),
+  ;; which is what keeps the rtl default from being a hardcoded edge.
+  :html "<p style=\"direction: rtl; width: 300px; text-align: left\">alpha <b>beta</b> gamma</p>"}
+
+ {:id :text/rtl-wraps-then-places-each-line
+  :group :text
+  ;; Breaking happens in logical order and EACH resulting line is placed
+  ;; on its own -- not the paragraph placed once. Measured in Brave, line
+  ;; one runs 33.17..160 and line two 62..160, two different offsets.
+  :html "<p style=\"direction: rtl; width: 160px\">one two <b>three</b> four five six seven</p>"}
+
+ {:id :text/rtl-br-sits-at-the-left-end-of-its-line
+  :group :text
+  ;; A <br>'s zero-width box is at the line's inline-END edge, which in an
+  ;; rtl block is its LEFT. Brave reports it at x=279 on a line whose only
+  ;; word runs 279..300.
+  :html "<p style=\"direction: rtl; width: 300px\">aaa<br>bb cc</p>"}
+
+ {:id :text/rtl-atomic-inline-keeps-its-place-in-the-line
+  :group :text
+  ;; An image among ltr words in an rtl block moves with the line and not
+  ;; against it. Brave: aa at 238, the image at 259, bb at 286.
+  :html "<p style=\"direction: rtl; width: 300px\">aa <img src=\"data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==\" width=\"20\" height=\"10\"> bb</p>"}
+
+ {:id :text/rtl-hebrew-reverses-the-words
+  :group :text
+  ;; The half a line's PLACEMENT cannot explain. Every word here is strong
+  ;; right-to-left, so UAX #9 reverses them: Brave reads the third word
+  ;; leftmost (\u05d0\u05d1\u05d2 at 193.58, \u05e2\u05d5\u05dc\u05dd at 225.78,
+  ;; \u05e9\u05dc\u05d5\u05dd at 266.38). Right-placing the line without reordering it
+  ;; would put them in exactly the wrong order.
+  :html "<p style=\"direction: rtl; width: 300px\">שלום עולם אבג</p>"}
+
+ {:id :text/rtl-hebrew-with-an-inline-element
+  :group :text
+  ;; The same reversal across an inline box boundary: the <b> is the
+  ;; MIDDLE word and Brave reports it at x=227.52 with the first word to
+  ;; its right.
+  :html "<p style=\"direction: rtl; width: 300px\">שלום <b>עולם</b> אבג</p>"}
+
+ {:id :text/rtl-hebrew-keeps-an-embedded-latin-run-in-order
+  :group :text
+  ;; A left-to-right run INSIDE reversed text keeps its own internal
+  ;; order, which is UAX #9 L2's nested reversal and the reason the
+  ;; algorithm is not just "reverse the line". Brave: \u05d0\u05d1\u05d2 at 178.17,
+  ;; then `one` at 210.39 and `two` at 238.39 -- still one before two --
+  ;; then \u05e9\u05dc\u05d5\u05dd at 266.39.
+  :html "<p style=\"direction: rtl; width: 300px\">שלום one two אבג</p>"}
+
+ {:id :text/ltr-hebrew-run-reverses-inside-a-latin-line
+  :group :text
+  ;; ...and the mirror image, which is why this is not an rtl-only branch:
+  ;; an LTR paragraph reverses the rtl run inside it and leaves everything
+  ;; else alone. Brave: alpha 0, \u05e2\u05d5\u05dc\u05dd 42, \u05e9\u05dc\u05d5\u05dd 82.59, beta 123.22
+  ;; -- the two Hebrew words swapped, the two Latin ones did not move.
+  :html "<p style=\"direction: ltr; width: 300px\">alpha שלום עולם beta</p>"}
+
+ {:id :text/rtl-arabic-reverses-the-words
+  :group :text
+  ;; Arabic, to pin that the rtl character class is a class and not a
+  ;; Hebrew special case. Brave: \u0623\u0647\u0644\u0627 at 176.78, \u0639\u0644\u064a\u0643\u0645 at 208.98,
+  ;; \u0627\u0644\u0633\u0644\u0627\u0645 at 257.98.
+  :html "<p style=\"direction: rtl; width: 300px\">السلام عليكم أهلا</p>"}
+
+ {:id :text/rtl-mixed-direction-word-is-not-split
+  :group :text
+  ;; The boundary of what this engine resolves: a word is the smallest
+  ;; thing that carries a direction here (see strong-rtl? in
+  ;; cssom.layout), so a single word holding strong characters of BOTH
+  ;; directions stays one run. Brave splits it INSIDE the word -- asked
+  ;; directly, `getClientRects()` returns two rects for it, `abc` at
+  ;; 213.19 and the Hebrew at 234.19, in that order.
+  ;;
+  ;; This case PASSES, and it is worth saying why rather than reading the
+  ;; pass as agreement: the line axis cannot see the split. A multi-rect
+  ;; word is re-grouped per character by TOP (see run.cljs's own comment
+  ;; on why -- it exists for words broken across LINES), and both of
+  ;; these rects share a top, so the oracle folds them back into one
+  ;; entry carrying the whole word. The engine and the browser agree on
+  ;; where the word sits among its neighbours and disagree only inside
+  ;; it, which is exactly the documented cut and exactly the part this
+  ;; harness has no axis for. Kept as the record of a boundary that is
+  ;; real but currently unmeasurable here, not as evidence of correctness.
+  :html "<p style=\"direction: rtl; width: 300px\">אבג שלוםabc דהו</p>"}
+
  {:id :text/rtl-block-alignment
   :group :text
   ;; In an rtl containing block a narrower block sits against the RIGHT

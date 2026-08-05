@@ -433,6 +433,203 @@
             candidate
             (recur (dec n))))))))
 
+;; ---- `direction: rtl` inside a line ----
+;;
+;; What this engine implements of the Unicode bidirectional algorithm
+;; (UAX #9) is stated once, here, because three call sites share it
+;; (layout-text, inline-line-breaker, layout-inline-run) and a boundary
+;; repeated three times is a boundary that drifts. What is IMPLEMENTED is
+;; UAX #9's two OUTPUTS at the granularity of whole words:
+;;
+;;   1. WHERE THE LINE SITS. In an rtl block a line is packed against the
+;;      inline-END edge, which is the RIGHT one -- see line-align-offset.
+;;   2. WHAT ORDER THE RUNS COME IN. Maximal sequences of same-direction
+;;      words are reversed per UAX #9 rule L2 -- see bidi-visual-order.
+;;
+;; What is NOT implemented is stated at each of those two functions, but
+;; the one cut that governs both is here: a WORD is the smallest thing
+;; that carries a direction. Nothing below a word is resolved -- no
+;; per-character bidi classes, no W-rules for numbers, no explicit
+;; embedding/override/isolate controls (U+202A..U+2069), and no
+;; `unicode-bidi` property. Measured in Brave, that costs exactly one
+;; shape: a single word with strong characters of BOTH directions in it
+;; (`שלוםabc`) is split by the browser into two runs at the boundary
+;; inside the word and this engine keeps it whole. Everything measured
+;; that puts the direction change at a word boundary -- which is every
+;; ordinary sentence -- comes out in the browser's order.
+
+(def ^:private strong-rtl-re
+  "The Unicode blocks whose letters are bidi class R or AL. Hebrew,
+   Arabic, Syriac, Thaana, N'Ko, Samaritan and the Arabic presentation
+   forms, i.e. every right-to-left script that lives in the BMP.
+
+   A REGEX rather than a codepoint predicate on purpose: this file is
+   .cljc and `Character/getDirectionality` (Clojure) has no ClojureScript
+   counterpart, while `\\uXXXX` ranges in a character class mean the same
+   thing to both readers. Supplementary-plane RTL scripts (Cypriot,
+   Adlam, Old Hebrew...) are outside the class and therefore outside
+   this engine -- they are surrogate PAIRS, which a BMP character class
+   cannot express, and no measurement here uses one."
+  #"[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFC]")
+
+(defn- strong-rtl?
+  "True when `s` contains at least one strong right-to-left character.
+
+   ANY such character makes the whole word an RTL run, rather than the
+   FIRST strong one deciding (which is what UAX #9's own P2 does for a
+   paragraph). The two rules only disagree for a word that mixes
+   directions internally, which is the documented cut above -- and the
+   `contains` form is also the exact question inline-line-breaker has to
+   ask before merging two words into one draw-op, so one predicate serves
+   both rather than two nearly-identical ones drifting apart."
+  [s]
+  (boolean (re-find strong-rtl-re (str s))))
+
+(defn- line-align-offset
+  "How far into `content-w` a line of width `line-w` starts, from
+   `text-align` and the containing block's `direction`.
+
+   `text-align`'s `start`/`end` are DIRECTION-RELATIVE, and the value in
+   force when nothing is declared is `start` -- so an rtl block's lines
+   pack against its RIGHT edge with no `text-align` anywhere. Measured in
+   Brave on `<p style=\"direction: rtl; width: 300px\">alpha beta
+   gamma</p>`: the three words sit at 188/230/265 where an ltr paragraph
+   of the same markup puts them at 0/42/77, i.e. every one of them shifted
+   by exactly 188 = 300 - 112, the leftover of the line's own width. The
+   whole `text-align` matrix was measured the same way and all eight
+   combinations are reproduced here: rtl+start and rtl+(nothing) are
+   right, rtl+end is left, ltr+start is left, ltr+end is right, and
+   left/right/center mean the physical thing they say in both.
+
+   `justify` degrades to `start` rather than to `left`, which is a change
+   only for rtl (in ltr the two are the same edge and this is byte for
+   byte what the old `case`'s default did). This engine has no per-space
+   stretch-justification, and measured in Brave the LAST line of a
+   justified rtl paragraph -- the one line a real justifier does not
+   stretch either -- sits at the right edge, so `start` is the honest
+   degrade rather than a second wrong guess."
+  [text-align direction line-w content-w]
+  (let [rtl? (= "rtl" direction)
+        leftover (max 0 (- content-w line-w))]
+    (case text-align
+      "center" (/ leftover 2)
+      "right" leftover
+      "left" 0
+      "end" (if rtl? 0 leftover)
+      ;; nil / "start" / "justify" / anything unrecognized
+      (if rtl? leftover 0))))
+
+(defn- bidi-levels
+  "UAX #9 embedding levels for one line, at word granularity, over an
+   INTERLEAVED sequence of `[:run <rtl?>]` and `[:gap]` entries -- a gap
+   being the whitespace between two runs, which is a NEUTRAL and takes its
+   level from what surrounds it.
+
+   The paragraph level is 1 for an rtl block and 0 for an ltr one. A run
+   of strong-rtl characters resolves to level 1 in both; anything else
+   resolves to the next even level up from the paragraph (2 in rtl, 0 in
+   ltr), which is UAX #9 I1/I2's answer for both strong-L text AND for
+   European numbers -- the reason `שלום 123 אבג` keeps `123` reading
+   left-to-right in the middle of a reversed line, as Brave does.
+
+   A gap takes the level of its neighbours when they agree and the
+   paragraph level when they do not (UAX #9 N1/N2), which is what puts
+   the space between two Hebrew words INSIDE their reversed run and the
+   space between a Hebrew word and a Latin one at the boundary between
+   the two runs. The documented cut: a run of two or more ADJACENT
+   neutral words between two rtl runs (`שלום - - אבג`) resolves to the
+   surrounding direction in real bidi and stays in logical order here,
+   because a neutral word is levelled as if it were strong-L. One
+   neutral word between two rtl runs -- overwhelmingly the common shape,
+   and the one measured -- is a single-item run either way and comes out
+   identical."
+  [rtl? entries]
+  (let [para (if rtl? 1 0)
+        run-level (fn [r?] (if r? 1 (if rtl? 2 0)))
+        levels (mapv (fn [[kind r?]] (when (= :run kind) (run-level r?))) entries)]
+    (vec (map-indexed
+          (fn [i lvl]
+            (or lvl
+                ;; a gap: N1 when the neighbours agree, N2 otherwise
+                (let [before (some identity (reverse (subvec levels 0 i)))
+                      after (some identity (subvec levels (inc i)))]
+                  (if (and before after (= before after)) before para))))
+          levels))))
+
+(defn- bidi-visual-order
+  "UAX #9 rule L2 applied to one line's runs: the display order of
+   `entries`, as a vector of indices into it.
+
+   L2 reads, verbatim: \"From the highest level found in the text to the
+   lowest odd level on each line, including intermediate levels not
+   actually present in the text, reverse any contiguous sequence of
+   characters that are at that level or higher.\" That is implemented
+   literally below -- the ranges are found in the FIXED levels array by
+   original index, and each pass reverses that index range of the order
+   vector, so the nested higher-level reversals survive the lower-level
+   ones that contain them.
+
+   Two consequences worth naming because they are what makes this
+   implementable at all. An ltr line with no rtl character anywhere has
+   max level 0, so the loop does not run and the order is the identity.
+   An RTL line with no rtl character has every entry at level 2, so it is
+   reversed at level 2 and reversed again at level 1 -- also the
+   identity. Both are exactly what Brave does, and together they are why
+   nothing that does not contain a strong rtl character can move."
+  [rtl? entries]
+  (let [levels (bidi-levels rtl? entries)
+        n (count entries)
+        top (reduce max 0 levels)]
+    (loop [lvl top order (vec (range n))]
+      (if (< lvl 1)
+        order
+        (recur (dec lvl)
+               (loop [i 0 order order]
+                 (if (>= i n)
+                   order
+                   (if (>= (nth levels i) lvl)
+                     (let [j (loop [j i] (if (and (< j n) (>= (nth levels j) lvl)) (recur (inc j)) j))]
+                       (recur j (vec (concat (subvec order 0 i)
+                                             (reverse (subvec order i j))
+                                             (subvec order j)))))
+                     (recur (inc i) order)))))))))
+
+(defn- bidi-reorder-pieces
+  "One line's pieces, re-`:x`ed into UAX #9 visual order.
+
+   `pieces` arrive in LOGICAL (document) order, each `{:x :w :rtl?}` plus
+   whatever its own kind carries, and come back with `:x` rewritten and
+   the vector itself in visual order. The gaps BETWEEN pieces -- the
+   collapsed whitespace the line breaker already charged for -- are
+   carried through the reordering as neutral entries of their own rather
+   than recomputed, so a reversal keeps each space with the pair of words
+   it separated, and the line's total width is unchanged by construction.
+
+   Returns `pieces` untouched when the line holds no strong rtl character
+   at all. That is not an optimization: it is the guarantee that this
+   whole mechanism is INERT for every line that does not contain an rtl
+   script, which is every line in this engine's conformance corpus except
+   the ones added to measure it."
+  [rtl? pieces]
+  (if-not (some :rtl? pieces)
+    pieces
+    (let [;; [piece gap piece gap piece ...], gaps measured from the x/w
+          ;; the line breaker already assigned
+          entries (vec (mapcat (fn [[a b]]
+                                 (if b
+                                   [[:run (:rtl? a) a] [:gap nil (- (:x b) (+ (:x a) (:w a)))]]
+                                   [[:run (:rtl? a) a]]))
+                               (partition-all 2 1 pieces)))
+          order (bidi-visual-order rtl? entries)
+          x0 (:x (first pieces))]
+      (loop [os order x x0 out []]
+        (if-let [o (first os)]
+          (let [[kind _ payload] (nth entries o)]
+            (if (= :run kind)
+              (recur (rest os) (+ x (:w payload)) (conj out (assoc payload :x x)))
+              (recur (rest os) (+ x payload) out)))
+          out)))))
+
 (defn- layout-text
   "Word-wraps and lays out `text` as one or more :text draw-ops -- exactly
    the algorithm layout-node's real-DOM-text-node branch uses, factored out
@@ -510,10 +707,24 @@
    (see resolve-width's `avail` fallback), so `text-align: center` on a
    plain `<div>` centers within that full block width exactly like a real
    browser, not within some auto-shrunk width that would make centering
-   invisible. Deliberately scoped to `left`/`center`/`right` -- `justify`
-   falls back to `left` (this engine has no per-space stretch-justification
-   of its own), a safe degrade rather than a wrong guess, matching this
-   codebase's existing convention for other unimplemented keyword values.
+   invisible. `left`/`center`/`right`/`start`/`end` all resolve through
+   line-align-offset, which is where the direction-relative half of them
+   and `justify`'s degrade to `start` are documented -- this engine has
+   no per-space stretch-justification of its own, a safe degrade rather
+   than a wrong guess, matching this codebase's existing convention for
+   other unimplemented keyword values.
+
+   `direction` reaches here for the same two reasons line-align-offset
+   and bidi-reorder-pieces exist: it decides which edge a line packs
+   against when nothing declares an alignment, and it is the paragraph
+   level UAX #9 rule L2 reorders against. A line that holds no strong
+   right-to-left character is emitted as the ONE draw-op per line it has
+   always been; a line that does holds one op per directional run, which
+   is the granularity a host can paint without re-reordering what this
+   function already reordered (handing a host a single string whose words
+   are in visual order would be double-reversed by any text stack that
+   applies bidi itself, which every real one does). See bidi-visual-order
+   for what a run is here and what is not resolved below a word.
 
    `text-transform` (see apply-text-transform above) rewrites `text`
    itself, BEFORE word-wrapping, so `uppercase`/`lowercase`/`capitalize`
@@ -622,7 +833,9 @@
    `text-shadow` (a single `{:x :y :blur :color}` map arg -- consolidated
    from 4 separate positional args to keep this fn's own arity under
    Clojure's hard 20-positional-parameter limit, hit for real once
-   `text-overflow` below pushed the previous flat-arg signature to 21)
+   `text-overflow` below pushed the previous flat-arg signature to 21;
+   `direction` took the last free slot, so the property AFTER it has to
+   consolidate something the way `text-shadow` did rather than add a 21st)
    -- real CSS's own `text-shadow` shorthand is expanded into four
    longhand-shaped attrs at cascade-parse time (see
    `cssom.core/expand-text-shadow-shorthand`) and bundled into this map
@@ -674,7 +887,7 @@
    own truncation intent) rather than a spec-accuracy claim."
   [theme x y avail-width opacity color font-size line-height font-weight font-style font-family
    text-shadow
-   text-decoration text-align text-transform white-space text-overflow overflow-wrap text]
+   text-decoration text-align direction text-transform white-space text-overflow overflow-wrap text]
   (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
@@ -725,28 +938,66 @@
                      (apply max 0 (map #(* (count %) char-w) lines)))
         w (min avail-width (+ max-line-w (* 2 padding)))
         h (+ (* (count lines) line-height) (* 2 padding))
-        align-offset (fn [line]
-                       (case text-align
-                         "center" (/ (max 0 (- content-w (line-w line))) 2)
-                         "right" (max 0 (- content-w (line-w line)))
-                         0))]
+        align-offset (fn [line] (line-align-offset text-align direction (line-w line) content-w))
+        ;; One line, split into the directional RUNS it will be painted
+        ;; as, each `[text x-within-the-line]`. A line with no strong
+        ;; right-to-left character is one run holding the whole line at
+        ;; x=0 -- literally the pre-existing single op, produced without
+        ;; measuring a single word -- so this is inert for every line
+        ;; that is not in an rtl script. A line that HAS one is split at
+        ;; its spaces, adjacent same-direction words are rejoined (so an
+        ;; embedded Latin phrase stays one op and one string, which is
+        ;; what keeps its own internal order readable), and the resulting
+        ;; runs are placed by bidi-reorder-pieces.
+        ;;
+        ;; The space between two runs is charged as one measured space,
+        ;; which is exact here for the same reason the line breaker's own
+        ;; separator is: `white-space: normal` has already collapsed
+        ;; every whitespace run to a single space by this point. Under a
+        ;; `pre`-family value it is an approximation -- runs of preserved
+        ;; spaces are re-charged as one each -- which is why this path is
+        ;; entered only when the line really does need reordering.
+        visual-runs
+        (fn [line]
+          (if-not (strong-rtl? line)
+            [[line 0]]
+            (let [sp (line-w " ")
+                  words (remove str/blank? (str/split (str line) #" "))
+                  ;; adjacent words of the SAME direction are one run
+                  runs (reduce (fn [acc word]
+                                 (let [r? (strong-rtl? word)]
+                                   (if (and (seq acc) (= r? (:rtl? (peek acc))) (not r?))
+                                     (conj (pop acc) (update (peek acc) :text str " " word))
+                                     (conj acc {:text word :rtl? r?}))))
+                               [] words)
+                  placed (loop [rs runs cursor 0 out []]
+                           (if-let [r (first rs)]
+                             (let [rw (line-w (:text r))]
+                               (recur (rest rs) (+ cursor rw sp) (conj out (assoc r :x cursor :w rw))))
+                             out))]
+              (mapv (juxt :text :x)
+                    (bidi-reorder-pieces (= "rtl" direction) placed)))))]
     {:box {:x x :y y :w w :h h}
      :draw (vec (mapcat
                  (fn [i line]
                    (let [line-x (+ x padding (align-offset line))
-                         line-y (+ y padding (* i line-height))
-                         base (cond-> {:text line :font-size font-size :opacity opacity}
-                                font-weight (assoc :font-weight font-weight)
-                                font-style (assoc :font-style font-style)
-                                font-family (assoc :font-family font-family))
-                         shadow-op (when (and (:color text-shadow) (not= "none" (:color text-shadow)))
-                                     (assoc base :draw/op :text
-                                            :x (+ line-x (or (:x text-shadow) 0))
-                                            :y (+ line-y (or (:y text-shadow) 0))
-                                            :color (:color text-shadow)))
-                         main-op (cond-> (assoc base :draw/op :text :x line-x :y line-y :color color)
-                                   text-decoration (assoc :text-decoration text-decoration))]
-                     (if shadow-op [shadow-op main-op] [main-op])))
+                         line-y (+ y padding (* i line-height))]
+                     (mapcat
+                      (fn [[run-text run-dx]]
+                        (let [run-x (+ line-x run-dx)
+                              base (cond-> {:text run-text :font-size font-size :opacity opacity}
+                                     font-weight (assoc :font-weight font-weight)
+                                     font-style (assoc :font-style font-style)
+                                     font-family (assoc :font-family font-family))
+                              shadow-op (when (and (:color text-shadow) (not= "none" (:color text-shadow)))
+                                          (assoc base :draw/op :text
+                                                 :x (+ run-x (or (:x text-shadow) 0))
+                                                 :y (+ line-y (or (:y text-shadow) 0))
+                                                 :color (:color text-shadow)))
+                              main-op (cond-> (assoc base :draw/op :text :x run-x :y line-y :color color)
+                                        text-decoration (assoc :text-decoration text-decoration))]
+                          (if shadow-op [shadow-op main-op] [main-op])))
+                      (visual-runs line))))
                  (range) lines))}))
 
 ;; ---- per-node computed style bag ----
@@ -7966,6 +8217,21 @@
    exactly the granularity a host needs to paint two different colors/
    weights on one line.
 
+   A word holding a strong RIGHT-TO-LEFT character never merges, with
+   anything, in either direction. Two adjacent rtl words are two runs
+   that layout-inline-run may have to REVERSE against each other (see
+   bidi-reorder-pieces), and a run that has been concatenated into its
+   neighbour's draw-op can no longer move independently of it. The cost
+   is one draw-op per word for rtl-script text and nothing at all for
+   anything else -- `strong-rtl?` is false for every character in every
+   Latin, CJK, Greek or Cyrillic word, so the merge behaviour of every
+   line this engine laid out before is unchanged. Adjacent LEFT-to-right
+   words still merge as they always did, which is not just an
+   optimization: an embedded Latin phrase inside rtl text is ONE
+   left-to-right run in UAX #9 too, and keeping it one piece is what
+   keeps its own words in their own order when the line around it
+   reverses.
+
    Widths come from the host's real `:measure-text` when the theme
    supplies one, else this file's `(long (* 0.6 font-size))` per-character
    approximation — identical to layout-text's own `line-w`, so wrap
@@ -8035,17 +8301,20 @@
           (let [st (:style t)
                 word (:text t)
                 ww (w-of word st)
+                rtl? (strong-rtl? word)
                 sep (if (and (content? pieces) (:space-before? t))
                       (w-of " " (or (:space-style t) st))
                       0)]
             (if (and (content? pieces) (> (+ x sep ww) content-w))
               (recur (rest ts) ww
                      [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww
-                       :shift (:shift t 0) :valign (:valign t)}]
+                       :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}]
                      (flush lines pieces x st))
               (let [last-piece (peek pieces)
                     merge? (and last-piece
                                 (not= :marker (:kind last-piece))
+                                (not rtl?)
+                                (not (:rtl? last-piece))
                                 (= (:style last-piece) st)
                                 (= (:owners last-piece) (:owners t))
                                 (= (:opacity last-piece) (:opacity t))
@@ -8060,7 +8329,7 @@
                                       :w (- x' (:x last-piece))))
                          (conj pieces {:text word :style st :owners (:owners t)
                                        :opacity (:opacity t) :x (+ x sep) :w ww
-                                       :shift (:shift t 0) :valign (:valign t)}))
+                                       :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}))
                        lines))))
           )
         (cond
@@ -8306,6 +8575,22 @@
    line breaker wrapped against. Returns the `{:draw :h}` shape
    layout-children-block already advances on.
 
+   `direction` enters at exactly two points, both of which come from the
+   containing block's own value and neither of which is a special case
+   for `rtl`. Which EDGE a line packs against is line-align-offset's
+   answer to `text-align` and `direction` together, the same one
+   layout-text gets. What ORDER a line's pieces come out in is
+   bidi-reorder-pieces' -- applied per line, AFTER breaking, because a
+   browser breaks in logical order and reorders each resulting line
+   (measured: a wrapped rtl Hebrew paragraph puts words 1-3 on line one
+   and 4-5 on line two, each line reversed within itself, not the whole
+   paragraph reversed and then broken). A `<br>`'s own zero-width box
+   moves with the same rule: it sits at the line's inline-END edge, which
+   is the RIGHT of the line's content in ltr and its LEFT in rtl
+   (measured in Brave, `<p style=\"direction:rtl;width:300px\">aaa<br>bb
+   cc</p>` reports the `<br>` at x=279, the left end of a line whose text
+   runs 279..300).
+
    Scope-cuts, all deliberate and each documented at the function that
    owns it: replaced/form-control elements are not inline-level here
    (inline-level-tags), an inline box containing a block box falls back to
@@ -8320,6 +8605,8 @@
         {fragments :fragments oof :out-of-flow} (inline-fragments theme inherited opacity inner-w items)
         lines (inline-line-breaker theme inner-w (inline-tokens fragments))
         text-align (:text-align inherited)
+        direction (:direction inherited)
+        rtl? (= "rtl" direction)
         ;; An out-of-flow descendant of one of this run's inline boxes,
         ;; ready for layout-absolute-children -- see inline-fragments for
         ;; how it got here and layout-children-block's own out-of-flow
@@ -8368,11 +8655,19 @@
         (if-let [line (first ls)]
           (let [{line-h :h baseline-off :baseline line-pieces :pieces}
                 (inline-line-metrics line inherited theme)
-                align-offset (case text-align
-                               "center" (/ (max 0 (- inner-w (:w line))) 2)
-                               "right" (max 0 (- inner-w (:w line)))
-                               0)
+                align-offset (line-align-offset text-align direction (:w line) inner-w)
                 base-x (+ content-x padding align-offset)
+                ;; UAX #9 rule L2, on this line only, in visual order. An
+                ;; OUTSIDE list marker is held out of it: it is painted at
+                ;; its own negative x, before the line's content edge,
+                ;; and it is not a run on the line at all (see
+                ;; inline-line-breaker for why it does not move the pen
+                ;; either). Which side of an rtl list item its marker sits
+                ;; on is a separate, unmeasured question and is left
+                ;; exactly where it was.
+                line-pieces (let [marker? #(= :marker (:kind %))]
+                              (into (vec (filter marker? line-pieces))
+                                    (bidi-reorder-pieces rtl? (vec (remove marker? line-pieces)))))
                 baseline (+ y baseline-off)
                 ;; One inline ELEMENT's own box on this line, for every
                 ;; owner the piece passed through. An inline box's height
@@ -8519,8 +8814,11 @@
                    ;; 1.2em approximation centred in the line box.
                    ;; Measured in Brave, `<p>a<br>b</p>` reports the <br>
                    ;; at (7, 2, 0, 15) where the 1.2em rule gave h=16.
+                   ;; "The end of the line" is the inline-END edge, which
+                   ;; is the line's LEFT in an rtl block -- see this fn's
+                   ;; own docstring for the measurement.
                    (owner-fragments rects (:break-owners line) 0
-                                    (+ base-x (:w line)) 0 opacity)))
+                                    (+ base-x (if rtl? 0 (:w line))) 0 opacity)))
           {:draw (into (inline-owner-ops theme rects) text-draws)
            :h (+ (- y content-y) padding)
            :out-of-flow (finish-oof rects)})))))
@@ -9197,7 +9495,30 @@
               ;; 300px `margin: 0 auto` block in a 200px container sits at
               ;; x=0 and is 300 wide, NOT centred at x=-50.
               free (max 0 (- content-w ml mr child-w))
-              rtl? (= "rtl" (:direction inherited))
+              ;; ...but a bare TEXT child is not a block box, and this rule
+              ;; is not its rule. Real CSS wraps such a child in an
+              ;; ANONYMOUS block box that is as wide as its containing
+              ;; block, so the equation above leaves it no `free` at all --
+              ;; where the words sit inside it is `text-align`'s and
+              ;; `direction`'s question about a LINE, which is
+              ;; line-align-offset's answer inside layout-text.
+              ;;
+              ;; The distinction only became visible when that answer
+              ;; existed: layout-text's box SHRINK-WRAPS its widest line
+              ;; (a reporting convenience -- see its own `w`), so a text
+              ;; child looked like a narrow block here and got shifted to
+              ;; the rtl edge by this rule, which was the right ANSWER
+              ;; reached by the wrong mechanism. With both in force
+              ;; `<p style="direction: rtl">alpha beta</p>` was shifted
+              ;; right TWICE and its text left the paragraph entirely.
+              ;; The line rule is the one kept because it is the one that
+              ;; generalizes: it places each WRAPPED line by its own
+              ;; width, where this rule can only move the whole box by the
+              ;; widest line's leftover, and it is the only one of the two
+              ;; that `text-align` can override.
+              rtl? (and (= "rtl" (:direction inherited))
+                        (nil? (real-text-child child))
+                        (not (generated-node? child)))
               auto-dx (cond
                         (and ml-auto? mr-auto?) (quot free 2)
                         ml-auto? free
@@ -10453,7 +10774,7 @@
            text-overflow (or (:text-overflow gstyle) (:text-overflow inherited))]
        (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family
                     {:x text-shadow-x :y text-shadow-y :blur text-shadow-blur :color text-shadow-color}
-                    text-decoration text-align text-transform white-space text-overflow
+                    text-decoration text-align (:direction inherited) text-transform white-space text-overflow
                     (:overflow-wrap inherited) (:generated/text node)))
 
      (text-node? node)
@@ -10462,7 +10783,8 @@
                   {:x (:text-shadow-x inherited) :y (:text-shadow-y inherited)
                    :blur (:text-shadow-blur inherited) :color (:text-shadow-color inherited)}
                   (:text-decoration inherited)
-                  (:text-align inherited) (:text-transform inherited) (:white-space inherited)
+                  (:text-align inherited) (:direction inherited)
+                  (:text-transform inherited) (:white-space inherited)
                   (:text-overflow inherited) (:overflow-wrap inherited) node)
 
      (= :text (:node/type node))
@@ -10515,31 +10837,48 @@
                ;; ---- how much of `direction: rtl` this engine implements ----
                ;;
                ;; `direction` is an inherited property, so it travels on the
-               ;; same map every other inherited property does. What reads it
-               ;; is layout-children-block, and ONLY for the block-level
-               ;; question: which edge the leftover space of an
-               ;; over-constrained block goes to. In an rtl containing block a
-               ;; block narrower than its container sits against the RIGHT
-               ;; edge, because CSS 2.1 SS10.3.3 solves the over-constrained
-               ;; equation by ignoring the specified `margin-LEFT` under rtl
-               ;; where it ignores `margin-right` under ltr. Measured in
-               ;; Brave: a 60px block in a 200px rtl container is at x=140
-               ;; there and was at x=0 here.
+               ;; same map every other inherited property does. THREE places
+               ;; read it, and each documents its own half:
                ;;
-               ;; What is NOT implemented, and is not a matter of wiring one
-               ;; more property through: the Unicode bidirectional algorithm.
-               ;; There is no reordering of inline content here at all -- no
-               ;; resolved embedding levels, no neutral resolution, no
-               ;; reversal of runs -- so a line of text in an rtl block comes
-               ;; out in DOM order. `text/rtl-with-inline-elements` measures
-               ;; exactly that gap and is expected to keep failing;
-               ;; `text-align`'s own direction-relative `start`/`end` values
-               ;; are deliberately left alone too, because right-aligning
-               ;; an rtl line would make that case's `<b>` land near the
-               ;; browser's x by symmetry (its text either side of the `<b>`
-               ;; is the same width) while the words on the line were still
-               ;; in the wrong order. A number improved by a coincidence is
-               ;; worse than a number that says the gap is still there.
+               ;; - layout-children-block, for the block-level question of
+               ;;   which edge the leftover space of an over-constrained
+               ;;   block goes to. In an rtl containing block a block
+               ;;   narrower than its container sits against the RIGHT edge,
+               ;;   because CSS 2.1 SS10.3.3 solves the over-constrained
+               ;;   equation by ignoring the specified `margin-LEFT` under
+               ;;   rtl where it ignores `margin-right` under ltr. Measured
+               ;;   in Brave: a 60px block in a 200px rtl container is at
+               ;;   x=140 there and was at x=0 here.
+               ;; - line-align-offset, for which edge a LINE packs against
+               ;;   and for `text-align`'s direction-relative `start`/`end`.
+               ;; - bidi-visual-order / bidi-reorder-pieces, for UAX #9 rule
+               ;;   L2 at word granularity.
+               ;;
+               ;; The last two arrived together, and only together, because
+               ;; separately either one of them is a coincidence. Until
+               ;; 2026-08-05 this comment said `text-align`'s
+               ;; direction-relative values were "deliberately left alone",
+               ;; on the reasoning that right-aligning an rtl line would
+               ;; land `text/rtl-with-inline-elements`'s `<b>` near the
+               ;; browser's x by symmetry "while the words on the line were
+               ;; still in the wrong order". Measuring it says otherwise:
+               ;; Brave does NOT reorder that line, because every word on it
+               ;; is strong LEFT-to-right and UAX #9 resolves an all-L line
+               ;; in an rtl paragraph to a single left-to-right run placed
+               ;; at the line's right end. `alpha <b>beta</b> gamma` sits at
+               ;; 185.48/227.48/265 against the ltr layout's 0/42/79.52 --
+               ;; the SAME order, every word shifted by the same 185.48. The
+               ;; shift was never the coincidence; believing the words had
+               ;; to move was the error. What genuinely does reverse is
+               ;; strong-rtl text, and that is what bidi-visual-order does
+               ;; and what `text/rtl-hebrew-*` measures -- which is why both
+               ;; halves are here rather than the placement half alone.
+               ;;
+               ;; What is still NOT implemented is stated at strong-rtl?:
+               ;; nothing below a word carries a direction, so per-character
+               ;; bidi classes, the W-rules for numbers, the explicit
+               ;; embedding/override/isolate controls and the `unicode-bidi`
+               ;; property are all absent.
                direction (or (:direction st) (:direction inherited))
                inherited (assoc inherited
                                 :direction direction

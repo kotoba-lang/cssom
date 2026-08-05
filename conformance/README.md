@@ -789,6 +789,89 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round thirty: `direction: rtl` inside a line, and the coincidence that was not one
+
+Round twenty-six left `direction: rtl` implemented at block level only, and
+wrote down why it stopped there: right-aligning `text/rtl-with-inline-
+elements` would land its `<b>` within 2px of Brave "purely because the text
+either side of it is the same width, while the words on the line were still
+in the wrong order."
+
+Measuring it first says the second half of that is not true. Driven through
+`cdp_dump.cljs` on twenty-two rtl shapes that were not in the corpus:
+
+| shape (300px block) | ltr | rtl |
+|---|---|---|
+| `alpha <b>beta</b> gamma` | 0 / 42 / 79.52 | 185.48 / 227.48 / 265 |
+| `aa <b>bbbb</b> cccccc <i>d</i> ee` | 0 / 21 / 62.13 / 111.13 / 126.55 | 159.45 / 180.45 / 221.58 / 270.58 / 286 |
+
+The **same order** both times, every word shifted by the same amount, and
+that amount is the line's own leftover in the content width (300 − 114.52 =
+185.48; 300 − 140.55 = 159.45). Brave does not reorder either line, and it
+is not being lenient: UAX #9 resolves a line whose every word is strong
+left-to-right into a single left-to-right run, placed at the line's
+inline-end. The shift was never the coincidence — believing the words had to
+move was the error. The asymmetric second row is in the corpus now
+(`text/rtl-two-inline-elements`) precisely because nothing about it is
+symmetric, so no coincidence can produce it.
+
+What genuinely reverses is strong-rtl script, and that was measured too:
+
+| shape (300px rtl block) | Brave, left to right |
+|---|---|
+| `שלום עולם אבג` | `אבג` 193.58, `עולם` 225.78, `שלום` 266.38 — reversed |
+| `שלום one two אבג` | `אבג` 178.17, `one` 210.39, `two` 238.39, `שלום` 266.39 — the Latin run keeps ITS order |
+| `alpha שלום עולם beta` in an **ltr** block | alpha 0, `עולם` 42, `שלום` 82.59, beta 123.22 — only the pair swapped |
+| `שלום 123 אבג` | `אבג` 206.17, `123` 238.39, `שלום` 266.39 — the number reads forward |
+
+So both halves landed, and only together: **line placement** (which edge a
+line packs against, including `text-align`'s direction-relative
+`start`/`end` — all eight {ltr,rtl}×{start,end,left,right} combinations
+measured) and **run reordering** (UAX #9 rule L2, applied per line after
+breaking, at the granularity of whole words).
+
+**What is not implemented, and what it costs.** A word is the smallest
+thing that carries a direction: no per-character bidi classes, no W-rules
+for numbers, no explicit embedding/override/isolate controls, no
+`unicode-bidi`. Measured, that costs exactly one shape — a single word
+holding strong characters of both directions (`שלוםabc`) is split by Brave
+into two runs inside the word and kept whole here.
+`text/rtl-mixed-direction-word-is-not-split` records it, and records that
+it **passes**: a multi-rect word is re-grouped per character by top on the
+oracle side (a facility that exists for words broken across LINES), so both
+of its rects fold back into one entry and the line axis cannot see the
+split at all. A passing case is not evidence of agreement here; the
+boundary is real and this harness has no axis for it.
+
+**A bug the fix exposed.** `layout-text`'s box shrink-wraps its widest line,
+so a bare text child looked like a narrow block to
+`layout-children-block`'s own rtl rule and got pushed to the right edge by
+it — the right answer reached by the wrong mechanism, invisible while it
+was the only mechanism. With line placement in force as well,
+`<p style="direction: rtl">alpha beta</p>` was shifted right **twice** and
+its text left the paragraph. Real CSS wraps such a child in an anonymous
+block box that fills its containing block, so that rule has nothing to
+place; it now skips text and generated-text children, and the line rule
+owns them. Nothing on any axis moved when it was fixed — with the
+harness's `padding: 0` the two mechanisms had coincided to the pixel — 
+which is exactly why a draw-op diff of all 357 pre-existing cases was taken
+rather than trusting the scoreboard.
+
+**Result**, on a corpus grown 357 → 370 by the thirteen cases above:
+
+| axis | before | after |
+|---|---|---|
+| line structure | 342/344 | 355/357 |
+| geometry (boxes) | 1304/1313 | 1327/1335 |
+| geometry (clean cases) | 349/357 | 363/370 |
+| paint order | 8866/8909 | 9196/9234 |
+| computed style | 16138/18453 | 16400/18761 |
+
+Every one of the thirteen new cases passes on all three layout axes;
+`text/rtl-with-inline-elements` moves from a −185.48 `b x` and a
+`b -> p` paint-order miss on five sample points to clean; and a draw-op
+diff of the whole pre-existing corpus shows exactly one case changed.
+
 ### Round twenty-nine: the marker that is not in the item, and the line-height that inherits a ratio
 
 Two residuals the geometry axis had localised to the pixel, both measured in
@@ -1291,17 +1374,21 @@ centring it.
 containing block the over-constrained equation resolves `margin-left`
 instead of `margin-right`, so a 60px block in a 200px container sits at
 **x=140** where this engine had it at 0 (`text/rtl-block-alignment`).
-That is block-level alignment, it is one property threaded through the
-inherited map, and it is all that is implemented. **There is no bidi
-algorithm here** — no embedding levels, no neutral resolution, no run
-reversal — so `text/rtl-with-inline-elements` still fails and is expected
-to. `text-align`'s direction-relative `start`/`end` was deliberately left
-alone for a reason worth writing down: right-aligning that case's line
-would land its `<b>` within 2px of Brave's x purely because the text
-either side of it is the same width, while the words on the line were
-still in the wrong order. A number improved by a coincidence is worse than
-a number that says the gap is still there. The boundary is written at
-`layout-node`, where the property is resolved.
+That is block-level alignment, and in this round it was all that was
+implemented: no embedding levels, no neutral resolution, no run reversal,
+so `text/rtl-with-inline-elements` still failed. `text-align`'s
+direction-relative `start`/`end` was left alone deliberately, on the
+reasoning that right-aligning that case's line would land its `<b>` within
+2px of Brave's x purely because the text either side of it is the same
+width, while the words on the line were still in the wrong order.
+
+**Round thirty measured that and found the second half of it wrong** —
+Brave does not reorder that line, because every word on it is strong
+left-to-right — and implemented both line placement and UAX #9 run
+reordering. See round thirty for the measurements and for what is still
+not resolved below a word. The block-level rule described here survives
+unchanged except that it no longer applies to a bare TEXT child, which was
+being shifted right twice once line placement existed.
 
 **A negative margin never wins a `max`.** The cascade had the `-8` all
 along; `layout-children-block` collapsed adjacent margins with `max`, and
@@ -1392,7 +1479,8 @@ one. Neither is wrong and they are not comparable, which is what the
 exclusion says.
 
 Still open, and named rather than left to be rediscovered: no bidi
-reordering (above); `flex/auto-margin-pushes-item-right` still fails,
+reordering (above -- **closed by round thirty**, at word granularity);
+`flex/auto-margin-pushes-item-right` still fails,
 because a flex line distributes its free space through
 `place-main-axis-auto-margins` and not through this round's block-flow
 path; `inset-side` still omits the border for a content-box element, in
