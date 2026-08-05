@@ -2510,6 +2510,25 @@
   ;; `break-spaces` does that `pre-wrap` does not.
   :html "<div style=\"width: 200px; white-space: break-spaces\">aa\nbb</div>"}
 
+ ;; The next three are BLOCKED UPSTREAM OF cssom, measured 2026-08-05.
+ ;; kotoba-lang/htmldom collapses whitespace at PARSE time on an
+ ;; HTML-STRUCTURAL rule (a real `<pre>` or a raw-text tag), where a
+ ;; browser defers all of it to layout and decides it from CSS -- so by the
+ ;; time `cssom.layout` sees a `<span style="white-space: pre">`, its
+ ;; leading spaces are already one space and its tab is already a space.
+ ;; Reproduced directly: `(htmldom.core/parse-into-document "<span>a\tb
+ ;; </span>")` yields the text `"a b"`, and the same markup in a `<pre>`
+ ;; yields `"a\tb"`.
+ ;;
+ ;; cssom's own half is implemented and measured against the same
+ ;; browser -- in `<pre>` form, where the characters survive the parser,
+ ;; the engine now answers 63/35/42 for these three shapes exactly (see
+ ;; the `a-preserved-tab-*` and `a-shrink-to-fit-box-measures-its-own-
+ ;; white-space-declaration` tests in test/cssom/layout_test.clj, which
+ ;; assert those numbers). Closing them needs htmldom to stop collapsing
+ ;; at parse time, which is its own change in its own repo; they are left
+ ;; in the corpus, failing, as the measurement that will report it.
+
  {:id :text/white-space-pre-keeps-leading-spaces
   :group :text
   ;; Shrink-to-fit so the preserved spaces are IN the measured width:
