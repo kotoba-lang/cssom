@@ -1460,24 +1460,170 @@
 
 ;; ---- per-node computed style bag ----
 
-(defn- presentational-size
-  "HTML's `width`/`height` ATTRIBUTES on `<img>` are presentational hints
-   that a real UA stylesheet maps onto the CSS `width`/`height` properties,
-   which is why `<img width=\"10\" height=\"10\">` has a real 10px box in
-   every browser with no CSS at all. This engine had no such mapping, so
-   such an image resolved through the ordinary block path to the FULL
-   available width -- visible the moment images became inline-level, where
-   a full-width image forced a line break after every one of them.
+(def ^:private replaced-tags
+  "The elements this engine gives a REPLACED box: one whose size comes from
+   the element itself rather than from anything inside it, and which paints
+   none of its children.
 
-   Restricted to `<img>` on purpose: the other elements that historically
-   honour these attributes (`<canvas>`/`<embed>`/`<iframe>`/`<video>`/
-   `<td>`) have no rendering in this engine at all, so mapping the
-   attribute for them would size a box that never paints."
+   `<img>` is the one that was always here. The other four arrived on
+   2026-08-06 with `replaced-content-size`, which is where the sizing
+   algorithm and its measurements live; this set is what selects into it,
+   into `presentational-size` below, into `inline-atomic-tags`, and into
+   the baseline rule in `inline-fragments` (a replaced box sits ON the
+   baseline).
+
+   Deliberately absent, each measured in Brave 151 on 2026-08-06 rather
+   than reasoned about:
+
+   - `<object>`. A bare `<object></object>` IS 300x150, but
+     `<object>fallback text</object>` RENDERS the fallback and
+     shrink-wraps to it (91x15 inline, `width: auto`) -- it is only
+     replaced when it has a resource, which this engine never loads. The
+     two behaviours need a resource model to choose between; treating it
+     as replaced would silently swallow the fallback content of every
+     `<object>` on every page.
+   - `<embed>`. `<embed>` with no `src` produces NO box at all (measured
+     `getClientRects().length === 0`), not a 300x150 one.
+   - `<audio>`. Without a `controls` attribute a browser's UA sheet gives
+     it `display: none`; with `controls` it is 300x54, a third default
+     size. Neither is 300x150, and the `display: none` half belongs in
+     cssom.core's UA stylesheet as an attribute rule rather than here.
+   - `<svg>` WITH a `viewBox`. The tag is in this set, but the viewBox is
+     an intrinsic RATIO with no intrinsic size, which Blink resolves by
+     filling the container: `<svg viewBox=\"0 0 40 20\">` in a 400px
+     block is 400x200, not 300x150. `replaced-intrinsic-size` does not
+     read `viewBox`, so this engine gives it the 300x150 default -- an
+     honest scope cut, and the number a fix needs is right here."
+  #{:img :canvas :video :svg :iframe})
+
+(defn- presentational-size
+  "HTML's `width`/`height` ATTRIBUTES are presentational hints that a real
+   UA stylesheet maps onto the CSS `width`/`height` properties, which is
+   why `<img width=\"10\" height=\"10\">` has a real 10px box in every
+   browser with no CSS at all. This engine had no such mapping, so such an
+   image resolved through the ordinary block path to the FULL available
+   width -- visible the moment images became inline-level, where a
+   full-width image forced a line break after every one of them.
+
+   Honoured for exactly the tags this engine gives a replaced box
+   (`replaced-tags`), which used to be `<img>` alone with the reason
+   'the others have no rendering in this engine at all, so mapping the
+   attribute for them would size a box that never paints'. They have one
+   now.
+
+   They really are HINTS rather than an intrinsic size, and the difference
+   is measurable. Measured in Brave 151, 2026-08-06, on
+   `width=\"80\" height=\"40\" style=\"width: 200px\"`:
+
+     img, video, iframe, svg   200x40   the CSS width replaces the width
+                                        hint; the HEIGHT hint stands, and
+                                        leaves the ratio nothing to solve
+     canvas                    200x100  the attributes are the BITMAP's
+                                        size, i.e. a real intrinsic size,
+                                        and its 2:1 ratio supplies the
+                                        height
+
+   Which is why `<canvas>` is excluded here and read by
+   `replaced-intrinsic-size` instead -- HTML's own dimension-attribute
+   hint rule lists `img`/`embed`/`iframe`/`object`/`video` and not
+   `canvas`, and this is what that distinction costs if you get it
+   backwards. `<svg>`'s `width`/`height` are SVG presentation attributes
+   rather than HTML hints, but they measure identically, so they take the
+   same path."
   [node k]
-  (when (= :img (:tag node))
+  (when (and (contains? replaced-tags (:tag node))
+             (not= :canvas (:tag node)))
     (let [v (get-in node [:attrs k])]
       (when (and v (re-matches #"\d+" (str v)))
         (parse-int v nil)))))
+
+(def ^:private default-object-size
+  "CSS's own default object size, used for a replaced element that has no
+   intrinsic size of its own -- 300x150, the number every browser reserves
+   for a `<video>`/`<svg>`/`<iframe>` it cannot draw a single pixel of.
+
+   It is an INTRINSIC size and not a UA `width: 300px` rule, which is
+   measurable and which decides how the whole of `replaced-content-size` is
+   shaped. Measured in Brave 151, 2026-08-06:
+
+   - `<canvas style=\"width: 50%\">` in a 400px block is 200x**100**, not
+     200x150. A UA `width`/`height` pair would leave the height at 150; an
+     intrinsic 300x150 carries a 2:1 ratio that the declared width then
+     solves the height from.
+   - `<canvas style=\"display: block\">` inside a **100px** block is 300
+     wide and OVERFLOWS. A block-level box with `width: auto` fills its
+     containing block; a block-level REPLACED box uses its intrinsic
+     width, which is CSS 2.1 10.3.4 against 10.3.3 and is why this cannot
+     be expressed as a stylesheet rule at all.
+   - It does not scale with the font: 300x150 at `font-size` 8, 14 and 28.
+
+   Not applied to `<img>`, which is in `replaced-tags` for the other three
+   reasons that set exists. Measured: a bare `<img>` and an `<img>` with a
+   src that 404s are both **0x0** in Brave, not 300x150 -- a browser
+   reserves the default object size for a replaced element it is still
+   WAITING for, and gives a broken image nothing. This engine loads
+   nothing at all, so 0x0 is both what it already produced and what the
+   browser agrees with; see `replaced-intrinsic-size` and
+   `replaced-default-size`."
+  {:w 300 :h 150})
+
+(defn- replaced-default-size
+  "The size each axis falls back to when neither CSS nor the resource has
+   an answer: `default-object-size` for everything except `<img>`, which
+   falls back to NOTHING.
+
+   Measured in Brave 151, 2026-08-06, and it is a real distinction rather
+   than special-casing the tag this engine happens to have got right
+   already: a bare `<img>` is **0x0**, an `<img src>` pointing at a 404 is
+   **0x0**, and a bare `<video>` on the same page is 300x150. A browser
+   reserves the default object size for a replaced element whose resource
+   simply has no intrinsic size of its own; an image whose resource is
+   absent or broken gets nothing, because the box is waiting for a size it
+   still expects to learn. This engine never learns one (see
+   `replaced-intrinsic-size`), so 0 is both what it has always produced
+   for a src-less `<img>` and what Brave agrees with -- and giving `<img>`
+   the 300x150 fallback would have put a 300x150 grey rectangle into every
+   page in the corpus that has an image in it."
+  [node]
+  (if (= :img (:tag node)) {:w 0 :h 0} default-object-size))
+
+(defn- replaced-intrinsic-size
+  "The intrinsic size of a replaced element -- the size the RESOURCE has,
+   before any CSS -- or nil when this engine cannot know it.
+
+   Exactly one tag has one here, and it is the one whose intrinsic size is
+   written in the markup rather than in a file: a `<canvas>`'s bitmap is
+   its `width`/`height` content attributes, which HTML defaults to 300 and
+   150. That default is why a bare `<canvas>` is 300x150 for a completely
+   different reason from a bare `<video>` -- the canvas HAS an intrinsic
+   size that happens to be 300x150, so it also has a 2:1 RATIO, and
+   `<canvas style=\"width: 200px\">` is 200x100 where
+   `<video style=\"width: 200px\">` is 200x150. Both measured in Brave 151,
+   2026-08-06.
+
+   NOT KNOWABLE HERE, and this is the scope line of the whole change: the
+   intrinsic size of an `<img>`, `<video>` or `<object>`'s resource. It is
+   a property of the bytes at the far end of a URL, and this engine has no
+   loader, no decoder and no network -- `cssom.layout` is handed a DOM
+   tree and a theme. Measured cost, in Brave 151 on the corpus's own 40x20
+   SVG data URI: `<img src=... style=\"width: 200px\">` is 200x100 there
+   and 200x0 here, and `style=\"height: 60px\"` is 120x60 there and 0x60
+   here. What a fix needs is not in this file: a host-supplied
+   `(fn [src] {:w .. :h ..})` hook on the theme -- the same shape as
+   `:measure-text`, which exists for exactly this reason (a fact only the
+   host can know) -- plus the decision about what to lay out while it is
+   still unresolved. With such a hook this function is where the answer
+   would arrive, and everything below it already solves both axes from a
+   ratio."
+  [node]
+  (when (= :canvas (:tag node))
+    (let [dim (fn [k d]
+                (let [v (get-in node [:attrs k])]
+                  (if (and v (re-matches #"\d+" (str v)))
+                    (parse-int v d)
+                    d)))]
+      {:w (dim :width (:w default-object-size))
+       :h (dim :height (:h default-object-size))})))
 
 (def ^:private list-container-tags
   "The elements a browser's UA stylesheet treats as a list container -- the
@@ -1722,6 +1868,56 @@
       {:padding 0 :border 1 :line-height :normal}
 
       :else (get ua-control-box tag))))
+
+(def ^:private ua-control-baseline
+  "Where a control's own internal baseline sits, for the three `<input>`
+   types whose baseline is NOT one line of its own text -- the one part of
+   their box a browser does not report through `getComputedStyle` and so
+   the one part that could not go into cssom.core's UA stylesheet with
+   their sizes (see the `input[type=...]` rules there).
+
+   Every other control in this file has a baseline the engine can DERIVE:
+   it is the top inset plus the first line's ascent, because the thing
+   inside the control is text. These three have no text at all -- a track
+   and a thumb, a colour swatch, a button and a filename -- so where their
+   baseline lands is a property of the widget.
+
+   Measured in Brave 151 on 2026-08-06, by reading the y of a word beside
+   the control and subtracting the face's ascent, at three font sizes and
+   with the control's own height overridden, which is what separates
+   `from-bottom` from `from-top`:
+
+   | type  | default box | baseline below the box top | with `height: 50px` |
+   |-------|-------------|----------------------------|---------------------|
+   | range | 129x16      | 16 (its bottom border edge)| 50 -- moves with h  |
+   | color | 50x27       | 21                         | 44 -- moves with h  |
+   | file  | 253x27      | 18                         | 18 -- does NOT move |
+
+   So range and color are measured from the BOTTOM (0 and 6), and file
+   from the TOP. File's 18 is not a fourth constant either: its control is
+   a 21px `<button>` centred in a 27px box, and 3 (the gap above) + 15 (a
+   button's own internal baseline, border 2 + padding 1 + ascent 12) is
+   exactly 18.
+
+   `range`'s 0 is worth stating as a fact rather than as an absence: its
+   bottom BORDER edge is on the baseline and its 2px bottom margin hangs
+   BELOW it, which is not CSS 2.1's rule for a box with no in-flow line
+   (that one aligns the bottom MARGIN edge). Measured directly by giving
+   it `margin-bottom: 20px`: the box does not move, and the line grows by
+   20 underneath it."
+  {"range" {:from-bottom 0}
+   "color" {:from-bottom 6}
+   "file"  {:from-top 18}})
+
+(defn- ua-control-baseline-offset
+  "`ua-control-baseline`'s entry for this node, resolved against the box
+   height `h` it actually got -- or nil when this control's baseline is the
+   ordinary derived one."
+  [node h]
+  (when (= :input (:tag node))
+    (let [t (str/lower-case (str (or (get-in node [:attrs :type]) "text")))]
+      (when-let [{:keys [from-top from-bottom]} (get ua-control-baseline t)]
+        (if from-top from-top (max 0 (- h from-bottom)))))))
 
 (def ^:private ua-tag-box
   "What is left of the UA box of the form-GROUPING elements and `<hr>` once
@@ -3291,6 +3487,76 @@
           (let [ix (+ (declared-inset-side st :left) (declared-inset-side st :right))
                 iy (+ (declared-inset-side st :top) (declared-inset-side st :bottom))]
             (+ ix (long (* (max 0 (- h iy)) r)))))))))
+
+(defn- replaced-content-size
+  "The used CONTENT width and height of a replaced element, as `[w h]`.
+
+   CSS's default sizing algorithm (css-images-3 5.3), which is the one
+   piece of sizing a replaced element does NOT share with a block: its
+   `width: auto` does not fill the containing block, it asks the resource,
+   and only if the resource has nothing to say does the default object
+   size stand. All four inputs -- a declared width, a declared height, an
+   intrinsic size, an intrinsic ratio -- can be present or absent, and the
+   whole table below is measured in Brave 151 on 2026-08-06 rather than
+   read off the spec, on `<canvas>` (an intrinsic size AND therefore a
+   ratio) and `<video>` (neither):
+
+   | declaration      | canvas   | video    |
+   |------------------|----------|----------|
+   | (none)           | 300x150  | 300x150  |
+   | `width: 200px`   | 200x100  | 200x150  |
+   | `height: 60px`   | 120x60   | 300x60   |
+   | `width: 50%`     | 200x100  | --       |
+   | `max-width:100px`| 100x50   | 100x150  |
+
+   Read the two columns against each other: the same declaration solves
+   the OTHER axis through the ratio when there is one and leaves it at the
+   default when there is not. That is the whole rule, and it is why the
+   canvas column cannot be produced by any stylesheet and the video column
+   cannot be produced by a fixed 2:1 ratio.
+
+   `max-width` is in the table because it fixes where the clamp goes: the
+   ratio solves the height from the width AFTER min/max-width has had its
+   say (100x50, not 300x150 clipped). So the clamps are applied here, on
+   the border box the caller will build, and the caller is then handed a
+   size with nothing left to clamp -- see the `:min-width nil` in
+   `layout-node`'s replaced branch, which exists to stop the clamp being
+   applied a second time to a number that has already absorbed it.
+
+   Insets are the DECLARED ones, the same halves `resolve-width` and
+   `used-block-height` convert their own declared lengths through: the
+   returned size is a CONTENT size, and an `<iframe>`'s UA
+   `border: 2px inset` is what turns Brave's 300x150 content box into the
+   304x154 border box it reports. Measured: `border: 0` on that same
+   iframe gives 300x150 exactly, and `box-sizing: border-box` gives
+   304x154 all the same -- the default object size is a content size in
+   both modes."
+  [st node avail-width]
+  (let [ix (+ (declared-inset-side st :left) (declared-inset-side st :right))
+        iy (+ (declared-inset-side st :top) (declared-inset-side st :bottom))
+        intrinsic (replaced-intrinsic-size node)
+        default (replaced-default-size node)
+        ratio (when (and intrinsic (pos? (:w intrinsic)) (pos? (:h intrinsic)))
+                (/ (:w intrinsic) (double (:h intrinsic))))
+        ;; `resolve-width`/`used-block-height` answer in BORDER boxes and
+        ;; already know which one a declared length measures under this
+        ;; element's `box-sizing`; the insets come back off so everything
+        ;; below is one currency.
+        declared-w (when (some? (:width st))
+                     (max 0 (- (resolve-width st avail-width) ix)))
+        declared-h (when-let [bh (used-block-height st nil)]
+                     (max 0 (- bh iy)))
+        w (cond declared-w declared-w
+                (and declared-h ratio) (* declared-h ratio)
+                intrinsic (:w intrinsic)
+                :else (:w default))
+        w (max 0 (- (clamp-width st (+ w ix) avail-width) ix))
+        h (cond declared-h declared-h
+                ratio (/ w ratio)
+                intrinsic (:h intrinsic)
+                :else (:h default))
+        h (max 0 (- (clamp-height st (+ h iy)) iy))]
+    [w h]))
 
 (defn- definite-content-height
   "The CONTENT height this box hands its children as the basis a percentage
@@ -6144,11 +6410,21 @@
    replaced box's bottom margin edge with the text baseline), not a font
    ascent.
 
-   `:svg`/`:canvas`/`:video`/`:audio`/`:iframe` are deliberately still
-   absent: this engine has no rendering for any of them, so giving them an
-   inline box would place an empty rectangle in the middle of a sentence
-   rather than fix anything."
-  #{:img :input :button :select :textarea})
+   `:svg`/`:canvas`/`:video`/`:iframe` used to be deliberately absent, on
+   the grounds that \"this engine has no rendering for any of them, so
+   giving them an inline box would place an empty rectangle in the middle
+   of a sentence rather than fix anything\". Measured, that is the wrong
+   way round: a browser cannot render them either, and reserves a box for
+   every one of them anyway. Brave 151 on 2026-08-06 keeps
+   `before <canvas width=20 height=10> after` on ONE 20px line with the
+   canvas at x=49 y=4 -- an atomic inline sitting on the baseline -- where
+   the block treatment broke the sentence into two lines with a
+   400px-wide row between them. They come in through `replaced-tags`,
+   which is also what sizes them (see `replaced-content-size`); the
+   \"empty rectangle\" objection was answered by the box being the RIGHT
+   empty rectangle. `:audio` is still absent -- see `replaced-tags` for
+   the measurement (`display: none` without `controls`)."
+  (into #{:input :button :select :textarea} replaced-tags))
 
 (def ^:private inline-atomic-default-input-chars
   "HTML's own default `size` for a text input is 20 characters, which is
@@ -6320,6 +6596,18 @@
                    (* 2 (:border-width st)))
         natural
         (cond
+          ;; A REPLACED element's width is its own, declared or not: it
+          ;; comes from the resource (or from CSS's default object size)
+          ;; rather than from the line it sits on, so it is answered before
+          ;; the declared-width branch below, which cannot see an intrinsic
+          ;; size at all. See replaced-content-size for the algorithm and
+          ;; its measurements; the inset is added because this function
+          ;; hands back a BORDER box.
+          (contains? replaced-tags tag)
+          (+ (first (replaced-content-size st child content-w))
+             (declared-inset-side st :left)
+             (declared-inset-side st :right))
+
           (:width st) (resolve-width st content-w)
 
           ;; An `inline-flex` box sizes ITSELF from its flex items
@@ -9247,8 +9535,45 @@
 
    `text-top`/`text-bottom` are absent for a related reason: they align
    against the parent's CONTENT AREA rather than the line box, which this
-   function's callers do not track per owner."
+   function's callers do not track per owner.
+
+   A LENGTH is not here either, and is not resolved the same way: it is
+   already an absolute number of pixels by the time layout sees it (the
+   cascade resolves its `em` -- see cssom.core's em-resolvable-properties),
+   so it needs no font size and no table. See vertical-align-length."
   {"super" 0.404 "sub" -0.271})
+
+(defn- vertical-align-length
+  "`vertical-align` as a signed number of pixels, or nil when this
+   element's value is one of the keywords instead.
+
+   Real CSS's `vertical-align: <length>` raises the box's own baseline
+   that far ABOVE its parent's (a negative value lowers it), with no
+   reference to any font metric -- which is why this is a plain read where
+   `vertical-align-shift`'s keywords need a table of measured ratios.
+
+   The value arrives already absolute: the cascade resolves `em` against
+   the element's own computed font size before layout sees it. That is
+   what makes the UA sheet's `progress, meter { vertical-align: -0.2em }`
+   land as -2.8 at 14px and -5.6 at 28px from one declaration; measured in
+   Brave 151 on 2026-08-06, a `<progress>` sits 2.797px below the baseline
+   at 14px and 5.594 at 28px, and does not move when the line-height goes
+   to 10 or 40.
+
+   The string form is matched WHOLE, against `px` only. `parse-dbl` would
+   have read an unresolved `-0.2em` as -0.2 pixels on ClojureScript
+   (`js/parseFloat` stops at the first non-numeric character) and as nil on
+   the JVM (`Double/parseDouble` throws), i.e. two different layouts from
+   one document -- and a `%`, which resolves against `line-height` rather
+   than against anything here, is deliberately not admitted at all rather
+   than silently read as pixels."
+  [st]
+  (let [v (:vertical-align st)]
+    (cond
+      (number? v) v
+      (and (string? v) (re-matches #"[+-]?(?:\d+\.?\d*|\.\d+)px" (str/trim v)))
+      (parse-dbl (subs (str/trim v) 0 (- (count (str/trim v)) 2)) nil)
+      :else nil)))
 
 (def ^:private line-edge-aligned
   "The `vertical-align` values that align an edge of the inline box with an
@@ -9445,8 +9770,19 @@
                            (and (= "middle" (:vertical-align st)) parent-x-height)
                            (+ (/ h 2) (/ parent-x-height 2))
 
-                           (= :img (:tag child))
-                           ;; a REPLACED box sits ON the baseline
+                           (contains? replaced-tags (:tag child))
+                           ;; a REPLACED box sits ON the baseline -- its
+                           ;; bottom MARGIN edge, which is what `h` is
+                           ;; here. Measured in Brave 151, 2026-08-06:
+                           ;; `M<canvas width=20 height=10>M` puts the
+                           ;; canvas at y=4 on a 20px line whose baseline
+                           ;; is at 14, i.e. bottom edge on the baseline,
+                           ;; and `<svg>` and an empty `inline-block` of
+                           ;; the same size land on exactly the same y. An
+                           ;; `<iframe width=20 height=10>` -- 14 tall
+                           ;; once its 2px UA border is counted -- sits at
+                           ;; y=0 on the same line, which is the same rule
+                           ;; and not a second one.
                            h
 
                            ;; An OPEN listbox is the one control a browser
@@ -9466,6 +9802,18 @@
                            (let [{:keys [descent]} (font-metrics theme (:font-size inherited)
                                                                  nil nil nil)]
                              (max 0 (- h descent)))
+
+                           ;; ...and the three `<input>` types whose
+                           ;; content is a widget rather than a line of
+                           ;; text, so there is no ascent to derive a
+                           ;; baseline from. Measured per type -- see
+                           ;; ua-control-baseline for the table and for how
+                           ;; range's, color's and file's differ from each
+                           ;; other. `(:h box)` and not `h`: the offset is
+                           ;; measured from the BORDER-box top, and `mt`
+                           ;; carries the fragment's own margin.
+                           (ua-control-baseline-offset child (:h box))
+                           (+ mt (ua-control-baseline-offset child (:h box)))
 
                            ;; CSS 2.1 10.8.1's own exception: an
                            ;; inline-block whose `overflow` is not
@@ -9515,7 +9863,24 @@
                                                                         (:font-style st) (:font-family st))
                                  lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)]
                              (+ mt (or (:padding-top st) (:padding st) 0) (:border-width st)
-                                (leading-ascent ascent descent lh))))]
+                                (leading-ascent ascent descent lh))))
+                         ;; ...and a `vertical-align: <length>` then moves
+                         ;; the whole box relative to the baseline it just
+                         ;; found. `baseline-offset` is the distance from
+                         ;; the fragment's top edge DOWN to the parent's
+                         ;; baseline, so raising the box by L (CSS's own
+                         ;; sign) grows that distance by L and a negative L
+                         ;; shrinks it. Applied after the cond rather than
+                         ;; inside it because it composes with every branch
+                         ;; there: it is an offset from wherever the box's
+                         ;; own baseline turned out to be, not a fifth way
+                         ;; of finding one. The UA sheet's
+                         ;; `progress, meter { vertical-align: -0.2em }` is
+                         ;; the only caller today -- see
+                         ;; vertical-align-length.
+                         baseline-offset (if-let [va (vertical-align-length st)]
+                                           (+ baseline-offset va)
+                                           baseline-offset)]
                      (conj acc (cond-> {:kind :atomic
                                         :w (+ (:w box) ml mr) :h h :baseline-offset baseline-offset
                                         :ml ml :mt mt :draw draw
@@ -13471,6 +13836,47 @@
 
              (contains? #{:input :select :textarea} tag)
              (layout-form-control theme x y avail-width opacity st node)
+
+             ;; A REPLACED element: a box sized from the element itself
+             ;; (replaced-content-size) that paints NONE of its children.
+             ;;
+             ;; Routed back through layout-block rather than given its own
+             ;; layout function, because everything else about it IS a
+             ;; block once its size is known -- background, border,
+             ;; outline, box-shadow, the `:node` op a hit-tester and the
+             ;; conformance harness read. What the injection does is
+             ;; replace the four inputs layout-block would otherwise
+             ;; resolve for itself: the width (which would fill the
+             ;; containing block), the height (which would be the content
+             ;; height, i.e. zero), the `box-sizing` (the pair above is a
+             ;; CONTENT size in both modes -- measured), and the min/max
+             ;; clamps and `aspect-ratio`, which replaced-content-size has
+             ;; already applied and which would otherwise be applied twice.
+             ;;
+             ;; Dropping the children is measured, not an omission. Brave
+             ;; 151, 2026-08-06: `<canvas>fallback text</canvas>`,
+             ;; `<video>fallback text</video>` and
+             ;; `<iframe>fallback text</iframe>` are all 300x150 (304x154
+             ;; for the iframe) with the text nowhere on the page. That is
+             ;; what makes `<object>` unfit for this branch -- see
+             ;; replaced-tags, its fallback DOES render -- and it is also
+             ;; the one thing this costs: an `<svg>` with real SVG children
+             ;; reports a box per child in a browser (a `<rect>`'s SVG
+             ;; bounding box) and reports none here. This engine has no SVG
+             ;; rendering, so the alternative on offer is not those boxes,
+             ;; it is the CSS block boxes it used to give them, which is a
+             ;; third answer agreeing with nothing.
+             (contains? replaced-tags tag)
+             (let [[cw ch] (replaced-content-size st node avail-width)]
+               (layout-block theme x y avail-width opacity inherited
+                             (assoc st
+                                    :width cw :height ch
+                                    :box-sizing "content-box"
+                                    :aspect-ratio nil
+                                    :min-width nil :max-width nil
+                                    :min-height nil :max-height nil)
+                             (assoc node :children [])
+                             intruding))
 
              (or (= "table" (:display st))
                  (and (nil? (:display st)) (= :table tag)))

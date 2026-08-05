@@ -4475,11 +4475,6 @@
      wearing a cascade change's clothes. `[hidden]` IS here: that one is
      already spelled in `node-style`, as an attribute rule, and moving it
      is a move rather than a new rule.
-   - `meter`/`progress` -> `inline-block`. Real browsers say so, but this
-     engine's `inline-atomic-displays` turns `inline-block` into an ATOMIC
-     inline, and these two are in `inline-level-tags` (text-like). The
-     declaration is true; acting on it here would silently rewrite how they
-     flow, which is a layout decision needing its own measurement.
    - the ABSOLUTE font-size keywords. Chrome's real sheet says
      `pre { font-family: monospace; font-size: -webkit-xxx-large }`-style
      things whose value comes out of a table keyed on the default font of
@@ -4619,6 +4614,66 @@
      measurement.
    - `input[type=\"radio\"]`'s own margins, `3px 3px 0 5px`, split out of
      the checkbox rule they were wrongly sharing.
+   - `progress { width: 10em; height: 1em }` and
+     `meter { width: 5em; height: 1em }`, plus
+     `progress, meter { display: inline-block; box-sizing: border-box;
+     vertical-align: -0.2em }`. Both tags used to be in `cssom.layout`'s
+     `inline-level-tags` -- text-like inlines with no box of their own --
+     and laid out as 400x0 blocks. The `inline-block` half was written
+     down here as deliberately ABSENT until 2026-08-06, on the grounds
+     that acting on it \"would silently rewrite how they flow, which is a
+     layout decision needing its own measurement\". This is that
+     measurement, in Brave 151, and every number of it is `em`:
+
+       font-size    progress      meter
+       8px           80x8         40x8
+       14px         140x14        70x14
+       28px         280x28       140x28
+
+     i.e. `10em x 1em` and `5em x 1em` exactly, which is why these are
+     stylesheet rules and not the platform constants a 140 and a 70 would
+     otherwise look like. `box-sizing: border-box` and `display:
+     inline-block` are read straight off `getComputedStyle`; the
+     `-0.2em` is the 2.797px both sit BELOW the baseline at 14px (5.594 at
+     28px, and 0 change under `line-height: 10px`/`40px`, which is what
+     rules out a leading-derived explanation). Their flow is measured too:
+     `x <progress></progress> y` is ONE 20px line in Brave with the bar at
+     x=14, where the block treatment gave three rows.
+   - `input[type=\"range\"|\"color\"|\"file\"]`. All three used to come out
+     of the plain `input` rule at a text field's 153x21 with its 1px/2px
+     padding and 2px border, and none of them is a text field. Measured in
+     Brave 151 on 2026-08-06, at `font-size` 8, 14, 28 and 40 -- none of
+     these numbers moves with the font, which is what says they are
+     platform WIDGETS and not boxes derived from a face:
+
+       range   129x16, `margin: 2px`, no padding, no border, content-box
+       color   50x27, `border: 1px`, the text field's 1px/2px padding,
+               border-box
+       file    ...x27, no padding, no border, content-box
+
+     The `...` is not an omission, it is the scope cut, and it is here
+     rather than in a comment because the number is the interesting part:
+     Brave says **253**, and 253 is not a platform constant. It is the
+     width of a shadow-DOM `<button>` holding the browser's own localized
+     \"Choose File\" string plus a reserved filename column. Measured on
+     the same page: that button is 87.141 wide and \"No file chosen\" in
+     the UA control face is 84.484, which sum to 171.625 -- 81 short of
+     253 -- so the control also reserves a fixed filename column this
+     engine has no way to derive, and both halves are en-US strings that a
+     browser in another locale renders at a different width. A 253 written
+     down here would be a measurement of this machine's UI language. The
+     HEIGHT is a rule and is written: 27 is the engine's own 21px
+     `<button>` with 3px above and below it, which is also where the
+     control's baseline comes from (see `ua-control-baseline` in
+     `cssom.layout`).
+   - `iframe { border: 2px inset }`, which is the entire difference
+     between an `<iframe>` and a `<video>`: measured in Brave 151 on
+     2026-08-06 both reserve a 300x150 CONTENT box, and the iframe reports
+     304x154 because of this one declaration -- `border: 0` on the same
+     iframe gives 300x150 exactly. The `inset` STYLE is not modelled (this
+     engine draws one solid border, the same reading `<hr>` already
+     carries in `cssom.layout`'s `ua-tag-box`), so the style is written
+     for what it is and the paint is a solid hairline.
    - `dialog`'s `padding: 1em` and `border: solid`, measured in Brave 151
      on 2026-08-05: `padding` 14px on all four sides at this page's 14px,
      `border-top-width` 3px (`solid`'s `medium`), `border-top-style`
@@ -4664,6 +4719,8 @@
   col { display: table-column }
   colgroup { display: table-column-group }
   button, input, select, textarea { display: inline-block }
+  progress, meter { display: inline-block; box-sizing: border-box;
+                    vertical-align: -0.2em }
   [hidden] { display: none }
   template { display: none }
   dialog:not([open]) { display: none }
@@ -4705,6 +4762,11 @@
     margin-top: 3px; margin-right: 3px }
   input[type=\"checkbox\"] { margin-bottom: 3px; margin-left: 4px }
   input[type=\"radio\"] { margin-bottom: 0; margin-left: 5px }
+  input[type=\"range\"] { width: 129px; height: 16px;
+                          padding: 0; margin: 2px; border-width: 0 }
+  input[type=\"color\"] { width: 50px; height: 27px;
+                          border-width: 1px; box-sizing: border-box }
+  input[type=\"file\"] { height: 27px; padding: 0; border-width: 0 }
 
   h1 { font-size: 2em }
   h2 { font-size: 1.5em }
@@ -4723,6 +4785,8 @@
   p, blockquote, dl, pre, figure, ul, ol, menu, dir {
     margin-top: 1em; margin-bottom: 1em }
   hr { margin-top: 0.5em; margin-bottom: 0.5em }
+  progress { width: 10em; height: 1em }
+  meter { width: 5em; height: 1em }
   ul ul, ul ol, ul menu, ul dir, ol ul, ol ol, ol menu, ol dir,
   menu ul, menu ol, menu menu, menu dir, dir ul, dir ol, dir menu, dir dir {
     margin-top: 0; margin-bottom: 0 }
@@ -4731,6 +4795,7 @@
   dialog { padding-top: 1em; padding-right: 1em;
            padding-bottom: 1em; padding-left: 1em;
            border-width: 3px; border-style: solid }
+  iframe { border-width: 2px; border-style: inset }
   ")
 
 (def ua-rules
@@ -5105,7 +5170,16 @@
     :box-shadow-x :box-shadow-y :box-shadow-blur :box-shadow-spread
     :text-shadow-x :text-shadow-y :text-shadow-blur
     :gap :row-gap :column-gap :flex-basis :text-indent
-    :letter-spacing :word-spacing})
+    :letter-spacing :word-spacing
+    ;; `vertical-align` is the one property here whose value is USUALLY a
+    ;; keyword (`sub`/`super`/`middle`/`top`/`bottom`) and only sometimes a
+    ;; length. That costs nothing: `resolve-em-length` returns nil for
+    ;; anything that is not `<n>em`/`<n>rem`, and this step writes a value
+    ;; back only when it resolved, so every keyword survives untouched.
+    ;; It is here for `progress`/`meter { vertical-align: -0.2em }`, which
+    ;; is the UA declaration behind the 2.797px those two sit BELOW the
+    ;; baseline at 14px -- see that rule in `ua-stylesheet-text`.
+    :vertical-align})
 
 (defn resolve-relative-lengths
   "Returns `[style computed-font-size]`: `style` with every `em`/`rem`

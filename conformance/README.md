@@ -813,6 +813,155 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round thirty-seven: the box a browser reserves for something it cannot draw
+
+Five tags — `<canvas>`, `<video>`, `<svg>`, `<iframe>`, and `<img>` beside
+them — plus `<progress>`, `<meter>` and three `<input>` types had **no
+intrinsic size model at all**. Each came out as a block that filled its
+container and was **0px tall**, so a page with a `<canvas>` in it was 150px
+shorter here than anywhere else and a `<canvas>` in a sentence broke the
+sentence in two. Everything below was measured in the same headless Brave
+151 the harness drives, on probe pages built to the harness's own page
+shell, **before** anything was implemented.
+
+**The 300×150 is an intrinsic size, not a UA `width` rule**, and one
+measurement decides it: `<canvas style="width: 50%">` in a 400px block is
+**200×100**, not 200×150. A stylesheet `width: 300px; height: 150px` would
+leave the height at 150; an intrinsic 300×150 carries a 2:1 ratio the
+declared width then solves the height from. A second one confirms it from
+the other side: `<canvas style="display: block">` inside a **100px** block
+is 300 wide and *overflows*. A block-level box with `width: auto` fills its
+containing block — a block-level **replaced** box uses its intrinsic width
+(CSS 2.1 10.3.4 against 10.3.3), which no stylesheet rule can express. And
+it does not scale with the font: 300×150 at `font-size` 8, 14 and 28.
+
+**A `<canvas>` and a `<video>` are 300×150 for different reasons**, which
+is the shape of the whole algorithm:
+
+| declaration | `<canvas>` | `<video>` |
+|---|---|---|
+| (none) | 300×150 | 300×150 |
+| `width: 200px` | 200×**100** | 200×**150** |
+| `height: 60px` | **120**×60 | **300**×60 |
+| `max-width: 100px` | 100×**50** | 100×**150** |
+
+A `<canvas>`'s bitmap *is* its `width`/`height` content attributes,
+defaulting to HTML's own 300 and 150 — so it has an intrinsic size and
+therefore a **ratio**. A bare `<video>`/`<svg>`/`<iframe>` has neither, and
+CSS's default object size supplies each axis **independently**. The
+`max-width` row is where the clamp goes: the ratio solves the height from
+the width *after* min/max has had its say.
+
+**The attributes are hints on four of the five and an intrinsic size on the
+fifth.** With `width="80" height="40"` and a CSS `width: 200px`, Brave says
+**200×40** for `<img>`, `<video>`, `<iframe>` and `<svg>` — the CSS width
+replaces the width hint, the height hint stands, and the ratio has nothing
+to solve — and **200×100** for `<canvas>`. `presentational-size` is now
+honoured for exactly the tags that get a replaced box, and `<canvas>` is
+excluded from it and read by `replaced-intrinsic-size` instead.
+
+**Atomic inline-ness is a separate finding from size**, and it is the half
+the old scope note got backwards. `inline-atomic-tags` excluded these four
+because "this engine has no rendering for any of them, so giving them an
+inline box would place an empty rectangle in the middle of a sentence
+rather than fix anything". A browser cannot render them either and reserves
+a box for every one of them anyway: `before <canvas width=20 height=10>
+after` is **one 20px line** with the canvas at x=49 y=4 on the baseline,
+where this engine made two lines with a 400px-wide block between them. The
+objection was answered by the box being the *right* empty rectangle.
+
+**An `<iframe>`'s 304×154 is one UA declaration.** `border: 2px inset`, and
+`border: 0` on the same iframe gives 300×150 exactly — which also proves
+the default object size is a **content** size, since `box-sizing:
+border-box` still reports 304×154.
+
+**`<progress>` and `<meter>` turned out to be `em`, not constants.** The UA
+sheet's own note listed `meter`/`progress` → `inline-block` as deliberately
+absent, "a layout decision needing its own measurement". This is that
+measurement: at `font-size` 8 / 14 / 28 a `<progress>` is 80×8 / 140×14 /
+280×28 and a `<meter>` 40×8 / 70×14 / 140×28, i.e. `10em × 1em` and
+`5em × 1em` exactly. The 2.797px they sit *below* the baseline is
+`vertical-align: -0.2em` (5.594 at 28px, and unchanged at `line-height: 10px`
+and `40px`, which is what rules out a leading-derived explanation). All four
+declarations are stylesheet rules now; the length form of `vertical-align`
+is new and closed `:inline/vertical-align-length` for free.
+
+**Three `<input>` types are widgets, and one of them is a locale.**
+`range` (129×16, `margin: 2px`, no padding or border), `color` (50×27,
+border-box, 1px border) and `file` (…×27) all came out of the plain `input`
+rule at a text field's 153×21. None of these numbers moves with the font
+(measured at 8, 14, 28 and 40px). Their **baselines** are three different
+rules, separated by overriding the height: range's is its bottom *border*
+edge with its 2px bottom margin hanging below (measured with
+`margin-bottom: 20px`, which does not move the box), color's is 6px up from
+its bottom edge and moves with the height, and file's is 18px down from its
+*top* and does **not**.
+
+**What was cut, with the numbers a fix needs.** Two things, both stated in
+code at the function that owns them:
+
+- **An `<img>`'s intrinsic ratio.** `:replaced/img-width-only-keeps-the-
+  ratio` is still 200×0 against Brave's 200×100. The ratio machinery exists
+  and does exactly this for a `<canvas>`; what is missing is the resource's
+  own size, which is a property of the bytes at the far end of a URL. This
+  stack has no loader, no decoder and no image draw-op — `cssom.layout`'s
+  four ops are `:node`, `:rect`, `:text` and `:clip`, and `dom-gpu` has no
+  `drawImage` path. A fix is a host-supplied `(fn [src] {:w .. :h ..})` on
+  the theme, the same shape as `:measure-text`, which exists for exactly
+  this class of fact; `replaced-intrinsic-size` is where the answer would
+  arrive. The control case in the corpus is what makes this a resource
+  finding rather than a box-model one: with `width`/`height` **attributes**
+  both sides already agree at 200×20, and a bare `<img>` and an `<img>`
+  whose src 404s are **both 0×0** in Brave, which is what this engine
+  already produced.
+- **`input[type=file]`'s width.** Brave says 253. The shadow `<button>`
+  holding the browser's own "Choose File" is 87.141 wide and "No file
+  chosen" in the UA control face is 84.484 — 171.625, **81 short** — so the
+  control also reserves a fixed filename column, and both strings are
+  en-US. A 253 written into the engine would be a measurement of this
+  machine's UI language. The height *is* a rule (27 = the engine's own 21px
+  `<button>` with 3px above and below, which is also where the 18px
+  baseline comes from) and is implemented, so that case's `<div>` agrees
+  and only the input's width does not.
+
+Also deliberately not implemented, each measured: `<object>` (bare it *is*
+300×150, but `<object>fallback text</object>` renders the fallback and
+shrink-wraps to it — it is only replaced when it has a resource);
+`<embed>` with no `src` (**no box at all**, not a 300×150 one); `<audio>`
+(`display: none` without `controls`, 300×**54** with); and an `<svg>` with
+a `viewBox` (an intrinsic *ratio* with no intrinsic size, which Blink
+resolves by filling the container — `viewBox="0 0 40 20"` in a 400px block
+is **400×200**).
+
+**Before → after**, both measured on the corpus of 576 at this round's
+merge base (`2b1d95b`, i.e. with the stacking and logical-properties
+rounds already in — these three rounds ran concurrently and only these
+numbers are this round's):
+
+| axis | before | after |
+|---|---|---|
+| line structure | 540/551 | **541/551** |
+| geometry (boxes) | 1870/1959 | **1892/1959** |
+| geometry (clean cases) | 524/576 | **535/576** |
+| paint order (points) | 14207/14389 | **14285/14389** |
+| paint order (clean cases) | 542/576 | **550/576** |
+| computed style (values) | 27525/27544 | **27539/27544** |
+| computed style (clean cases) | 570/576 | **573/576** |
+
+Twelve cases changed and **none regressed** (`--dump-ops`, corpus-wide,
+before and after, on that same merge base): the six `:replaced/`
+default-size cases, `:form/progress`, `:form/meter`, `:form/input-range`,
+`:form/input-color`, `:form/input-file` (its `<div>` only), and
+`:inline/vertical-align-length`. The 14 computed-style values are: the
+four `padding` longhands each on the range and file inputs (8, all
+`cascade`-attributed), the range's `margin-right`/`margin-bottom`, and
+`display: inline-block` on `<progress>` and `<meter>`. What is left in
+this group's `ua-default` bucket is one value and it is deliberate — a
+range input's `color`, which Brave reports as `rgb(16, 16, 16)` and which
+the UA sheet declines to write for the reason already recorded there (the
+real UA value is the system colour `fieldtext`, and this sheet has no
+system-colour model).
+
 ### Round thirty-six: logical properties, and the percentage that is always of the width
 
 Two gaps, fifteen cases between them, and the interesting part of both is

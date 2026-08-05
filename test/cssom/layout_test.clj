@@ -6356,6 +6356,7 @@
         "and the image's BOTTOM edge on the text baseline, real CSS's
          `vertical-align: baseline` for a replaced box")))
 
+
 (deftest a-button-shrink-wraps-to-its-label-inside-a-line
   (let [ops (inline-ops ["hit " [:button {} "go"] " now"])
         t (text-draw-ops ops)
@@ -8094,6 +8095,196 @@
        (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))))
        first
        :h))
+
+;; ---- replaced elements: the default object size ----
+;;
+;; Everything in this section is measured in Brave 151 on 2026-08-06,
+;; through `conformance/run.cljs`'s own page shape (a 400px block inside an
+;; 800px page, `line-height: 20px`), and the same measurements are recorded
+;; at `replaced-content-size`, `default-object-size` and
+;; `replaced-default-size` in cssom.layout, and at the `progress`/`meter`
+;; and `input[type=...]` rules in cssom.core's UA stylesheet.
+
+(defn- replaced-boxes
+  "Every element `:node` box, as [tag x y w h], for a 400px `<div>` holding
+   `before`, one `<tag>` carrying real HTML `attrs` and inline `style`, and
+   `after`.
+
+   Built with `dom/set-attribute` rather than through `build-inline-children`
+   on purpose: that DSL reads `:width`/`:height` as STYLE, and the whole
+   point of half these cases is that on a `<canvas>` they are ATTRIBUTES
+   and mean something else."
+  ([tag attrs style] (replaced-boxes tag attrs style nil nil))
+  ([tag attrs style before after]
+   (let [[root doc] (dom/create-element dom/empty-document :div)
+         doc (dom/set-root doc root)
+         doc (dom/set-style doc root {:width 400 :line-height 20})
+         doc (if before
+               (let [[t d] (dom/create-text-node doc before)]
+                 (dom/append-child d root t))
+               doc)
+         [el doc] (dom/create-element doc tag)
+         doc (dom/append-child doc root el)
+         doc (reduce-kv (fn [d k v] (dom/set-attribute d el k (str v))) doc attrs)
+         doc (if (seq style) (dom/set-style doc el style) doc)
+         doc (if after
+               (let [[t d] (dom/create-text-node doc after)]
+                 (dom/append-child d root t))
+               doc)
+         [_ doc] (dom/consume-ops doc)
+         ops (layout/draw-ops (dom/tree doc) {:width 800 :theme brave-theme})]
+     (mapv (juxt :tag :x :y :w :h)
+           (filterv #(= :node (:draw/op %)) ops)))))
+
+(defn- replaced-box [tag attrs style]
+  (first (filter #(= tag (first %)) (replaced-boxes tag attrs style))))
+
+(deftest a-replaced-element-with-no-resource-reserves-the-default-object-size
+  ;; Brave: 300x150 for every one of these, whether or not it can decode a
+  ;; single pixel. This engine used to lay each one out as a BLOCK that
+  ;; filled its container and was 0px tall, so a page with a <canvas> in it
+  ;; was 150px shorter here than anywhere else.
+  (doseq [tag [:canvas :video :svg]]
+    (is (= [tag 0 0 300 150] (replaced-box tag {} {}))
+        (str "<" (name tag) "> reserves 300x150")))
+  ;; ...and an <iframe> is 304x154, which is the same 300x150 CONTENT box
+  ;; plus Chrome's UA `border: 2px inset` on all four sides. Measured:
+  ;; `border: 0` on that same iframe gives 300x150 exactly.
+  (is (= [:iframe 0 0 304 154] (replaced-box :iframe {} {})))
+  (is (= [:iframe 0 0 300 150] (replaced-box :iframe {} {:border-width 0}))))
+
+(deftest an-img-is-not-given-the-default-object-size
+  ;; The measured exception, and the reason `replaced-default-size` exists
+  ;; rather than one constant: a bare <img> and an <img> whose src 404s are
+  ;; both 0x0 in Brave, where a bare <video> on the same page is 300x150.
+  ;; A browser reserves the default object size for a replaced element
+  ;; whose RESOURCE has no intrinsic size; a missing image gets nothing.
+  (is (= [:img 0 14 0 0] (replaced-box :img {} {})))
+  (is (= [:img 0 14 0 0] (replaced-box :img {:src "/nope.png"} {}))))
+
+(deftest a-canvas-is-sized-by-its-attributes-and-keeps-their-ratio
+  ;; A <canvas>'s width/height ATTRIBUTES are its bitmap, i.e. a real
+  ;; intrinsic size -- not a presentational hint. The difference is
+  ;; measurable and this is the measurement: with attributes 80x40 and a
+  ;; CSS `width: 200px`, Brave says 200x100 for a <canvas> (the 2:1 ratio
+  ;; solves the height) and 200x40 for a <video>, an <img> and an <iframe>
+  ;; (the height HINT stands and leaves the ratio nothing to solve).
+  (is (= [:canvas 0 0 80 40] (replaced-box :canvas {:width 80 :height 40} {})))
+  (is (= [:canvas 0 0 200 100]
+         (replaced-box :canvas {:width 80 :height 40} {:width 200})))
+  (is (= [:video 0 0 200 40]
+         (replaced-box :video {:width 80 :height 40} {:width 200})))
+  ;; one attribute alone leaves the OTHER axis at HTML's own default, so
+  ;; `<canvas width=80>` is 80x150 -- an intrinsic size, ratio and all
+  (is (= [:canvas 0 0 80 150] (replaced-box :canvas {:width 80} {}))))
+
+(deftest a-declared-length-solves-the-other-axis-only-through-a-ratio
+  ;; The two columns of `replaced-content-size`'s own table, side by side:
+  ;; the same declaration on a box that HAS an intrinsic ratio and on one
+  ;; that does not.
+  (is (= [:canvas 0 0 200 100] (replaced-box :canvas {} {:width 200}))
+      "a canvas's 300x150 bitmap is 2:1, so a 200px width is 100 tall")
+  (is (= [:video 0 0 200 150] (replaced-box :video {} {:width 200}))
+      "a video has no intrinsic size at all, so its height stays at the
+       default object size's own 150 -- per AXIS, not per ratio")
+  (is (= [:canvas 0 0 120 60] (replaced-box :canvas {} {:height 60})))
+  (is (= [:video 0 0 300 60] (replaced-box :video {} {:height 60})))
+  ;; and min/max clamp the width BEFORE the ratio solves the height
+  (is (= [:canvas 0 0 100 50] (replaced-box :canvas {} {:max-width 100})))
+  (is (= [:video 0 0 100 150] (replaced-box :video {} {:max-width 100}))))
+
+(deftest a-block-level-replaced-element-still-uses-its-intrinsic-width
+  ;; CSS 2.1 10.3.4 against 10.3.3, and the single fact that makes the
+  ;; default object size an intrinsic size rather than a UA `width` rule:
+  ;; `width: auto` on a block-level REPLACED box does not fill the
+  ;; containing block. Measured in Brave, `<canvas style="display: block">`
+  ;; inside a **100px** block is 300 wide and overflows it.
+  (is (= [:canvas 0 0 300 150] (replaced-box :canvas {} {:display "block"})))
+  (is (= [:video 0 0 300 150] (replaced-box :video {} {:display "block"}))))
+
+(deftest a-replaced-element-is-an-atomic-inline-on-the-baseline
+  ;; What the block treatment cost on the LINE axis rather than on the box:
+  ;; Brave keeps `before <canvas> after` on ONE 20px line with the canvas
+  ;; at x=49 y=4 sitting on the baseline, and this engine put `before` and
+  ;; `after` on two lines with a 400px-wide block between them.
+  (let [bs (replaced-boxes :canvas {:width 20 :height 10} {} "before " " after")
+        div (first (filter #(= :div (first %)) bs))
+        cv (first (filter #(= :canvas (first %)) bs))]
+    (is (= 20 (nth div 4)) "the sentence is still ONE line")
+    (is (= [20 10] [(nth cv 3) (nth cv 4)]))
+    (is (pos? (nth cv 1)) "the canvas sits AFTER `before ` on that line")
+    (is (= 14 (+ (nth cv 2) (nth cv 4)))
+        "with its bottom edge on the line's baseline -- real CSS's
+         `vertical-align: baseline` for a replaced box")))
+
+(deftest a-replaced-element-paints-none-of-its-children
+  ;; Measured in Brave: `<canvas>fallback text</canvas>`,
+  ;; `<video>fallback text</video>` and `<iframe>fallback text</iframe>`
+  ;; are all their default size with the text nowhere on the page. (An
+  ;; `<object>` is NOT like this -- its fallback does render, which is why
+  ;; it is not in `replaced-tags`.)
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [cv doc] (dom/create-element doc :canvas)
+        doc (dom/append-child doc root cv)
+        [t doc] (dom/create-text-node doc "fallback text")
+        doc (dom/append-child doc cv t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme brave-theme})]
+    (is (empty? (filterv #(= :text (:draw/op %)) ops))
+        "no text op at all")
+    (is (= [300 150]
+           ((juxt :w :h) (first (filter #(and (= :node (:draw/op %))
+                                              (= :canvas (:tag %))) ops))))
+        "and the box is still the default object size")))
+
+(deftest progress-and-meter-are-em-sized-inline-blocks-below-the-baseline
+  ;; Both used to be text-like inlines with no box at all and laid out as
+  ;; 400x0 blocks. Measured in Brave at three font sizes, and every number
+  ;; is `em`: progress is 10em x 1em and meter 5em x 1em (8px -> 80x8 and
+  ;; 40x8, 14px -> 140x14 and 70x14, 28px -> 280x28 and 140x28), with
+  ;; `vertical-align: -0.2em` putting both 2.797px BELOW the baseline at
+  ;; 14px. The engine's 2.8 is that same 0.2em without Brave's 1/64
+  ;; LayoutUnit flooring.
+  (let [[tag x y w h] (replaced-box :progress {} {})]
+    (is (= [:progress 0 140 14] [tag x w h]))
+    (is (< (abs (- 2.796875 y)) 0.01)
+        "2.8, against Brave's 2.796875 -- the same 0.2em without Brave's
+         1/64 LayoutUnit flooring"))
+  (let [[tag x y w h] (replaced-box :meter {} {})]
+    (is (= [:meter 0 70 14] [tag x w h]))
+    (is (< (abs (- 2.796875 y)) 0.01)))
+  ;; ...and they scale with the font rather than being platform constants
+  (is (= [:progress 280 28]
+         (let [[tag _ _ w h] (replaced-box :progress {} {:font-size 28})] [tag w h])))
+  (is (= [:meter 140 28]
+         (let [[tag _ _ w h] (replaced-box :meter {} {:font-size 28})] [tag w h])))
+  ;; the flow half: `x <progress> y` is ONE line in Brave, where the block
+  ;; treatment gave three rows
+  (let [bs (replaced-boxes :progress {} {} "x " " y")]
+    (is (= 20 (nth (first (filter #(= :div (first %)) bs)) 4)))))
+
+(deftest the-three-input-types-that-are-widgets-rather-than-text-fields
+  ;; range/color/file all used to come out of the plain `input` rule at a
+  ;; text field's 153x21. None of them is a text field, and none of these
+  ;; numbers moves with the font (measured at 8, 14, 28 and 40px).
+  (is (= [:input 2 2 129 16] (replaced-box :input {:type "range"} {}))
+      "a range carries `margin: 2px` and no padding or border, and its
+       bottom BORDER edge is what sits on the baseline -- measured by
+       giving it `margin-bottom: 20px`, which does not move the box")
+  (is (= [:input 0 0 50 27] (replaced-box :input {:type "color"} {}))
+      "a colour swatch is 50x27 border-box with a 1px border, and its
+       baseline is 6px up from its bottom edge (which moves with an
+       explicit height: at `height: 50px` Brave's baseline is at 44)")
+  ;; A file input's HEIGHT is a rule -- 27 is the engine's own 21px
+  ;; <button> with 3px above and below, which is also where its baseline
+  ;; comes from (18 from the TOP, and unlike the other two it does NOT
+  ;; move when the height does). Its WIDTH is the documented scope cut:
+  ;; Brave says 253, which is a localized shadow-DOM button plus a
+  ;; reserved filename column. See the `input[type="file"]` rule in
+  ;; cssom.core's UA stylesheet for the decomposition.
+  (is (= 27 (nth (replaced-box :input {:type "file"} {}) 4)))
+  (is (= 0 (nth (replaced-box :input {:type "file"} {}) 2))))
 
 (deftest a-line-box-is-the-union-of-its-participants-not-the-tallest-line-height
   ;; Measured in Brave: `<p>text <span style="font-size:24px">big</span>
