@@ -9605,8 +9605,26 @@
    an anonymous TABLE box around a stray `display: table-cell` outside any
    table (it lays out as an ordinary block instead -- measured in Brave,
    two such divs sit side by side in a generated table),
-   `visibility: collapse` on a row or column, and full border-conflict
-   resolution under `border-collapse` (widths only -- see collapse? below).
+   `visibility: collapse` on a COLUMN (the row and row-group half of that
+   property IS implemented -- see `collapsed-row?` below), and full
+   border-conflict resolution under `border-collapse` (widths only -- see
+   collapse? below).
+
+   The column half is the same track rule as the row half turned ninety
+   degrees, measured in Brave 151 on 2026-08-06: a collapsed `<col>` has
+   width 0, the cells in it have width 0 and their full row height, the
+   columns after it shift left, and one border-spacing goes with it --
+   three 16px columns with the middle one collapsed give a 32px table with
+   the third column at x=16, and under separate borders the table is 38
+   (2 + 16 + 0 + 0 + 2 + 16 + 2), the same `one gap goes, one stays`
+   pattern the rows use. What it needs that the row half does not is a
+   change to the table's own USED WIDTH: a `width: 300px` table whose three
+   declared 100px columns include one collapsed column renders at 200, so
+   the collapse has to run before the table's width is final rather than
+   after it, which is the reverse of the row axis (there, a declared table
+   HEIGHT is divided over every row INCLUDING the collapsed one and only
+   then dropped -- a `height: 100px` table over three rows with one
+   collapsed is 66.67 tall, i.e. two thirds of 100).
    Before this existed a table rendered as one stacked column of every cell
    in document order -- the two conformance cases scored 0/2 -- so this is
    a large step from nothing, not a complete table implementation.
@@ -9975,7 +9993,66 @@
                           hs))))
                   base
                   laid-cells))
-        row-offsets (vec (reductions (fn [acc rh] (+ acc rh spacing)) 0 row-heights))
+        ;; ---- `visibility: collapse` on a row or a row group ----
+        ;;
+        ;; The one `visibility` value with a behaviour of its own, and the
+        ;; only place in CSS where `visibility` changes LAYOUT rather than
+        ;; just painting. Everywhere else -- a block, a flex item, a cell --
+        ;; `collapse` is exactly `hidden`, which is what the two control
+        ;; cases beside :visibility/collapse-removes-a-table-row say, and
+        ;; what the paint-time visibility accumulator already does.
+        ;;
+        ;; Applied AFTER the row heights are known and after the column
+        ;; widths are, because a collapsed row still drives both. Measured
+        ;; in Brave 151 (2026-08-06): a table whose WIDEST cell is in the
+        ;; collapsed row is still 114px wide, exactly as wide as the same
+        ;; table with the row visible, and a `width: 200px` declared on a
+        ;; cell of the collapsed row still sizes the column (202 + 9 = 211).
+        ;; So this zeroes heights and nothing else.
+        ;;
+        ;; A row is collapsed when ITS OWN computed visibility is
+        ;; `collapse`, or its row group's is, or the table's is -- and a
+        ;; descendant that declares `visibility: visible` does NOT bring it
+        ;; back. Measured, all four:
+        ;;   <tr style="visibility: collapse">                 row 0 tall
+        ;;   <tbody style="visibility: collapse">              both its rows 0
+        ;;   <table style="visibility: collapse">              every row 0, table 0
+        ;;   <div style="visibility: collapse"><table>         the same
+        ;;   <tbody collapse><tr style="visibility: visible">  STILL 0 tall
+        ;; which is why this is a self-or-ancestor test rather than a plain
+        ;; read of the row's own inherited value.
+        collapsed-row? (let [tbl-collapsed? (or (= "collapse" (:visibility st))
+                                                (= "collapse" (:visibility inherited)))]
+                         (fn [{:keys [row group]}]
+                           (or tbl-collapsed?
+                               (= "collapse" (:visibility (node-style row theme)))
+                               (and group
+                                    (= "collapse" (:visibility (node-style group theme)))))))
+        collapsed (into #{} (comp (map-indexed (fn [i r] (when (collapsed-row? r) i)))
+                                  (remove nil?))
+                        rows)
+        row-heights (if (seq collapsed)
+                      (vec (map-indexed (fn [i h] (if (collapsed i) 0 h)) row-heights))
+                      row-heights)
+        ;; The border-spacing BEFORE a collapsed row goes with it; the one
+        ;; after it stays. Measured with `border-spacing: 10px` over
+        ;; three 22px rows with the middle one collapsed: Brave puts the
+        ;; rows at y=10, y=32 (the collapsed one, flush against the first
+        ;; row's bottom edge) and y=42, and the row group is 54 tall --
+        ;; i.e. exactly the two visible rows and ONE gap, with the
+        ;; collapsed row's zero-height box sitting at the top of that gap.
+        ;; With `border-collapse: collapse` (spacing 0) the same rule gives
+        ;; the corpus case its 44.
+        row-advance (fn [i]
+                      (+ (nth row-heights i 0) (if (collapsed (inc i)) 0 spacing)))
+        row-offsets (vec (reductions + 0 (map row-advance (range (count row-heights)))))
+        ;; The rows' own extent, gaps included but with no trailing one:
+        ;; `row-offsets` carries the gap that FOLLOWS each row, so the last
+        ;; row's own height is what closes it.
+        rows-extent (if (zero? (count row-heights))
+                      0
+                      (+ (nth row-offsets (dec (count row-heights)) 0)
+                         (peek row-heights)))
         {:keys [draws groups]}
         (reduce
          (fn [{:keys [draws groups]} {:keys [row-idx row group anonymous]}]
@@ -10098,11 +10175,17 @@
               :groups (if group
                         (update groups group
                                 (fn [g] {:y (min (:y g row-y) row-y)
-                                         :h (+ (:h g 0) row-h spacing)}))
+                                         ;; the same advance the offsets are
+                                         ;; built from, so a collapsed row
+                                         ;; takes its gap out of the group's
+                                         ;; height too. The trailing spacing
+                                         ;; this leaves on is removed once,
+                                         ;; at the group's own op below.
+                                         :h (+ (:h g 0) (row-advance row-idx))}))
                         groups)}))
          {:draws [] :groups {}}
          (map-indexed (fn [i r] (assoc r :row-idx i)) rows))
-        height (+ (reduce + 0 row-heights) (* spacing (max 0 (dec (count row-heights)))) trail-y)
+        height (+ rows-extent trail-y)
         ;; The wrapper's own left edge and, on the bottom side, everything
         ;; below the rows: the trailing border-spacing (already in `height`)
         ;; and then the table's own bottom padding and border (`inset`).
@@ -10126,7 +10209,7 @@
         ;; they cover for the full height of the rows -- measured in Brave,
         ;; a `<col style="width:120px">` reports 120x22 next to its table's
         ;; own 186x26, and this engine reported no box at all.
-        rows-h (+ (reduce + 0 row-heights) (* spacing (max 0 (dec (count row-heights)))))
+        rows-h rows-extent
         col-span-w (fn [start n]
                      (+ (reduce + 0 (map #(nth widths % 0) (range start (+ start n))))
                         (* spacing (max 0 (dec n)))))
@@ -10572,6 +10655,160 @@
          bottom (length-or-percentage (:bottom st) basis-h)]
      [(cond left left right (- right) :else 0)
       (cond top top bottom (- bottom) :else 0)])))
+
+;; ---- position: sticky ----
+
+(defn- sticky-axis-shift
+  "`position: sticky`'s paint-time offset in ONE axis, AT SCROLL OFFSET
+   ZERO, which is the state a static render of a fresh document is in and
+   the only state this engine has (see sticky-shift).
+
+   Every number below was measured in Brave 151 on 2026-08-06 rather than
+   read off the spec, and two of them contradict the spec's own wording:
+
+   - The constraint is on the box's BORDER box, not its margin box. A
+     `bottom: 0` sticky box with `margin-bottom: 8px` in a 60px scrollport
+     sits with its BORDER edge on the scrollport's bottom edge (y=40, box
+     40..60), where a margin-box constraint would put it at y=32.
+   - The `sticky view rectangle` is the scroll container's CONTENT box, not
+     its padding box (= the scrollport). With `padding: 10px` on a 60px
+     scroller the pull stops at y=50 (box 50..70, the content box's bottom
+     edge) and not at 60 (the padding box's).
+
+   The rule itself, per axis:
+
+     near-inset (`top`/`left`)  PUSHES the box away from the scrollport's
+                                start edge, and only ever in the positive
+                                direction: `top: 10px` on the first child
+                                of a scroller moves it from y=0 to y=10,
+                                and `top: 10px` on a box already at y=100
+                                moves nothing.
+     far-inset  (`bottom`/`right`) PULLS the box back from the scrollport's
+                                end edge, and only ever negatively: the
+                                corpus's own `bottom: 0` box at y=100 in a
+                                60px scrollport lands at y=40.
+
+   When BOTH are declared and both would bind, the near edge wins (real
+   CSS, and this file's own established `left`/`top`-wins convention). When
+   both are declared and only the far one binds, the far one applies --
+   measured, `top: 0; bottom: 0` on the corpus's shape gives 40, the
+   `bottom` answer.
+
+   Finally the box is CLAMPED into its containing block: it may be pushed
+   or pulled only as far as its containing block's content box allows, and
+   never past its own flow position in the opposite direction. This is a
+   pure layout rule with no scroll position in it at all, and it is what
+   :position/sticky-is-clamped-by-its-containing-block measures --
+   `bottom: 0` asks for y=40 and the containing block starting at y=80
+   allows only 80. `cb-end` is the containing block's content box grown to
+   its LAYOUT OVERFLOW, which is not the same as its used size and is the
+   one number here that had to be measured to be believed: a `top: 500px`
+   sticky box in a 60px-tall scroller holding 220px of content stops at
+   y=200 (box 200..220, the scrollable extent), not at y=40 (box 40..60,
+   the used 60px content box).
+
+   `port-end` is nil when the scroll container's size in this axis is
+   indefinite. That is not a gap: an indefinite axis has no overflow, so
+   the far edge can never bind, and the near edge only needs `port-start`.
+   Measured -- an auto-height `overflow: auto` box does not stick a
+   `bottom: 0` child (y=100, its flow position) and does stick a
+   `top: 10px` one (y=10)."
+  [box-start box-end port-start port-end near-inset far-inset cb-start cb-end]
+  (let [dn (if (and near-inset port-start) (max 0 (- (+ port-start near-inset) box-start)) 0)
+        df (if (and far-inset port-end) (min 0 (- (- port-end far-inset) box-end)) 0)
+        d (if (pos? dn) dn df)]
+    (cond
+      ;; the clamps are applied only to a shift that exists, so a box that
+      ;; already overflows its containing block (which is legal, and
+      ;; common) is never MOVED by the clamp that is supposed to bound it
+      (zero? d) 0
+      (pos? d) (max 0 (min d (- cb-end box-end)))
+      :else (min 0 (max d (- cb-start box-start))))))
+
+(defn- sticky-port-theme
+  "Publishes a scroll container's own content box on the theme, as the
+   `sticky view rectangle` its sticky descendants resolve against.
+
+   The theme is the one thing already threaded to every descendant, and a
+   scrollport is exactly that shape of fact -- an ancestor's geometry a
+   descendant needs and cannot reach. `:viewport` is on the theme for the
+   same reason, for `position: fixed`.
+
+   `h` is nil when the container's block size is indefinite. See
+   sticky-axis-shift for why that is a complete answer rather than a gap.
+   A non-scroll-container leaves whatever port is already in force alone --
+   `overflow: clip` is deliberately not one (see scroll-container?), and
+   measured, a `clip` box does NOT scroll and does NOT act as a sticky
+   box's scrollport."
+  [theme st x y w h]
+  (if (scroll-container? st)
+    (assoc theme :sticky/port {:x x :y y :w w :h h})
+    theme))
+
+(defn- sticky-shift
+  "The `[dx dy]` a `position: sticky` box is painted at, relative to its
+   normal flow position, at scroll offset zero. `[0 0]` for anything that
+   is not sticky, has no inset, or has no ancestor scroll container.
+
+   `box` is the box's own border box, `port` the nearest ancestor scroll
+   container's content box (`:h` nil when its block size is indefinite),
+   and `cb` the containing block's content box with `:h` its used size (the
+   basis a percentage inset resolves against -- measured, `bottom: 10%` in
+   the corpus's 60px scroller gives 6px, i.e. 10% of the containing block's
+   USED 60, not of its 160px of content) and `:clamp-h` its layout
+   overflow (what bounds the shift; see sticky-axis-shift).
+
+   ---- what this deliberately does NOT do, with the numbers ----
+
+   **There is still no scroll model.** This computes the offset a box has
+   when its scroll container is at offset zero; it does not re-lay-out as
+   anything scrolls, and `layout.cljc` has nowhere to put a scroll position
+   even if it wanted one. Everything a static render can answer, it now
+   answers; a sticky box's behaviour DURING a scroll remains outside this
+   engine.
+
+   **The scrollport is never the viewport.** When a sticky box has no
+   ancestor scroll container its scrollport is the viewport, and the answer
+   then depends on where the document is scrolled to and where the box sits
+   on the page -- exactly the fact that makes this harness unable to score
+   the block axis of a `position: fixed` box (see layout-absolute-children).
+   Measured in Brave: `<div style=\"height:60px\"><div style=\"position:
+   sticky; bottom:0; height:20px\">` reports y=0 when the case sits far
+   down a long page (the box is pulled up to the viewport's bottom edge and
+   then clamped by its containing block's top), and would report y=100 --
+   its flow position -- with the same case at the top of the page. No
+   engine answer can agree with a number that moves when an unrelated case
+   is inserted above it, so this leaves such a box at its flow position,
+   which is the right answer whenever the box is inside the viewport and
+   the one the corpus's two viewport-scrollport cases
+   (`:position/sticky-in-flow`, `:position/sticky-with-offset`) measure.
+
+   **An inline-level sticky box gets its INLINE axis only.** Its block-axis
+   containing block is the block container it is flowed into, whose content
+   height is not known until every line is placed. Measured, an
+   `display: inline-block; position: sticky; bottom: 0` box in the corpus's
+   60px scroller is at y=40 in Brave and stays at its flow y=100 here."
+  [st box port cb]
+  (if (or (nil? port) (not= "sticky" (:position st)))
+    [0 0]
+    (let [pw (:w port)
+          ph (:h port)
+          left (length-or-percentage (:left st) (:w cb))
+          right (length-or-percentage (:right st) (:w cb))
+          top (length-or-percentage (:top st) (:h cb))
+          bottom (length-or-percentage (:bottom st) (:h cb))]
+      [(if (or left right)
+         (sticky-axis-shift (:x box) (+ (:x box) (:w box))
+                            (:x port) (when pw (+ (:x port) pw))
+                            left right
+                            (:x cb) (+ (:x cb) (:clamp-w cb (:w cb))))
+         0)
+       (if (or top bottom)
+         (sticky-axis-shift (:y box) (+ (:y box) (:h box))
+                            (:y port) (when ph (+ (:y port) ph))
+                            top bottom
+                            (:y cb) (+ (:y cb) (:clamp-h cb (:h cb 0))))
+         0)])))
 
 ;; ---- inline formatting context ----
 
@@ -11395,7 +11632,15 @@
                                  ;; itself, so its OWN relative offset
                                  ;; rides on the fragment
                                  (not= [0 0] (rel+ (rel-of owners) st))
-                                 (assoc :rel (rel+ (rel-of owners) st)))))
+                                 (assoc :rel (rel+ (rel-of owners) st))
+                                 ;; ...and so does its `position: sticky`
+                                 ;; state, for the same reason. `:w` above
+                                 ;; is the fragment's ADVANCE (margins
+                                 ;; included); the sticky constraint is on
+                                 ;; the border box, measured, so that width
+                                 ;; travels separately.
+                                 (= "sticky" (:position st))
+                                 (assoc :sticky/st st :sticky/w (:w box)))))
 
                    (generated-node? child)
                    ;; An OUTSIDE list marker is a fragment of its own KIND,
@@ -12178,8 +12423,11 @@
                     ;; piece's does: a `vertical-align: top`/`bottom` box
                     ;; cannot be placed until inline-line-metrics has the
                     ;; finished line, and this piece is what it is handed.
+                    ;; `:sticky/*` rides along for the same reason again --
+                    ;; see the atomic branch of layout-inline-run.
                     piece (fn [x] (cond-> (assoc (select-keys t [:owners :opacity :draw :h :ml :mt
-                                                                 :baseline-offset :valign])
+                                                                 :baseline-offset :valign
+                                                                 :sticky/st :sticky/w])
                                                  :kind :atomic :x x :w (:w t))
                                     (seq pad-start) (assoc :pad-start pad-start)))]
                 (if (and (content? pieces) opp? (> (+ x sep cluster) content-w))
@@ -12917,7 +13165,20 @@
                            px0 (+ base-x (:x piece) (:ml piece 0))
                            py0 (+ (- baseline (or (:baseline-offset piece) (:h piece)))
                                   (:mt piece 0))
-                           px (+ px0 rdx)
+                           ;; `position: sticky` on an atomic inline, INLINE
+                           ;; AXIS ONLY -- the block axis needs this
+                           ;; containing block's content height, which is
+                           ;; not known until every line is placed. See
+                           ;; sticky-shift's docstring for the measurement
+                           ;; that cut leaves behind.
+                           sdx (if-let [sst (:sticky/st piece)]
+                                 (first (sticky-shift sst
+                                                      {:x px0 :y py0
+                                                       :w (:sticky/w piece (:w piece)) :h (:h piece)}
+                                                      (:sticky/port theme)
+                                                      {:x content-x :y content-y :w content-w}))
+                                 0)
+                           px (+ px0 rdx sdx)
                            py (+ py0 rdy)
                            rects (owner-fragments rects (:owners piece) 0
                                                   px0 (:w piece) (:opacity piece)
@@ -13413,6 +13674,10 @@
                           collapse-top? collapse-bottom? contains-floats? nil))
   ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom? contains-floats?
     intruding]
+   (layout-children-block theme content-x content-y content-w opacity inherited children
+                          collapse-top? collapse-bottom? contains-floats? intruding nil))
+  ([theme content-x content-y content-w opacity inherited children collapse-top? collapse-bottom? contains-floats?
+    intruding cb-content-h]
   (let [floated? #(float-child? theme %)]
   (loop [remaining (inline-runs theme inherited children
                                 ;; With a float present even a LONE inline
@@ -13462,7 +13727,7 @@
          ;; `:node` op, and a browser agrees: measured, an ancestor is not
          ;; in `elementsFromPoint`'s stack over a descendant's overflow.
          ink []
-         height 0 prev-mb 0 first? true out-mt 0 oof []]
+         height 0 prev-mb 0 first? true out-mt 0 oof [] stickies []]
     (if-let [child (first remaining)]
       (cond
         ;; ---- out of flow: the flow yields only its STATIC POSITION ----
@@ -13515,7 +13780,8 @@
           (recur (rest remaining) y draws floats fdraws ink height prev-mb first? out-mt
                  (conj oof {:node child
                             :x (+ content-x (margin-side cst :left))
-                            :y (+ y (if first? 0 prev-mb) (margin-side cst :top))})))
+                            :y (+ y (if first? 0 prev-mb) (margin-side cst :top))})
+                 stickies))
 
         ;; ---- a float: placed into the band, invisible to block flow ----
         (floated? child)
@@ -13544,7 +13810,7 @@
                  draws
                  (conj floats {:x fx :y fy :w mw :h mh :right? right?})
                  (into fdraws (translate-ops (+ fx fml) (+ fy fmt) (:draw m)))
-                 ink height prev-mb first? out-mt oof))
+                 ink height prev-mb first? out-mt oof stickies))
 
         (and (map? child) (:inline/run child))
         (let [run (:inline/run child)
@@ -13581,7 +13847,7 @@
           (recur (rest remaining) (+ y advance) (into draws draw) floats fdraws
                  (into ink run-ink)
                  (+ height advance) 0 false out-mt
-                 (into oof run-oof)))
+                 (into oof run-oof) stickies))
 
         :else
         (let [cst (when (map? child) (resolve-box-percentages (node-style child theme) content-w))
@@ -13807,8 +14073,49 @@
                    escaping-top? (collapse-margins out-mt mt* mb*)
                    (and first? collapse-top?) mt*
                    :else out-mt)
-                 oof)))
+                 oof
+                 ;; ---- position: sticky -----------------------------------
+                 ;;
+                 ;; Recorded here and APPLIED at this function's return,
+                 ;; because the shift is clamped by the containing block's
+                 ;; own content box (see sticky-axis-shift) and this block
+                 ;; IS that containing block -- its content height is the
+                 ;; `height` the loop is still accumulating. The recorded
+                 ;; span is an index range into `draws`; nothing reorders
+                 ;; `draws` between here and there (the float draws are
+                 ;; CONCATENATED after them, never interleaved), and
+                 ;; absorb-stacking-contexts, which does reorder, runs at
+                 ;; the document root long afterwards.
+                 (if (and cst (= "sticky" (:position cst)) (seq draw))
+                   (conj stickies {:from (count draws)
+                                   :to (+ (count draws) (count draw))
+                                   :st cst
+                                   :box (-> (:box laid)
+                                            (update :x + auto-dx)
+                                            (update :y + gap-before))})
+                   stickies))))
       ;; ^ closes: if / recur / let / cond
+      (let [;; ---- position: sticky, applied ------------------------------
+            ;;
+            ;; See the `stickies` recur arm above for why this waits until
+            ;; here. The containing block is THIS block's content box: its
+            ;; origin and inline size were arguments, its used block size
+            ;; arrives as `cb-content-h` (nil when the block's own height is
+            ;; auto), and its LAYOUT OVERFLOW -- what actually bounds the
+            ;; shift, measured -- is the larger of that and the flow extent
+            ;; the loop just finished accumulating.
+            cb {:x content-x :y content-y :w content-w
+                :h (or cb-content-h height)
+                :clamp-h (max height (or cb-content-h 0))}
+            draws (reduce (fn [ds {:keys [from to st box]}]
+                            (let [[dx dy] (sticky-shift st box (:sticky/port theme) cb)]
+                              (if (and (zero? dx) (zero? dy))
+                                ds
+                                (into (into (subvec ds 0 from)
+                                            (translate-ops dx dy (subvec ds from to)))
+                                      (subvec ds to)))))
+                          draws
+                          stickies)]
       {:draw (if (seq fdraws) (into draws fdraws) draws)
        ;; see the `ink` loop binding
        :ink/lines ink
@@ -13838,7 +14145,7 @@
        ;; static position the flow above just computed for it -- see the
        ;; out-of-flow branch. layout-block hands these straight to
        ;; layout-absolute-children, which is the only consumer.
-       :out-of-flow oof})))))
+       :out-of-flow oof}))))))
 
 (defn- layout-absolute-children
   "Real CSS `position: absolute` anchors a box's edges to its containing
@@ -15500,6 +15807,21 @@
         ;; `column-count: 2` box keeps its own 10px top margin INSIDE the
         ;; box) and it contains its own floats. See the multicol section
         ;; above for what it then does with its children.
+        definite-content-h (when explicit-h (max 0 (- explicit-h inset-t inset-b)))
+        ;; The `sticky view rectangle` this box publishes to its sticky
+        ;; descendants when it is a scroll container (see
+        ;; sticky-port-theme). Its block size is the box's own used content
+        ;; height, which is definite from a declared `height` -- and, when
+        ;; there is none, from a declared `max-height`: measured in Brave, a
+        ;; `max-height: 60px; overflow: auto` box sticks a `bottom: 0` child
+        ;; at y=40 exactly as a `height: 60px` one does. Using the
+        ;; max-height before the content is known is safe rather than
+        ;; optimistic: if the content turns out SHORTER than it, the box
+        ;; does not overflow, the far edge of the port sits below every
+        ;; child, and no far-edge inset can bind.
+        sticky-port-h (or definite-content-h
+                          (when-let [mx (length-or-percentage (:max-height st) cb-h)]
+                            (max 0 (- mx inset-t inset-b))))
         mc (multicol-spec node st content-w (:font-size inherited))
         fc-free? (and (nil? mc)
                       ;; BLOCK-axis borders only. A border stops margins
@@ -15555,7 +15877,12 @@
                            ;; used-block-height), and the columns divide the
                            ;; content box.
                            (when explicit-h (max 0 (- explicit-h inset-t inset-b))))
-          (layout-children-block theme (- content-x scroll-x) (- content-y scroll-y)
+          (layout-children-block (sticky-port-theme theme st
+                                                    (- content-x scroll-x)
+                                                    (- content-y scroll-y)
+                                                    content-w
+                                                    sticky-port-h)
+                                 (- content-x scroll-x) (- content-y scroll-y)
                                  content-w opacity inherited node-children
                                  collapse-top? collapse-bottom? contains-floats?
                                  ;; A box that establishes a formatting context
@@ -15564,7 +15891,14 @@
                                  ;; formatting context means, and it is the one
                                  ;; place this decision belongs, because
                                  ;; `contains-floats?` is computed right here.
-                                 (when-not contains-floats? intruding)))
+                                 (when-not contains-floats? intruding)
+                                 ;; this box's own USED content height, when
+                                 ;; it has a definite one -- the containing
+                                 ;; block size a `position: sticky` child's
+                                 ;; shift is clamped by, and the basis a
+                                 ;; percentage inset resolves against. See
+                                 ;; sticky-axis-shift.
+                                 definite-content-h))
         ;; content + padding + BORDER, for the same reason resolve-width
         ;; adds it horizontally: with `box-sizing: content-box` the border
         ;; sits outside the content box in both axes. Without it every
@@ -16366,7 +16700,27 @@
                                 ;; `<div>` moves the caption of a
                                 ;; `<table>` inside it.
                                 :caption-side (or (:caption-side st)
-                                                  (:caption-side inherited)))
+                                                  (:caption-side inherited))
+                                ;; `visibility` inherits, and layout-table
+                                ;; needs the INHERITED value for the same
+                                ;; reason `caption-side` is here: a
+                                ;; `visibility: collapse` on any ancestor
+                                ;; collapses a table's rows, and the table
+                                ;; is not the element that declared it.
+                                ;; Measured in Brave, `<div style=
+                                ;; "visibility: collapse"><table>` reports
+                                ;; a 0-tall table exactly as the same
+                                ;; declaration on the `<table>` does.
+                                ;;
+                                ;; This is an ordinary `or`, not the
+                                ;; multiply-only accumulator paint uses
+                                ;; (see the `opacity` binding above), so a
+                                ;; descendant CAN take itself back out with
+                                ;; `visibility: visible` -- which is real
+                                ;; CSS, and which the paint side still
+                                ;; cannot express.
+                                :visibility (or (:visibility st)
+                                                (:visibility inherited)))
                tag (:tag node)
                children (laid-out-children theme node)
                ;; ---- the one place a `transform` is applied ----

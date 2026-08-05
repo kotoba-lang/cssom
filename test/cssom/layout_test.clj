@@ -12349,6 +12349,289 @@
     (is (= [:div 0 0 300 20] (at "left:0;right:0;margin:auto"))
         "CONTROL: a box with no width is STRETCHED, so there is no leftover")))
 
+;; ---- `visibility: collapse` on a table row -------------------------------
+;;
+;; The one `visibility` value with a behaviour of its own, and the only
+;; place in CSS where `visibility` changes LAYOUT rather than just paint.
+;; Every number below was measured in Brave 151 over CDP on 2026-08-06,
+;; before any of it was written; the conformance corpus carries the first
+;; shape as `:visibility/collapse-removes-a-table-row` and its two controls
+;; as `:visibility/collapse-on-a-block-is-hidden` and
+;; `:visibility/collapse-on-a-flex-item-is-hidden`.
+;;
+;; Only heights and block positions are asserted: the RULE is about the
+;; block axis, and cell widths here are the test theme's own 7px-per-
+;; character measurement rather than a real font's.
+
+(defn- collapse-rows
+  "`[tag y h]` for every row-ish box of `html`, so a collapsed row names
+   itself by its zero height and by where the row after it lands."
+  [html]
+  (->> (tm-boxes html)
+       (filter #(contains? #{:table :tbody :thead :tfoot :tr} (first %)))
+       (mapv (fn [[tag _x y _w h]] [tag y h]))))
+
+(deftest a-collapsed-table-row-is-taken-out-of-the-tables-height
+  ;; Brave: the collapsed <tr> and its <td> are 0px tall, the third row
+  ;; moves UP to y=22, and the table is 44 tall rather than 66. This engine
+  ;; rendered the row as if it were `hidden`.
+  (is (= [[:table 0 44] [:tbody 0 44] [:tr 0 22] [:tr 22 0] [:tr 22 22]]
+         (collapse-rows (str "<table style=\"border-collapse: collapse\">"
+                             "<tr><td>one</td></tr>"
+                             "<tr style=\"visibility: collapse\"><td>two</td></tr>"
+                             "<tr><td>three</td></tr></table>"))))
+  (is (= [[:table 0 66] [:tbody 0 66] [:tr 0 22] [:tr 22 22] [:tr 44 22]]
+         (collapse-rows (str "<table style=\"border-collapse: collapse\">"
+                             "<tr><td>one</td></tr><tr><td>two</td></tr>"
+                             "<tr><td>three</td></tr></table>")))
+      "CONTROL: the same table with every row visible")
+  (is (= 0 (nth (first (filter #(= :td (first %)) (tm-boxes
+                                                   (str "<table style=\"border-collapse: collapse\">"
+                                                        "<tr style=\"visibility: collapse\"><td>two</td></tr>"
+                                                        "</table>"))))
+                4))
+      "the collapsed row's CELLS are zero-height too, not just the row"))
+
+(deftest a-collapsed-row-takes-the-border-spacing-before-it-with-it
+  ;; Under separate borders the gap BEFORE the collapsed row goes with it
+  ;; and the one after it stays -- so the row's zero-height box sits flush
+  ;; against the previous row's bottom edge, at the top of the single
+  ;; remaining gap. Brave, `border-spacing: 10px` over three 22px rows with
+  ;; the middle one collapsed: rows at y=10, y=32 and y=42, group 54 tall,
+  ;; table 74. At the default 2px spacing: y=2, y=24, y=26, group 46,
+  ;; table 50.
+  (is (= [[:table 0 74] [:tbody 10 54] [:tr 10 22] [:tr 32 0] [:tr 42 22]]
+         (collapse-rows (str "<table style=\"border-spacing: 10px\">"
+                             "<tr><td>one</td></tr>"
+                             "<tr style=\"visibility: collapse\"><td>two</td></tr>"
+                             "<tr><td>three</td></tr></table>"))))
+  (is (= [[:table 0 50] [:tbody 2 46] [:tr 2 22] [:tr 24 0] [:tr 26 22]]
+         (collapse-rows (str "<table>"
+                             "<tr><td>one</td></tr>"
+                             "<tr style=\"visibility: collapse\"><td>two</td></tr>"
+                             "<tr><td>three</td></tr></table>"))))
+  (is (= [[:table 0 106] [:tbody 10 86] [:tr 10 22] [:tr 42 22] [:tr 74 22]]
+         (collapse-rows (str "<table style=\"border-spacing: 10px\">"
+                             "<tr><td>one</td></tr><tr><td>two</td></tr>"
+                             "<tr><td>three</td></tr></table>")))
+      "CONTROL: with no collapsed row every gap is there"))
+
+(deftest collapse-on-a-row-group-or-a-table-collapses-its-rows
+  ;; Brave, all four. `visibility` inherits, so an ancestor's `collapse`
+  ;; reaches the rows -- and a row that declares `visibility: visible`
+  ;; inside a collapsed group is STILL zero-height, which is why the engine
+  ;; asks the row, its group AND the table rather than reading the row's
+  ;; own inherited value alone.
+  (is (= [[:table 0 44] [:thead 0 22] [:tbody 22 0] [:tfoot 22 22]
+          [:tr 0 22] [:tr 22 0] [:tr 22 0] [:tr 22 22]]
+         (collapse-rows (str "<table style=\"border-collapse: collapse\">"
+                             "<thead><tr><td>h</td></tr></thead>"
+                             "<tbody style=\"visibility: collapse\">"
+                             "<tr><td>a</td></tr><tr><td>b</td></tr></tbody>"
+                             "<tfoot><tr><td>f</td></tr></tfoot></table>")))
+      "a collapsed <tbody> takes both its rows out and the <tfoot> moves up")
+  (is (= [[:table 0 0] [:tbody 0 0] [:tr 0 0] [:tr 0 0]]
+         (collapse-rows (str "<table style=\"border-collapse: collapse; visibility: collapse\">"
+                             "<tr><td>one</td></tr><tr><td>two</td></tr></table>")))
+      "declared on the <table> itself")
+  (is (= [[:table 0 0] [:tbody 0 0] [:tr 0 0] [:tr 0 0]]
+         (collapse-rows (str "<div style=\"visibility: collapse\">"
+                             "<table style=\"border-collapse: collapse\">"
+                             "<tr><td>one</td></tr><tr><td>two</td></tr></table></div>")))
+      "and inherited from an ancestor that is not in the table at all")
+  (is (= [[:table 0 0] [:tbody 0 0] [:tr 0 0] [:tr 0 0]]
+         (collapse-rows (str "<table style=\"border-collapse: collapse; visibility: collapse\">"
+                             "<tr style=\"visibility: visible\"><td>one</td></tr>"
+                             "<tr><td>two</td></tr></table>")))
+      "a row's own `visibility: visible` does NOT bring it back")
+  (is (= [[:table 0 44] [:tbody 0 44] [:tr 0 22] [:tr 22 22]]
+         (collapse-rows (str "<table style=\"border-collapse: collapse; visibility: hidden\">"
+                             "<tr><td>one</td></tr><tr><td>two</td></tr></table>")))
+      "CONTROL: `hidden` is not `collapse` -- it keeps every row's height")
+  (is (= [[:table 0 66] [:tbody 0 66] [:tr 0 22] [:tr 22 22] [:tr 44 22]]
+         (collapse-rows (str "<table style=\"border-collapse: collapse\">"
+                             "<tr><td>one</td></tr>"
+                             "<tr><td style=\"visibility: collapse\">two</td></tr>"
+                             "<tr><td>three</td></tr></table>")))
+      "CONTROL: on a CELL, `collapse` is `hidden` -- the row keeps its height"))
+
+(deftest a-collapsed-row-still-sizes-the-columns
+  ;; The collapse is height-only, and applied after the column widths are
+  ;; solved. Measured in Brave: a table whose WIDEST cell is in the
+  ;; collapsed row is 114px wide either way.
+  (let [w (fn [html] (nth (first (filter #(= :table (first %)) (tm-boxes html))) 3))
+        collapsed (w (str "<table style=\"border-collapse: collapse\"><tr><td>a</td></tr>"
+                          "<tr style=\"visibility: collapse\"><td>wwwwwwwwwwwwwwww</td></tr>"
+                          "<tr><td>b</td></tr></table>"))
+        visible (w (str "<table style=\"border-collapse: collapse\"><tr><td>a</td></tr>"
+                        "<tr><td>wwwwwwwwwwwwwwww</td></tr>"
+                        "<tr><td>b</td></tr></table>"))]
+    (is (= visible collapsed))
+    (is (< 100 collapsed) "and it is the WIDE row that set the width, not the narrow ones")))
+
+(deftest a-rowspan-crossing-a-collapsed-row-spans-what-is-left-of-it
+  ;; Brave: the `rowspan="3"` cell is 44 tall, not 66 -- it simply spans
+  ;; three rows one of which is now zero. Nothing special is needed for it,
+  ;; and this test says so.
+  (is (= 44 (nth (first (filter #(= :td (first %))
+                                (tm-boxes (str "<table style=\"border-collapse: collapse\">"
+                                               "<tr><td rowspan=\"3\">R</td><td>one</td></tr>"
+                                               "<tr style=\"visibility: collapse\"><td>two</td></tr>"
+                                               "<tr><td>three</td></tr></table>"))))
+                 4)))
+  (is (= 66 (nth (first (filter #(= :td (first %))
+                                (tm-boxes (str "<table style=\"border-collapse: collapse\">"
+                                               "<tr><td rowspan=\"3\">R</td><td>one</td></tr>"
+                                               "<tr><td>two</td></tr>"
+                                               "<tr><td>three</td></tr></table>"))))
+                 4))
+      "CONTROL"))
+
+;; ---- position: sticky at scroll offset zero ------------------------------
+;;
+;; See `sticky-shift` for what this does and does not model and for the
+;; browser numbers behind every constant here. Measured in Brave 151 over
+;; CDP on 2026-08-06; the corpus carries the first three shapes as
+;; `:position/sticky-bottom-is-stuck-at-scroll-zero`,
+;; `:position/sticky-is-clamped-by-its-containing-block` and
+;; `:position/sticky-right-in-a-horizontal-scroller`.
+
+;; A sticky box ESTABLISHES A STACKING CONTEXT, so its op is emitted after
+;; every one of its later siblings' -- which makes it the LAST box in each
+;; of these cases, and is why the helpers below read it off the end rather
+;; than counting from the front.
+
+(deftest a-bottom-inset-pulls-a-sticky-box-back-onto-the-scrollport
+  ;; Brave: the sticky box's flow position (y=100) is below the 60px
+  ;; scrollport, so `bottom: 0` pulls it UP to sit on the scrollport's
+  ;; bottom edge, at y=40. This engine left it at 100.
+  (let [y (fn [html] (nth (last (tm-boxes html)) 2))]
+    (is (= 40 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"height: 100px\">a</div>"
+                      "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div>"
+                      "<div style=\"height: 40px\">b</div></div>"))))
+    (is (= 20 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"height: 100px\">a</div>"
+                      "<div style=\"position: sticky; bottom: 20px; height: 20px\">s</div>"
+                      "<div style=\"height: 40px\">b</div></div>")))
+        "the inset is measured from the scrollport's edge")
+    (is (= 100 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                       "<div style=\"height: 100px\">a</div>"
+                       "<div style=\"position: sticky; height: 20px\">s</div>"
+                       "<div style=\"height: 40px\">b</div></div>")))
+        "CONTROL: with no inset there is no anchor edge and nothing moves")
+    (is (= 10 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"height: 10px\">a</div>"
+                      "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div>"
+                      "<div style=\"height: 130px\">b</div></div>")))
+        "CONTROL: a box already inside the scrollport is not pulled anywhere")
+    (is (= 100 (y (str "<div style=\"width: 300px; overflow: auto\">"
+                       "<div style=\"height: 100px\">a</div>"
+                       "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div></div>")))
+        "CONTROL: an auto-height scroll container does not overflow, so the
+         far edge can never bind")
+    (is (= 100 (y (str "<div style=\"width: 300px; height: 60px\">"
+                       "<div style=\"height: 100px\">a</div>"
+                       "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div>"
+                       "<div style=\"height: 40px\">b</div></div>")))
+        "CONTROL: no ancestor scroll container, so no scrollport this engine
+         can answer for -- see sticky-shift")))
+
+(deftest a-sticky-box-is-clamped-by-its-containing-block
+  ;; `bottom: 0` asks for y=40 and the 60px-tall parent starting at y=80
+  ;; allows only y=80. A pure layout rule with no scroll position in it.
+  (let [y (fn [html] (nth (last (tm-boxes html)) 2))]
+    (is (= 80 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"height: 80px\">a</div>"
+                      "<div style=\"height: 60px\"><div style=\"height: 20px\">x</div>"
+                      "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div></div>"
+                      "<div style=\"height: 100px\">b</div></div>"))))
+    (is (= 90 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"height: 80px\">a</div>"
+                      "<div style=\"height: 60px; padding: 10px 0\">"
+                      "<div style=\"height: 20px\">x</div>"
+                      "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div></div>"
+                      "<div style=\"height: 100px\">b</div></div>")))
+        "the clamp is the containing block's CONTENT box, so its padding counts")))
+
+(deftest a-top-inset-pushes-a-sticky-box-down-at-scroll-offset-zero
+  ;; The near edge, which needs no scroll position either: a box whose flow
+  ;; position is CLOSER to the scrollport's top than its own `top` inset is
+  ;; pushed down to it. Brave, all five.
+  (let [y (fn [html] (nth (last (tm-boxes html)) 2))]
+    (is (= 10 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"position: sticky; top: 10px; height: 20px\">s</div>"
+                      "<div style=\"height: 200px\">b</div></div>"))))
+    (is (= 0 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                     "<div style=\"position: sticky; top: 0; height: 20px\">s</div>"
+                     "<div style=\"height: 200px\">b</div></div>")))
+        "CONTROL: `top: 0` asks for the edge the box is already on")
+    (is (= 200 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                       "<div style=\"position: sticky; top: 500px; height: 20px\">s</div>"
+                       "<div style=\"height: 200px\">b</div></div>")))
+        "the clamp is the containing block's LAYOUT OVERFLOW -- 220px of
+         content in a 60px scroller, so the box stops at 200 and not at 40")
+    (is (= 20 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"height: 40px\">"
+                      "<div style=\"position: sticky; top: 30px; height: 20px\">s</div></div>"
+                      "<div style=\"height: 200px\">b</div></div>")))
+        "and a short containing block stops it sooner")
+    (is (= 10 (y (str "<div style=\"width: 300px; overflow: auto\">"
+                      "<div style=\"position: sticky; top: 10px; height: 20px\">s</div>"
+                      "<div style=\"height: 40px\">b</div></div>")))
+        "the near edge binds even in an axis that cannot scroll: the
+         scrollport's TOP is known whether or not its height is")))
+
+(deftest the-sticky-rectangle-is-the-scroll-containers-content-box
+  ;; Two measurements that contradict the obvious reading, both in Brave.
+  (let [y (fn [html] (nth (last (tm-boxes html)) 2))]
+    (is (= 50 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto; padding: 10px\">"
+                      "<div style=\"height: 100px\">a</div>"
+                      "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div>"
+                      "<div style=\"height: 40px\">b</div></div>")))
+        "the pull stops at the CONTENT box's bottom edge (70), not the
+         padding box's (80) -- so the box lands at 50, not 60")
+    (is (= 40 (y (str "<div style=\"width: 300px; height: 60px; overflow: auto\">"
+                      "<div style=\"height: 100px\">a</div>"
+                      "<div style=\"position: sticky; bottom: 0; height: 20px; margin-bottom: 8px\">s</div>"
+                      "<div style=\"height: 40px\">b</div></div>")))
+        "the constraint is on the BORDER box: an 8px bottom margin does not
+         hold the box off the edge, which a margin-box constraint would put
+         at y=32")
+    (is (= 40 (y (str "<div style=\"width: 300px; max-height: 60px; overflow: auto\">"
+                      "<div style=\"height: 100px\">a</div>"
+                      "<div style=\"position: sticky; bottom: 0; height: 20px\">s</div>"
+                      "<div style=\"height: 40px\">b</div></div>")))
+        "a `max-height` scroll container is a scrollport exactly as a
+         `height` one is")))
+
+(deftest a-right-inset-pulls-a-sticky-inline-block-back-in-the-inline-axis
+  ;; The same mechanism in the other axis, and the corpus case that had
+  ;; been left explicitly untouched. Brave: the second inline-block's flow
+  ;; x is 300, past the 200px scrollport, and it is pulled back to 160.
+  (let [x (fn [html] (nth (last (tm-boxes html)) 1))]
+    (is (= 160 (x (str "<div style=\"width: 200px; overflow: auto; white-space: nowrap\">"
+                       "<span style=\"display: inline-block; width: 300px\">a</span>"
+                       "<span style=\"display: inline-block; position: sticky; right: 0; width: 40px\">s</span>"
+                       "</div>"))))
+    (is (= 140 (x (str "<div style=\"width: 200px; overflow: auto; white-space: nowrap\">"
+                       "<span style=\"display: inline-block; width: 300px\">a</span>"
+                       "<span style=\"display: inline-block; position: sticky; right: 20px; width: 40px\">s</span>"
+                       "</div>")))
+        "the inset is measured from the scrollport's right edge")
+    (is (= 300 (x (str "<div style=\"width: 200px; overflow: auto; white-space: nowrap\">"
+                       "<span style=\"display: inline-block; width: 300px\">a</span>"
+                       "<span style=\"display: inline-block; width: 40px\">s</span>"
+                       "</div>")))
+        "CONTROL: the identical markup with no `position: sticky` -- the
+         corpus's own :overflow/nowrap-inline-blocks-do-not-wrap")
+    (is (= 300 (x (str "<div style=\"width: 200px; overflow: auto; white-space: nowrap\">"
+                       "<span style=\"display: inline-block; width: 300px\">a</span>"
+                       "<span style=\"display: inline-block; width: 100px\">"
+                       "<span style=\"display: inline-block; position: sticky; right: 0; width: 40px\">s</span>"
+                       "</span></div>")))
+        "and the containing-block clamp holds in the inline axis too: the
+         inner box may not leave the 100px inline-block it sits in")))
 ;; ---- whitespace collapsing moved out of the parser (2026-08-06) --------
 ;;
 ;; kotoba-lang/htmldom used to collapse runs of spaces and tabs at PARSE
