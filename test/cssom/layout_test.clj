@@ -5952,6 +5952,61 @@
         "a single-fragment inline box carries no :hit at all -- its union
          IS its fragment, and every consumer already reads the box")))
 
+(deftest a-hit-region-travels-with-the-box-it-belongs-to
+  ;; A hit region is a SECOND geometry on the same op, in the same
+  ;; coordinate space as its box, so everything that moves the box must
+  ;; move it. Found by clicking one through kotoba-lang/browser's own
+  ;; session/node-at rather than by reading code: a two-line <a> inside a
+  ;; <p> inside a <main> came back with a box at y=30 and hit rects at
+  ;; y=16, because the block flow translated the run (translate-ops) and
+  ;; the rects rode along untouched -- an element painted in one place and
+  ;; clicked in another.
+  (let [ops (layout/draw-ops
+             (let [[root doc] (dom/create-element dom/empty-document :div)
+                   doc (dom/set-root doc root)
+                   ;; a wrapper whose own padding puts the run somewhere
+                   ;; other than the origin, which is what makes the
+                   ;; translation observable at all
+                   [p doc] (dom/create-element doc :p)
+                   doc (dom/append-child doc root p)
+                   doc (dom/set-style doc p {:width 100 :margin-top 40 :margin-left 25})
+                   doc (build-inline-children doc p ["x " [:a {} "aaaa bbbb cccc"]])
+                   [_ doc] (dom/consume-ops doc)]
+               (dom/tree doc))
+             {:width 400 :theme {:padding 0 :gap 0}})
+        a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %))) ops))
+        hit (:hit a-op)
+        x0 (apply min (map :x hit))
+        y0 (apply min (map :y hit))
+        x1 (apply max (map #(+ (:x %) (:w %)) hit))
+        y1 (apply max (map #(+ (:y %) (:h %)) hit))]
+    (is (< 1 (count hit)) "sanity: the <a> really did wrap")
+    (is (= [(:x a-op) (:y a-op) (:w a-op) (:h a-op)]
+           [x0 y0 (- x1 x0) (- y1 y0)])
+        "the box is the union of the hit rects AFTER the block flow moved
+         the whole run, which it only is if both were translated")
+    (is (<= 25 (:x a-op))
+        "and both are where the margin actually put them, not at the
+         origin the inline run was laid out at"))
+
+  ;; the same invariant under a `transform`, the other thing that rewrites
+  ;; op geometry (transform-ops)
+  (let [ops (layout/draw-ops
+             (let [[root doc] (dom/create-element dom/empty-document :div)
+                   doc (dom/set-root doc root)
+                   [p doc] (dom/create-element doc :p)
+                   doc (dom/append-child doc root p)
+                   doc (dom/set-style doc p {:width 100 :transform "translate(30px, 12px)"})
+                   doc (build-inline-children doc p ["x " [:a {} "aaaa bbbb cccc"]])
+                   [_ doc] (dom/consume-ops doc)]
+               (dom/tree doc))
+             {:width 400 :theme {:padding 0 :gap 0}})
+        a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %))) ops))
+        hit (:hit a-op)]
+    (is (= (:x a-op) (apply min (map :x hit)))
+        "a transformed element's hit region is transformed with it")
+    (is (= (:y a-op) (apply min (map :y hit))))))
+
 (deftest inline-padding-moves-the-pen-and-widens-the-box
   ;; Real CSS applies HORIZONTAL padding/border/margin to an inline box.
   ;; Measured in Brave 151 (see inline-box-edge for the readings), `a
