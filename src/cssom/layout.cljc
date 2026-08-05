@@ -1980,6 +1980,21 @@
    :margin/raw-bottom (style node :margin-bottom)
    :margin/raw-left (style node :margin-left)
    :margin/raw-right (style node :margin-right)
+   ;; The same for the uniform key and for all five of `padding`, and for
+   ;; the same shape of reason: a PERCENTAGE is not a length either, and
+   ;; the coercions above turn `10%` into the integer 10 -- a number that
+   ;; is right only when the containing block happens to be 100px wide.
+   ;; Resolving one needs the containing block's inline size, which does
+   ;; not exist at this layer, so the raw value is carried alongside the
+   ;; coerced one and `resolve-box-percentages` (called from the layout
+   ;; sites that DO have that size) rewrites it. See
+   ;; `percentage-box-basis` for the rule and the measurements.
+   :margin/raw (style node :margin)
+   :padding/raw (style node :padding)
+   :padding/raw-top (style node :padding-top)
+   :padding/raw-bottom (style node :padding-bottom)
+   :padding/raw-left (style node :padding-left)
+   :padding/raw-right (style node :padding-right)
    ;; The containing block's inline-axis START edge. Read here, resolved
    ;; and inherited by layout-node -- see the `:direction` entry it adds to
    ;; the inherited map for what part of `rtl` this engine implements.
@@ -2566,6 +2581,102 @@
   (if (auto-margin? st side)
     0
     (or (get st (keyword (str "margin-" (name side)))) (:margin st))))
+
+(defn- percentage-box-basis
+  "The dimension a PERCENTAGE margin or padding resolves against: the
+   containing block's INLINE size -- on all four sides, block axis
+   included.
+
+   This is one rule, not two, and it is the surprising one. Measured in
+   Brave 151 over CDP on 2026-08-06:
+
+     containing block            declaration            computed
+     -------------------------   --------------------   --------
+     300x40                      padding-top: 10%       30px
+     300 wide, no height         padding-bottom: 50%    150px (a 300x150 box)
+     300 wide, 1px top border    margin-top: 10%        30px (child at y=31)
+     300 wide                    margin-left: 10%       30px
+     200 wide, 400 TALL          padding-top: 10%       20px
+     200 wide, 400 TALL          margin-top: 10%        20px
+     300 wide, padding: 50px     padding-top: 10%       30px  (the CONTENT
+                                                               width, not
+                                                               the 400 border
+                                                               box)
+     300 wide                    margin-left: -10%      -30px
+
+   The 200x400 row is the one that settles it: a definite containing-block
+   HEIGHT is available there and the block-axis percentage still resolves
+   against the 200px width. It is also why `padding-bottom: 50%` is the
+   aspect-ratio idiom -- a box with no height at all comes out 300x150.
+
+   NOT the same rule as a percentage `top`/`left` (`length-or-percentage`
+   at `layout-absolute-children`, which resolves each inset against its
+   OWN axis: measured, `left: 50%` of a 200x60 block is 100 and `top: 50%`
+   is 30), and not the same as a percentage `row-gap` either. Three
+   properties spelled `50%`, three bases; see this function's callers for
+   which sites pass which.
+
+   `basis` is threaded from the caller rather than read here because only
+   the caller knows it: the containing block's content width in block flow,
+   the container's content width for a flex/grid item, the line's content
+   width for an atomic inline.
+
+   NOT threaded at `layout-absolute-children`, and the reason is not the
+   percentage: an absolutely positioned box's margins are not applied there
+   AT ALL. Measured through this engine, `<div style=\"position:relative;
+   width:300px;padding:20px\"><div style=\"position:absolute;top:0;left:0;
+   margin-left:20px\">` puts the box at x=0 for a PLAIN 20px margin as much
+   as for a percentage one, where Brave reports 20 (and 34 for
+   `margin-left: 10%`, i.e. 10% of the containing block's 340px PADDING box
+   -- the one place the basis is not a content width). Resolving a
+   percentage there would produce a correct number nothing reads. The
+   basis to pass, when that gap is closed, is `(:w cb pad-w)`."
+  [_st basis]
+  basis)
+
+(def ^:private box-percentage-keys
+  "Every `[coerced-key raw-key]` pair `resolve-box-percentages` rewrites:
+   the four sides of each of margin and padding, plus the two uniform keys
+   this engine emits alongside them (`content-inset` and `inset-side`'s
+   own fallback still read those, so leaving them at `parse-int`'s
+   leading-digit-run reading of `\"10%\"` would put the bug back in the one
+   path that has no per-side value)."
+  (into [[:margin :margin/raw] [:padding :padding/raw]]
+        (for [box ["margin" "padding"]
+              side ["top" "right" "bottom" "left"]]
+          [(keyword (str box "-" side))
+           (keyword box (str "raw-" side))])))
+
+(defn- resolve-box-percentages
+  "`st` with every PERCENTAGE margin/padding resolved against `basis` (see
+   `percentage-box-basis`), and unchanged everywhere else.
+
+   Deliberately a post-step on the style map rather than an argument to
+   `node-style`: `margin-side`/`inset-side`/`declared-inset-side`/
+   `content-inset`/`intrinsic-inset-x` and their ~56 call sites all read
+   the coerced keys, so rewriting the map once at the point the containing
+   block's inline size becomes known fixes every one of them without
+   touching any. It is the same shape as `explicit-length` vs
+   `length-or-percentage` further up this file: the sites that KNOW their
+   containing-block dimension call this, and the ones that genuinely do
+   not are left with the documented `parse-int` approximation, so the two
+   are easy to tell apart when reading.
+
+   A nil `basis` returns `st` untouched rather than dropping the value: an
+   indefinite basis makes a percentage margin/padding compute to ZERO in
+   real CSS (unlike a percentage width, which becomes `auto`), but every
+   caller here passes a real content width, and silently zeroing on a
+   basis that is merely absent from this code path would be a change of
+   behaviour dressed as a fix."
+  [st basis]
+  (if (nil? basis)
+    st
+    (reduce (fn [st [k raw-k]]
+              (if-let [px (percentage-of (get st raw-k) (percentage-box-basis st basis))]
+                (assoc st k px)
+                st))
+            st
+            box-percentage-keys)))
 
 (defn- resolve-width
   "The element's BORDER-BOX width.
@@ -3386,9 +3497,9 @@
    still 0 here, so such an item keeps its align-items placement --
    the same cut place-main-axis-auto-margins' own docstring already
    names, now merely reachable through a second door."
-  [theme column? child]
+  [theme column? child basis]
   (if (map? child)
-    (let [st (node-style child theme)
+    (let [st (resolve-box-percentages (node-style child theme) basis)
           t (margin-side st :top) b (margin-side st :bottom)
           l (margin-side st :left) r (margin-side st :right)]
       (if column? {:main [t b] :cross [l r]} {:main [l r] :cross [t b]}))
@@ -6115,7 +6226,7 @@
   [theme content-w opacity inherited c]
   (let [w (:w (:box (measure-child theme content-w opacity inherited c true)))]
     (if (map? c)
-      (let [cst (node-style c theme)]
+      (let [cst (resolve-box-percentages (node-style c theme) content-w)]
         (+ w (margin-side cst :left) (margin-side cst :right)))
       w)))
 
@@ -6791,7 +6902,7 @@
         ;; Every item's own margins, on this container's axes -- reserved
         ;; in full on both, because a flex item's margins never collapse.
         ;; See item-margins.
-        margins (mapv #(item-margins theme column? %) in-flow)
+        margins (mapv #(item-margins theme column? % cw) in-flow)
         m-main-start (mapv #(first (:main %)) margins)
         m-cross-start (mapv #(first (:cross %)) margins)
         m-cross-total (mapv #(+ (first (:cross %)) (second (:cross %))) margins)]
@@ -7080,7 +7191,7 @@
             (if (and pl (= 1 (- (:col-end pl) (:col-start pl))))
               (let [i (:col-start pl)]
                 (if (< -1 i n-cols)
-                  (let [{[ml mr] :main} (item-margins theme false child)]
+                  (let [{[ml mr] :main} (item-margins theme false child cw)]
                     (-> acc
                         (update-in [i :min] max (+ ml mr (grid-item-min-content-width theme cw opacity inherited child)))
                         (update-in [i :max] max (+ ml mr (grid-item-max-content-width theme cw opacity inherited child)))))
@@ -8403,7 +8514,7 @@
         ;; second at y=70 in a 90px container (20 AND 30, not max).
         ;; Grid is physically row-major here, so `:main` is the horizontal
         ;; pair and `:cross` the vertical one.
-        margins (mapv #(item-margins theme false %) in-flow)
+        margins (mapv #(item-margins theme false % cw) in-flow)
         m-x (mapv #(+ (first (:main %)) (second (:main %))) margins)
         m-y (mapv #(+ (first (:cross %)) (second (:cross %))) margins)
         measured (mapv (fn [child pl align mx]
@@ -8892,7 +9003,7 @@
                        acc)
 
                    (inline-atomic-element? theme child)
-                   (let [st (node-style child theme)
+                   (let [st (resolve-box-percentages (node-style child theme) content-w)
                          avail (atomic-intrinsic-width theme content-w opacity inherited child st)
                          {:keys [box draw]} (layout-node theme 0 0 avail opacity inherited child)
                          ;; An atomic inline's own MARGINS take part in the
@@ -10750,7 +10861,7 @@
         ;; implemented here -- see layout-inline-run's own `:out-of-flow`
         ;; return for the half that is.
         (absolute? theme child)
-        (let [cst (node-style child theme)]
+        (let [cst (resolve-box-percentages (node-style child theme) content-w)]
           (recur (rest remaining) y draws floats fdraws ink height prev-mb first? out-mt
                  (conj oof {:node child
                             :x (+ content-x (margin-side cst :left))
@@ -10758,7 +10869,7 @@
 
         ;; ---- a float: placed into the band, invisible to block flow ----
         (floated? child)
-        (let [fst (node-style child theme)
+        (let [fst (resolve-box-percentages (node-style child theme) content-w)
               m (measure-child theme content-w opacity inherited child true)
               fmt (margin-side fst :top)
               fml (margin-side fst :left)
@@ -10823,7 +10934,7 @@
                  (into oof run-oof)))
 
         :else
-        (let [cst (when (map? child) (node-style child theme))
+        (let [cst (when (map? child) (resolve-box-percentages (node-style child theme) content-w))
               mt (if cst (margin-side cst :top) 0)
               mb (if cst (margin-side cst :bottom) 0)
               ml (if cst (margin-side cst :left) 0)
@@ -12071,6 +12182,16 @@
         ;; every layout-node call site; it is not a text-inheritance
         ;; property, hence the `:block/` namespace on the key.
         inherited (assoc inherited :block/containing-height (definite-content-height st cb-h))
+        ;; ...and the INLINE-axis basis, on the same channel and for the
+        ;; same reason. This is what a descendant's percentage margin or
+        ;; padding resolves against ON ALL FOUR SIDES -- see
+        ;; `percentage-box-basis`. It cannot be taken from `layout-node`'s
+        ;; own `avail-width` argument, which is the space left for the box
+        ;; AFTER its own margins (`layout-children-block` passes
+        ;; `content-w - ml - mr`): measured, `margin-left: 10px;
+        ;; padding-top: 10%` inside a 300px block is 30px of padding in
+        ;; Brave, not 29.
+        inherited (assoc inherited :block/containing-inline content-w)
         ;; Margins collapse THROUGH this box's own edge only when nothing
         ;; separates the edge from the child: no padding on that side, no
         ;; border, and no formatting context of its own -- which is exactly
@@ -12784,7 +12905,15 @@
      {:box {:x x :y y :w 0 :h 0} :draw []}
 
      (= :element (:node/type node))
-     (let [st (node-style node theme)]
+     ;; The ONE place a box's own style map is built for layout, which is
+     ;; why the percentage margin/padding rewrite happens here: every
+     ;; sub-layout fn below (block/flex/grid/table/form-control) is handed
+     ;; this same `st`, so a percentage PADDING is resolved once for all of
+     ;; them. A percentage MARGIN is read by the PARENT, not from here, so
+     ;; the container fns resolve it again on their own children's style
+     ;; maps against their own content width -- see `resolve-box-percentages`.
+     (let [st (resolve-box-percentages (node-style node theme)
+                                       (:block/containing-inline inherited))]
        (if (= "none" (:display st))
          {:box {:x x :y y :w 0 :h 0} :draw []}
          (let [;; visibility:hidden/collapse reserves layout space (unlike

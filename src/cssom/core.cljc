@@ -988,6 +988,19 @@
   ;; one level already covers the overwhelmingly common real-world cases.
   #"var\(\s*(--[A-Za-z_][-A-Za-z0-9_]*)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)")
 
+(def ^:private percentage-pattern
+  "A whole value that is a single signed number plus `%`.
+
+   MOVED UP HERE on 2026-08-06, from beside `absolute-length-pattern` in
+   the relative-length section that was its only reader, for exactly the
+   reason `var-ref-pattern` above gives for living here: the box-side
+   shorthand expanders below now have to recognize a percentage token too,
+   and a second, separately-written copy of this regex next to them is the
+   drift this file keeps removing. A percentage is a value this namespace
+   deliberately does NOT resolve -- it has no containing block -- but does
+   carry per side, exactly as it carries `auto`."
+  #"^([+-]?(?:\d+\.?\d*|\.\d+))%$")
+
 (def ^:private border-style-keywords
   #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
 
@@ -1156,13 +1169,26 @@
     (when (and (pos? n) (<= n 4)
                ;; Only expand when EVERY token is a length this engine can
                ;; actually resolve, or -- for `margin` alone -- the keyword
-               ;; `auto`. Anything else -- a percentage, or outright nonsense
-               ;; (a var() regression guard in the test
-               ;; suite passes `margin: 1px solid 3px dashed`) -- is left
+               ;; `auto`. Outright nonsense (a var() regression guard in the
+               ;; test suite passes `margin: 1px solid 3px dashed`) is left
                ;; completely untouched for the generic path to store raw,
                ;; this namespace's standing degrade-don't-guess posture.
                ;; Silently keeping the first token of an unparseable
                ;; shorthand would be a guess dressed as a value.
+               ;;
+               ;; A PERCENTAGE is admitted (it was not, until
+               ;; cssom.layout learned to resolve one -- see its own
+               ;; `percentage-box-basis`). It is not a length here and never
+               ;; becomes one in this namespace: it rides through as the raw
+               ;; `"10%"` string exactly as `auto` does, and cssom.layout
+               ;; resolves it against the containing block's inline size at
+               ;; layout time, which is the only place that size exists.
+               ;; Measured in Brave 151 on 2026-08-06:
+               ;; `<div style="width:300px;height:100px"><div
+               ;; style="padding:10% 20%">` reports padding 30px top/bottom
+               ;; and 60px left/right -- BOTH axes of the 300px width -- so
+               ;; expanding a percentage shorthand per side is exactly as
+               ;; well defined as expanding a px one.
                ;;
                ;; A whole-token var() reference is admitted too: it is not a
                ;; length yet, but it is a value this engine WILL resolve
@@ -1184,6 +1210,7 @@
                ;; `padding: auto` is not valid CSS and is not admitted --
                ;; the property is checked, not just the token.
                (every? #(or (re-matches #"-?\d+(px)?" %)
+                            (re-matches percentage-pattern %)
                             (re-matches calc-pattern %)
                             (re-matches var-ref-pattern %)
                             (and (= "margin" prop)
@@ -1232,11 +1259,17 @@
    `auto` is admitted for the same reason it is admitted for `margin`: it
    is `inset`'s own INITIAL value and a real, common authored one
    (`inset: 0 auto`), and it travels as a raw string exactly as a
-   directly-declared `top: auto` already does. Percentages are rejected
-   here exactly as they are for margin/padding -- this namespace's
-   degrade-don't-guess posture, and the same reason
-   `:box/margin-left-percentage` is a recorded divergence rather than a
-   wrong number."
+   directly-declared `top: auto` already does. So are PERCENTAGES, and for
+   the same reason: `layout-absolute-children` already resolves a
+   percentage `top`/`left` against the containing block (measured, and
+   passing: `:position/absolute-percentage-offsets` and
+   `:position/relative-percentage-offset`), so the four longhands this
+   produces can read one. Note the basis is NOT the same as a percentage
+   margin's: measured in Brave 151 on 2026-08-06, `left: 50%` of a 200x60
+   containing block is 100 and `top: 50%` is 30 -- each axis against its
+   OWN dimension -- while a percentage margin or padding resolves against
+   the INLINE size on all four sides. Two different rules that both spell
+   `50%`; see `cssom.layout/percentage-box-basis`."
   [v]
   (let [tokens (box-shorthand-tokens v)
         n (count tokens)
@@ -1244,6 +1277,7 @@
                        (get box-side-picks n [0 0 0 0]))]
     (when (and (pos? n) (<= n 4)
                (every? #(or (re-matches #"-?\d+(px)?" %)
+                            (re-matches percentage-pattern %)
                             (re-matches calc-pattern %)
                             (re-matches var-ref-pattern %)
                             (= "auto" (str/lower-case %)))
@@ -1252,6 +1286,116 @@
        :right (parse-style-value r)
        :bottom (parse-style-value b)
        :left (parse-style-value l)})))
+
+;; ---- the flow-relative (logical) box properties ----
+;;
+;; CSS Logical Properties and Values Level 1. `margin-inline-start` is not
+;; an alias for `margin-left`: which physical side it lands on depends on
+;; the element's own resolved `direction` (and `writing-mode`), so the two
+;; halves live in two different places in this file. The SHORTHANDS expand
+;; here, at declaration-parse time, into logical LONGHANDS -- exactly what
+;; `expand-box-side-shorthand` does for the physical ones, and for exactly
+;; the same reason (the cascade compares longhands). The logical-to-
+;; physical rename happens later, in `resolve-style-for`, which is the
+;; first point at which the element's own direction is known.
+;;
+;; Measured in Brave 151 over CDP on 2026-08-06, on the corpus's own 14px
+;; monospace page at width 800, which is where every number below and in
+;; `logical->physical-by-flow` comes from.
+
+(def ^:private logical-side-shorthand-longhands
+  "The two-value flow-relative box shorthands, and the pair of logical
+   longhands each expands to.
+
+   Note the value rule is NOT `expand-box-side-shorthand`'s 1-to-4 clockwise
+   one: these take one or two values only, and two values are
+   `<start> <end>` rather than `<vertical> <horizontal>`. Measured:
+   `margin-inline: 20px 60px` on a 300px-wide ltr containing block puts the
+   box at x=20 with w=220, i.e. 20 on the left (start) and 60 on the right
+   (end); the same declaration under `direction: rtl` puts it at x=60."
+  {"margin-inline" [:margin-inline-start :margin-inline-end]
+   "margin-block" [:margin-block-start :margin-block-end]
+   "padding-inline" [:padding-inline-start :padding-inline-end]
+   "padding-block" [:padding-block-start :padding-block-end]
+   "inset-inline" [:inset-inline-start :inset-inline-end]
+   "inset-block" [:inset-block-start :inset-block-end]})
+
+(defn- expand-logical-side-shorthand
+  "Expands one of `logical-side-shorthand-longhands`' six shorthands into
+   its `<start>`/`<end>` logical longhands, or nil when the value is
+   outside the token subset this namespace resolves.
+
+   The admitted tokens are exactly `expand-box-side-shorthand`'s -- a
+   px/bare length, a percentage, a constant `calc()`, a whole-token
+   `var()` reference, and `auto` for the two families where `auto` is
+   legal (`margin-*` and `inset-*`, never `padding-*`; the property is
+   checked, not just the token, the same way it is there). Nothing else is
+   guessed at: an unexpandable shorthand is left for the generic path to
+   store raw under a key nothing reads, which is this namespace's standing
+   degrade-don't-guess posture and is precisely what these six did before
+   this function existed."
+  [prop v]
+  (when-let [[start end] (get logical-side-shorthand-longhands prop)]
+    (let [tokens (box-shorthand-tokens v)
+          n (count tokens)
+          auto-ok? (or (str/starts-with? prop "margin") (str/starts-with? prop "inset"))]
+      (when (and (pos? n) (<= n 2)
+                 (every? #(or (re-matches #"-?\d+(px)?" %)
+                              (re-matches percentage-pattern %)
+                              (re-matches calc-pattern %)
+                              (re-matches var-ref-pattern %)
+                              (and auto-ok? (= "auto" (str/lower-case %)))
+                              (and (= 1 n) (css-wide-keyword %)))
+                         tokens))
+        {start (parse-style-value (tokens 0))
+         end (parse-style-value (get tokens 1 (tokens 0)))}))))
+
+(def ^:private logical-border-shorthand-sides
+  "The flow-relative `border-*` shorthands, and the logical SIDES each one
+   sets. `border-inline`/`border-block` set both of their axis's sides from
+   one `<line-width> || <line-style> || <color>` value; the four
+   single-side shorthands set one.
+
+   Measured: `border-inline: 3px solid #000` on a 300px block reports
+   `border-left-width: 3px` AND `border-right-width: 3px`, and
+   `border-inline-start-width: 8px` + `border-inline-start-style: solid`
+   (the sub-longhands, with no shorthand anywhere) reports
+   `border-left-width: 8px` -- so the sub-longhands map too, and are in
+   `logical->physical-by-flow` for that reason."
+  {"border-inline-start" [:inline-start]
+   "border-inline-end" [:inline-end]
+   "border-block-start" [:block-start]
+   "border-block-end" [:block-end]
+   "border-inline" [:inline-start :inline-end]
+   "border-block" [:block-start :block-end]})
+
+(defn- expand-logical-border-shorthand
+  "Expands one of `logical-border-shorthand-sides`' six shorthands into
+   per-logical-side `-width`/`-style`/`-color` longhands, reusing
+   `expand-border-shorthand`'s own order-independent parse (and inheriting
+   its documented token-form scope cut) rather than writing a second copy
+   of it.
+
+   Honest scope note, stated here because this is where a reader will look
+   for it: cssom.layout has NO per-side border at all -- it reads a single
+   uniform `:border-width`/`:border-style`/`:border-color` (see
+   `node-style`) -- so the `:border-left-width` these ultimately become is
+   correct in `getComputedStyle` and invisible in layout. That is a
+   pre-existing gap with its own corpus case (`:box/border-left-width-only`,
+   where the physical `border-left-width` is equally unread), not one this
+   function introduces: measured, Brave renders
+   `<div style=\"width:300px;border-inline-start:5px solid #000\">` 305 wide
+   with its `<p>` at x=5, and this engine renders 300 / x=0 both before and
+   after this change."
+  [prop v]
+  (when-let [sides (get logical-border-shorthand-sides prop)]
+    (let [parts (expand-border-shorthand v)]
+      (when (seq parts)
+        (into {}
+              (for [side sides
+                    [k v] parts
+                    :let [sub (subs (name k) (count "border-"))]]
+                [(keyword (str "border-" (name side) "-" sub)) v]))))))
 
 (defn- expand-text-shadow-shorthand
   "Parses a `text-shadow` shorthand value (real CSS's own grammar,
@@ -1601,6 +1745,21 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-inset-shorthand value))
+
+                         ;; The six flow-relative box shorthands. Expanded
+                         ;; to LOGICAL longhands here (not physical ones):
+                         ;; which physical side each lands on is not known
+                         ;; until the element's own `direction` is
+                         ;; resolved, which happens in `resolve-style-for`.
+                         (some? (expand-logical-side-shorthand (str/lower-case k) value))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-logical-side-shorthand (str/lower-case k) value))
+
+                         (some? (expand-logical-border-shorthand (str/lower-case k) value))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-logical-border-shorthand (str/lower-case k) value))
 
                          (= "border" (str/lower-case k))
                          (map (fn [[longhand longhand-value]]
@@ -4818,8 +4977,9 @@
    something different on every property (see the block comment above)."
   #"(?i)^([+-]?(?:\d+\.?\d*|\.\d+))(px|em|rem)$")
 
-(def ^:private percentage-pattern
-  #"^([+-]?(?:\d+\.?\d*|\.\d+))%$")
+;; `percentage-pattern` -- the other half of this pair -- is defined up
+;; beside `var-ref-pattern`, where the shorthand expanders that also read
+;; it can see it.
 
 (defn- parse-number
   [s]
@@ -4985,7 +5145,135 @@
                 style)
      own]))
 
-(defn- resolve-style-for
+;; ---- logical -> physical, at computed-value time ----
+;;
+;; WHERE THIS LIVES AND WHY. `margin-inline-start` becomes `margin-left` in
+;; the CASCADE, not in cssom.layout, because that is demonstrably where a
+;; browser does it. Measured in Brave 151 over CDP on 2026-08-06, on the
+;; corpus's own page:
+;;
+;;   <div style="max-inline-size: 80px">      getComputedStyle -> maxWidth: 80px
+;;   <div style="margin-inline: 20px 60px">   -> marginLeft 20px, marginRight 60px
+;;   ...the same, inside direction:rtl        -> marginLeft 60px, marginRight 20px
+;;
+;; i.e. the PHYSICAL longhand genuinely holds the value by the time
+;; `getComputedStyle` can be asked, which is the definition of
+;; computed-value time. A layout-time mapping would leave the cascade --
+;; and therefore this engine's own `computed-style`, a devtools panel, and
+;; a live page's `getComputedStyle` -- reporting nothing at all, exactly
+;; the architectural mistake ADR-2800003100 corrected for the UA sheet.
+;;
+;; WHICH DIRECTION IT READS. The element's OWN computed direction, not its
+;; containing block's. Measured: `<div style="width:300px"><div
+;; style="direction:rtl; margin-inline:20px 60px">` puts the inner box at
+;; x=60 -- the same answer as declaring `direction: rtl` on the PARENT and
+;; inheriting it. Both were measured, side by side, because they are
+;; indistinguishable in every case where only the parent declares it.
+;;
+;; HOW IT COMPETES WITH THE PHYSICAL PROPERTY. A logical and a physical
+;; longhand that land on the same side are two declarations for ONE slot,
+;; resolved by the ordinary cascade -- so within one declaration block,
+;; SOURCE ORDER decides. Measured, all four combinations:
+;;
+;;   margin-left: 5px; margin-inline-start: 40px   -> marginLeft 40px
+;;   margin-inline-start: 40px; margin-left: 5px   -> marginLeft  5px
+;;   margin: 1px; margin-inline-start: 40px        -> marginLeft 40px (rest 1px)
+;;   margin-inline-start: 40px; margin: 1px        -> marginLeft  1px
+;;
+;; and, decisively, the same first pair under `direction: rtl` gives
+;; marginLeft 5px / marginRight 40px in BOTH orders -- because there the
+;; two declarations no longer collide. The collision is therefore decided
+;; AFTER the rename, not before, which is exactly what `resolve-style-for`
+;; does: it renames each declaration in the already-sorted cascade list and
+;; lets its existing "last entry of the group wins" step pick between them.
+;; Nothing about ordering had to be added.
+
+(def ^:private logical-flow-sides
+  "Which physical side each flow-relative side maps to, per writing
+   mode + direction. Keyed by `[writing-mode direction]`.
+
+   SCOPE CUT, and the numbers a future fix needs. Only `horizontal-tb` is
+   here. Under a vertical writing mode the whole box model rotates, and
+   this engine has no vertical layout to rotate with it: measured in Brave
+   151 on 2026-08-06, inside `writing-mode: vertical-rl`,
+
+     inline-size:70px; block-size:20px   -> a box 20 WIDE and 70 TALL
+                                            (this engine: 300x20)
+     margin-inline-start: 40px           -> margin-TOP 40px
+     padding-block-start: 12px           -> padding-RIGHT 12px
+     padding-top: 10%                    -> 20px, i.e. 10% of the parent's
+                                            200px HEIGHT (its inline size)
+
+   Adding the four rotated rows here is two minutes' work and would make
+   `getComputedStyle` right while every box stayed laid out horizontally --
+   a mapping that cannot be checked by either layout axis of the
+   conformance corpus. So the mapping is GATED on `horizontal-tb` instead:
+   under a vertical writing mode a logical property stays logical and is
+   ignored, exactly as it was before this change, rather than resolving to
+   a physical side this engine would then use in the wrong axis."
+  {["horizontal-tb" "ltr"] {"inline-start" "left" "inline-end" "right"
+                            "block-start" "top" "block-end" "bottom"}
+   ["horizontal-tb" "rtl"] {"inline-start" "right" "inline-end" "left"
+                            "block-start" "top" "block-end" "bottom"}})
+
+(def ^:private logical->physical-by-flow
+  "`{[writing-mode direction] {logical-property physical-property}}` over
+   every flow-relative longhand this engine carries: the four sides of
+   `margin`/`padding`, the four `inset-*`, the twelve
+   `border-<side>-{width,style,color}`, and the six sizing properties.
+
+   Built from `logical-flow-sides` rather than written out, because 34
+   hand-written entries per flow would be 34 chances to transpose one --
+   and a transposed `inline-end` is a bug no test in this file would
+   catch (both sides are real properties, both take the same values)."
+  (into {}
+        (map (fn [[flow sides]]
+               [flow
+                (into {:inline-size :width
+                       :block-size :height
+                       :min-inline-size :min-width
+                       :max-inline-size :max-width
+                       :min-block-size :min-height
+                       :max-block-size :max-height}
+                      cat
+                      [(for [box ["margin" "padding"]
+                             [logical physical] sides]
+                         [(keyword (str box "-" logical)) (keyword (str box "-" physical))])
+                       (for [[logical physical] sides]
+                         [(keyword (str "inset-" logical)) (keyword physical)])
+                       (for [[logical physical] sides
+                             sub ["width" "style" "color"]]
+                         [(keyword (str "border-" logical "-" sub))
+                          (keyword (str "border-" physical "-" sub))])])]))
+        logical-flow-sides))
+
+(def ^:private initial-flow
+  "The flow every element starts in: CSS's own initial `writing-mode` and
+   `direction`. Also what a detached subtree, and any caller with no tree
+   walk behind it, is styled against."
+  {:writing-mode "horizontal-tb" :direction "ltr"})
+
+(defn- flow-keyword
+  "Normalises a cascaded `direction`/`writing-mode` value for
+   `logical-flow-sides`' key, resolving the CSS-wide keywords against
+   `inherited` the way `resolve-css-wide-keyword` would.
+
+   Both properties are INHERITED (see `inherited-properties`), so `inherit`
+   and `unset` are the same answer here, and `initial`/`revert` fall to
+   `initial-flow` -- the UA stylesheet declares neither, so there is
+   nothing for `revert` to roll back TO. `nil` (no declaration on this
+   element) inherits, which is the whole reason this value is threaded down
+   the walk at all."
+  [declared inherited fallback]
+  (let [kw (css-wide-keyword declared)]
+    (cond
+      (nil? declared) (or inherited fallback)
+      (contains? #{:inherit :unset} kw) (or inherited fallback)
+      (some? kw) fallback
+      :else (let [s (str/lower-case (str/trim (str declared)))]
+              (if (seq s) s fallback)))))
+
+(defn- resolve-style-and-flow
   "Cascade-resolves the declarations that target `pseudo-element` (nil for
    the real element itself, :before/:after for its generated content) on
    `node`. Mirrors the pre-pseudo-element `computed-style` algorithm exactly
@@ -5161,12 +5449,31 @@
    `inline` in a browser, not the UA's `block`. `unset` is `inherit` on an
    inherited property (`inherited-properties`) and `initial` on every
    other. `revert` rolls the cascade back to the previous ORIGIN, which is
-   why the entries below the winner are kept rather than discarded."
-  ([document rules node pseudo-element]
-   (resolve-style-for document rules node pseudo-element nil nil))
-  ([document rules node pseudo-element counters]
-   (resolve-style-for document rules node pseudo-element counters nil))
-  ([document rules node pseudo-element counters container-ctx]
+   why the entries below the winner are kept rather than discarded.
+
+   `inherited-flow` -- the 7-arity form's last argument, and the reason the
+   logical-to-physical rename can happen here at all: `{:writing-mode ...
+   :direction ...}` as the PARENT resolved them, threaded down
+   `run-cascade-walk` exactly like `parent-font-size` and `parent-display`
+   already are, because both properties inherit and this element may not
+   declare either. nil means \"no tree walk behind this call\" (every
+   standalone `computed-style`/`pseudo-element-style-for` caller), which
+   resolves to `initial-flow` -- the same honest simplification the
+   `parent-display` argument already makes for blockification, and with the
+   same consequence: a standalone `computed-style` on an element inside a
+   `direction: rtl` ancestor maps its logical properties as if it were ltr.
+
+   The rename itself is one `map` over `sorted`, BELOW the sort and ABOVE
+   the group-by, and that position is the whole design -- see the
+   `logical -> physical, at computed-value time` block above for the four
+   declaration-order measurements it reproduces without any code of its
+   own.
+
+   Returns `[style flow]` -- the resolved map, and the element's own
+   resolved `{:writing-mode :direction}`, which its children inherit.
+   `resolve-style-for` is the same function without the second value, and
+   is what every caller that does not walk a tree uses."
+  ([document rules node pseudo-element counters container-ctx inherited-flow]
    (let [max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
          declarations (for [rule rules
                             :let [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rule]
@@ -5245,6 +5552,32 @@
                                              (inline-style node)))
          sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
                          (concat ua-declarations declarations inline-declarations))
+         ;; ---- logical -> physical ----
+         ;; This element's OWN flow, resolved from this same cascade: the
+         ;; last-sorted `writing-mode`/`direction` declaration is that
+         ;; property's winner by exactly the rule the group-by below uses,
+         ;; and neither property has a logical form, so neither can depend
+         ;; on the rename it decides.
+         flow (let [win (fn [prop]
+                          (some->> sorted (filter #(= prop (:property %))) last :value))]
+                {:writing-mode (flow-keyword (win :writing-mode)
+                                             (:writing-mode inherited-flow)
+                                             (:writing-mode initial-flow))
+                 :direction (flow-keyword (win :direction)
+                                          (:direction inherited-flow)
+                                          (:direction initial-flow))})
+         ;; nil for a vertical writing mode -- see `logical-flow-sides` for
+         ;; the measurements behind that scope cut. A logical declaration
+         ;; then stays under its logical key, which nothing reads, which is
+         ;; where it was before this rename existed.
+         rename (get logical->physical-by-flow
+                     [(:writing-mode flow) (:direction flow)])
+         sorted (if rename
+                  (map #(if-let [physical (get rename (:property %))]
+                          (assoc % :property physical)
+                          %)
+                       sorted)
+                  sorted)
          ;; Grouped per property rather than reduced straight into a map,
          ;; because `revert` needs the LOSING entries too -- it rolls the
          ;; cascade back to the previous origin rather than to nothing.
@@ -5265,12 +5598,26 @@
                   (assoc m property value))))
             {}
             (group-by :property sorted))]
-     (if (contains? m :content)
-       (let [resolved (resolve-content-value node counters (:content m))]
-         (if (nil? resolved)
-           (dissoc m :content)
-           (assoc m :content resolved)))
-       m))))
+     [(if (contains? m :content)
+        (let [resolved (resolve-content-value node counters (:content m))]
+          (if (nil? resolved)
+            (dissoc m :content)
+            (assoc m :content resolved)))
+        m)
+      flow])))
+
+(defn- resolve-style-for
+  "`resolve-style-and-flow`'s resolved style map alone, for every caller
+   that has no tree walk to hand the element's own flow back to."
+  ([document rules node pseudo-element]
+   (resolve-style-for document rules node pseudo-element nil nil))
+  ([document rules node pseudo-element counters]
+   (resolve-style-for document rules node pseudo-element counters nil))
+  ([document rules node pseudo-element counters container-ctx]
+   (resolve-style-for document rules node pseudo-element counters container-ctx nil))
+  ([document rules node pseudo-element counters container-ctx inherited-flow]
+   (first (resolve-style-and-flow document rules node pseudo-element counters
+                                  container-ctx inherited-flow))))
 
 (defn computed-style
   "Cascade-resolved style map for `node`. Regular declarations are flat
@@ -5490,18 +5837,30 @@
    `container-ctx` (see `resolve-style-for`'s own docstring) is threaded
    through unchanged to all three `resolve-style-for` calls below -- nil
    during apply-cascade's first pass (and from any standalone caller), the
-   real containers/parent-index map during its second pass."
-  [document rules node inherited-counters container-ctx]
-  (let [base (resolve-style-for document rules node nil inherited-counters container-ctx)
+   real containers/parent-index map during its second pass.
+
+   `inherited-flow` is threaded the same way, and reaches the ::before/
+   ::after resolutions too: a generated box sits in its originating
+   element's flow, so `content` beside a `margin-inline-start` on the same
+   ::before maps against the same direction the element itself resolved."
+  ([document rules node inherited-counters container-ctx]
+   (style-with-counters document rules node inherited-counters container-ctx nil))
+  ([document rules node inherited-counters container-ctx inherited-flow]
+   (let [[base node-flow] (resolve-style-and-flow document rules node nil inherited-counters
+                                                  container-ctx inherited-flow)
         node-counters (-> inherited-counters
                           (apply-counter-pairs :reset (:counter-reset base))
                           (apply-counter-pairs :increment (:counter-increment base)))
-        before (resolve-style-for document rules node :before node-counters container-ctx)
-        after (resolve-style-for document rules node :after node-counters container-ctx)
+        ;; The generated boxes sit in THIS element's flow, not its
+        ;; parent's -- a `::before` of a `direction: rtl` element has its
+        ;; own `margin-inline-start` on the right even though the element
+        ;; declared the direction itself.
+        before (resolve-style-for document rules node :before node-counters container-ctx node-flow)
+        after (resolve-style-for document rules node :after node-counters container-ctx node-flow)
         style (cond-> base
                 (seq before) (assoc :pseudo/before before)
                 (seq after) (assoc :pseudo/after after))]
-    [style node-counters]))
+    [style node-counters node-flow])))
 
 (def ^:private current-color-keys
   "The color-valued properties (other than `color` itself) this namespace
@@ -5674,11 +6033,22 @@
    element is not derivable from this element. The extra return value is
    what this element's own children should be blockified against, which is
    its own computed display except for `display: contents` -- see
-   `children-container-display`."
+   `children-container-display`.
+
+   `parent-flow` is the fifth, and it is inherited because BOTH of its
+   halves are inherited CSS properties: an element with no `direction` of
+   its own is in its parent's, and that is what decides which physical side
+   its `margin-inline-start` lands on (see `logical->physical-by-flow`).
+   The extra return value is this element's own resolved flow, which its
+   children inherit -- computed in `resolve-style-for`, where the cascade
+   that decides it already ran, rather than re-derived here from the
+   written-back `:style/direction` (which would be wrong for an element
+   that declares none, since this map holds no inherited values)."
   [document rules node-id inherited-env inherited-counters container-ctx
-   parent-font-size root-font-size parent-display parent-quote-depth]
+   parent-font-size root-font-size parent-display parent-quote-depth parent-flow]
   (let [node (get-in document [:nodes node-id])
-        [style node-counters] (style-with-counters document rules node inherited-counters container-ctx)
+        [style node-counters node-flow]
+        (style-with-counters document rules node inherited-counters container-ctx parent-flow)
         pseudo-keys #{:pseudo/before :pseudo/after}
         regular (into {} (remove (fn [[k _]] (contains? pseudo-keys k))) style)
         pseudo (select-keys style pseudo-keys)
@@ -5710,7 +6080,7 @@
                   final-style)]
     [document node-env node-counters node-font-size
      (children-container-display final-style parent-display)
-     child-quote-depth]))
+     child-quote-depth node-flow]))
 
 (defn- run-cascade-walk
   "The actual top-down tree walk apply-cascade performs (see its own
@@ -5740,31 +6110,33 @@
    has no ancestor chain to read either number off."
   [document rules container-ctx base-font-size]
   (letfn [(walk [document node-id inherited-env inherited-counters visited
-                 parent-font-size root-font-size parent-display quote-depth]
+                 parent-font-size root-font-size parent-display quote-depth parent-flow]
             (let [node (get-in document [:nodes node-id])
                   element? (= :element (:node/type node))
                   [document node-env node-counters node-font-size node-display
-                   node-quote-depth]
+                   node-quote-depth node-flow]
                   (if element?
                     (style-element document rules node-id inherited-env inherited-counters
                                    container-ctx parent-font-size root-font-size
-                                   parent-display quote-depth)
+                                   parent-display quote-depth parent-flow)
                     ;; a text node establishes no formatting context of its
                     ;; own, so its (impossible) children would still be
                     ;; blockified against this node's parent -- and it
                     ;; generates no quote, so the depth passes straight
-                    ;; through it
+                    ;; through it -- and it is in its parent's flow, since
+                    ;; both halves of a flow are inherited properties
                     [document inherited-env inherited-counters parent-font-size parent-display
-                     quote-depth])
+                     quote-depth parent-flow])
                   root-font-size (if element? (or root-font-size node-font-size) root-font-size)
                   visited (conj visited node-id)]
               (reduce (fn [[document visited counters] child-id]
                         (walk document child-id node-env counters visited
-                              node-font-size root-font-size node-display node-quote-depth))
+                              node-font-size root-font-size node-display node-quote-depth
+                              node-flow))
                       [document visited node-counters]
                       (:children node))))]
     (let [[document visited] (if-let [root (:root document)]
-                                (walk document root {} {} #{} base-font-size nil nil 0)
+                                (walk document root {} {} #{} base-font-size nil nil 0 initial-flow)
                                 [document #{}])]
       (reduce-kv
        (fn [document node-id node]
@@ -5775,8 +6147,10 @@
            ;; a detached subtree has no ancestor chain to read a quote
            ;; depth off either -- it starts at 0, the same honest
            ;; simplification as the two above
+           ;; a detached subtree has no ancestor chain to read a FLOW off
+           ;; either -- it starts in `initial-flow`, same simplification
            (first (style-element document rules node-id {} {} container-ctx
-                                 base-font-size base-font-size nil 0))
+                                 base-font-size base-font-size nil 0 initial-flow))
            document))
        document
        (:nodes document)))))
