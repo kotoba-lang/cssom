@@ -815,6 +815,161 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-three: where a box sits on a line
+
+Four residuals in one cluster — everything left that was about a box's
+place on a line rather than its size. All measured in Brave 151 over CDP
+on 2026-08-06, and all measured *before* anything was written, because
+this is exactly the area where a one-case constant looks right.
+
+**`vertical-align` on an atomic inline — the largest remaining geometry
+cluster.** Round thirty-three localised it precisely: `middle` reached an
+inline-block *exactly* (both sides y=31.828125) and everything else came
+out at the engine's baseline default. `<length>` had since landed. Five
+values had not, and probing them one shape at a time would have produced
+five constants. Instead: **13 shapes × 14 values**, varying the
+line-height and the font-size on the container and on the box
+*independently*, because that is the only thing that separates a
+font-relative rule from a line-relative one.
+
+| value | where it aligns | the reading that proves it |
+|---|---|---|
+| `top` / `bottom` | the **line box**'s edges | y=0 / y=36 on a 46px line; both follow the line-height |
+| `text-top` / `text-bottom` | the **parent's content area** | y=28 / y=33 at `line-height` 10, 20 **and** 40 — unmoved |
+| `<percentage>` | the element's **own line-height** | `50%` raises 10 normally, **20** when the box declares `line-height: 40px` |
+
+`text-top`/`text-bottom` are `baseline − ascent` and
+`baseline + descent − h` in the parent's face, and the face is the parent's
+and not a constant: a **bold** parent (ascent 14, descent 4 against the
+upright face's 12/3) reads 26 and 34 where the upright one reads 28 and 33,
+and 28px and 8px parents read 16/35 and 33/32. A `font-size` or a
+`line-height` **on the box itself** moves neither. So they are resolved in
+`inline-fragments`, which has the parent's metrics, where `top`/`bottom`
+need the second pass in `inline-line-metrics` that the text path already
+had.
+
+The percentage is the discriminating pair in the other direction: the
+box's own `line-height: 40px` doubles the raise and the *container's*
+`font-size: 28px` does not change it, so the base is a line-height and it
+is the element's own. That is why the round that landed `<length>`
+deliberately did not admit it — and it is now measured rather than
+guessed.
+
+**The growth rule when a `top` and a `bottom` box ask at once.**
+`inline-line-metrics` said in its own docstring that it grew both sides
+independently, that CSS 2.1 is circular here, and that the corpus had no
+such line — "an honest approximation rather than a claim". Measured, in
+both document orders, with a 40px baseline-aligned box setting a 46px
+line:
+
+```
+top 60 + bottom 50  ->  line 60, baseline unmoved      (the top box grew it DOWN)
+top 60 + bottom 80  ->  line 80, baseline 34 lower     (the bottom box grew it UP)
+```
+
+Only the **larger** request is served; the smaller box then fits inside
+the line it made. The independent model gives the second shape 94. The two
+agree whenever only one side asks, which is every line in the corpus — so
+this changed no case and is a rule the next such line will need.
+
+**`super`/`sub` are affine in the font size, and the table was a
+one-point fit.** The constants were `0.404em` and `0.271em`, measured at
+14px and recorded as "the font's own superscript/subscript offsets, which
+a real browser reads from the OS/2 table". Swept at 17 sizes from 6 to 40,
+including fractional ones, the ratio is not constant at all — 0.457em at
+8px, 0.404 at 14, 0.369 at 28, 0.358 at 40 — and the actual law is:
+
+```
+super =  font-size/3 + 1        sub = -(font-size/5 + 1)
+```
+
+exact at every one of the 17 (to LayoutUnit's own 1/64, which the browser
+floors and this engine does not), and **identical in monospace, Arial,
+Georgia and Verdana** at 20px, so it is a function of the size and of
+nothing else — not of any font table. The affine term is what a fraction
+cannot express. The old constants were 0.42px out at 8px and 0.98px out at
+28px: **both inside the geometry axis's 2px tolerance**, which is why the
+corpus never failed on it and could not have. A sweep found it; no case
+could.
+
+**`display: inline-table` — three stacked 400px blocks.** It needed no
+sizing rule at all, unlike `inline-flex` and `inline-grid` before it: a
+table already shrink-wraps to its columns, so the only thing missing was
+that it was never inline-*level*. Brave: one 20px line, the table 28×20 at
+x=49 — the cell's four monospace characters, through the anonymous row and
+table boxes `table-rows` already generates. Its baseline is its first
+row's, which is the rule the atomic path already gives an inline-block
+holding a line of text: a cell forced to `height: 40px` centres its text
+(a cell's UA `vertical-align: middle`) and takes the line box to 40 with
+it.
+
+**`list-style-position: inside` — the 5.29px round twenty-nine recorded
+rather than modelled.** That round measured a `<ul>`'s inside marker at
+19px at 14px, 14 at 10 and 37 at 28, called it "a function of the
+font-size only", and wrote the observation into `list-style-inside?`
+because three points are not a rule. Swept at **every integer size from 6
+to 40** and at five fractional ones:
+
+```
+advance = font-size + ceil(2 x (font-size + 2) / 7)
+```
+
+Exact at all forty. Identical for `disc`, `circle` and `square`, and
+identical in Arial and in monospace — **whose space advances differ by
+3px** — so Blink is not laying out the `"• "` string this engine draws at
+all. That string is 13.70625 wide here against the browser's 19, and the
+difference is the whole of the case's residual. An `<ol>`'s inside marker
+*is* its string (21px for `1. `, 28 for `10. `, 35 for `100. `, in
+monospace), so the two list-style-types keep two rules and the `<ol>` is
+the control.
+
+Landing it exposed a second thing: the marker was being **merged into the
+item's own text run**, both in `with-generated-content` and again in the
+line breaker's adjacent-piece merge. A merged `:text` op has one x and one
+string, so the item's first word would be painted inside the gap the
+advance exists to reserve, and the whole run measured as the marker alone
+— the `<td>` shrink-wrapped to 61px where Brave says 82. An inside marker
+is a box of its own, exactly as an outside one is, and is now held out of
+both merges.
+
+**Before → after**, both measured on the corpus of 601 at this round's
+merge base (`bbe20e5`, i.e. with the whitespace-deferral round already in
+— these ran concurrently and only these deltas are this round's):
+
+| axis | before | after |
+|---|---|---|
+| line structure | 569/576 | **570/576** |
+| geometry (boxes) | 2013/2036 | **2021/2036** |
+| geometry (clean cases) | 585/601 | **591/601** |
+| paint order (points) | 14987/15009 | 14987/15009 |
+| paint order (clean cases) | 589/601 | 589/601 |
+| computed style (values) | 28615/28618 | 28615/28618 |
+| computed style (clean cases) | 599/601 | 599/601 |
+
+`--dump-ops`, corpus-wide, before and after: **eight cases changed and
+none regressed.** Six are the targets —
+`:display/inline-table-in-a-sentence`, the four `:inline/vertical-align-*`
+that sat on the baseline, and `:list/list-style-position-inside`. The
+seventh is `:inline/vertical-align-text-top`, which was *inside* the 2px
+tolerance at 30 against 28 and is now exact — a case that was passing
+while being wrong, which is the reason the per-case dump is read and not
+only the sums. The eighth is `:inline/sub-and-sup`, which moves 0.017px
+under the new super/sub law and stays clean.
+
+Downstream, all against this branch's `cssom`: `browser` 754/0, `dom-gpu`
+130/0 (its `retained_draw_ops.edn` golden needed no regeneration — no new
+op key), `htmldom` 180/0. cssom's own suite 925 tests / 2336 assertions,
+0 failures; lint 0 errors, 25 pre-existing warnings.
+
+**Still open, with the numbers a fix needs**, stated in code at
+`vertical-align-shift`: `text-top`/`text-bottom` on a **non-atomic** inline
+box. What they align there is the box's own *inline* box (its
+`line-height`, `leading-ascent` of it above the baseline), not its content
+area, so the two differ even when parent and child are the same face —
+measured, `text-top` moves an identical child **down by 2px** and takes the
+line from 20 to 22. Four measured rows are recorded there. No corpus case
+covers it.
+
 ### Round forty-two: a block cut in half, and the two rectangles a browser reports for it
 
 `layout-multicol` landed with a scope cut written into the code: **nothing
