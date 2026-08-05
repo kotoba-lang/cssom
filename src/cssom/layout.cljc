@@ -354,6 +354,246 @@
 
 (defn- text-node? [node] (string? node))
 
+;; ---- what a text run's ADVANCE is made of ----
+;;
+;; Three properties add to how far the pen moves over a string, and none
+;; of them is visible to a glyph measurement: `letter-spacing`,
+;; `word-spacing` and (under a preserving `white-space`) the tab stops
+;; `tab-size` sets. They are collected here, once, because FOUR places
+;; measure text -- layout-text for a lone text child, inline-line-breaker
+;; for a line, inline-max-content-width for a run's intrinsic width, and
+;; atomic-intrinsic-width for a control's label -- and a property added at
+;; one of them is a property the other three disagree with.
+;;
+;; What Brave 151 does, measured 2026-08-05 in the conformance harness's
+;; 14px monospace page (a bare character is 7px, its bold face is not
+;; fixed-pitch):
+;;
+;;   abcd                                28    (4 x 7)
+;;   abcd, letter-spacing: 4px           44    (4 x 7 + 4 x 4)
+;;   a,    letter-spacing: 4px           11    (1 x 7 + 1 x 4)
+;;   ab cd, letter-spacing: 4px          55    `cd` starts at 33
+;;   ab cd, word-spacing: 10px           45    `cd` starts at 31
+;;   a  b (pre), word-spacing: 10px      48    `b` starts at 41
+;;
+;; -- so letter-spacing is charged after EVERY character, the last one
+;; included (which is why a shrink-to-fit box gets wider by the whole
+;; `n x spacing`, not `(n-1) x spacing`, and why a centred line offsets by
+;; half of it), the SPACE between two words is a character like any other
+;; and takes letter-spacing too, and word-spacing is charged once per
+;; space character rather than once per gap between words.
+;;
+;; TWO measurement sites are deliberately NOT routed through this, and
+;; both answer a different question than "how wide is this string":
+;; flex-item-min-content-width / layout-table's caption width take the
+;; widest single WORD (a min-content, not a max-content, quantity), and
+;; atomic-intrinsic-width sizes a form control from `size` characters of
+;; a per-character metric (avg-advance / the `0` glyph) rather than from
+;; any string at all. Both would need their own measurement of what a
+;; spacing property does to them -- an `<input size=20>` under
+;; `letter-spacing` is not 20 spaced characters wide by inspection -- and
+;; neither is measured here, so both keep exactly the widths they had.
+
+(defn- spacing-px
+  "A `letter-spacing`/`word-spacing` cascade value as a number of pixels.
+
+   `cssom.core` has already resolved a length to a plain number by the
+   time this file sees it (`4px` -> 4, and `0.5em` -> 7 against a 14px
+   font), so the only strings that arrive here are the ones it left
+   alone: `normal` -- the initial value of both properties, and the one
+   real authors write to cancel an inherited spacing -- and anything
+   unparseable. Both are zero extra advance, which is what `normal`
+   means. A hand-built document that never went through the cascade can
+   still carry `\"4px\"`, so a string with a number in it is read rather
+   than discarded."
+  [v]
+  (cond
+    (number? v) v
+    (string? v) (parse-px v 0)
+    :else 0))
+
+(defn- space-char? [c] (= \space c))
+
+(defn- glyph-advance
+  "The bare GLYPH advance of `text` in `st`'s font: the host's real
+   `:measure-text` when the theme supplies one, else this file's
+   `(long (* 0.6 font-size))` per-character approximation -- the same two
+   answers, in the same order, every measurement site in this file has
+   always used."
+  [theme st text]
+  (let [text (str text)]
+    (if-let [mt (:measure-text theme)]
+      (mt text (:font-size st) (:font-weight st) (:font-style st) (:font-family st))
+      (* (count text) (long (* 0.6 (:font-size st 14)))))))
+
+(defn- text-advance
+  "How far the pen moves over `text` set in `st` -- `glyph-advance` plus
+   what `letter-spacing` and `word-spacing` add to it (see the section
+   comment above for the measurements the two rules come from).
+
+   Both spacings are absent from almost every real element, and both are
+   skipped entirely when zero, so this is `glyph-advance` and one
+   `zero?` test for the overwhelming majority of the text this engine
+   lays out.
+
+   `count` counts UTF-16 code units on both platforms, so a character
+   outside the BMP is charged letter-spacing twice. Measured in Brave, a
+   CJK character (which IS in the BMP) is charged once, like every other
+   character -- the divergence is confined to astral-plane text, and
+   correcting it would mean a code-point-aware count this file has no
+   other use for.
+
+   `word-spacing` is charged for U+0020 only. Real CSS also names the
+   other Unicode word-separators (U+00A0 NO-BREAK SPACE among them);
+   whitespace collapsing has already turned every separator this engine
+   ever measures into a plain space by the time it gets here, except
+   under a preserving `white-space`, where a literal NBSP would be
+   undercharged."
+  [theme st text]
+  (let [text (str text)
+        ls (spacing-px (:letter-spacing st))
+        ws (spacing-px (:word-spacing st))]
+    (cond-> (glyph-advance theme st text)
+      (not (zero? ls)) (+ (* ls (count text)))
+      (not (zero? ws)) (+ (* ws (count (filter space-char? text)))))))
+
+(defn- tab-stop-width
+  "The distance between two tab stops: `tab-size` SPACES, measured with
+   whatever `letter-spacing`/`word-spacing` are in force, or nil when the
+   property leaves no room to advance into at all.
+
+   Measured in Brave 151 on 2026-08-05, in a shrink-to-fit `<pre>` whose
+   space is 7px wide: `a<tab>b` is 63px at the initial `tab-size: 8`
+   (`a` at 0, `b` at 56 = 8 x 7), 35px at `tab-size: 4` (`b` at 28), 24.5
+   at `tab-size: 2.5`, and 14 at `tab-size: 0` -- where the tab advances
+   nothing at all and `b` sits at 7. With `letter-spacing: 2px` the stop
+   is 8 x 9 = 72, with `word-spacing: 10px` it is 8 x 17 = 136, and with
+   both it is 8 x 19 = 152: the stop is `tab-size` times the advance of a
+   space, not `tab-size` times a glyph width.
+
+   KNOWN LIMITATION, and it is upstream of this file: real `tab-size`
+   takes EITHER a `<number>` of spaces or a `<length>`, and
+   `cssom.core`'s own value parsing collapses both to a plain number
+   (`tab-size: 20px` and `tab-size: 20` both arrive as 20). This file
+   therefore reads every value as a number of spaces, which is right for
+   the number form -- the one the initial value and essentially all real
+   CSS uses -- and 7x too wide for the length form."
+  [theme st]
+  (let [n (let [v (:tab-size st)]
+            (cond (number? v) v
+                  (string? v) (parse-px v 8)
+                  :else 8))
+        w (* n (text-advance theme st " "))]
+    (when (pos? w) w)))
+
+(defn- tab-runs
+  "One line's text split at TAB characters into `[[piece pen] ...]` plus
+   the pen position it ENDS at, with `pen` measured from the line box's
+   own inline start and `start` the pen the line begins at.
+
+   A tab advances the pen to the next tab stop STRICTLY past it -- a pen
+   already sitting exactly on a stop moves a whole stop, which is what
+   makes two adjacent tabs two stops (measured: `a<tab><tab>b` is 119 =
+   7, 56, 112, 119) and a leading tab one (`<tab>b` is 63, `b` at 56).
+
+   The stops are measured from the LINE's start and not from the pen the
+   line's text begins at: measured in Brave, a `<pre>` with
+   `text-indent: 20px` puts `a` at 20 and still lands `b` on the 56px
+   stop, not on 20 + 56.
+
+   `tab-w` nil (a `tab-size` of zero) makes every tab a no-op, which is
+   the same measurement's answer."
+  [advance tab-w start line]
+  (loop [segs (str/split (str line) #"\t" -1) pen start out []]
+    (if-let [s (first segs)]
+      (let [more (next segs)
+            out (if (seq s) (conj out [s pen]) out)
+            pen (+ pen (if (seq s) (advance s) 0))
+            pen (if (and more tab-w)
+                  (* tab-w (inc (long (Math/floor (/ pen tab-w)))))
+                  pen)]
+        (recur more pen out))
+      [out pen])))
+
+;; ---- text-indent ----
+
+(def ^:private indefinite-indent-basis
+  "Above this, a `content-w` is one of this file's own
+   effectively-unconstrained MEASUREMENT widths (see
+   flex-item-shrink-to-fit-measure-width, a million pixels) rather than a
+   real line width, and a PERCENTAGE `text-indent` resolved against it
+   would be half a million pixels of indent on a box being asked how wide
+   it wants to be. Real CSS says the same thing in its own vocabulary: a
+   percentage against an indefinite basis contributes nothing to an
+   intrinsic size."
+  100000)
+
+(defn- text-indent-of
+  "A `text-indent` cascade value as `{:px :hanging? :each-line?}`.
+
+   Real CSS's own grammar is `<length-percentage> && hanging? &&
+   each-line?`, and the two keywords change WHICH lines are indented
+   rather than by how much (see indented-line?). `cssom.core` resolves
+   the single-token forms to a number (`40px` -> 40, `2em` -> 28) and
+   leaves anything with a keyword in it as the author's own string, so
+   both shapes arrive here.
+
+   Measured in Brave 151 on 2026-08-05, a percentage resolves against the
+   width of the box whose lines are being indented, NOT against its
+   containing block: `<div style=\"width:200px; text-indent:50%\"><p
+   style=\"width:100px\">alpha</p></div>` indents `alpha` by 50, not by
+   100. (The two are the same number in the far more common shape where
+   the block fills its container, which is why this needed a `<p>` with a
+   width of its own to tell apart.)
+
+   A `<length>` written with a unit inside a MULTI-token value
+   (`text-indent: 2em hanging`) reaches this file as an unresolved string
+   and is read as its leading number -- 2 pixels, not 28. Single-token
+   `2em` is resolved by the cascade and is correct; the multi-token form
+   is the one shape this file cannot resolve, because the em basis is not
+   in the string."
+  [v content-w]
+  (let [s (str v)
+        toks (remove str/blank? (str/split (str/trim s) #"\s+"))
+        hanging? (boolean (some #{"hanging"} toks))
+        each-line? (boolean (some #{"each-line"} toks))
+        len (if (number? v)
+              v
+              (first (remove #{"hanging" "each-line"} toks)))
+        px (cond
+             (number? len) len
+             (nil? len) 0
+             (str/ends-with? (str len) "%")
+             (if (<= content-w indefinite-indent-basis)
+               (* content-w (/ (parse-dbl (subs (str len) 0 (dec (count (str len)))) 0.0) 100.0))
+               0)
+             :else (parse-px len 0))]
+    {:px px :hanging? hanging? :each-line? each-line?}))
+
+(defn- indented-line?
+  "Whether the line at `i` (counted from the block's first line) carries
+   the indent, given whether it is the first line ON a forced break --
+   the block's own start, a `<br>`, or a preserved newline.
+
+   Real CSS's two keywords are two independent inversions of the same
+   rule, and Brave 151 answers all four combinations, measured
+   2026-08-05 on `<p style=\"width:200px; text-indent:30px ...\">alpha<br>
+   beta</p>`:
+
+     (neither)              alpha at 30, beta at 0
+     each-line              alpha at 30, beta at 30
+     hanging                alpha at 0,  beta at 30
+     hanging each-line      alpha at 0,  beta at 0
+
+   -- `each-line` widens the set of indented lines from {the first} to
+   {every line after a forced break}, and `hanging` complements whichever
+   set that is. A SOFT wrap is not a forced break in either case:
+   measured, the same paragraph at 120px puts a soft-wrapped third line
+   flush at 0 under `each-line`."
+  [i forced? hanging? each-line?]
+  (let [base (if each-line? forced? (zero? i))]
+    (if hanging? (not base) base)))
+
 (defn- text-lines
   "Word-wraps text into lines that each fit within max-w pixels, using the
    char-w-per-character heuristic already used elsewhere in this file for
@@ -432,10 +672,18 @@
    is a fixed char-w px wide. This is what makes wrap decisions agree with
    how a REAL proportional font actually renders -- a 'W'-heavy string
    measures wider, and wraps earlier, than an 'i'-heavy string of the same
-   character count, which the char-w approximation can never tell apart."
+   character count, which the char-w approximation can never tell apart.
+
+   `max-w` may be a FUNCTION of the line's own index instead of a single
+   number, which is what `text-indent` needs: the indented line has less
+   room than the ones after it, and which line that is depends on the
+   property's own `hanging`/`each-line` keywords (see indented-line?).
+   Every pre-existing caller passes a number and gets the identical
+   packing it always did."
   [measure max-w text]
-  (let [text (str text)]
-    (if (<= (measure text) (max 0 max-w))
+  (let [max-w-of (if (fn? max-w) max-w (constantly max-w))
+        text (str text)]
+    (if (<= (measure text) (max 0 (max-w-of 0)))
       [text]
       (let [words (remove str/blank? (str/split text #"\s+"))]
         (if (empty? words)
@@ -450,7 +698,7 @@
                   (nil? cur)
                   (recur more word lines)
 
-                  (<= (measure candidate) max-w)
+                  (<= (measure candidate) (max-w-of (count lines)))
                   (recur more candidate lines)
 
                   :else
@@ -900,12 +1148,41 @@
    same bug shape already fixed for font-weight/font-style/
    text-decoration/line-height.
 
-   `text-shadow` (a single `{:x :y :blur :color}` map arg -- consolidated
-   from 4 separate positional args to keep this fn's own arity under
-   Clojure's hard 20-positional-parameter limit, hit for real once
-   `text-overflow` below pushed the previous flat-arg signature to 21;
-   `direction` took the last free slot, so the property AFTER it has to
-   consolidate something the way `text-shadow` did rather than add a 21st)
+   `text-style` is the map every text property that does not fit as a
+   positional argument travels in, and it exists because this fn is AT
+   Clojure's hard 20-positional-parameter limit -- reached when
+   `text-overflow` pushed the flat signature to 21 and `text-shadow` was
+   consolidated from its own four args into a map to make room. The four
+   text-metric properties added after it (`letter-spacing`,
+   `word-spacing`, `tab-size`, `text-indent`) had the same choice, and
+   made it the same way: the map absorbed the shadow rather than the
+   signature growing a 21st slot. Its keys:
+
+     {:shadow {:x :y :blur :color}   ; see below
+      :letter-spacing <px> :word-spacing <px>  ; see text-advance
+      :tab-size <n>                            ; see tab-stop-width
+      :indent <raw text-indent value>}         ; see text-indent-of
+
+   `letter-spacing`/`word-spacing`/`tab-size` do not appear in this
+   function's own body beyond being handed to the shared advance helpers
+   (text-advance, tab-stop-width, tab-runs), which is the point: the
+   line breaker, the intrinsic-width measurement and this function all
+   ask the SAME function how wide a string is, so a property added there
+   cannot be missing here. Before them, all three were resolved by the
+   cascade, carried through `inherited`, and then silently dropped: a
+   `letter-spacing: 4px` paragraph wrapped and shrink-wrapped exactly as
+   if the property were not there.
+
+   `indent` is the property's raw cascade value, resolved against
+   `content-w` here rather than in the caller because real CSS resolves a
+   percentage `text-indent` against the width of the box whose lines are
+   indented -- which is the number THIS function has and the element
+   branch that reads the property does not (see text-indent-of for the
+   measurement that settles which width that is). Which lines carry it is
+   indented-line?'s answer, and the indent narrows the line it applies to
+   as well as moving it: an indented first line wraps earlier.
+
+   `text-shadow` (the `:shadow` key of that map, `{:x :y :blur :color}`)
    -- real CSS's own `text-shadow` shorthand is expanded into four
    longhand-shaped attrs at cascade-parse time (see
    `cssom.core/expand-text-shadow-shorthand`) and bundled into this map
@@ -956,13 +1233,25 @@
    text-node child has no other route to learn its containing block's
    own truncation intent) rather than a spec-accuracy claim."
   [theme x y avail-width opacity color font-size line-height font-weight font-style font-family
-   text-shadow
+   text-style
    text-decoration text-align direction text-transform white-space text-overflow overflow-wrap text]
   (let [line-height (or line-height (:line-height theme))
         padding (:padding theme)
         measure-text (:measure-text theme)
         char-w (long (* 0.6 font-size))
         content-w (max 0 (- avail-width (* 2 padding)))
+        text-shadow (:shadow text-style)
+        ;; The style bag the shared advance helpers read. It is this fn's
+        ;; own positional font args plus the two spacing properties,
+        ;; assembled here so text-advance/tab-stop-width answer for a lone
+        ;; text child exactly what they answer for the same text inside a
+        ;; line box (inline-line-breaker builds the same shape from
+        ;; inline-inherited).
+        st {:font-size font-size :font-weight font-weight :font-style font-style
+            :font-family font-family
+            :letter-spacing (:letter-spacing text-style)
+            :word-spacing (:word-spacing text-style)
+            :tab-size (:tab-size text-style)}
         ;; `white-space: normal`/`nowrap` collapse EVERY run of whitespace,
         ;; newlines included, into a single space. The parser deliberately
         ;; keeps newlines (it cannot see CSS, and `pre-line`/`pre-wrap` need
@@ -972,8 +1261,30 @@
                (str/replace (str text) #"\s+" " ")
                text)
         text (apply-text-transform text-transform text)
-        measure #(measure-text % font-size font-weight font-style font-family)
-        line-w #(if measure-text (measure %) (* (count %) char-w))
+        line-w #(text-advance theme st %)
+        ;; Preserving white-space values keep a TAB, and a tab is not a
+        ;; space: it advances to the next tab stop. `pre-line` and
+        ;; `normal`/`nowrap` collapse it to a space before it ever gets
+        ;; here (measured in Brave: `a<tab>b` is 21px under both, against
+        ;; 63 under `pre`), so only these two ever expand one.
+        tabs? (contains? #{"pre" "pre-wrap"} white-space)
+        tab-w (when tabs? (tab-stop-width theme st))
+        ;; Which lines carry `text-indent`, and how wide it is -- see
+        ;; text-indent-of for the percentage basis and indented-line? for
+        ;; the four keyword combinations.
+        {indent :px hanging? :hanging? each-line? :each-line?}
+        (text-indent-of (:indent text-style) content-w)
+        indent-of (fn [i forced?]
+                    (if (indented-line? i forced? hanging? each-line?) indent 0))
+        ;; Wrapping consults the real advance -- which is what a host's
+        ;; `:measure-text` supplies, and also what makes a spacing
+        ;; property change a wrap point at all. Without any of the three
+        ;; this stays on text-lines' own character-count packing, byte for
+        ;; byte, which is what every existing caller and test gets.
+        measured? (or (some? measure-text)
+                      (not (zero? (spacing-px (:letter-spacing st))))
+                      (not (zero? (spacing-px (:word-spacing st))))
+                      (not (zero? indent)))
         break? (contains? #{"break-word" "anywhere" "break-all"} overflow-wrap)
         ;; `overflow-wrap: break-word` splits a word that cannot fit rather
         ;; than letting it overflow -- applied AFTER the ordinary greedy
@@ -985,68 +1296,106 @@
                                         (break-long-word line-w content-w %))
                                      ls))
                         ls))
-        lines (cond
-                (= "pre" white-space) (str/split (str text) #"\n" -1)
-                (= "nowrap" white-space)
-                (let [line (str text)]
-                  [(if (= "ellipsis" text-overflow) (ellipsize line content-w line-w) line)])
-                (= "pre-wrap" white-space)
-                (mapcat #(if measure-text
-                           (text-lines-measured measure content-w %)
-                           (text-lines char-w content-w %))
-                        (str/split (str text) #"\n" -1))
-                (= "pre-line" white-space)
-                (mapcat #(let [collapsed (str/replace % #"\s+" " ")]
-                           (if measure-text
-                             (text-lines-measured measure content-w collapsed)
-                             (text-lines char-w content-w collapsed)))
-                        (str/split (str text) #"\n" -1))
-                measure-text (break-lines (text-lines-measured measure content-w text))
-                :else (break-lines (text-lines char-w content-w text)))
-        max-line-w (if measure-text
-                     (apply max 0 (map measure lines))
-                     (apply max 0 (map #(* (count %) char-w) lines)))
+        wrap (fn [max-w-of s]
+               (if measured?
+                 (text-lines-measured line-w max-w-of s)
+                 (text-lines char-w (max-w-of 0) s)))
+        ;; Each `[segment re-wrap?]` starts at a FORCED break -- the
+        ;; block's own beginning, or a preserved newline -- which is the
+        ;; distinction `text-indent: ... each-line` turns on.
+        segments (cond
+                   (= "pre" white-space) (mapv #(vector % false) (str/split (str text) #"\n" -1))
+                   (= "nowrap" white-space) [[(str text) false]]
+                   (= "pre-wrap" white-space) (mapv #(vector % true) (str/split (str text) #"\n" -1))
+                   (= "pre-line" white-space) (mapv #(vector (str/replace % #"\s+" " ") true)
+                                                    (str/split (str text) #"\n" -1))
+                   :else [[text true]])
+        ;; `{:text :indent}` per line, in document order, with `:indent`
+        ;; already resolved for that line's position in the block.
+        lines (loop [segs segments k 0 out []]
+                (if-let [[s re-wrap?] (first segs)]
+                  (let [ls (if re-wrap?
+                             (wrap (fn [i] (- content-w (indent-of (+ k i) (zero? i)))) s)
+                             [(if (and (= "nowrap" white-space) (= "ellipsis" text-overflow))
+                                (ellipsize (str s) (- content-w (indent-of k true)) line-w)
+                                (str s))])
+                        ls (if (and re-wrap? (not (contains? #{"pre-wrap" "pre-line"} white-space)))
+                             (break-lines ls)
+                             ls)]
+                    (recur (rest segs) (+ k (count ls))
+                           (into out (map-indexed
+                                      (fn [i l] {:text l :indent (indent-of (+ k i) (zero? i))})
+                                      ls))))
+                  out))
+        ;; One line, split into the runs it will be PAINTED as, each
+        ;; `[text pen]` with `pen` measured from the line box's own inline
+        ;; start -- so `pen` already carries the indent the line begins
+        ;; at, and tab stops (which are measured from the line's start,
+        ;; not from the indented pen) land where a browser puts them.
+        ;;
+        ;; Three shapes, in the order they are tested. A line holding a
+        ;; TAB is split at its tabs by tab-runs. A line with no strong
+        ;; right-to-left character is one run holding the whole line --
+        ;; literally the pre-existing single op, produced without
+        ;; measuring a single word -- so this is inert for every line that
+        ;; is not in an rtl script and holds no tab. A line that HAS an
+        ;; rtl character is split at its spaces, adjacent same-direction
+        ;; words are rejoined (so an embedded Latin phrase stays one op
+        ;; and one string, which is what keeps its own internal order
+        ;; readable), and the resulting runs are placed by
+        ;; bidi-reorder-pieces.
+        ;;
+        ;; Tabs are tested FIRST and therefore win over reordering: a
+        ;; preserved tab inside right-to-left text is not resolved, and is
+        ;; not measured anywhere either. The two features do not otherwise
+        ;; meet -- a tab only survives under `pre`/`pre-wrap`, and an rtl
+        ;; line under one of those is the one shape this chooses against.
+        ;;
+        ;; The space between two reordered runs is charged as one measured
+        ;; space, which is exact for the same reason the line breaker's
+        ;; own separator is: `white-space: normal` has already collapsed
+        ;; every whitespace run to a single space by this point.
+        visual-runs
+        (fn [{:keys [text indent]}]
+          (let [line (str text)]
+            (cond
+              (and tabs? (str/includes? line "\t"))
+              (first (tab-runs line-w tab-w indent line))
+
+              (not (strong-rtl? line))
+              [[line indent]]
+
+              :else
+              (let [sp (line-w " ")
+                    words (remove str/blank? (str/split line #" "))
+                    ;; adjacent words of the SAME direction are one run
+                    runs (reduce (fn [acc word]
+                                   (let [r? (strong-rtl? word)]
+                                     (if (and (seq acc) (= r? (:rtl? (peek acc))) (not r?))
+                                       (conj (pop acc) (update (peek acc) :text str " " word))
+                                       (conj acc {:text word :rtl? r?}))))
+                                 [] words)
+                    placed (loop [rs runs cursor indent out []]
+                             (if-let [r (first rs)]
+                               (let [rw (line-w (:text r))]
+                                 (recur (rest rs) (+ cursor rw sp) (conj out (assoc r :x cursor :w rw))))
+                               out))]
+                (mapv (juxt :text :x)
+                      (bidi-reorder-pieces (= "rtl" direction) placed))))))
+        ;; How far the pen ends up on a line, from the line box's inline
+        ;; start: the indent plus the text's advance, or -- when the line
+        ;; holds a tab -- wherever the stops leave it. This is the width
+        ;; the box shrink-wraps to, the width `text-align` offsets, and
+        ;; the width the overflow test compares, so all three see the
+        ;; indent and the tab stops.
+        line-end (fn [{:keys [text indent]}]
+                   (if (and tabs? (str/includes? (str text) "\t"))
+                     (second (tab-runs line-w tab-w indent (str text)))
+                     (+ indent (line-w (str text)))))
+        max-line-w (apply max 0 (map line-end lines))
         w (min avail-width (+ max-line-w (* 2 padding)))
         h (+ (* (count lines) line-height) (* 2 padding))
-        align-offset (fn [line] (line-align-offset text-align direction (line-w line) content-w))
-        ;; One line, split into the directional RUNS it will be painted
-        ;; as, each `[text x-within-the-line]`. A line with no strong
-        ;; right-to-left character is one run holding the whole line at
-        ;; x=0 -- literally the pre-existing single op, produced without
-        ;; measuring a single word -- so this is inert for every line
-        ;; that is not in an rtl script. A line that HAS one is split at
-        ;; its spaces, adjacent same-direction words are rejoined (so an
-        ;; embedded Latin phrase stays one op and one string, which is
-        ;; what keeps its own internal order readable), and the resulting
-        ;; runs are placed by bidi-reorder-pieces.
-        ;;
-        ;; The space between two runs is charged as one measured space,
-        ;; which is exact here for the same reason the line breaker's own
-        ;; separator is: `white-space: normal` has already collapsed
-        ;; every whitespace run to a single space by this point. Under a
-        ;; `pre`-family value it is an approximation -- runs of preserved
-        ;; spaces are re-charged as one each -- which is why this path is
-        ;; entered only when the line really does need reordering.
-        visual-runs
-        (fn [line]
-          (if-not (strong-rtl? line)
-            [[line 0]]
-            (let [sp (line-w " ")
-                  words (remove str/blank? (str/split (str line) #" "))
-                  ;; adjacent words of the SAME direction are one run
-                  runs (reduce (fn [acc word]
-                                 (let [r? (strong-rtl? word)]
-                                   (if (and (seq acc) (= r? (:rtl? (peek acc))) (not r?))
-                                     (conj (pop acc) (update (peek acc) :text str " " word))
-                                     (conj acc {:text word :rtl? r?}))))
-                               [] words)
-                  placed (loop [rs runs cursor 0 out []]
-                           (if-let [r (first rs)]
-                             (let [rw (line-w (:text r))]
-                               (recur (rest rs) (+ cursor rw sp) (conj out (assoc r :x cursor :w rw))))
-                             out))]
-              (mapv (juxt :text :x)
-                    (bidi-reorder-pieces (= "rtl" direction) placed)))))]
+        align-offset (fn [line] (line-align-offset text-align direction (line-end line) content-w))]
     (cond->
      {:box {:x x :y y :w w :h h}
       :draw (vec (mapcat
@@ -1092,13 +1441,16 @@
       ;; `elementsFromPoint` return `p` alone at x=100 -- the `<div>` is not
       ;; in the stack, so a descendant's overflow is not its ancestor's hit
       ;; region.
-      (some #(> (line-w %) content-w) lines)
+      (some #(> (line-end %) content-w) lines)
       (assoc :ink/lines
              (vec (map-indexed
                    (fn [i line]
-                     {:x (+ x padding (align-offset line))
+                     ;; the INK, not the line box: an indented line's own
+                     ;; glyphs start at the indent and end where the pen
+                     ;; does, so the region is the difference of the two.
+                     {:x (+ x padding (align-offset line) (:indent line))
                       :y (+ y padding (* i line-height))
-                      :w (line-w line)
+                      :w (- (line-end line) (:indent line))
                       :h line-height})
                    lines))))))
 
@@ -1770,6 +2122,17 @@
    :text-decoration (style node :text-decoration)
    :text-align (style node :text-align)
    :text-transform (style node :text-transform)
+   ;; The four TEXT-METRIC properties, all four of them inherited in real
+   ;; CSS and all four read here RAW: `letter-spacing`/`word-spacing`
+   ;; because `normal` is a keyword and not a length (spacing-px), and
+   ;; `text-indent` because a percentage in it resolves against the width
+   ;; of the box whose lines are indented, which nothing at this layer
+   ;; knows (text-indent-of). `tab-size` arrives as a bare number either
+   ;; way -- see tab-stop-width for the one thing that costs.
+   :letter-spacing (style node :letter-spacing)
+   :word-spacing (style node :word-spacing)
+   :text-indent (style node :text-indent)
+   :tab-size (style node :tab-size)
    ;; `transform`/`transform-origin` are read RAW: they are function lists
    ;; and position pairs, not lengths, and the one place that parses them
    ;; (transform-list-matrix / transform-origin-point) needs the element's
@@ -5155,7 +5518,36 @@
                               :font-weight (or (:font-weight st) (:font-weight inherited))
                               :font-style (or (:font-style st) (:font-style inherited))
                               :font-family (or (:font-family st) (:font-family inherited))
-                              :text-transform (or (:text-transform st) (:text-transform inherited)))
+                              :text-transform (or (:text-transform st) (:text-transform inherited))
+                              ;; the text-metric properties belong to the
+                              ;; same merge for the same reason the font
+                              ;; ones do: a `letter-spacing: 4px` item is
+                              ;; WIDER, and measuring it without them
+                              ;; shrink-wraps the box to the wrong number.
+                              ;; Measured in Brave, `<span
+                              ;; style="display:inline-block;
+                              ;; letter-spacing:4px">abcd</span>` is 44,
+                              ;; not 28.
+                              :letter-spacing (or (:letter-spacing st) (:letter-spacing inherited))
+                              :word-spacing (or (:word-spacing st) (:word-spacing inherited))
+                              :text-indent (or (:text-indent st) (:text-indent inherited))
+                              :tab-size (or (:tab-size st) (:tab-size inherited))
+                              ;; ...and `white-space`, which was missing
+                              ;; from this merge and belongs to it for
+                              ;; exactly the same reason: it decides
+                              ;; whether the text being measured keeps its
+                              ;; runs of spaces, its newlines and its
+                              ;; tabs, and layout-text was collapsing all
+                              ;; three away because the element's own
+                              ;; declaration never reached it. Measured in
+                              ;; Brave, `<pre style="display:inline-
+                              ;; block">a<tab>b</pre>` is 63px wide -- the
+                              ;; tab reaching its 8-column stop -- and
+                              ;; `<pre style="display:inline-block">
+                              ;; ___ind</pre>` is 42, six preserved
+                              ;; characters; this engine said 21 and 28,
+                              ;; i.e. `a b` and ` ind`.
+                              :white-space (or (:white-space st) (:white-space inherited)))
         text-box (:box (layout-node theme 0 0 flex-item-shrink-to-fit-measure-width opacity text-inherited text))]
     ;; the SAME horizontal inset layout-block will subtract -- see
     ;; intrinsic-inset-x for why the uniform `:padding` is not it.
@@ -5544,16 +5936,20 @@
    a run, and a run has no insets. Every caller adds the inset it is
    responsible for -- which is what lets block-max-content-width compare
    an inline run against a block child's width without one of them
-   carrying the parent's padding twice."
+   carrying the parent's padding twice.
+
+   `text-indent` IS included, because real CSS's max-content size counts
+   it: measured in Brave, `<span style=\"display:inline-block;
+   text-indent:30px\">abcd</span>` is 58px wide, exactly the 28px of text
+   plus the indent. Only the FIRST line's indent can apply here -- a
+   max-content run is one line by definition -- so `hanging` (which
+   indents every line EXCEPT the first) contributes nothing, which is the
+   same answer for the same reason."
   [theme content-w opacity inherited st children]
-  (let [inherited (inline-inherited inherited st)
+  (let [block-indent (text-indent-of (or (:text-indent st) (:text-indent inherited)) content-w)
+        inherited (inline-inherited inherited st)
         tokens (inline-tokens (:fragments (inline-fragments theme inherited opacity content-w children)))
-        measure-text (:measure-text theme)
-        w-of (fn [text style]
-               (if measure-text
-                 (measure-text text (:font-size style) (:font-weight style)
-                               (:font-style style) (:font-family style))
-                 (* (count text) (long (* 0.6 (:font-size style 14))))))]
+        w-of (fn [text style] (text-advance theme style text))]
     (reduce (fn [total t]
               (case (:kind t)
                 :break total
@@ -5568,7 +5964,9 @@
                 (+ total
                    (w-of (:text t) (:style t))
                    (if (:space-before? t) (w-of " " (or (:space-style t) (:style t))) 0))))
-            0
+            (if (indented-line? 0 true (:hanging? block-indent) (:each-line? block-indent))
+              (:px block-indent)
+              0)
             tokens)))
 
 (defn- intrinsic-flow-children
@@ -7947,7 +8345,23 @@
            :text-shadow-blur (or (:text-shadow-blur st) (:text-shadow-blur inherited))
            :text-shadow-color (or (:text-shadow-color st) (:text-shadow-color inherited))
            :text-decoration (or (:text-decoration st) (:text-decoration inherited))
-           :text-transform (or (:text-transform st) (:text-transform inherited)))))
+           :text-transform (or (:text-transform st) (:text-transform inherited))
+           ;; The two spacings an inline box can change for its OWN text
+           ;; and everything nested in it -- measured in Brave, `a <b
+           ;; style=\"letter-spacing:3px\">wide</b> b` makes the `<b>`
+           ;; 42.69 wide against 30.68 bare, and the space AFTER it is
+           ;; still the paragraph's own (the separator belongs to the run
+           ;; that owns the whitespace, which inline-tokens already
+           ;; tracks as `:space-style`).
+           ;;
+           ;; `text-indent` is deliberately NOT here: it indents a
+           ;; block's LINES, and declaring it on an inline box does
+           ;; nothing at all (measured: `a <span
+           ;; style=\"text-indent:40px\">bb</span> c` puts every word
+           ;; exactly where it sits without it). The run's indent comes
+           ;; from the containing block, in layout-inline-run.
+           :letter-spacing (or (:letter-spacing st) (:letter-spacing inherited))
+           :word-spacing (or (:word-spacing st) (:word-spacing inherited)))))
 
 (defn- inline-fragments
   "Flattens an inline run (a vector of adjacent inline-flow-candidate?
@@ -8510,13 +8924,30 @@
    break. A closing edge belongs to the line the box's last content landed
    on, which is not always the line the pen is on when the NEXT token
    arrives, so it is applied to the piece it follows rather than to the
-   pen (see `close!`)."
-  [theme content-w tokens]
-  (let [measure-text (:measure-text theme)
-        w-of (fn [text st]
-               (if measure-text
-                 (measure-text text (:font-size st) (:font-weight st) (:font-style st) (:font-family st))
-                 (* (count text) (long (* 0.6 (:font-size st))))))
+   pen (see `close!`).
+
+   `indent` is the containing block's `text-indent`, already resolved by
+   layout-inline-run into `{:px :hanging? :each-line?}` (nil when the
+   property is absent, which is almost always). A line that carries the
+   indent starts its pen there instead of at 0, which is both halves of
+   what the property does at once: the line's first piece moves right,
+   and the line has that much less room to wrap in. Measured in Brave,
+   `<p style=\"width:100px; text-indent:30px\">alpha <b>beta</b>
+   gamma</p>` breaks before `beta` -- 30 + 35 + 7 + 30.52 is 102.52 --
+   where the same paragraph without the indent fits `alpha beta` on line
+   one. The resulting line `:w` INCLUDES the indent, which is what makes
+   `text-align` land where a browser puts it with no second rule: the
+   same paragraph centred at 200px sits at 104.91, i.e. 40 + (200 -
+   70.19)/2, and that is exactly `line-align-offset` of a 70.19-wide
+   line plus the piece's own 40.
+
+   A `<br>` is a FORCED break here, which is the distinction
+   `text-indent: ... each-line` turns on; a wrap is not."
+  [theme content-w tokens indent]
+  (let [w-of (fn [text st] (text-advance theme st text))
+        {ind :px hanging? :hanging? each-line? :each-line?} indent
+        indent-at (fn [i forced?]
+                    (if (and ind (indented-line? i forced? hanging? each-line?)) ind 0))
         ;; An outside list marker is a piece on the line but not CONTENT on
         ;; it: every question this loop asks about "is there anything on the
         ;; line already" -- does a space separate me from it, must I wrap
@@ -8561,7 +8992,7 @@
                         pieces x])
 
                      :else [lines pieces x])))]
-    (loop [ts tokens x 0 pieces [] lines [] prev []]
+    (loop [ts tokens x (indent-at 0 true) pieces [] lines [] prev []]
       (if-let [t (first ts)]
         ;; An OUTSIDE list marker gets a piece whose x is its own NEGATIVE
         ;; width and which does not move the pen: it is painted in the
@@ -8612,7 +9043,7 @@
               ;; layout-inline-run can give it a real (zero-width) box. A
               ;; browser reports one there, and without it every <br> was a
               ;; missing element on the geometry axis.
-              (recur (rest ts) 0 []
+              (recur (rest ts) (indent-at (inc (count lines)) true) []
                      (conj lines {:pieces pieces :w x :style (:style t)
                                   :break-owners (:owners t)})
                      owners)
@@ -8629,8 +9060,9 @@
                                                  :kind :atomic :x x :w (:w t))
                                     (seq pad-start) (assoc :pad-start pad-start)))]
                 (if (and (content? pieces) (> (+ x sep open-adv (:w t) tail-adv) content-w))
-                  (recur (rest ts) (+ open-adv (:w t)) [(piece open-adv)]
-                         (flush lines pieces x nil) owners)
+                  (let [nx (indent-at (inc (count lines)) false)]
+                    (recur (rest ts) (+ nx open-adv (:w t)) [(piece (+ nx open-adv))]
+                           (flush lines pieces x nil) owners))
                   (recur (rest ts) (+ x sep open-adv (:w t))
                          (conj pieces (piece (+ x sep open-adv))) lines owners)))
 
@@ -8647,8 +9079,9 @@
                                            :shift (:shift t 0) :valign (:valign t) :rtl? rtl?}
                                     (seq pad-start) (assoc :pad-start pad-start)))]
                 (if (and (content? pieces) (> (+ x sep open-adv ww tail-adv) content-w))
-                  (recur (rest ts) (+ open-adv ww) [(piece open-adv)]
-                         (flush lines pieces x st) owners)
+                  (let [nx (indent-at (inc (count lines)) false)]
+                    (recur (rest ts) (+ nx open-adv ww) [(piece (+ nx open-adv))]
+                           (flush lines pieces x st) owners))
                   (let [last-piece (peek pieces)
                         merge? (and last-piece
                                     (not= :marker (:kind last-piece))
@@ -9060,7 +9493,12 @@
   (let [padding (:padding theme)
         inner-w (max 0 (- content-w (* 2 padding)))
         {fragments :fragments oof :out-of-flow} (inline-fragments theme inherited opacity inner-w items)
-        lines (inline-line-breaker theme inner-w (inline-tokens fragments))
+        ;; `text-indent` belongs to the block whose lines these are, not
+        ;; to any inline box on them (see inline-inherited), and its
+        ;; percentage resolves against that block's own content width --
+        ;; which is `inner-w`, the width the breaker wraps against.
+        lines (inline-line-breaker theme inner-w (inline-tokens fragments)
+                                   (text-indent-of (:text-indent inherited) inner-w))
         text-align (:text-align inherited)
         direction (:direction inherited)
         rtl? (= "rtl" direction)
@@ -11795,15 +12233,32 @@
            white-space (or (:white-space gstyle) (:white-space inherited))
            text-overflow (or (:text-overflow gstyle) (:text-overflow inherited))]
        (layout-text theme x y avail-width opacity color font-size line-height font-weight font-style font-family
-                    {:x text-shadow-x :y text-shadow-y :blur text-shadow-blur :color text-shadow-color}
+                    {:shadow {:x text-shadow-x :y text-shadow-y
+                              :blur text-shadow-blur :color text-shadow-color}
+                     ;; A generated ::before/::after can override its own
+                     ;; font and colour, but the four text-metric
+                     ;; properties come from the element it hangs off --
+                     ;; a marker sits in its item's own letter-spacing.
+                     :letter-spacing (:letter-spacing inherited)
+                     :word-spacing (:word-spacing inherited)
+                     :tab-size (:tab-size inherited)
+                     ;; ...except `text-indent`, which the generated
+                     ;; content's OWN block has already applied to its
+                     ;; first line: charging it again here would indent a
+                     ;; marker twice.
+                     :indent nil}
                     text-decoration text-align (:direction inherited) text-transform white-space text-overflow
                     (:overflow-wrap inherited) (:generated/text node)))
 
      (text-node? node)
      (layout-text theme x y avail-width opacity (:color inherited) (:font-size inherited) (:line-height inherited)
                   (:font-weight inherited) (:font-style inherited) (:font-family inherited)
-                  {:x (:text-shadow-x inherited) :y (:text-shadow-y inherited)
-                   :blur (:text-shadow-blur inherited) :color (:text-shadow-color inherited)}
+                  {:shadow {:x (:text-shadow-x inherited) :y (:text-shadow-y inherited)
+                            :blur (:text-shadow-blur inherited) :color (:text-shadow-color inherited)}
+                   :letter-spacing (:letter-spacing inherited)
+                   :word-spacing (:word-spacing inherited)
+                   :tab-size (:tab-size inherited)
+                   :indent (:text-indent inherited)}
                   (:text-decoration inherited)
                   (:text-align inherited) (:direction inherited)
                   (:text-transform inherited) (:white-space inherited)
@@ -11856,6 +12311,17 @@
                white-space (or (:white-space st) (:white-space inherited))
                text-overflow (or (:text-overflow st) (:text-overflow inherited))
                overflow-wrap (or (:overflow-wrap st) (:word-break st) (:overflow-wrap inherited))
+               ;; The four text-metric properties inherit like every other
+               ;; text property on this map. `text-indent` inherits its RAW
+               ;; value on purpose: a percentage is resolved against the
+               ;; box whose lines it indents, so a `text-indent: 50%`
+               ;; declared on a container and inherited by a narrower child
+               ;; is 50% of the CHILD (measured -- see text-indent-of), and
+               ;; resolving it here would freeze the container's number.
+               letter-spacing (or (:letter-spacing st) (:letter-spacing inherited))
+               word-spacing (or (:word-spacing st) (:word-spacing inherited))
+               text-indent (or (:text-indent st) (:text-indent inherited))
+               tab-size (or (:tab-size st) (:tab-size inherited))
                ;; ---- how much of `direction: rtl` this engine implements ----
                ;;
                ;; `direction` is an inherited property, so it travels on the
@@ -11914,7 +12380,9 @@
                                 :text-decoration text-decoration :text-align text-align
                                 :text-transform text-transform :white-space white-space
                                 :text-overflow text-overflow
-                                :overflow-wrap overflow-wrap)
+                                :overflow-wrap overflow-wrap
+                                :letter-spacing letter-spacing :word-spacing word-spacing
+                                :text-indent text-indent :tab-size tab-size)
                tag (:tag node)
                children (laid-out-children theme node)]
            ;; ---- the one place a `transform` is applied ----

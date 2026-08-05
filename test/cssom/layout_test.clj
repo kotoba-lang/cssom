@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [cssom.core :as css]
             [cssom.layout :as layout]
+            [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 
 (deftest draw-ops-projects-button-and-text
@@ -9385,6 +9386,240 @@
     (is (= 80 (h "min-height:80px")))
     (is (= 20 (h "max-height:20px")))))
 
+;; ---- text metrics: letter-spacing, word-spacing, tab-size, text-indent ----
+;;
+;; Every number asserted below was measured in Brave 151 on 2026-08-05, in
+;; the conformance harness's own frame -- 14px monospace, a 20px line box,
+;; a plain character 7px wide -- and `metric-*` reproduces that frame with
+;; a fixed 7px-per-character `:measure-text` so the assertions are the
+;; browser's own numbers rather than this engine's 0.6-em approximation of
+;; them. Where the browser's answer depends on its BOLD face (which is not
+;; fixed-pitch, so a synthetic table cannot reproduce it), the assertion is
+;; on the DIFFERENCE the property makes, which is face-independent.
+;;
+;; All four properties reached `cssom.layout` -- they resolve in the
+;; cascade and travel on the inherited style map -- and none of them was
+;; ever read: a `letter-spacing: 4px` paragraph wrapped exactly where the
+;; same paragraph without it wrapped, a shrink-to-fit box measured the same
+;; width either way, `text-indent` appeared nowhere in the file at all, and
+;; a preserved tab was charged as a single space.
+
+(def ^:private tm-theme
+  {:padding 0 :gap 0
+   :measure-text (fn [text font-size _weight _style _family]
+                   (* (/ (or font-size 14) 14) 7.0 (count (str text))))})
+
+(defn- tm-ops [html]
+  (let [doc (-> (html/parse-into-document
+                 (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">" html "</div>"))
+                (css/apply-cascade (css/parse-rules "")))
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc) {:width 800 :theme tm-theme})))
+
+(defn- tm-n
+  "A coordinate as the number it IS: an exact integer stays one, and only
+   a genuinely fractional result reads as a decimal. Without this every
+   assertion below would have to spell `44.0`, because the advance
+   arithmetic runs in doubles whether or not the answer has a fraction."
+  [n]
+  (if (and (number? n) (== n (long n))) (long n) n))
+
+(defn- tm-boxes
+  "Every element box except the `#root` wrapper, as `[tag x y w h]`."
+  [html]
+  (->> (tm-ops html)
+       (filter #(= :node (:draw/op %)))
+       (drop 2)
+       (mapv (fn [o] (into [(:tag o)] (map tm-n ((juxt :x :y :w :h) o)))))))
+
+(defn- tm-texts [html]
+  (->> (tm-ops html)
+       (filter #(= :text (:draw/op %)))
+       (mapv (fn [o] [(:text o) (tm-n (:x o)) (tm-n (:y o))]))))
+
+(defn- tm-box [tag html]
+  (first (filter #(= tag (first %)) (tm-boxes html))))
+
+(deftest letter-spacing-is-charged-after-every-character-including-the-last
+  ;; Brave: `abcd` is 28 bare and 44 at 4px/char -- 4 x 4, not 3 x 4, so
+  ;; the spacing after the FINAL character is part of the run's width and
+  ;; therefore part of a shrink-to-fit box's. A single character shows the
+  ;; same rule with nothing to hide behind: 7 + 4 = 11.
+  (is (= [:span 0 0 44 20]
+         (tm-box :span "<span style=\"display:inline-block; letter-spacing:4px\">abcd</span>")))
+  (is (= [:span 0 0 11 20]
+         (tm-box :span "<span style=\"display:inline-block; letter-spacing:4px\">a</span>"))))
+
+(deftest letter-spacing-is-charged-for-the-space-between-two-words-too
+  ;; Brave: `ab cd` at 4px/char is 55 -- five characters, the space
+  ;; included -- and puts `cd` at 33: 22 for `ab`, then 7 + 4 for the space.
+  (is (= [:span 0 0 55 20]
+         (tm-box :span "<span style=\"display:inline-block; letter-spacing:4px\">ab cd</span>"))))
+
+(deftest word-spacing-is-charged-once-per-space-character
+  ;; Brave: `ab cd` at word-spacing 10px is 45 (35 + one space), and a
+  ;; PRESERVED double space is charged twice: `a  b` is 48, not 38.
+  (is (= [:span 0 0 45 20]
+         (tm-box :span "<span style=\"display:inline-block; word-spacing:10px\">ab cd</span>")))
+  (is (= [:pre 0 0 48 20]
+         (tm-box :pre (str "<pre style=\"display:inline-block; margin:0; word-spacing:10px\">"
+                           "a  b</pre>")))))
+
+(deftest letter-spacing-changes-where-a-line-wraps-in-both-directions
+  ;; The pair that separates "the spacing is wrong" from "the spacing is
+  ;; ignored". Brave: `alpha beta` is 70px bare, so it fits 100px on one
+  ;; line -- but 110px at 4px/char, which does not; and it does NOT fit
+  ;; 60px bare, but 50px at -2px/char does.
+  (is (= [:p 0 0 100 40]
+         (tm-box :p "<div style=\"width:100px\"><p style=\"letter-spacing:4px\">alpha beta</p></div>")))
+  (is (= [:p 0 0 60 20]
+         (tm-box :p "<div style=\"width:60px\"><p style=\"letter-spacing:-2px\">alpha beta</p></div>"))))
+
+(deftest letter-spacing-inherits-into-a-block-child-and-wraps-it
+  ;; Declared on the container, not on the paragraph: Brave wraps this to
+  ;; two lines for the same reason the declaration above does.
+  (is (= [:p 0 0 100 40]
+         (tm-box :p "<div style=\"width:100px; letter-spacing:4px\"><p>alpha beta</p></div>"))))
+
+(deftest letter-spacing-on-an-inline-child-widens-that-childs-box-only
+  ;; Brave: the `<b>` is 42.69 wide against 30.68 bare -- exactly 4
+  ;; characters x 3px more -- and the space AFTER it is still the
+  ;; paragraph's own, so the following word moves by the same 12 and not
+  ;; by 12 + 3. Asserted as the difference because the browser's bold face
+  ;; is not fixed-pitch and no synthetic advance table reproduces its
+  ;; absolute width.
+  (let [w #(nth (tm-box :b (str "<p>a <b style=\"" % "\">wide</b> b</p>")) 3)
+        x #(nth (last (tm-texts (str "<p>a <b style=\"" % "\">wide</b> b</p>"))) 1)]
+    (is (= 12 (- (w "letter-spacing:3px") (w ""))))
+    (is (= 12 (- (x "letter-spacing:3px") (x ""))))))
+
+(deftest word-spacing-on-an-inline-child-charges-its-own-spaces-only
+  ;; Brave: `<b style="word-spacing:10px">one two</b>` is 64.14 against
+  ;; 54.14 bare -- one space, 10px -- and the two spaces around it, which
+  ;; belong to the paragraph, are not charged.
+  (let [w #(nth (tm-box :b (str "<p>a <b style=\"" % "\">one two</b> b</p>")) 3)]
+    (is (= 10 (- (w "word-spacing:10px") (w ""))))))
+
+(deftest text-indent-moves-and-narrows-the-first-line-only
+  ;; Brave: `alpha beta gamma delta` is 154px and fits 160px unindented; a
+  ;; 40px indent pushes `delta` onto a second line, and that second line
+  ;; starts flush at 0.
+  (is (= [["alpha beta gamma" 40 0] ["delta" 0 20]]
+         (tm-texts "<p style=\"width:160px; text-indent:40px\">alpha beta gamma delta</p>"))))
+
+(deftest text-indent-percentage-resolves-against-the-indented-boxs-own-width
+  ;; Brave: 50% inside a 200px block is 100 -- and, in the shape that tells
+  ;; the two candidate bases apart, 50% INHERITED into a 100px-wide child
+  ;; is 50, not the 100 its containing block would give.
+  (is (= [["alpha beta" 100 0] ["gamma" 0 20]]
+         (tm-texts "<div style=\"width:200px\"><p style=\"text-indent:50%\">alpha beta gamma</p></div>")))
+  (is (= [["alpha" 50 0]]
+         (tm-texts (str "<div style=\"width:200px; text-indent:50%\">"
+                            "<p style=\"width:100px\">alpha</p></div>")))))
+
+(deftest text-indent-hanging-and-each-line-are-two-independent-inversions
+  ;; All four combinations, measured in Brave on `alpha<br>beta` in a
+  ;; 200px paragraph at 30px: neither -> 30/0, each-line -> 30/30,
+  ;; hanging -> 0/30, hanging each-line -> 0/0. `each-line` widens the set
+  ;; of indented lines from {the first} to {every line after a forced
+  ;; break}; `hanging` complements whichever set that is.
+  (let [t (fn [decl] (tm-texts (str "<p style=\"width:200px; text-indent:" decl
+                                        "\">alpha<br>beta</p>")))]
+    (is (= [["alpha" 30 0] ["beta" 0 20]] (t "30px")))
+    (is (= [["alpha" 30 0] ["beta" 30 20]] (t "30px each-line")))
+    (is (= [["alpha" 0 0] ["beta" 30 20]] (t "30px hanging")))
+    (is (= [["alpha" 0 0] ["beta" 0 20]] (t "30px hanging each-line")))))
+
+(deftest text-indent-hanging-indents-soft-wrapped-lines-too
+  ;; Brave wraps this to THREE lines where the same text without `hanging`
+  ;; wraps to two: every line after the first loses 40px of room.
+  (is (= [["alpha beta gamma delta" 0 0] ["epsilon zeta eta" 40 20] ["theta" 40 40]]
+         (tm-texts (str "<p style=\"width:160px; text-indent:40px hanging\">"
+                            "alpha beta gamma delta epsilon zeta eta theta</p>")))))
+
+(deftest text-indent-widens-a-shrink-to-fit-box-and-does-nothing-on-an-inline-box
+  ;; Brave: an inline-block with a 30px indent is 58 wide, exactly its 28px
+  ;; of text plus the indent -- text-indent is part of a max-content size.
+  ;; Declared on an INLINE box it does nothing at all, because it indents a
+  ;; block's lines and an inline box has none of its own.
+  (is (= [:span 0 0 58 20]
+         (tm-box :span (str "<div style=\"width:400px\">"
+                            "<span style=\"display:inline-block; text-indent:30px\">abcd</span></div>"))))
+  (is (= [["a" 0 0] ["bb" 14 0] ["c" 35 0]]
+         (tm-texts (str "<p style=\"width:200px\">a "
+                            "<span style=\"text-indent:40px\">bb</span> c</p>")))))
+
+(deftest text-indent-is-inside-the-width-text-align-centres
+  ;; Brave puts `abcd` at 106 in a 200px paragraph with a 40px indent and
+  ;; `text-align: center` -- 40 + (200 - 68)/2, i.e. the line is centred at
+  ;; its full INDENTED width rather than the indent being added afterwards.
+  (is (= [["abcd" 106 0]]
+         (tm-texts "<p style=\"width:200px; text-indent:40px; text-align:center\">abcd</p>")))
+  (is (= [["abcd" 172 0]]
+         (tm-texts "<p style=\"width:200px; text-indent:40px; text-align:right\">abcd</p>"))))
+
+(deftest a-preserved-tab-advances-to-the-next-tab-stop-not-by-one-space
+  ;; Brave, on a shrink-to-fit `<pre>` whose space is 7px: `a<tab>b` is 63
+  ;; at the initial `tab-size: 8` (`b` at 56) and 35 at `tab-size: 4` (`b`
+  ;; at 28). The pair is what separates "the stop is wrong" from
+  ;; "`tab-size` is ignored"; this engine said 21 for both, having charged
+  ;; the tab as a single space. `tab-size: 0` leaves nothing to advance
+  ;; into, and `b` sits at 7.
+  (let [pre (fn [decl] (tm-box :pre (str "<pre style=\"display:inline-block; margin:0;"
+                                         decl "\">a\tb</pre>")))]
+    (is (= [:pre 0 0 63 20] (pre "")))
+    (is (= [:pre 0 0 35 20] (pre "tab-size:4")))
+    (is (= [:pre 0 0 14 20] (pre "tab-size:0")))))
+
+(deftest a-tab-stop-is-strictly-past-the-pen-so-two-tabs-are-two-stops
+  ;; Brave: `a<tab><tab>b` is 119 (7 -> 56 -> 112 -> 119), a LEADING tab
+  ;; from a pen already at 0 still moves a whole stop (`<tab>b` is 63), and
+  ;; a pen that has passed a stop goes to the NEXT one (`abcdefghi` is 63
+  ;; and its tab lands on 112, not on 56).
+  (is (= [["a" 0 0] ["b" 112 0]]
+         (tm-texts "<pre style=\"display:inline-block; margin:0\">a\t\tb</pre>")))
+  (is (= [["b" 56 0]]
+         (tm-texts "<pre style=\"display:inline-block; margin:0\">\tb</pre>")))
+  (is (= [["abcdefghi" 0 0] ["b" 112 0]]
+         (tm-texts "<pre style=\"display:inline-block; margin:0\">abcdefghi\tb</pre>"))))
+
+(deftest a-tab-stop-is-tab-size-SPACES-so-the-spacing-properties-move-it
+  ;; Brave: with `letter-spacing: 2px` the space is 9 and the stop is
+  ;; 8 x 9 = 72; with `word-spacing: 10px` it is 8 x 17 = 136. The stop is
+  ;; `tab-size` ADVANCES of a space, not `tab-size` glyph widths.
+  (is (= [["ab" 0 0] ["c" 72 0]]
+         (tm-texts (str "<pre style=\"display:inline-block; margin:0; letter-spacing:2px\">"
+                            "ab\tc</pre>"))))
+  (is (= [["a" 0 0] ["b" 136 0]]
+         (tm-texts (str "<pre style=\"display:inline-block; margin:0; word-spacing:10px\">"
+                            "a\tb</pre>")))))
+
+(deftest tab-stops-are-measured-from-the-line-start-not-from-the-indent
+  ;; Brave: a `<pre>` with `text-indent: 20px` puts `a` at 20 and still
+  ;; lands `b` on the 56px stop -- the stops are absolute within the line
+  ;; box -- so the box is 63 wide rather than 20 + 63.
+  (let [h "<pre style=\"display:inline-block; margin:0; text-indent:20px\">a\tb</pre>"]
+    (is (= [["a" 20 0] ["b" 56 0]] (tm-texts h)))
+    (is (= [:pre 0 0 63 20] (tm-box :pre h)))))
+
+(deftest a-tab-under-a-collapsing-white-space-is-just-a-space
+  ;; `pre-line` and `normal` both collapse a tab away before it can reach a
+  ;; stop -- measured in Brave, `a<tab>b` is 21px under either, against 63
+  ;; under `pre`.
+  (is (= [:pre 0 0 21 20]
+         (tm-box :pre (str "<pre style=\"display:inline-block; margin:0; white-space:pre-line\">"
+                           "a\tb</pre>")))))
+
+(deftest a-shrink-to-fit-box-measures-its-own-white-space-declaration
+  ;; A gap this cycle found rather than went looking for:
+  ;; flex-item-natural-text-width merged the element's font properties into
+  ;; the style it measured against and NOT `white-space`, so a
+  ;; shrink-to-fit box was always measured with its runs of spaces
+  ;; collapsed and its tabs gone -- which is also why every tab assertion
+  ;; above needed it. Brave: `<pre style="display:inline-block">___ind</pre>`
+  ;; is 42, six preserved characters, where this engine said 28.
+  (is (= [:pre 0 0 42 20]
+         (tm-box :pre "<pre style=\"display:inline-block; margin:0\">   ind</pre>"))))
 ;; ---- CSS multi-column layout --------------------------------------------
 ;;
 ;; Every expectation below is a number a real Blink browser produced for
