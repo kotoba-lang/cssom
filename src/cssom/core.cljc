@@ -4830,23 +4830,40 @@
      `<dialog open>Hi</dialog>` as 48x54 and this engine drew 300x20,
      which is now 300x54.
 
-   And the rest of `dialog`'s UA rule, measured at the same time and
-   deliberately NOT written, because writing it would remove the harness's
-   ability to see the divergence without removing the divergence:
-   `position: absolute; left: 0; right: 0; width: fit-content;
-   height: fit-content; margin: auto`. Brave puts that same dialog at
-   x=126 with width 48 inside a 300px `position: relative` parent, i.e.
-   `(300 - 48) / 2` on each side, and reports the auto margins as the used
-   126px. This engine cannot: `explicit-width`'s own docstring records
-   `fit-content` as a scope cut that behaves as `auto`, so the box stays
-   300 wide, the leftover space is zero, and `margin: auto` resolves to 0.
-   Measured with the declarations added: NOT ONE BOX MOVES, and the
-   computed-style axis loses four values -- `margin-left`/`margin-right`
-   go from a scored mismatch (0 against 126px) to EXCLUDED as
-   non-absolute, and `margin-top`/`margin-bottom`, which agree today at 0,
-   go from scored to excluded too. The order this wants is intrinsic
-   sizing first, then this declaration; see `explicit-width` for the two
-   facts that fix needs."
+     And the REST of `dialog`'s UA rule, written on 2026-08-06 once
+     `cssom.layout` could resolve `fit-content`: `position: absolute;
+     left: 0; right: 0; width: fit-content; height: fit-content;
+     margin: auto`. It was measured a round earlier and deliberately left
+     out then, because adding it would have moved the numbers without
+     converging on them -- and that was measured too: with the
+     declarations added and `fit-content` still behaving as `auto`, NOT
+     ONE BOX MOVED. The box stayed 300 wide, so the leftover space the
+     auto margins are supposed to split was zero.
+
+     Re-measured in Brave 151 over CDP on 2026-08-06, `<dialog open>Hi
+     </dialog>` inside a 300px `position: relative` parent: the box is
+     48x54 at x=126, `getComputedStyle` reports `width: 14px` (the
+     fit-content size of `Hi`), `height: 20px`, `margin: 0px 126px` --
+     i.e. `(300 - 48) / 2` on each inline side and ZERO on the block
+     sides -- `left: 0px`, `right: 0px`, and `top` resolved to the box's
+     own STATIC position, which is what says `top` is `auto` in the UA
+     sheet and only the inline insets are written. Confirmed by moving
+     the same dialog into a case with no positioned ancestor: it centres
+     in the 756px viewport (x=354) and its `top` reads back as that
+     case's own offset down the page (124px), which no declared `top`
+     could produce.
+
+     Written as four `margin-*` longhands for the same reason the padding
+     is: `auto` is not a length, so expand-box-side-shorthand correctly
+     declines to expand `margin: auto`, and everything that reads a
+     per-side margin -- `auto-margin?` in `cssom.layout`, and
+     `getComputedStyle` -- would then see nothing.
+
+     Measured but NOT written, because neither changes a box or any of
+     the fourteen properties the computed-style axis compares:
+     `background-color: rgb(255,255,255)` and `color: rgb(0,0,0)`. This
+     engine's default page is dark, so writing them would repaint every
+     dialog white on a surface nothing else in the corpus can judge."
   "
   html, body, address, article, aside, blockquote, center, dd, details,
   dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form,
@@ -4938,7 +4955,11 @@
              padding-bottom: 0.625em; padding-left: 0.75em }
   dialog { padding-top: 1em; padding-right: 1em;
            padding-bottom: 1em; padding-left: 1em;
-           border-width: 3px; border-style: solid }
+           border-width: 3px; border-style: solid;
+           position: absolute; left: 0; right: 0;
+           width: fit-content; height: fit-content;
+           margin-top: auto; margin-right: auto;
+           margin-bottom: auto; margin-left: auto }
   iframe { border-width: 2px; border-style: inset }
   ")
 

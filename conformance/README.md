@@ -813,7 +813,7 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
-### Round forty: where a line is allowed to break
+### Round forty-one: where a line is allowed to break
 
 The line breaker had no model of a break OPPORTUNITY at all. It would
 break between any two tokens, and `white-space: nowrap` never reached the
@@ -1052,6 +1052,253 @@ asserted in `<pre>` form, where they survive — 63 / 35 / 42, the browser's
 numbers exactly. Fixing it means making htmldom defer collapsing to
 layout, which changes the text every corpus case sees, and belongs in a
 round where nothing else is measuring.
+### Round forty: three divergences, one missing capability
+
+`width: min-content | max-content | fit-content` behaving as `auto`, flex
+`min-width`/`max-width` never giving their surplus back to the line, and
+`<dialog open>`'s box. The third depended on the first: the previous round
+measured the whole of the dialog's UA rule, added it, and found **not one
+box moved**, because `width: fit-content` was still `auto` and the
+`margin: auto` it is centred by had nothing to split.
+
+```
+                    LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
+before   546/556    1926/1973  549/581                   14450/14514  561/581     27735/27740  578/581
+after    547/556    1933/1973  555/581                   14462/14514  563/581     27733/27736  579/581
+```
+
+**Six cases changed in the whole 581-case op dump**, all in the intended
+direction, all now matching the oracle exactly:
+`:sizing/min-width-min-content` (which also cost 12 paint points as
+`div -> none`), `:sizing/width-max-content`, `:sizing/width-fit-content`,
+`:sizing/min-width-on-a-flex-item`, `:sizing/max-width-on-a-flex-item`,
+`:interactive/dialog-open-is-a-bordered-block` (6 paint points as
+`div -> dialog`). Nothing else moved, in either direction.
+
+The computed-style DENOMINATOR falls by 4 and the numerator by 2, which is
+the previous round's own prediction landing: the dialog's four auto margins
+go from scored to `non-absolute-length`-EXCLUDED, and two of the four
+(`margin-left`/`margin-right`) were the last two cascade-attributed
+mismatches outside `:text/font-size-absolute-keyword`. The residual is now
+**2 values in 1 case**.
+
+#### What Brave actually said
+
+**The keywords, on `alpha beta` in the corpus's 14px monospace (7px/char).**
+
+| container | `min-content` | `max-content` | `fit-content` | `auto` |
+|---|---|---|---|---|
+| 300px | 35 | 70 | 70 | 300 |
+| 60px | 35 | 70 | 60 | 60 |
+| 50px | 35 | 70 | 50 | 50 |
+| 40px | 35 | 70 | 40 | 40 |
+| 20px | 35 | 70 | **35** | 20 |
+
+So `fit-content` is exactly `min(max-content, max(min-content, available))`
+— it stops narrowing at min-content and overflows — and `max-content`
+never narrows at all.
+
+**`available` is net of the box's own margins AND its own insets.** All in
+a 60px container:
+
+| box | Brave |
+|---|---|
+| `fit-content` | 60 |
+| `fit-content; padding: 0 6px; border: 2px` | 60 border box (44 content) |
+| `fit-content; margin: 0 10px` | 40 |
+| `fit-content; margin-left: auto; margin-right: 15px` | 45 |
+
+A resolved margin takes room away, an `auto` one does not. The margins are
+*not* subtracted by the new code: `layout-children-block` already hands a
+block child `(- content-w ml mr)` through the same `margin-side`.
+Subtracting them twice was measured doing it — the 40px row came out 35 and
+the 45px row 35, both having fallen back to min-content on a room 20px too
+small.
+
+**The keyword yields a CONTENT size in BOTH `box-sizing` modes**, which is
+the fact that decides where the resolution has to live. `width:
+max-content; padding: 0 6px; border: 2px` over `alpha beta` is **86 under
+`content-box` and 86 under `border-box`**, where `width: 70px` is 86 and
+70. A declared length differs by the inset between the modes; a keyword
+does not.
+
+**min-content is a recursion, not the longest word in the subtree.**
+
+| content of a `width: min-content` box | Brave |
+|---|---|
+| `alpha beta` | 35 |
+| `<span>alpha</span> <span>bb</span>` | 35 |
+| `<div>alpha beta</div><div>bb</div>` | 35 |
+| `<div style="padding:0 10px">alpha beta</div>` | **55** |
+| `<div style="width:40px;height:5px"></div>` | **40** |
+| a 40x20 `<img>` | **40** |
+| nothing at all, 1px border | 2 |
+
+The last four are why `flex-item-min-content-width`'s longest-word-in-the-
+subtree rule — which is right for what IT answers, a flex item's automatic
+minimum — could not be reused: it reports 35 for the padded row and nil for
+the other three.
+
+**The flex clamp needs the whole frozen-item loop.** Eleven shapes, in both
+directions and in both the growing and the shrinking case:
+
+| shape | Brave |
+|---|---|
+| 200px row, `flex: 1` x2, `min-width: 150px` on one | 150 / 50 |
+| 300px row, `flex: 1` x2, `max-width: 60px` on one | 60 / 240 |
+| 300px row, `flex: 1` x3, `min-width: 200px` on one | 200 / 50 / 50 |
+| 300px row, `flex: 1` x3, `max-width: 30px` on one | 30 / 135 / 135 |
+| ...with `max-width: 30px` AND `max-width: 40px` | 30 / 40 / 230 |
+| ...with `max-width: 30px` AND `min-width: 200px` | 30 / 200 / 70 |
+| **...with `max-width: 30px` AND `max-width: 110px`** | **30 / 110 / 160** |
+| 100px row, `min-width: 80px` on both of 2 | 80 / 80 (overflows) |
+| 200px row, two `width: 150px`, `min-width: 140px` | 140 / 60 |
+| 200px row, two `width: 150px`, `max-width: 60px` | 60 / 140 |
+| 300px row, `flex: 1` `max-width: 50px` vs `flex: 2` | 50 / 250 |
+| 200px row, 3x`width: 100px`, `max-width: 20px` + `min-width: 95px` | 20 / 95 / 85 |
+
+**The bolded row is the one that proves it is a loop.** One pass proposes
+100/100/100, freezes the first at 30 and offers its 70 to the other two
+(135/135) — and only *then* is the second item's own maximum violated. A
+clamp-once-and-redistribute rule reports 30/110/**135** and leaves 25px in
+nobody's hands. Every other row above is satisfied by the simpler rule, so
+that one shape is the whole evidence, and it was written because the simpler
+rule predicted the other ten.
+
+CSS Flexbox §9.7.4 resolves a pass with BOTH kinds of violation by the SIGN
+of the total (freeze only the min-violated when positive, only the
+max-violated when negative). This engine freezes everything the clamp
+moved, in either direction. The two rows written to discriminate them —
+`max-width: 20px` + `min-width: 95px`, and `max-width: 30px` +
+`min-width: 200px` — give the same answer under both rules, so the simpler
+one is what is implemented and this paragraph is why.
+
+Two more measured facts the flex loop needed. **`max-width` limits the
+CONTENT box**: `flex: 1; max-width: 60px; padding: 0 10px; border: 2px` in
+a 300px row is **84** wide (60 + 24), and 60 under `box-sizing:
+border-box`, with the sibling taking 216 and 240. And **an explicit
+maximum caps the AUTOMATIC minimum**: `flex: 1; max-width: 20px` holding
+`averylongunbrokenword`, whose min-content is 147, is **20**, its sibling
+280 (CSS Flexbox §4.5).
+
+**`<dialog open>` is centred by `margin: auto` between two zero insets.**
+Measured, `<dialog open>Hi</dialog>` in a 300px `position: relative`
+parent: 48x54 at x=126, `getComputedStyle` reporting `width: 14px`,
+`height: 20px`, `margin: 0px 126px`, `left: 0px`, `right: 0px` — and `top`
+resolved to the box's own STATIC position, which is what says `top` is
+`auto` in the UA sheet and only the INLINE insets are declared. Confirmed
+by moving the same dialog into a case with no positioned ancestor: it
+centres in the 756px viewport (x=354) and its `top` reads back as that
+case's own offset down the page (124px), a number no declared `top` could
+produce.
+
+The general rule underneath it, measured on a plain 70px absolutely
+positioned box in a 300px `position: relative` parent:
+
+| declaration | x |
+|---|---|
+| `left:0; right:0; margin:auto` | 115 |
+| `left:0; right:0; margin-left:auto` | 230 |
+| `left:0; right:0; margin-right:auto` | 0 |
+| `left:0; right:0` (no auto margin) | 0 |
+| `left:20px; right:0; margin:auto` | 125 |
+| `left:0; right:0; margin:auto; width:400px` | 0 |
+| `left:0; margin:auto` (no `right`) | 0 |
+| **no `width` at all** | 0, and 300 wide |
+
+and the same rule on the block axis (`top:0; bottom:0; margin:auto` on a
+20px box in a 60px parent is y=20). The last row is why this round could
+close the dialog and the last one could not: without a `width` the box is
+stretched between the two insets, the leftover is zero, and `margin: auto`
+has nothing to distribute.
+
+Measured but deliberately NOT written into the UA sheet: the dialog's
+`background-color: rgb(255,255,255)` and `color: rgb(0,0,0)`. Neither
+changes a box, a hit region, or any of the fourteen properties the
+computed-style axis compares, and this engine's default page is dark.
+
+#### Where the keyword resolution ended up living, and why
+
+In **`layout-node`**, not in `resolve-width`. `resolve-width` takes
+`[st avail]` and an intrinsic width needs the NODE (and the theme, for
+`:measure-text`) — its own docstring said so and left the three keywords
+behaving as `auto`. `layout-node` is the one place a box's style map is
+built for layout: it holds the node, the theme, the available width, the
+opacity and the inherited context at once, and every sub-layout function
+(block, flex, grid, table, form control, absolute) is handed the `st` it
+produces. So resolving once there resolves for all of them — exactly as
+the percentage padding/margin rewrite three lines above it already does.
+
+The used value is written back onto `st` as a plain length, which is
+`measure-child`'s own write-the-used-value-back technique for stopping a
+percentage width resolving twice. Because a keyword yields a content size
+in both box-sizing modes, a `border-box` box gets the insets folded in at
+the write rather than losing them.
+
+#### Scope cuts, each with the number a future round needs
+
+- **A PERCENTAGE-width child inside an intrinsically sized box** is
+  measured at its percentage of the OUTER containing block, where real CSS
+  treats a percentage as indefinite while sizing the box it would resolve
+  against. Measured: `<div style="width:max-content"><div
+  style="width:50%">alpha beta</div></div>` in 300px is **70 / 35** in
+  Brave and **150 / 75** here. Pre-existing — `child-outer-max-content-
+  width` goes through `measure-child`, whose percentage write-back already
+  answered this way for a table cell and a flex item — and the fix belongs
+  in that write-back.
+- **A flex item's base size is already clamped** when it reaches the §9.7
+  loop, because it comes from `measure-child`, which runs `clamp-width`.
+  Real CSS feeds the loop the UNCLAMPED flex base size. One shape measured
+  to differ: a 200px row of three `width: 100px` items, the first
+  `max-width: 20px` and the second `min-width: 95px`, is **20 / 95 / 85**
+  in Brave and **17 / 95 / 87** here. Every `flex: N` shape is unaffected
+  (its basis is `0%` and cannot be clamped away).
+- **`clamp-width` reads `min-width`/`max-width` as BORDER-box limits**, so
+  the same declaration clips the inset twice everywhere except the new
+  flex path (`flex-main-clamp`, which converts). Not corrected here
+  because `clamp-width` is called from `resolve-width`, i.e. from every
+  box in the document. `force-main-width` now neutralises it for a
+  resized flex item, since §9.7 has already applied both bounds.
+- **A percentage `min-width`/`max-width` on a flex item** resolves against
+  the item's own resolved width rather than the container's, because
+  `measure-child` hands the child its own width as `avail-width`.
+  Measured: `flex: 1; max-width: 20%` in a 300px row is **60** in Brave;
+  the line reserves 60 here and the item draws itself 12 wide (20% of 60).
+- **`flex: 1 1 0`** (a unitless zero basis) is not parsed as a basis:
+  `flex: 1 1 0` vs `flex: 2 1 0` in a 300px row is 100 / 200 in Brave and
+  7 / 7 here, while `flex: 1 1 0%` is 100 / 200 both sides. A `flex`
+  shorthand parsing gap in `cssom.core`, unrelated to clamping.
+- **An absolutely positioned box's own margin does not offset it.**
+  Measured, `position:absolute; left:0; margin-left:20px` is at x=20 in
+  Brave and x=0 here. `left` is the offset to the MARGIN edge. Untouched
+  by this round; the auto-margin rule added here is a different clause of
+  the same section.
+- **`min-content` of a FLEX CONTAINER** falls through to the block rule
+  (widest item) where real CSS sums the items' min-contents along a nowrap
+  row. Measured: a `display: flex` holding `alpha beta` and `gamma delta`
+  under `width: min-content` is **70** = 35 + 35, and **35** here. Same
+  cut, same reason, as the grid branch of `intrinsic-max-content-width`.
+- **`text-indent` is counted in the max-content size and not in the
+  min-content one.** The max-content rule was measured (an
+  `inline-block; text-indent: 30px` holding `abcd` is 58); the min-content
+  one has no corpus case and no measurement, so it is absent rather than
+  guessed.
+
+#### Tried and withdrawn
+
+**Subtracting the box's own margins inside `resolve-intrinsic-width`.**
+It reads like the rule — `available` is demonstrably net of margins — and
+it is double-counting: `layout-children-block` has already done it. Caught
+by the two margin rows of the 60px table above, which came out 35 and 35
+instead of 40 and 45.
+
+**Reusing `flex-item-min-content-width` for the `min-content` keyword.**
+Its longest-word-in-the-subtree rule matches on plain text and on the two
+nested shapes above it, and misses everything with a box in it: 35 instead
+of 55 for a padded child, and nil (no text to measure) for a
+declared-width child and for an `<img>`. Replaced by a recursion that
+mirrors `block-max-content-width` branch for branch. That function is
+untouched and still answers what it always answered.
 
 ### Round thirty-nine: four numbers where there was one, and the summary a browser writes for you
 
