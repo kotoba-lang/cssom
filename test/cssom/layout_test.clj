@@ -5725,7 +5725,8 @@
               (let [[tag style & kids] spec
                     ;; a few keys are real ATTRIBUTES, not style: the table
                     ;; spans and the form-control ones layout reads directly
-                    attr-keys #{:colspan :rowspan :span :type :value :size :href :alt :name :multiple}
+                    attr-keys #{:colspan :rowspan :span :type :value :size :href :alt :name
+                                :multiple :cols :rows}
                     attrs (select-keys style attr-keys)
                     style (apply dissoc style attr-keys)
                     [el doc] (dom/create-element doc tag)
@@ -6787,6 +6788,51 @@
         "about a browser's 30.8px for `go`: the label plus 6px padding a
          side plus a 2px border a side")))
 
+;; ---- <textarea>: `cols`, and the scrollbar gutter ----
+;;
+;; Every number below is a Brave 2026-08-05 reading at the conformance
+;; harness's own frame (width 800, monospace 14px/20px, html/body margin 0),
+;; and this engine reproduces each one EXACTLY here -- not by luck and not
+;; by tuning: with no `:measure-text` host hook the default per-character
+;; estimate is `(long (* 0.6 13))` = 7px at the UA control size, and Brave's
+;; own average advance for the control face at 13.3333px is also 7 (measured
+;; across cols=1/2/5/10/20/40/80 and six families). The conformance harness
+;; DOES supply a host hook, and there the `0`-glyph proxy it answers with is
+;; 7.23 -- which is why `:form/textarea-in-sentence` is still 5px wide of
+;; Brave and these tests are not. See ua-control-font for why that 0.23 is
+;; load-bearing and cannot be fixed by itself.
+
+(defn- textarea-width [attrs]
+  (->> (inline-ops ["note " [:textarea attrs "body"] " end"] {} {:width 800 :theme {:padding 0 :gap 0}})
+       (filter #(and (= :node (:draw/op %)) (= :textarea (:tag %))))
+       first :w))
+
+(deftest textarea-width-comes-from-cols-not-size
+  ;; `size` is not a <textarea> attribute in HTML at all; `cols` is, and its
+  ;; default is 20. This engine read `size` for a textarea until 2026-08-05,
+  ;; so `cols` was ignored outright and every textarea was 20 characters
+  ;; wide however wide the author asked for.
+  (is (= 162 (textarea-width {}))
+      "Brave: 162 for a default textarea -- 20 cols x 7 + 16 of scrollbar
+       gutter + 4 padding + 2 border")
+  (is (= 302 (textarea-width {:cols 40})) "Brave: 302")
+  (is (= 29 (textarea-width {:cols 1})) "Brave: 29")
+  (is (= 162 (textarea-width {:size 40}))
+      "a `size` attribute is not a textarea attribute and must change
+       nothing -- it used to be the ONLY thing that did"))
+
+(deftest textarea-reserves-a-vertical-scrollbar-gutter-unless-overflow-hides-it
+  ;; Measured in Brave: a default (`overflow: auto`) textarea is exactly
+  ;; 16px wider than the same one at `overflow: hidden`, at every font size
+  ;; from 8 to 40px and in every family tried. It is a reservation in the
+  ;; INTRINSIC size, not a scrollbar that gets painted -- this platform
+  ;; draws overlay scrollbars, and a `div { overflow: scroll }` on the same
+  ;; page reports `offsetWidth - clientWidth == 0`.
+  (is (= 146 (textarea-width {:overflow "hidden"})) "Brave: 146")
+  (is (= 16 (- (textarea-width {}) (textarea-width {:overflow "hidden"}))))
+  (is (= 162 (textarea-width {:overflow "visible"}))
+      "`visible` still reserves it -- measured; only hidden/clip do not"))
+
 (deftest an-atomic-inline-carries-its-own-margins
   ;; A checkbox's UA `margin: 3px 3px 3px 4px` is the gap a reader sees
   ;; between the box and the label beside it. The browser puts it at x=4
@@ -7596,6 +7642,79 @@
   (let [[_ sub sup] (metric-boxes ["H" [:sub {} "2"] "O X" [:sup {} "2"]])]
     (is (< 9.4 (- (second sub) (second sup)) 9.5)
         "the gap between the two boxes is the parent's em, not the child's")))
+
+(deftest vertical-align-top-pins-a-box-to-the-line-top-without-growing-the-line
+  ;; Measured in Brave at the harness's own frame: `base <span
+  ;; style="vertical-align: top; font-size: 24px">top</span> end` on a
+  ;; 14px/20px line reports the PARAGRAPH at 20px tall -- not the 24 the
+  ;; same span gets on the baseline (a-line-box-is-the-union...) -- with the
+  ;; span's own 26px content area at y=-3, spilling 3px out of both the top
+  ;; and the bottom of the line. That is a 20px inline box pinned to the
+  ;; line's top edge: the box aligns with the LINE, and its content area
+  ;; overflows the box because its own line-height (20, inherited) is
+  ;; smaller than its face's content area (26).
+  ;;
+  ;; The engine's numbers here are one pixel short of Brave's throughout,
+  ;; for the reason a-line-box-is-the-union... already records: brave-faces
+  ;; scales the 24px face linearly from the 14px measurement (20.57/5.14
+  ;; against the browser's 21/5). The RULE is what is pinned.
+  (let [[div span] (metric-boxes ["base " [:span {:vertical-align "top" :font-size 24} "top"] " end"])]
+    (is (= [:div 0 20] div)
+        "the line box is the strut's 20, NOT the 23 the same span produces
+         on the baseline -- a top-aligned box is not part of the baseline
+         union at all")
+    (is (= :span (first span)))
+    (is (< -4.0 (second span) -3.0)
+        "and its content area starts ABOVE the line's top edge, because a
+         20px inline box pinned to the top cannot contain a 25.7px content
+         area. Brave says exactly -3 from the real 21/5 face; -3.57 is the
+         same rule on the scaled one"))
+  ;; ...and `bottom` is the mirror image. Measured in Brave, the same span
+  ;; with `vertical-align: bottom` reports the identical box, because here
+  ;; the inline box and the line box are the same height -- pinning either
+  ;; edge puts it in the same place.
+  (is (= (metric-boxes ["base " [:span {:vertical-align "top" :font-size 24} "x"] " end"])
+         (metric-boxes ["base " [:span {:vertical-align "bottom" :font-size 24} "x"] " end"]))
+      "top and bottom coincide when the box exactly fills the line"))
+
+(deftest an-edge-aligned-box-taller-than-the-line-grows-it-on-its-far-side
+  ;; Measured in Brave: the same span at `line-height: 40px` reports a 40px
+  ;; paragraph whose BASELINE has not moved (its leading text still sits at
+  ;; y=2), i.e. the extra 20px all went below. A top-aligned box grows the
+  ;; line downward because its top is already pinned; a bottom-aligned one
+  ;; grows it upward.
+  ;; Measured in Brave for both directions, same markup, only the value
+  ;; changing: `top` gives p.h=40, span y=7, leading text y=2; `bottom`
+  ;; gives p.h=40, span y=7 (the box fills the line either way, so it does
+  ;; not move) and leading text y=22 -- the whole 20px of growth went ABOVE
+  ;; the baseline instead of below it. The box is not what tells the two
+  ;; apart; the BASELINE is.
+  (let [tall (fn [v] ["base " [:span {:vertical-align v :font-size 24 :line-height 40} "top"] " end"])
+        base-y (fn [specs] (->> (metric-ops specs)
+                                (filter #(and (= :text (:draw/op %)) (= "base" (:text %))))
+                                first :y))
+        [div span] (metric-boxes (tall "top"))]
+    (is (= [:div 0 40] div) "the line grew to hold the 40px inline box")
+    (is (< 6.0 (second span) 8.0)
+        "the top-aligned box's own content area sits 7px down inside it
+         (its half-leading), and the growth went below it")
+    (is (= 0 (base-y (tall "top")))
+        "the baseline did NOT move: the leading text's em box still starts
+         at the line's top edge, exactly as Brave reports it")
+    (is (= 20 (base-y (tall "bottom")))
+        "...where a BOTTOM-aligned box of the same size pushes the baseline
+         20px down instead, because the line grew above it")))
+
+(deftest vertical-align-middle-is-still-unmodelled-and-says-so
+  ;; A pin of a documented scope cut, not a claim: `middle` centres the box
+  ;; on `baseline + x-height/2`, and `font-metrics` reports no x-height (see
+  ;; vertical-align-shift). Brave puts this line at 20.828125 with the span
+  ;; 0.828125 lower than baseline-aligned; this engine leaves it on the
+  ;; baseline. Asserted so the day an x-height hook arrives, this test is
+  ;; the one that fails and points at it.
+  (is (= (metric-boxes ["base " [:span {:font-size 24} "top"] " end"])
+         (metric-boxes ["base " [:span {:vertical-align "middle" :font-size 24} "top"] " end"]))
+      "middle still lays out exactly as baseline"))
 
 (deftest a-lone-inline-element-still-gets-a-real-inline-box
   ;; `<td><a href="/x">link</a></td>` reports the <a> at (0, 2, 28, 15) in

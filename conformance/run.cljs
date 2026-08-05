@@ -376,7 +376,8 @@
      0x203A,0x2044,0x2122,0x2190,0x2191,0x2192,0x2193,0x2194,0x2212,0x2260,
      0x2264,0x2265,0x221E,0x2248,0x2217,0x25CA,0x2660,0x2663,0x2665,0x2666,
      0x2020,0x2021,0x203E,0x2032,0x2033].forEach(function (c) { CHARS.push(c); });
-    var advances = { normal: {}, bold: {}, italic: {}, control: {} };
+    var advances = { normal: {}, bold: {}, italic: {},
+                     control: {}, 'control-bold': {}, 'control-italic': {} };
     [['normal', 'normal', 'normal'],
      ['bold', 'bold', 'normal'],
      ['italic', 'normal', 'italic']].forEach(function (spec) {
@@ -393,12 +394,28 @@
     // container, so a control's intrinsic width can only be computed
     // against metrics measured in that font -- which the engine now asks
     // for by naming the family in its own UA defaults.
+    //
+    // Three of them, for the same reason the page font has three: a
+    // control's label can be BOLD or ITALIC, and the control face is a
+    // different font from the page's, so neither the page's bold table nor
+    // the control's regular one stands in for it. Measured here, `now` is
+    // 24.45px in regular Arial 13.3333 and 26.65 in its bold -- a 9%
+    // difference, which is what made `<button>save <b>now</b></button>`
+    // come back 3.5px narrow than Brave's and its <b> 2.8px narrow.
+    // Until 2026-08-05 the face lookup below tested the FAMILY first and
+    // returned regular control metrics for a bold control query, so the
+    // engine asked the right question and was answered with the wrong
+    // face.
     probe.style.cssText = 'white-space:pre;' + getComputedStyle(document.createElement('input')).font;
-    probe.style.font = '400 13.3333px Arial';
-    CHARS.forEach(function (code) {
-      var ch = String.fromCharCode(code);
-      probe.textContent = new Array(21).join(ch);
-      advances.control[code] = probe.getBoundingClientRect().width / 20;
+    [['control', '400', 'normal'],
+     ['control-bold', '700', 'normal'],
+     ['control-italic', '400', 'italic']].forEach(function (spec) {
+      probe.style.font = spec[2] + ' ' + spec[1] + ' 13.3333px Arial';
+      CHARS.forEach(function (code) {
+        var ch = String.fromCharCode(code);
+        probe.textContent = new Array(21).join(ch);
+        advances[spec[0]][code] = probe.getBoundingClientRect().width / 20;
+      });
     });
     probe.remove();
     out['__advances__'] = advances;
@@ -414,7 +431,9 @@
     }
     out['__metrics__'] = {
       normal: fm('14px monospace'), bold: fm('bold 14px monospace'),
-      italic: fm('italic 14px monospace'), control: fm('13.3333px Arial')
+      italic: fm('italic 14px monospace'), control: fm('13.3333px Arial'),
+      'control-bold': fm('bold 13.3333px Arial'),
+      'control-italic': fm('italic 13.3333px Arial')
     };
     var pre = document.createElement('pre');
     pre.id = 'kotoba-conformance-out';
@@ -639,6 +658,32 @@
 
 ;; ---- the cssom side ----
 
+(defn- text-face
+  "Which of the six measured faces a run of text is drawn in.
+
+   Six, not four: a form control's face is a different FONT from the page's
+   (Arial 13.3333 against monospace 14, see the measurement script's
+   control-face probe), so it needs its own bold and italic exactly as the
+   page font does. This used to test the family FIRST and stop -- a bold
+   control label was answered with regular control metrics, which is a
+   9%-narrow answer to a question the engine asked correctly.
+
+   The family test is `Arial` because that is the family this engine names
+   in its own UA control defaults (cssom.layout's ua-control-font); it is
+   how a control's text identifies itself on the way out."
+  [family weight style]
+  (let [control? (= "Arial" family)]
+    (cond (= "bold" weight) (if control? :control-bold :bold)
+          (= "italic" style) (if control? :control-italic :italic)
+          control? :control
+          :else :normal)))
+
+(defn- face-ref-size
+  "The size the face's advance/metric table was measured at, which is what
+   the engine's own font-size is scaled against."
+  [face]
+  (if (contains? #{:control :control-bold :control-italic} face) 13.3333 14))
+
 (defn- cascaded-document
   "One parse + cascade pass: htmldom parse -> cssom.core/apply-cascade,
    stopping BEFORE layout. This is the document the computed-style axis
@@ -719,23 +764,17 @@
                               ;; alone makes the result worse, so it waits
                               ;; for the other half.
                               :font-metrics (fn [font-size weight style family]
-                                              (let [face (cond (= "Arial" family) :control
-                                                               (= "bold" weight) :bold
-                                                               (= "italic" style) :italic
-                                                               :else :normal)
+                                              (let [face (text-face family weight style)
                                                     base (get (:metrics char-w) face)
-                                                    ref (if (= :control face) 13.3333 14)
+                                                    ref (face-ref-size face)
                                                     k (/ (or font-size ref) ref)]
                                                 {:ascent (* k (:ascent base))
                                                  :descent (* k (:descent base))}))
                               :measure-text (fn [text font-size weight style family]
-                                              (let [control? (= "Arial" family)
-                                                    advance (cond control? (:control char-w)
-                                                                  (= "bold" weight) (:bold char-w)
-                                                                  (= "italic" style) (:italic char-w)
-                                                                  :else (:normal char-w))]
-                                                (* (/ (or font-size (if control? 13.3333 14))
-                                                      (if control? 13.3333 14))
+                                              (let [face (text-face family weight style)
+                                                    advance (get char-w face)
+                                                    ref (face-ref-size face)]
+                                                (* (/ (or font-size ref) ref)
                                                    (reduce + 0 (map advance (str text))))))}})))
 
 (defn- engine-lines
@@ -812,12 +851,10 @@
                                   ;; compares the same box in the same
                                   ;; coordinates rather than penalising a
                                   ;; convention difference.
-                                  (let [face (cond (= "Arial" (:font-family op)) :control
-                                                   (= "bold" (:font-weight op)) :bold
-                                                   (= "italic" (:font-style op)) :italic
-                                                   :else :normal)
+                                  (let [face (text-face (:font-family op) (:font-weight op)
+                                                        (:font-style op))
                                         base (get (:metrics char-w) face)
-                                        ref (if (= :control face) 13.3333 14)
+                                        ref (face-ref-size face)
                                         k (/ fs ref)
                                         asc (* k (:ascent base))
                                         desc (* k (:descent base))
@@ -1451,6 +1488,8 @@
               :bold (advance-for :bold)
               :italic (advance-for :italic)
               :control (advance-for :control)
+              :control-bold (advance-for :control-bold)
+              :control-italic (advance-for :control-italic)
               :metrics (:__metrics__ oracle)}
       _ (println (str "metrics: per-character advance table measured in the oracle ("
                       (count (:normal advances)) " chars x normal/bold/italic)\n"))

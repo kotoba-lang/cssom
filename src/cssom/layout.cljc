@@ -880,7 +880,42 @@
    hook alongside `:measure-text`/`:font-metrics`, and a re-derivation of
    the `size`-based input width against it. Deliberately NOT faked here by
    scaling the `0` advance by a fudge factor: that would fit these two
-   measurements and mislead the next one."
+   measurements and mislead the next one.
+
+   2026-08-05, measured, on whether that hook can be BUILT from what a host
+   like the conformance harness actually has -- a per-character advance
+   table. It cannot, and the reason is worth writing down so the next
+   attempt does not spend the afternoon finding it again.
+
+   Blink's `avgCharWidth` is the FONT's own OS/2 summary metric, not a mean
+   over any set of glyphs, and at small sizes it is a hinted whole number.
+   Measured in Brave via `<textarea cols=N>` (whose intrinsic width is
+   exactly `ceil(avg * cols)` plus a constant gutter, so it reads the metric
+   off directly) at three sizes and six families:
+
+     face        13.3333px   26.6666px   40px    mean of the ASCII table
+     Arial          7.0        13.33     20.0      7.02 / 14.05 / 21.08
+     Georgia        7.0        13.47     20.21     7.33 / 14.66 / 22.00
+     monospace      7.0        13.33     20.0      6.67 / 13.33 / 20.00
+     Verdana        8.0        16.0      24.0      8.20 / 16.40 / 24.61
+     Courier        8.0        16.0      24.0      8.00 / 16.00 / 24.00
+
+   The table mean tracks the real metric to ~0.3% at 13.3333px for the
+   control face -- 7.02 against 7.0 -- and to 5.4% at 26.6666 and 40px,
+   because at 13.3333 the font's true 0.5-em advance (6.67) is HINTED UP to
+   a whole 7 and the mean happens to sit in the same place. A hook fed from
+   the table would therefore be right at exactly the size the corpus uses
+   and 22px wrong on a 20-column textarea at 40px. That is the trap the
+   paragraph above names, reached by a different road.
+
+   So the pair stays. What is left of it, measured after the textarea's own
+   two structural bugs were fixed (see atomic-intrinsic-width): the `0`
+   proxy is 7.23 where Brave's average is 7.0, which over 20 columns is the
+   whole of `:form/textarea-in-sentence`'s remaining 5px. Closing it needs a
+   real font's `xAvgCharWidth` AND its `maxCharWidth` (an `<input size=n>`
+   is `ceil(avg * n) + round(max) - avg`, measured: 12 and 145 of content
+   for n=1 and n=20 in this face, i.e. avg 7 and max 12), from a host that
+   has font tables rather than an advance table. Both halves, or neither."
   {:family "Arial" :size 13})
 
 (def ^:private ua-control-box
@@ -4890,6 +4925,60 @@
    where every browser's ~20ch default text-field width comes from."
   20)
 
+(def ^:private textarea-default-cols
+  "HTML's own default `cols` for a `<textarea>`, the attribute that sizes
+   it. `size` -- which this file used to read for a textarea too -- is not
+   a `<textarea>` attribute at all in HTML, so a `<textarea cols=\"40\">`
+   was laid out at 20 characters and a `<textarea size=\"40\">` (which no
+   browser honours) at 40. Measured in Brave, the content box of a
+   default-overflow textarea is exactly `cols` average advances plus the
+   scrollbar gutter below: cols=1/2/5/10/20/40/80 give 23/30/51/86/156/
+   296/576 px of content at 13.3333px, i.e. 7 per column and a constant
+   16 left over."
+  20)
+
+(defn- textarea-cols
+  "How many characters wide a `<textarea>` asks to be."
+  [node]
+  (max 1 (parse-int (get-in node [:attrs :cols]) textarea-default-cols)))
+
+(def ^:private textarea-scrollbar-gutter
+  "The vertical-scrollbar gutter a `<textarea>` reserves INSIDE its padding
+   box, on top of its `cols` characters of text.
+
+   Measured in Brave 2026-08-05, and it is a constant rather than a
+   multiple of anything: the same 16px separates an `overflow: auto`
+   textarea from an `overflow-y: hidden` one at every font size tried
+   (8/10/12/13/13.3333/14/16/20/24/26.6666/32/40px) and in every family
+   tried (Arial, Courier, Verdana, Georgia, Helvetica, monospace). It is a
+   fixed-size platform widget, exactly like select-arrow-width next door.
+
+   It is NOT the same thing as a scrollbar that is actually painted: this
+   platform draws OVERLAY scrollbars, and a `div { overflow: scroll }`
+   probe on the same page reports `offsetWidth - clientWidth == 0`. Blink
+   reserves the gutter in the textarea's INTRINSIC size regardless, which
+   is why the reservation shows up as content width (Brave's `clientWidth`
+   for a default textarea is 160 = 140 of text + 16 of gutter + 4 of
+   padding) rather than as a strip taken out of one.
+
+   Missing it entirely is where the larger half of
+   `:form/textarea-in-sentence`'s 11.4px deficit came from."
+  16)
+
+(defn- textarea-reserves-gutter?
+  "Whether a `<textarea>` reserves textarea-scrollbar-gutter. Measured: an
+   `overflow: hidden` or `overflow-y: hidden` textarea does not (146px
+   against 162), `overflow: visible` and `overflow: auto` both do.
+
+   Keyed on the `overflow` SHORTHAND alone, which is the only overflow
+   value this engine's cascade carries (see node-style). The axis-specific
+   `overflow-y: hidden` -- which is what actually governs a vertical
+   scrollbar, measured -- and `scrollbar-width: none`, which also removes
+   the gutter, are therefore not seen here: a documented scope cut, not an
+   oversight. Both would need cssom.core to resolve the longhands first."
+  [st]
+  (not (contains? #{"hidden" "clip"} (:overflow st))))
+
 (defn- laid-out-children
   "The children `node` will actually be laid out with: its own
    `:children` after every box-tree fixup this file applies -- a
@@ -4986,12 +5075,41 @@
           (contains? #{"inline-flex" "inline-grid"} (:display st))
           content-w
 
-          (contains? #{:input :textarea} tag)
+          (= :input tag)
           (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
             (if (contains? #{"checkbox" "radio"} input-type)
               13
               (+ (* char-w (parse-int (get-in child [:attrs :size]) inline-atomic-default-input-chars))
                  inset-x)))
+
+          ;; A `<textarea>` is `cols` characters (HTML's own attribute, and
+          ;; its own default of 20) PLUS a reserved vertical-scrollbar
+          ;; gutter -- see textarea-cols and textarea-scrollbar-gutter for
+          ;; both measurements. It shared the `<input>` branch above until
+          ;; 2026-08-05, which got both of those wrong at once: it read
+          ;; `size`, an attribute `<textarea>` does not have (so `cols` was
+          ;; ignored outright and every textarea was 20 characters), and it
+          ;; reserved nothing for the scrollbar.
+          ;;
+          ;; `char-w` is still the `0`-glyph proxy for the font's average
+          ;; advance, and it is still ~0.23px/char too wide at the control
+          ;; size this engine charges -- see ua-control-font, which explains
+          ;; why that error is load-bearing and why HALF of it cannot be
+          ;; fixed. Over 20 columns that is 4.6px, and it is what is left of
+          ;; this case's deficit once the gutter is reserved. Deliberately
+          ;; not absorbed into the gutter: the gutter is 16 in every family
+          ;; and at every size, and bending it to 11.4 to close one case
+          ;; would make every other textarea wrong.
+          ;; `long` around the ceil for the reason leading-ascent spells
+          ;; out: this number becomes a `:w` a host paints with and a test
+          ;; compares, and a 162.0 where every other control says 162 is a
+          ;; difference downstream consumers can see. (The `<select>`
+          ;; branch above hands back a bare double; that is pre-existing
+          ;; and not this change's to move.)
+          (= :textarea tag)
+          (+ (long (Math/ceil (* char-w (textarea-cols child))))
+             (if (textarea-reserves-gutter? st) textarea-scrollbar-gutter 0)
+             inset-x)
 
           (= :select tag)
           ;; Widest option label -- a <select> is as wide as the longest
@@ -7423,12 +7541,35 @@
    from the OS/2 table; this engine has no font tables, so the measured
    platform values are used and named as such.
 
-   `top`/`bottom`/`middle` are deliberately ABSENT: each aligns against the
-   final line box, which is not known until every other box on the line has
-   been placed, so they need a second pass this file does not have. They
-   keep the baseline default, which is what this engine did for every value
-   before."
+   `top`/`bottom` are NOT here, because they are not a fraction of anything:
+   each aligns an edge of the inline box against the finished LINE box, so
+   the shift is whatever it takes to put that edge there. They are resolved
+   in inline-line-metrics, in the second pass this map cannot express -- see
+   line-edge-aligned, which is the set of values that get that treatment.
+
+   `middle` is still unmodelled and still falls back to the baseline. It
+   needs one metric this engine does not have: the PARENT font's x-height,
+   against which `middle` centres the box (`baseline + x-height/2`).
+   Measured in Brave, a 14px monospace parent puts that half-x-height at
+   3.171875px, i.e. an x-height of 6.34375 -- but `font-metrics` reports
+   only ascent and descent, so there is nowhere honest to read it from, and
+   charging a fixed em fraction would fit this one face and mislead the
+   next. `text-top`/`text-bottom` are absent for a related reason: they
+   align against the parent's CONTENT AREA rather than the line box, which
+   this function's callers do not track per owner."
   {"super" 0.404 "sub" -0.271})
+
+(def ^:private line-edge-aligned
+  "The `vertical-align` values that align an edge of the inline box with an
+   edge of the LINE box, rather than shifting it relative to the baseline:
+   `top` puts its top edge on the line box's top, `bottom` its bottom edge
+   on the line box's bottom.
+
+   These cannot be resolved where sub/super are (inline-fragments, before
+   the line exists) because the line box they align to is built from every
+   OTHER box on the line. They are carried down as a mode and resolved in
+   inline-line-metrics once that union is known."
+  #{"top" "bottom"})
 
 (defn- inline-inherited
   "The text style context an inline box (or a generated node) hands to its
@@ -7665,7 +7806,8 @@
                               :style inherited
                               :owners owners
                               :opacity opacity
-                              :shift (:vertical-align/shift inherited 0)})
+                              :shift (:vertical-align/shift inherited 0)
+                              :valign (:vertical-align/mode inherited)})
 
                    (and (map? child) (= :element (:node/type child)))
                    (if (non-rendered-tag? (:tag child))
@@ -7694,6 +7836,14 @@
                                inherited (if-let [f (get vertical-align-shift (:vertical-align st))]
                                            (assoc inherited :vertical-align/shift
                                                   (* f parent-fs))
+                                           inherited)
+                               ;; ...and a `top`/`bottom` box carries a MODE
+                               ;; instead of a shift, because the shift it
+                               ;; needs is not known until the line box is
+                               ;; (see line-edge-aligned).
+                               inherited (if (contains? line-edge-aligned (:vertical-align st))
+                                           (assoc inherited :vertical-align/mode
+                                                  (:vertical-align st))
                                            inherited)
                                rel (rel+ (rel-of owners) st)
                                owners (conj owners (cond-> {:idx (swap! counter inc)
@@ -7794,7 +7944,8 @@
                                            :style (:style fr)
                                            :owners (:owners fr)
                                            :opacity (:opacity fr)
-                                           :shift (:shift fr 0)}))
+                                           :shift (:shift fr 0)
+                                           :valign (:valign fr)}))
                                       words))))))
       out)))
 
@@ -7889,7 +8040,8 @@
                       0)]
             (if (and (content? pieces) (> (+ x sep ww) content-w))
               (recur (rest ts) ww
-                     [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww}]
+                     [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww
+                       :shift (:shift t 0) :valign (:valign t)}]
                      (flush lines pieces x st))
               (let [last-piece (peek pieces)
                     merge? (and last-piece
@@ -7897,7 +8049,8 @@
                                 (= (:style last-piece) st)
                                 (= (:owners last-piece) (:owners t))
                                 (= (:opacity last-piece) (:opacity t))
-                                (= (:shift last-piece 0) (:shift t 0)))
+                                (= (:shift last-piece 0) (:shift t 0))
+                                (= (:valign last-piece) (:valign t)))
                     x' (+ x sep ww)]
                 (recur (rest ts) x'
                        (if merge?
@@ -7907,7 +8060,7 @@
                                       :w (- x' (:x last-piece))))
                          (conj pieces {:text word :style st :owners (:owners t)
                                        :opacity (:opacity t) :x (+ x sep) :w ww
-                                       :shift (:shift t 0)}))
+                                       :shift (:shift t 0) :valign (:valign t)}))
                        lines))))
           )
         (cond
@@ -7970,24 +8123,58 @@
    baseline` puts THAT on the line's baseline, so the box contributes
    `:baseline-offset` above and `h - :baseline-offset` below. A 40px-tall
    button on a 14px line therefore pushes the baseline down and grows the
-   line box to fit rather than being clipped by it."
+   line box to fit rather than being clipped by it.
+
+   `vertical-align: top`/`bottom` are the one thing this cannot do in a
+   single pass, and they are done in a second one here: a box that aligns
+   with an EDGE of the line box is left out of the baseline union entirely
+   (it is not on the baseline, so letting it stretch the union would be
+   wrong twice over), the union is taken over everything else, and only
+   then is the box placed against the finished edge -- as a `:shift`, the
+   same offset sub/super already travel as, so nothing downstream needs a
+   second concept. Measured in Brave, `base <span style=\"vertical-align:
+   top; font-size: 24px\">top</span> end` on a 20px line reports the
+   paragraph at 20px tall with the span's own 26px content area spilling
+   3px out of the top and the bottom -- exactly a 20px inline box pinned to
+   the line's top edge, not a 24px line box.
+
+   Such a box GROWS the line only when its own inline box does not fit the
+   one the baseline content built: measured, the same span at
+   `line-height: 40px` reports a 40px paragraph whose baseline has NOT
+   moved (its leading text still sits at y=2), i.e. the extra 20px went
+   below. A `bottom` box symmetrically grows the line upward. When both
+   kinds ask for growth at once this grows both sides independently, which
+   over-grows the line -- CSS 2.1's own rule here is circular and browsers
+   differ, and the corpus has no such line; an honest approximation rather
+   than a claim.
+
+   Returns the pieces alongside `:h`/`:baseline`, because resolving those
+   shifts is the whole point and the caller places from them."
   [line inherited theme]
   (let [pieces (:pieces line)
         fallback-fs (or (:font-size (:style line)) (:font-size inherited) (:font-size theme))
         fallback-lh (or (:line-height (:style line)) (:line-height inherited) (:line-height theme))
-        spans (for [p pieces
-                    :when (not= :atomic (:kind p))
-                    :let [st (:style p)
-                          fs (or (:font-size st) fallback-fs)
-                          lh (or (:line-height st) fallback-lh fs)
-                          {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
-                                                                 (:font-style st) (:font-family st))
-                          a (leading-ascent ascent descent lh)
-                          ;; a raised/lowered box carries its whole span
-                          ;; with it, growing the line in that direction
-                          ;; (positive = raised, see vertical-align-shift)
-                          shift (:shift p 0)]]
-                [(+ a shift) (- (- lh a) shift)])
+        ;; one entry per NON-atomic piece: where it reaches relative to the
+        ;; baseline, and (for an edge-aligned one) what it needs to be
+        ;; re-placed against the finished line.
+        measured (mapv (fn [p]
+                         (when (not= :atomic (:kind p))
+                           (let [st (:style p)
+                                 fs (or (:font-size st) fallback-fs)
+                                 lh (or (:line-height st) fallback-lh fs)
+                                 {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
+                                                                       (:font-style st) (:font-family st))
+                                 a (leading-ascent ascent descent lh)
+                                 ;; a raised/lowered box carries its whole
+                                 ;; span with it, growing the line in that
+                                 ;; direction (positive = raised, see
+                                 ;; vertical-align-shift)
+                                 shift (:shift p 0)]
+                             {:a a :lh lh :shift shift :valign (:valign p)})))
+                       pieces)
+        spans (for [m measured :when (and m (nil? (:valign m)))]
+                [(+ (:a m) (:shift m)) (- (- (:lh m) (:a m)) (:shift m))])
+        edges (filterv #(and % (:valign %)) measured)
         atomic-hs (keep #(when (= :atomic (:kind %)) (or (:baseline-offset %) (:h %))) pieces)
         atomic-below (keep #(when (= :atomic (:kind %))
                               (- (:h %) (or (:baseline-offset %) (:h %))))
@@ -7996,8 +8183,14 @@
                     lh (or fallback-lh fallback-fs)
                     a (leading-ascent ascent descent lh)]
                 [a (- lh a)])
-        above (apply max (concat (map first spans) atomic-hs [(first strut)]))
-        below (apply max (concat (map second spans) atomic-below [(second strut)]))
+        above0 (apply max (concat (map first spans) atomic-hs [(first strut)]))
+        below0 (apply max (concat (map second spans) atomic-below [(second strut)]))
+        ;; an edge-aligned box only makes the line taller, and only on the
+        ;; side it is NOT pinned to: a `top` box grows the line downward.
+        grow (fn [mode] (apply max 0 (for [e edges :when (= mode (:valign e))]
+                                       (- (:lh e) (+ above0 below0)))))
+        above (+ above0 (grow "bottom"))
+        below (+ below0 (grow "top"))
         ascents (concat (keep #(:font-size (:style %)) pieces) atomic-hs)
         line-heights (keep #(:line-height (:style %)) pieces)
         max-ascent (if (seq ascents) (apply max ascents) fallback-fs)
@@ -8024,9 +8217,28 @@
     ;; every inline box a pixel low again.
     (if (:font-metrics theme)
       {:h (long (Math/ceil (+ above below)))
-       :baseline above}
+       :baseline above
+       ;; second pass: an edge-aligned box's shift is whatever puts the
+       ;; edge it names on the line's own. `top` wants its box top at
+       ;; `baseline - above`, and a box's top is `baseline - a - shift`;
+       ;; `bottom` wants its box bottom at `baseline + below`, and a box's
+       ;; bottom is `baseline + (lh - a) - shift`.
+       :pieces (if (seq edges)
+                 (mapv (fn [p m]
+                         (if (and m (:valign m))
+                           (assoc p :shift (case (:valign m)
+                                             "top" (- above (:a m))
+                                             "bottom" (- (- (:lh m) (:a m)) below)))
+                           p))
+                       pieces measured)
+                 pieces)}
+      ;; No host metrics, so no ascents to build a union from and nothing
+      ;; to align an edge against either: `top`/`bottom` keep the baseline
+      ;; fallback this engine has always given them, exactly as sub/super
+      ;; keep their em-fraction shift.
       {:h (max max-lh (if (seq atomic-hs) (apply max atomic-hs) 0))
-       :baseline max-ascent})))
+       :baseline max-ascent
+       :pieces pieces})))
 
 (defn- inline-owner-ops
   "Background + `:node` draw-ops for the inline ELEMENTS a laid-out run
@@ -8154,7 +8366,8 @@
              text-draws []
              rects {}]
         (if-let [line (first ls)]
-          (let [{line-h :h baseline-off :baseline} (inline-line-metrics line inherited theme)
+          (let [{line-h :h baseline-off :baseline line-pieces :pieces}
+                (inline-line-metrics line inherited theme)
                 align-offset (case text-align
                                "center" (/ (max 0 (- inner-w (:w line))) 2)
                                "right" (max 0 (- inner-w (:w line)))
@@ -8294,7 +8507,10 @@
                           true (conj main-op))
                         rects])))
                  [[] rects]
-                 (:pieces line))]
+                 ;; the metrics pass, not the raw line: an edge-aligned
+                 ;; piece's `:shift` is only known once the line box is
+                 ;; (see inline-line-metrics).
+                 line-pieces)]
             (recur (rest ls) (+ y line-h) (into text-draws line-draws)
                    ;; the <br>'s own zero-width box, at the end of the line
                    ;; it terminates -- the same content-area box on the
