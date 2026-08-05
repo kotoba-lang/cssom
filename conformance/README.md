@@ -933,10 +933,34 @@ a `viewBox` (an intrinsic *ratio* with no intrinsic size, which Blink
 resolves by filling the container — `viewBox="0 0 40 20"` in a 400px block
 is **400×200**).
 
+**Before → after**, both measured on the corpus of 576 at this round's
+merge base (`2b1d95b`, i.e. with the stacking and logical-properties
+rounds already in — these three rounds ran concurrently and only these
+numbers are this round's):
+
+| axis | before | after |
+|---|---|---|
+| line structure | 540/551 | **541/551** |
+| geometry (boxes) | 1870/1959 | **1892/1959** |
+| geometry (clean cases) | 524/576 | **535/576** |
+| paint order (points) | 14207/14389 | **14285/14389** |
+| paint order (clean cases) | 542/576 | **550/576** |
+| computed style (values) | 27525/27544 | **27539/27544** |
+| computed style (clean cases) | 570/576 | **573/576** |
+
 Twelve cases changed and **none regressed** (`--dump-ops`, corpus-wide,
-before and after): the six `:replaced/` default-size cases, `:form/progress`,
-`:form/meter`, `:form/input-range`, `:form/input-color`,
-`:form/input-file` (its `<div>` only), and `:inline/vertical-align-length`.
+before and after, on that same merge base): the six `:replaced/`
+default-size cases, `:form/progress`, `:form/meter`, `:form/input-range`,
+`:form/input-color`, `:form/input-file` (its `<div>` only), and
+`:inline/vertical-align-length`. The 14 computed-style values are: the
+four `padding` longhands each on the range and file inputs (8, all
+`cascade`-attributed), the range's `margin-right`/`margin-bottom`, and
+`display: inline-block` on `<progress>` and `<meter>`. What is left in
+this group's `ua-default` bucket is one value and it is deliberate — a
+range input's `color`, which Brave reports as `rgb(16, 16, 16)` and which
+the UA sheet declines to write for the reason already recorded there (the
+real UA value is the system colour `fieldtext`, and this sheet has no
+system-colour model).
 
 ### Round thirty-six: logical properties, and the percentage that is always of the width
 
