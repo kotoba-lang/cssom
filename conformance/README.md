@@ -813,6 +813,110 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-two: a block cut in half, and the two rectangles a browser reports for it
+
+`layout-multicol` landed with a scope cut written into the code: **nothing
+was ever fragmented** — a block that did not fit moved whole into the next
+column. Two corpus cases recorded the gap and together they were the top of
+the geometry residual (`div h` 13 boxes at median −20, `div w` 8 at +230).
+The code named the consequence too: `break-inside: avoid` was satisfied by
+construction and therefore scored nothing, anywhere.
+
+Measured on this round's own merge base, `eb9dca9` — rounds forty-one and
+forty-two were in flight at the same time and landed within hours of each
+other, so these are not the numbers on today's main. The op dump they are
+diffed against is from the same base.
+
+```
+                    LINE      GEOMETRY (boxes / clean)   PAINT (points / clean)   STYLE
+before   546/556    1926/1973  549/581                   14450/14514  561/581     27735/27740
+after    546/556    1930/1973  551/581                   14450/14514  561/581     27735/27740
+```
+
+**Two cases changed in the whole 581-case op dump**, both the ones that
+recorded the gap, both now exact. `:multicol/a-block-splits-across-the-
+column-boundary` and `:multicol/break-inside-avoid-moves-the-whole-block`
+each go from two wrong boxes to two right ones. Nothing else in the corpus
+moved — which mattered here more than usual, because the balancing rule the
+same function owns (the smallest height at which the content still fits in
+the used column count, snapped to a real break, deliberately *not*
+`ceil(total / count)`) is measured and correct and had to survive.
+
+The corpus then grew 581 → 597 with sixteen cases that say what the rule
+**is** rather than that it is missing, all clean: 1989/2032 boxes,
+567/597 cases, paint 14845/14909 and 577/597.
+
+#### The harness did not change, and that is the finding
+
+A fragmented element has one rect **per fragment** in `getClientRects()`
+and the **union** of them in `getBoundingClientRect()` — a rectangle
+spanning both columns, covering ground the element does not occupy, inside
+which `elementFromPoint` answers the container rather than the element.
+Measured on the first corpus case: rects `[0,0,140,25]` and `[160,0,140,5]`,
+bounding rect `[0,0,300,25]`.
+
+Both of those already had a home. The geometry axis compares
+`getBoundingClientRect` against the engine's single `:node` box, and the
+paint axis compares `elementFromPoint` against that op's `:hit` rects —
+a pair this engine needed once before, for a **wrapped inline box**, and
+for exactly the same reason. So the engine emits the union as the box and
+the fragments as `:hit`, and `conformance/run.cljs` is byte-identical to
+what it was: `git status` on the landing commit lists `src/cssom/layout.cljc`,
+`test/cssom/layout_test.clj` and `conformance/cases.edn` and nothing else.
+There is no thumb on the scale to disprove, because there is no harness
+change to disprove it about.
+
+It also shows the two axes are not redundant. `box-decoration-break: clone`
+is not implemented, and the geometry axis **cannot see that** — slice
+reports fragments of 40 and 16 where clone reports 40 and 32, and both
+unions are `[160,0,300,40]`. The paint axis sees it at 2 sample points in
+the 16..32 band. A gap invisible to one axis and visible to the other is
+the argument for having both.
+
+#### Fifty-nine shapes measured before a line was written
+
+The corpus had two fragmentation cases; the rule has at least five parts.
+Fifty-nine probe shapes were rendered in the same headless Brave first and
+the engine was then measured against all of them (via the same harness,
+under a temporary `:frag/` group). Where a break may fall:
+
+| | |
+|---|---|
+| inside a line box | never |
+| in the empty band inside a block, below its last line or between two children | anywhere, **continuously** — a 90px block holding one 20px line cuts at 45 |
+| above a block's first line, or below its last | never. `padding-top: 40px` over a line is 60 tall and does **not** split, where `height: 60px` over the same line splits at 30. `padding-bottom` reads the same |
+| inside a monolithic box | never: `overflow: hidden`, a replaced element, `break-inside: avoid` |
+| with nothing legal left | it cuts anyway, by **pushing** the straddling line rather than halving it — a `padding-top:10px` block (30 tall) in a forced 25px column reports 25 and 20, which sum to *more* than 30 because the first fragment is a 10px slice stretched to the column bottom |
+
+Two of those five contradict a plausible first guess, and neither would
+have been found by reading the spec:
+
+- **`orphans` decides whether a two-line block splits at all**, and
+  **`widows` is ignored**. Default (`orphans: 2`), two lines: 40 tall, one
+  rect. `orphans: 1; widows: 2`: 20 tall, two rects — it splits leaving a
+  single widow. `orphans: 2; widows: 1`: 40, one rect. So this engine reads
+  `orphans` and deliberately does not read `widows`, because honouring it
+  would diverge from the browser.
+- **The balanced height is floored at `ceil(total / count)`.** Blink's
+  balancer starts there and only grows. Two 30px blocks with a 60px margin
+  between them fit one per column at height 30 — the margin is dropped at
+  the break — and Brave still reports the box 60 tall. A 20px margin in the
+  same shape reads 40. Before fragmentation nothing could drop a margin, so
+  the search never returned less than the floor and the floor was invisible.
+
+The scope cuts are listed at the function that owns each, with the browser
+numbers a future fix will need: `clone` (40/32 vs 40/16), an item
+containing a `:stack` push (a positioned or z-indexed descendant — the one
+cut here whose browser number is **not** measured), `break-before`/
+`break-after`, and a declared `orphans` on the multicol box's own direct
+content.
+
+One measured divergence was left alone because it is not about
+fragmentation: a `<br>` in the **second** column reports x=7 in Brave where
+the engine says 167, i.e. the browser gives a zero-width `<br>` its
+pre-fragmentation x. It costs 2 boxes on a six-line probe shape, which is
+therefore not in the corpus.
+
 ### Round forty-one: where a line is allowed to break
 
 The line breaker had no model of a break OPPORTUNITY at all. It would

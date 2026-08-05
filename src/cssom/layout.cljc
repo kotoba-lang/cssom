@@ -1492,7 +1492,14 @@
                       (mapcat
                        (fn [[run-text run-dx]]
                          (let [run-x (+ line-x run-dx)
-                               base (cond-> {:text run-text :font-size font-size :opacity opacity}
+                               base (cond-> {:text run-text :font-size font-size :opacity opacity
+                                             ;; the LINE BOX this run sits in, as a
+                                             ;; height and an offset from the op's own
+                                             ;; `:y` -- see the `:line/h` paragraph in
+                                             ;; the ns docstring. Here the op's `:y` IS
+                                             ;; the line top, so the offset is 0 and is
+                                             ;; left implicit.
+                                             :line/h line-height}
                                       font-weight (assoc :font-weight font-weight)
                                       font-style (assoc :font-style font-style)
                                       font-family (assoc :font-family font-family))
@@ -2824,6 +2831,15 @@
    ;; the same rule `overflow` triggers, but decided by the PARENT, which is
    ;; why it arrives as an attr rather than a declaration.
    :independent-fc? (boolean (attr node :kotoba/independent-fc))
+   ;; Two FRAGMENTATION properties, read only by layout-multicol's
+   ;; frag-atoms via style-passthrough. `break-inside: avoid` makes this
+   ;; box one a column break may not fall inside; `orphans` is how many of
+   ;; its line boxes a break must leave behind. `break-before`/
+   ;; `break-after` (forced breaks) and `widows` are not read anywhere --
+   ;; the last of those because Brave does not honour it either, measured;
+   ;; see layout-multicol's header.
+   :break-inside (style node :break-inside)
+   :orphans (style node :orphans)
    ;; The RAW shorthand, still read by style-passthrough (and so by
    ;; browser.session's wheel hit-test and dom-gpu) exactly as before.
    ;; Every LAYOUT decision now goes through the two computed axes below
@@ -2864,6 +2880,14 @@
    ;; pointer events (CSS-UI-4 / CSS2.1 SS11.1.1), exactly like
    ;; pointer-events:none.
    :visibility (:visibility st)
+   ;; `break-inside` is not a paint property at all: it is carried so that a
+   ;; FRAGMENTATION context downstream of these ops (layout-multicol's
+   ;; frag-atoms) can tell which boxes refuse to be cut, without re-walking
+   ;; the document to ask the cascade a second question. It is the one
+   ;; property here whose consumer is a layout pass rather than a painter or
+   ;; a hit-tester.
+   :break-inside (:break-inside st)
+   :orphans (:orphans st)
    :overflow (:overflow st)
    :scroll-top (:scroll-top st)
    :scroll-left (:scroll-left st)
@@ -12395,7 +12419,14 @@
                                        :y (- baseline (:font-size st))
                                        :font-size (:font-size st)
                                        :color (:color st)
-                                       :opacity (:opacity piece)}
+                                       :opacity (:opacity piece)
+                                       ;; the line box this op sits in, as an offset
+                                       ;; from the op's own `:y` and a height (see the
+                                       ;; ns docstring's `:line/h` paragraph). Here the
+                                       ;; op's `:y` is a BASELINE-derived glyph top, so
+                                       ;; the offset is real and negative.
+                                       :line/dy (- y (- baseline (:font-size st)))
+                                       :line/h line-h}
                                 (:font-weight st) (assoc :font-weight (:font-weight st))
                                 (:font-style st) (assoc :font-style (:font-style st))
                                 (:font-family st) (assoc :font-family (:font-family st))))
@@ -12435,7 +12466,13 @@
                            py0 (- baseline (:font-size st) (:shift piece 0))
                            px (+ px0 rdx)
                            py (+ py0 rdy)
-                           base (cond-> {:text (:text piece) :font-size (:font-size st) :opacity (:opacity piece)}
+                           base (cond-> {:text (:text piece) :font-size (:font-size st) :opacity (:opacity piece)
+                                         ;; the LINE BOX, as an offset from this op's
+                                         ;; own `:y` and a height -- see the ns
+                                         ;; docstring's `:line/h` paragraph. Relative
+                                         ;; to `py`, which is where the op ends up, so
+                                         ;; it survives every later translate.
+                                         :line/dy (- y py) :line/h line-h}
                                   (:font-weight st) (assoc :font-weight (:font-weight st))
                                   (:font-style st) (assoc :font-style (:font-style st))
                                   (:font-family st) (assoc :font-family (:font-family st)))
@@ -13959,31 +13996,57 @@
 ;;               full-width block, and the content after it starts a fresh
 ;;               row below
 ;;
-;; ---- the scope cut: a block is never FRAGMENTED across a boundary ------
+;; ---- fragmentation: a block IS cut across a boundary -------------------
 ;;
-;; A real browser SPLITS a block that does not fit -- part of it at the
-;; bottom of one column, the rest at the top of the next, with
-;; getBoundingClientRect reporting the union of the two fragments. This
-;; engine moves such a block WHOLE into the next column instead, i.e. it
-;; treats every block as `break-inside: avoid`. That is a real difference
-;; and the corpus measures it: `:multicol/a-block-splits-across-the-column-
-;; boundary` is a 300px box with `height: 40px` holding a 30px and a 20px
-;; block, where Brave balances to a 25px column height by cutting the first
-;; block at 25 (its box reads 300 wide and 25 tall, spanning both columns)
-;; and this engine reports it 140 wide and 30 tall in column one.
+;; A block that does not fit is SPLIT -- part of it at the bottom of one
+;; column, the rest at the top of the next. Where a cut is allowed to fall
+;; is its own measured question with five answers; they are stated at the
+;; "where a column break is ALLOWED to fall" comment further down, beside
+;; the functions that implement them (frag-atoms, frag-cut-below,
+;; multicol-pack).
 ;;
-;; What is NOT cut: the direct inline content of a multicol box breaks
-;; between its LINE boxes, which is the fragmentation an author actually
-;; sees (`:multicol/text-flows-into-the-column-width`'s three lines land
-;; two in the first column and one in the second). See multicol-line-items.
+;; What a browser REPORTS for a fragmented block, because it is two
+;; different rectangles and this engine emits both:
+;; `getClientRects()` gives one rect per fragment, `getBoundingClientRect()`
+;; gives their union -- a rectangle spanning both columns and covering
+;; ground the element does not occupy, inside which `elementFromPoint`
+;; answers the container rather than the element. So the `:node` op's box
+;; is the union and its `:hit` rects are the fragments, which is the same
+;; pair a wrapped INLINE box already needed (see the ns docstring). See
+;; frag-slice-ops and frag-merge-nodes.
 ;;
-;; Two consequences worth naming rather than discovering: `break-inside:
-;; avoid` is satisfied by construction and so scores nothing, and a
-;; PARAGRAPH (`<p>` -- a block, not direct inline content) is atomic here
-;; where a browser would flow its lines across the boundary. A future
-;; cycle that wants the real thing needs op-level fragmentation: split a
-;; laid-out subtree's draw ops at a y, and report ONE `:node` op whose box
-;; is the union of the fragments, which is what the browser reports.
+;; This replaced a scope cut, landed 2026-08-06: until then nothing was
+;; ever fragmented, a block that did not fit moved whole into the next
+;; column, and `break-inside: avoid` was therefore satisfied by
+;; construction and scored nothing anywhere. Both corpus cases that
+;; recorded the gap now agree with Brave, and 59 measured probe shapes
+;; agree with it box for box.
+;;
+;; ---- what is still cut, with the browser numbers a fix will need ------
+;;
+;;   `box-decoration-break: clone` is not implemented; `slice`, the
+;;     initial value, is. Measured on a `border:5px; padding:3px;
+;;     height:40px` block (56 tall) cut at 40: slice reports fragments of
+;;     40 and 16 (= 56), clone reports 40 and 32 (= 72, an extra 8px of
+;;     decoration at each cut edge). The geometry axis cannot see the
+;;     difference -- both unions are `[160,0,300,40]` -- but the PAINT axis
+;;     can, and does: `:multicol/decorations-are-sliced-at-the-break`'s
+;;     clone twin disagrees at 2 sample points in the 16..32 band.
+;;   an item whose ops contain a `:clip` or `:stack` push is monolithic.
+;;     For `:clip` that is correct anyway (a scroll container is monolithic
+;;     in Brave: a 60px `overflow:hidden` block moves whole into the next
+;;     column and overflows it). For `:stack` -- a positioned or z-indexed
+;;     descendant -- it is a real cut and its browser number is NOT
+;;     measured. See frag-atoms.
+;;   `widows` is not read, deliberately: measured, Brave does not honour it
+;;     either (`orphans:1; widows:2` over two lines splits anyway). See
+;;     frag-keep-orphans, which does read `orphans`.
+;;   `break-before`/`break-after` (forced breaks) are not read at all.
+;;   a declared `orphans` on the multicol box itself does not reach its own
+;;     direct inline content, which uses the initial 2. See
+;;     multicol-line-items.
+;;   the balanced height is searched over WHOLE pixels, so a shape whose
+;;     true optimum is fractional lands within 1px of it.
 
 (def ^:private multicol-displays
   "The `display` values whose box can BE a multi-column container.
@@ -14098,8 +14161,17 @@
 
 (defn- multicol-line-items
   "Splits a laid-out bare TEXT entry into one item per LINE, so the column
-   flow can break between them -- the one fragmentation this engine does
-   perform (see the section header for the block-level cut it does not).
+   flow can break between them.
+
+   The first TWO lines are one item, not two: `orphans` (initial value 2)
+   forbids a break that leaves a single line behind, and this is the same
+   fusing frag-keep-orphans does for a block's lines, at the one place
+   those lines are items rather than atoms. Measured in Brave -- a
+   multicol box whose own direct content is two lines keeps BOTH in the
+   first column and reports the box 40 tall, where three lines split 2/1
+   and read 40 as well. A declared `orphans` on the multicol box itself is
+   not read here (only the initial 2), which is the narrow scope cut of
+   this path.
 
    The lines are recovered from the ops' own `:y`, which layout-text sets
    to `y + padding + i * line-height` and so is one distinct value per
@@ -14121,14 +14193,21 @@
                  (every? #(= :text (:draw/op %)) ops)
                  (apply = steps))
       [item]
+      ;; index 0 is skipped: its line is folded into index 1's item, which
+      ;; therefore starts at the FIRST line's y and is two lines tall.
       (mapv (fn [i]
               (let [ly (nth ys i)
-                    off (- ly (first ys))]
-                {:h (if (< (inc i) n) (nth steps i) (- (:h item) off))
+                    first? (= i 1)
+                    ly0 (if first? (nth ys 0) ly)
+                    off (- ly0 (first ys))]
+                {:h (if (< (inc i) n)
+                      (+ (nth steps i) (if first? (nth steps 0) 0))
+                      (- (:h item) off))
                  :mt 0 :mb 0
-                 :draw (mapv #(update % :y - off) (filterv #(= ly (:y %)) ops))
+                 :draw (mapv #(update % :y - off)
+                             (filterv #(or (= ly (:y %)) (and first? (= (nth ys 0) (:y %)))) ops))
                  :oof []}))
-            (range n)))))
+            (if (> n 1) (range 1 n) (range n))))))
 
 (defn- multicol-items
   "One layout entry of a multi-column container's flow, as the vector of
@@ -14175,70 +14254,502 @@
         (recur (rest is) bot (:mb it) false (conj tops top) (conj bottoms bot)))
       {:tops tops :bottoms bottoms :total (+ y prev-mb)})))
 
+(def ^:private multicol-monolithic-tags
+  "Tags whose box a column break may never fall inside, whatever its
+   height. Measured in Brave (2026-08-06): an 80px `display: block` `<img>`
+   alone in a two-column box balances to 80 and reports ONE client rect --
+   the browser would rather leave a column empty than cut a replaced
+   element in half. The form controls are here for the same reason and by
+   the same argument this file already makes for them elsewhere (their
+   contents are their own formatting context, and this engine paints them
+   as one unit); they are not separately measured."
+  #{:img :canvas :video :svg :iframe :input :button :select :textarea :object :embed})
+
+;; ---- where a column break is ALLOWED to fall ---------------------------
+;;
+;; Measured in Brave 151.1.93.129 at the corpus's own font-size 14 /
+;; line-height 20, 2026-08-06. Everything below is a fact about the
+;; browser, not a reading of CSS Fragmentation 3.
+;;
+;;   inside a LINE BOX        never. `<div style="height:90px">a</div>` in
+;;                            two columns balances to 45 and cuts at 45,
+;;                            in the empty band BELOW its one 20px line;
+;;                            three `height:30px` blocks holding text
+;;                            balance to 50, not 45, because 45 lands
+;;                            inside the second block's line.
+;;   in the EMPTY band inside a block, below its last line or between two
+;;                            children: anywhere, continuously. The 45 and
+;;                            the 50 above are both such cuts, and neither
+;;                            is at a structural boundary.
+;;   ABOVE a block's first line: never, even when there is room.
+;;                            `<div style="padding-top:40px">a</div>` (60
+;;                            tall, a 20px line at 40) balances to 60 and
+;;                            reports one rect -- 20/40 would have been
+;;                            available if the padding were breakable. A
+;;                            `border-top: 40px` reads the same. This is
+;;                            the asymmetry `:lo` encodes: the first
+;;                            atom's BOTTOM, not its top, is the first
+;;                            legal cut.
+;;   inside a MONOLITHIC box  never: `overflow: hidden` (a 60px one moves
+;;                            whole into the next column and overflows it
+;;                            rather than splitting), a replaced element,
+;;                            `break-inside: avoid`.
+;;   with nothing legal left  the browser cuts anyway, and does it by
+;;                            PUSHING the atom that straddles rather than
+;;                            slicing it. `<div style="padding-top:10px">a
+;;                            </div>` (30 tall) in a forced 25px column
+;;                            reports 25 and 20 -- 25+20 > 30, because the
+;;                            first fragment is a 10px slice STRETCHED to
+;;                            the column bottom and the line went whole
+;;                            into the second. A single line in a 10px
+;;                            column reports two 20px fragments: the line
+;;                            overflows its column, it is never halved.
+;;                            `break-inside: avoid` is dropped one step
+;;                            earlier than that -- a 100px `avoid` block in
+;;                            a 40px column fragments 40/40/20.
+;;
+;; The three sets those five rules produce are what frag-cut-below is asked
+;; for in order (respect `avoid`; drop `avoid`; push the straddling atom),
+;; and only the FIRST of them counts as "fits" for balancing -- see
+;; multicol-balanced-height, and the pad-top-10 pair above, which balances
+;; to 30 (no cut) and yet cuts at 10 when the height is forced.
+
+(defn- frag-keep-orphans
+  "The line boxes with each block's first `orphans` lines FUSED into one
+   unbreakable range, so no break can leave fewer than that many behind.
+
+   `orphans` is real CSS (initial value 2) and this is the rule that
+   decides whether a two-line block splits at all. Measured in Brave
+   2026-08-06, one block of two 20px lines in two columns:
+
+     default (orphans 2)      40 tall, ONE rect      -- refuses to split
+     `orphans:1; widows:2`    20 tall, TWO rects     -- splits
+     `orphans:2; widows:1`    40 tall, ONE rect      -- refuses
+
+   So `orphans` is honoured and **`widows` is not**: the second shape
+   splits although it leaves a single widow, and three lines under the
+   defaults split 2/1 although that is also a single widow. `widows` is
+   therefore read nowhere in this engine, deliberately, because reading it
+   would diverge from the browser this is measured against. `orphans:3`
+   over four lines was measured too, and cuts after the third.
+
+   Which block a line belongs to is read geometrically -- the SMALLEST
+   `:node` box that vertically contains it -- because a text op does not
+   carry its owner. A line that OVERFLOWS its own block (a `height:10px`
+   box holding a 20px line) is contained by nothing and falls in the nil
+   group with any others like it; that group is fused the same way, which
+   is a cut worth naming: two such lines in different blocks would be
+   treated as one block's pair."
+  [lines blocks]
+  (let [owner (fn [[t b]]
+                (->> blocks
+                     (filter #(and (<= (- (:y %) 0.5) t) (>= (+ (:y %) (:h %) 0.5) b)))
+                     (reduce (fn [best op] (if (or (nil? best) (< (:h op) (:h best))) op best)) nil)))
+        k-of (fn [op] (max 1 (or (some-> (:orphans op) str parse-long) 2)))]
+    (->> lines
+         (group-by owner)
+         (mapcat (fn [[op ls]]
+                   (let [k (if op (k-of op) 2)
+                         ls (vec (sort-by first ls))]
+                     (if (< (count ls) k)
+                       ls
+                       (cons [(first (nth ls 0)) (second (nth ls (dec k))) false]
+                             (drop k ls))))))
+         vec)))
+
+(defn- frag-absorb-deco
+  "Each DECORATION band (a box's padding+border at the block start or end)
+   folded into the content atom it touches, so the two become one
+   unbreakable range.
+
+   Absorbing rather than listing them separately is the difference between
+   two measurements that would otherwise contradict each other.
+   `<div style=\"padding-bottom:40px\">a</div>` is 60 tall with a 20px line
+   and a 40px band under it, and Brave balances it to 60 in two columns --
+   it will not cut at 20, the one point that is inside neither. Absorbed,
+   the line and the band are one 0..60 atom and there is nothing to cut.
+   Yet four LINE boxes stacked 0..80 do get cut at 20/40/60, so touching
+   ranges cannot simply be merged wholesale: content meeting content is a
+   break opportunity, content meeting its own padding is not.
+
+   A band that touches no content -- an empty padded box -- stays an atom
+   of its own, and is NOT content, so it does not move `:lo`."
+  [content decos]
+  (loop [as (vec content) ds (vec decos) left [] guard 0]
+    (if (or (empty? ds) (> guard (+ 4 (* 2 (count decos)))))
+      [(vec as) (into (vec left) ds)]
+      (let [[dt db] (first ds)
+            hit (first (keep-indexed (fn [i [t b]] (when (or (== b dt) (== t db)) i)) as))]
+        (if hit
+          (recur (update as hit (fn [[t b av]] [(min t dt) (max b db) av]))
+                 (subvec ds 1) left (inc guard))
+          (recur as (subvec ds 1) (conj left [dt db]) (inc guard)))))))
+
+(defn- frag-atoms
+  "The item-local y ranges a column break may not fall INSIDE, read off the
+   item's own laid-out draw ops:
+
+     {:soft [[top bottom avoid?] ...]   every range, decorations absorbed
+      :raw  [[top bottom avoid?] ...]   the CONTENT ranges, unabsorbed
+      :lo   <first offset a cut is allowed at all>}
+
+   `:soft` is what a break opportunity has to avoid. `:raw` is what the
+   forced path pushes when there is no opportunity left -- it has to see
+   the line box on its own, without the padding above it, to know that
+   pushing the line clears the obstruction. The pair is the two halves of
+   one measured shape: `<div style=\"padding-top:10px\">a</div>` (30 tall)
+   balances to 30 with no cut, and yet in a forced 25px column it reports
+   fragments of 25 and 20, i.e. it cut at 10.
+
+   Reading the ops rather than re-walking the document is deliberate: the
+   ops ARE the geometry that will be sliced, so an atom derived from them
+   cannot disagree with what gets cut. Four sources:
+
+   - every `:text` op is a LINE BOX, `[:y + :line/dy, + :line/h]`. Those
+     two keys exist for this function (see the ns docstring): a text op's
+     own `:y` is the line top on layout-text's path and a baseline-derived
+     glyph top on layout-inline-run's, and only the emitter knows which.
+   - every `:node` op whose tag is monolithic, or whose element declares
+     `break-inside: avoid` (carried on the op by style-passthrough), or
+     which CLIPS (`overflow` other than visible pushes a `:clip` op
+     carrying that element's `:node/id`).
+   - every `:node` op's own decoration bands, `:frag/insets`.
+   - the whole item, when its ops contain a `:clip` or `:stack` push at
+     all. Those come in pairs bracketing a span, and a cut between a push
+     and its pop would emit half a pair into each column. Making the item
+     monolithic is a real scope cut and not only a safety net: for
+     `overflow: hidden` it is what Brave does anyway (a 60px one moves
+     whole into the next column and overflows it rather than splitting),
+     and for `:stack` -- a positioned or z-indexed descendant -- it is a
+     cut whose browser number is NOT measured. What Brave does with a
+     fragmented block containing a `position: relative; z-index: 1` child
+     is the first thing a future cycle should probe.
+
+   `avoid?` travels with the range instead of removing it, because the
+   forced path drops exactly those and keeps the rest."
+  [ops h]
+  (let [guarded? (some #(and (contains? #{:clip :stack} (:draw/op %))
+                             (= :push (or (:clip/op %) (:stack/op %))))
+                       ops)]
+    (if guarded?
+      {:soft [[0 h false]] :raw [[0 h false]] :lo h}
+      (let [clipped (into #{} (comp (filter #(= :clip (:draw/op %))) (map :node/id)) ops)
+            blocks (filterv #(= :node (:draw/op %)) ops)
+            lines (vec (for [op ops :when (= :text (:draw/op op))]
+                         (let [t (+ (:y op) (:line/dy op 0))]
+                           [t (+ t (or (:line/h op) (:font-size op) 0)) false])))
+            content (vec (concat
+                          (frag-keep-orphans lines blocks)
+                          (for [op ops
+                                :when (and (= :node (:draw/op op))
+                                           (or (contains? multicol-monolithic-tags (:tag op))
+                                               (contains? clipped (:id op))
+                                               (= "avoid" (:break-inside op))))]
+                            [(:y op) (+ (:y op) (:h op)) (= "avoid" (:break-inside op))])))
+            decos (vec (for [op ops
+                             :when (and (= :node (:draw/op op)) (seq (:frag/insets op)))
+                             :let [[t b] (:frag/insets op)]
+                             band [[(:y op) (+ (:y op) t)]
+                                   [(- (+ (:y op) (:h op)) b) (+ (:y op) (:h op))]]
+                             :when (> (second band) (first band))]
+                         band))
+            [absorbed left] (frag-absorb-deco content decos)]
+        {:soft (into absorbed (map (fn [[t b]] [t b false])) left)
+         :raw (vec (concat lines
+                           (for [op ops
+                                 :when (and (= :node (:draw/op op))
+                                            (or (contains? multicol-monolithic-tags (:tag op))
+                                                (contains? clipped (:id op))
+                                                (= "avoid" (:break-inside op))))]
+                             [(:y op) (+ (:y op) (:h op)) (= "avoid" (:break-inside op))])))
+         ;; The first offset at which a cut is allowed AT ALL: the smallest
+         ;; bottom edge among the CONTENT ranges (with their decorations),
+         ;; or 0 when there are none.
+         ;;
+         ;; This one number is the `padding-top` measurement in the header.
+         ;; Everything above the first atom's bottom is either inside that
+         ;; atom or above it, and Brave takes neither as a break
+         ;; opportunity. A leftover decoration band is excluded because it
+         ;; is not content: an empty padded box must not make the space
+         ;; after it look cuttable.
+         :lo (if (seq absorbed) (reduce min (map second absorbed)) 0)}))))
+
+(defn- frag-ink-h
+  "How far an item's content actually reaches, which is not always its
+   height: a `height: 10px` block holding a 20px line box reaches 20.
+
+   Only multicol-balanced-height's floor reads this, and it has to:
+   measured, four `height:10px` blocks (each holding a 20px line, so the
+   flow is 40 tall and its ink 50) balance to 25 in two columns, which is
+   `ceil(50/2)` and not `ceil(40/2)`. The CUTS still work in the flow's own
+   coordinates -- the overflow is a paint fact, not a break opportunity."
+  [item]
+  (reduce (fn [m op]
+            (max m (case (:draw/op op)
+                     :text (+ (:y op) (:line/dy op 0) (or (:line/h op) (:font-size op) 0))
+                     (:rect :node) (+ (:y op) (or (:h op) 0))
+                     m)))
+          (:h item) (:draw item)))
+
+(defn- frag-inside?
+  [atoms y]
+  (boolean (some (fn [[at ab]] (and (< at y) (< y ab))) atoms)))
+
+(defn- frag-cut-below
+  "The largest legal cut offset `<= t` in an item of height `h`, or nil.
+
+   Walks DOWN from `t`: a target inside an atom retreats to that atom's
+   top, which may be inside another, until it lands in free space or falls
+   below `lo`."
+  [atoms h lo t]
+  (loop [y (min t h) guard 0]
+    (cond
+      (> guard (inc (count atoms))) nil
+      (or (< y lo) (<= y 0)) nil
+      (frag-inside? atoms y)
+      (recur (reduce min (keep (fn [[at ab]] (when (and (< at y) (< y ab)) at)) atoms))
+             (inc guard))
+      :else y)))
+
+(defn- frag-cut-past
+  "The first cut offset after `y0` that clears whatever atom is sitting at
+   `y0`, or nil when nothing is -- the PUSH the last measured rule
+   describes, and the only thing that guarantees a column makes progress."
+  [atoms h y0]
+  (let [blocking (keep (fn [[at ab]] (when (and (<= at y0) (< y0 ab)) ab)) atoms)]
+    (when (seq blocking)
+      (let [b (reduce max blocking)]
+        (when (< b h) b)))))
+
 (defn- multicol-pack
-  "Fills columns of height `h` greedily, in order: `[{:from :to :origin
-   :h}]`, one entry per column used -- which may be MORE than the used
-   column count, and is exactly how a box with a definite height overflows
-   sideways (measured: a 200px `height: 40px` two-column box holding three
-   40px blocks puts the third at x=220, past its own right edge).
+  "Fills columns of height `h` greedily, in order, CUTTING items where a
+   cut is allowed: `{:cols [{:origin :h :parts [...]}] :forced? bool}`,
+   one column per entry -- which may be MORE than the used column count,
+   and is exactly how a box with a definite height overflows sideways
+   (measured: a 200px `height: 40px` two-column box holding three 40px
+   blocks puts the third at x=220, past its own right edge).
 
-   `origin` is the flow position the column's own y=0 is at. For every
-   column but the first that is the first item's TOP, i.e. the margin
-   before the break is dropped rather than carried into the new column --
-   measured in Brave, the first block of the second column sits at y=0
-   with its 10px top margin truncated. The first column keeps 0, so the
-   first item's margin stays inside the box, which is the other half of
-   the same measurement.
+   `:origin` is the flow position the column's own y=0 is at, and a break
+   DROPS the margin at it: for every column but the first, `:origin` is
+   the cut itself, which for a cut at an item boundary is that item's TOP
+   rather than its margin edge -- measured in Brave, the first block of
+   the second column sits at y=0 with its 10px top margin truncated. The
+   first column keeps 0, so the first item's margin stays inside the box.
 
-   A column always takes at least one item, so an item taller than `h`
-   overflows its column instead of looping forever."
-  [tops bottoms h]
-  (let [n (count tops)]
-    (loop [i 0 cols []]
-      (if (>= i n)
-        cols
-        (let [origin (if (zero? i) 0 (nth tops i))
-              j (loop [j i]
-                  (if (and (< (inc j) n)
-                           (<= (- (nth bottoms (inc j)) origin) h))
-                    (recur (inc j))
-                    j))]
-          (recur (inc j) (conj cols {:from i :to j :origin origin
-                                     :h (- (nth bottoms j) origin)})))))))
+   Each `:parts` entry is `{:item :from :to :box-h}` in item-local y.
+   `:box-h` is the height the box REPORTS in this column, and it is not
+   always `:to - :from`: a box that CONTINUES into the next column is
+   stretched to the column's bottom edge. Measured -- a `<p>` of four 20px
+   lines in a forced 30px column reports fragments 30/30/30/20, and the
+   30s hold one line each.
+
+   `:forced?` says a cut had to be taken where the browser has no break
+   OPPORTUNITY, only a last resort. It is not an error (Brave does the
+   same thing, see the header comment) but balancing refuses to count such
+   a height as fitting, which is what keeps `padding-top` from being
+   treated as free space to balance into."
+  [items tops bottoms total h]
+  (let [n (count items)
+        ;; the three break-opportunity sets of the header comment, in the
+        ;; order they are asked for: soft (respecting `break-inside:
+        ;; avoid`), soft without `avoid`, and the RAW content ranges the
+        ;; forced path pushes.
+        a1 (mapv (comp :soft :atoms) items)
+        lo1 (mapv (comp :lo :atoms) items)
+        drop-avoid (fn [as] (vec (remove #(nth % 2) as)))
+        a2 (mapv drop-avoid a1)
+        lo2 (mapv (fn [as] (if (seq as) (reduce min (map second as)) 0)) a2)
+        a3 (mapv (comp drop-avoid :raw :atoms) items)
+        ih (mapv :h items)
+        seam-at (fn [i] (if (< (inc i) n) (nth tops (inc i)) total))
+        item-at (fn [y] (first (filter #(and (<= (nth tops %) y) (< y (nth bottoms %))) (range n))))
+        containing (fn [y] (first (filter #(and (< (nth tops %) y) (< y (nth bottoms %))) (range n))))]
+    (loop [origin 0 cols [] forced? false guard 0]
+      (if (or (>= origin total) (> guard (* 4 (inc n))))
+        {:cols cols :forced? forced?}
+        (let [target (+ origin h)
+              seam (last (for [i (range n)
+                               :when (and (<= (- (nth bottoms i) origin) h)
+                                          (> (nth bottoms i) origin))]
+                           {:at (seam-at i) :end (nth bottoms i)}))
+              j (containing target)
+              internal (fn [as los]
+                         (when j
+                           (when-let [off (frag-cut-below (nth as j) (nth ih j) (nth los j)
+                                                          (- target (nth tops j)))]
+                             (let [at (+ (nth tops j) off)]
+                               (when (> at origin) {:at at :end at})))))
+              pick (fn [& cs] (let [cs (remove nil? cs)] (when (seq cs) (apply max-key :end cs))))
+              soft (pick seam (internal a1 lo1))
+              ;; the two last resorts, in the order Brave takes them: drop
+              ;; `break-inside: avoid`, then push the straddling atom.
+              hard (or soft
+                       (internal a2 lo2)
+                       (when j
+                         (when-let [off (frag-cut-below (nth a3 j) (nth ih j) 0
+                                                        (- target (nth tops j)))]
+                           (let [at (+ (nth tops j) off)]
+                             (when (> at origin) {:at at :end at}))))
+                       ;; progress: whatever is sitting at `origin` has to
+                       ;; be cleared, or the whole item goes in.
+                       (let [k (or (item-at origin) 0)]
+                         (or (when-let [off (frag-cut-past (nth a3 k) (nth ih k)
+                                                           (- origin (nth tops k)))]
+                               (let [at (+ (nth tops k) off)]
+                                 (when (> at origin) {:at at :end at})))
+                             {:at (seam-at k) :end (nth bottoms k)})))
+              {:keys [at end]} hard
+              parts (vec (for [i (range n)
+                               :when (and (< (nth tops i) end) (> (nth bottoms i) origin))]
+                           (let [p (max 0 (- origin (nth tops i)))
+                                 q (min (nth ih i) (- end (nth tops i)))
+                                 top-in-col (- (max (nth tops i) origin) origin)]
+                             {:item i :from p :to q
+                              :box-h (if (< q (nth ih i))
+                                       (max (- q p) (- h top-in-col))
+                                       (- q p))})))]
+          (recur at
+                 (conj cols {:origin origin :h (- end origin) :parts parts})
+                 (or forced? (nil? soft))
+                 (inc guard)))))))
 
 (defn- multicol-balanced-height
-  "The balanced column height: the SMALLEST height at which the items still
-   fit in `n` columns.
+  "The balanced column height: the smallest height at which the items fit
+   in `n` columns WITHOUT a forced cut, but never less than
+   `ceil(total / n)`.
 
-   The rule, stated exactly because it is the part most easily
-   approximated: greedy filling is optimal for this problem (it is the
-   classic minimum-largest-partition of a sequence into at most n
-   contiguous runs), and 'does it fit in n columns' is monotone in the
-   height, so a bisection over [0, total] converges on the smallest
-   feasible height and a final pack at that height snaps it to a real
-   break -- the answer is always some `bottom(j) - origin(i)`, never a
-   number between two of them.
+   The search half is unchanged and still the part most easily
+   approximated: greedy filling is optimal for this problem (the classic
+   minimum-largest-partition of a sequence into at most n contiguous
+   runs), 'does it fit' is monotone in the height, and the bisection is
+   over WHOLE pixels because every item height and every cut offset this
+   engine produces is one. Three 30px blocks in two columns still do not
+   balance to 45 -- but they now balance to 50 rather than 60, because
+   with fragmentation 50 IS a place the content can be cut (measured in
+   Brave: the second block reports two rects, `[0,30,140,20]` and
+   `[160,0,140,10]`).
 
-   How far it was verified: against a real Blink browser on eleven corpus
-   shapes plus twenty more probes, every one of which agreed once the
-   items are the ones THIS engine can break at (see the section header --
-   a browser can also break inside a block, and where it does, its
-   balanced height is smaller than the one this returns). Four of those
-   probes are the reason the rule is a search rather than the
-   `ceil(total / n)` first guess it is often written as: three 30px blocks
-   in two columns balance to 60 here and in Brave, not 45, because 45 is
-   not a place the content can be cut."
-  [tops bottoms n]
-  (if (empty? tops)
+   The floor is the half that is NOT a search, and it was measured
+   2026-08-06 because fragmentation is what exposed it. Blink's balancer
+   starts from `ceil(total / n)` and only ever grows; it does not look for
+   anything smaller. `<div style=\"height:30px\">a</div><div
+   style=\"height:30px; margin-top:60px\">b</div>` in two columns has a
+   minimum feasible height of 30 -- one block per column, the 60px margin
+   dropped at the break -- and Brave reports the box 60 tall, which is
+   `ceil(120/2)`. A 20px margin in the same shape reads 40. Without the
+   floor this engine would have answered 30 and 30. The floor is inert on
+   every shape whose margins do not straddle a break, which is every
+   multicol case in the corpus.
+
+   The height the floor divides is the flow's INK bottom, not its box
+   bottom, on the one shape where those differ -- see frag-ink-h."
+  [items tops bottoms total n]
+  (if (or (empty? items) (<= total 0))
     0
-    (let [total (double (peek bottoms))]
-      (loop [lo 0.0 hi total k 0]
-        (if (>= k 40)
-          (reduce max 0 (map :h (multicol-pack tops bottoms hi)))
-          (let [mid (/ (+ lo hi) 2.0)]
-            (if (<= (count (multicol-pack tops bottoms mid)) n)
-              (recur lo mid (inc k))
-              (recur mid hi (inc k)))))))))
+    (let [fits? (fn [h]
+                  (let [{:keys [cols forced?]} (multicol-pack items tops bottoms total h)]
+                    (and (not forced?) (<= (count cols) n))))
+          ink (reduce max total (map-indexed (fn [i it] (+ (nth tops i) (frag-ink-h it))) items))
+          cap (long (Math/ceil total))
+          found (loop [lo 0 hi cap guard 0]
+                  (cond
+                    (> guard 64) hi
+                    (<= (- hi lo) 1) hi
+                    :else (let [mid (quot (+ lo hi) 2)]
+                            (if (fits? mid) (recur lo mid (inc guard)) (recur mid hi (inc guard))))))]
+      (max (long (Math/ceil (/ ink (double n)))) found))))
+
+(defn- frag-slice-ops
+  "One item's ops restricted to the fragment holding item-local `[p, q)`,
+   in FRAGMENT-local y (so the caller only has to place the fragment), for
+   a fragment box `fh` tall.
+
+   The three op kinds are cut differently, and each way was measured:
+
+   - a `:text` op is a LINE, and a line is never halved (see the header
+     comment). It belongs, whole, to the fragment its line box STARTS in.
+   - a `:rect` op -- a background, a border edge, an outline -- is CLIPPED
+     to the fragment box. That is `box-decoration-break: slice`, the
+     initial value, and slice is what a browser does: a `border: 5px;
+     padding: 3px; height: 40px` block (56 tall) cut at 40 reports
+     fragments 40 and 16, summing to 56, so the border ring is cut open
+     rather than repeated. Clipping the rects reproduces exactly that --
+     the top edge lands in the first fragment and the bottom edge in the
+     last, because that is where those rects are. `box-decoration-break:
+     clone` is NOT implemented: measured on the same shape it reports 40
+     and 32, i.e. 72 = 56 + two extra 8px decorations, and it would need
+     the decoration re-emitted per fragment rather than sliced.
+   - a `:node` op is the ELEMENT, and an element that spans two columns is
+     still one element. Each fragment gets its own rect here, marked
+     ::frag, and frag-merge-nodes folds them into the single op with the
+     union box that `getBoundingClientRect` returns.
+
+   Clipped to `fh` and not to `q - p` because a fragment that CONTINUES is
+   stretched to the column bottom, so its background is that tall too."
+  [ops p q fh fragmented?]
+  (let [lo p
+        hi (+ p fh)]
+    (into []
+          (keep (fn [op]
+                  (case (:draw/op op)
+                    :text (let [t (+ (:y op) (:line/dy op 0))]
+                            (when (and (>= t (- p 0.5)) (< t (- q 0.5)))
+                              (update op :y - p)))
+                    (:rect :node)
+                    (let [oy (:y op) ob (+ oy (or (:h op) 0))
+                          ny (max oy lo) nb (min ob hi)]
+                      (when (or (> nb ny) (and (= oy ob) (<= lo oy) (< oy hi)))
+                        (cond-> (assoc op :y (- ny p) :h (- nb ny))
+                          (and fragmented? (= :node (:draw/op op)))
+                          (assoc ::frag true))))
+                    (cond-> op (contains? op :y) (update :y - p)))))
+          ops)))
+
+(defn- frag-merge-nodes
+  "Folds the `:node` ops frag-slice-ops marked as fragments back into ONE
+   op per element: the box becomes the UNION of the fragments and `:hit`
+   becomes the fragments themselves.
+
+   That shape is not invented here -- it is what this file already does
+   for a WRAPPED INLINE box (see the ns docstring's `:hit` section), and
+   it is what the browser reports for a fragmented block. Measured: the
+   first block of `<div style=\"width:300px;height:40px;column-count:2\">
+   <div style=\"height:30px\">a</div><div style=\"height:20px\">b</div>
+   </div>` returns getClientRects `[0,0,140,25]` and `[160,0,140,5]` and
+   getBoundingClientRect `[0,0,300,25]` -- the union across BOTH columns,
+   which is a rectangle covering ground the element does not occupy, and
+   `elementFromPoint` inside that gap answers the container, not this
+   element. Box and hit region have to be two different things for both
+   halves to be right, and they already are.
+
+   The merged op keeps the FIRST fragment's position in the op vector, so
+   paint order is the order the element first painted in. An element with
+   one fragment just loses the marker, which is why this is inert on every
+   multicol box that does not fragment."
+  [ops]
+  (let [frags (->> ops (filter ::frag) (group-by :id))
+        rects (fn [op] (if (seq (:hit op))
+                         (:hit op)
+                         [{:x (:x op) :y (:y op) :w (:w op) :h (:h op)}]))
+        merged (into {}
+                     (for [[id os] frags
+                           :let [rs (vec (mapcat rects os))
+                                 x0 (reduce min (map :x rs))
+                                 y0 (reduce min (map :y rs))
+                                 x1 (reduce max (map #(+ (:x %) (:w %)) rs))
+                                 y1 (reduce max (map #(+ (:y %) (:h %)) rs))]]
+                       [id (cond-> (assoc (first os) :x x0 :y y0 :w (- x1 x0) :h (- y1 y0))
+                             (next rs) (assoc :hit rs))]))
+        seen (volatile! #{})]
+    (into []
+          (keep (fn [op]
+                  (if-not (::frag op)
+                    op
+                    (let [id (:id op)]
+                      (when-not (contains? @seen id)
+                        (vswap! seen conj id)
+                        (dissoc (get merged id op) ::frag))))))
+          ops)))
 
 (defn- multicol-spanner?
   [node]
@@ -14283,27 +14794,49 @@
                              (into oofs (mapv #(update % :y + content-y top) (:oof it)))]))
                         [y draws oofs] seg)]
             (recur (rest segs) y' draws' oofs'))
-          (let [items (vec (mapcat #(multicol-items theme content-x lay-w opacity inherited %) seg))
+          (let [items0 (vec (mapcat #(multicol-items theme content-x lay-w opacity inherited %) seg))
+                items (mapv #(assoc % :atoms (frag-atoms (:draw %) (:h %))) items0)
                 {:keys [tops bottoms total]} (multicol-flow theme items)
                 h (if (= :auto (:fill mc))
                     (or content-h total)
-                    (let [b (multicol-balanced-height tops bottoms n)]
+                    (let [b (multicol-balanced-height items tops bottoms total n)]
                       (if content-h (min b content-h) b)))
-                cols (multicol-pack tops bottoms h)
-                seg-h (reduce max 0 (map :h cols))
+                cols (:cols (multicol-pack items tops bottoms total h))
+                ;; the column height a browser reports for the BOX is the
+                ;; balanced height itself, not the tallest column's
+                ;; content -- `ceil(total / n)` can exceed what any column
+                ;; ends up holding once a margin is dropped at a break (see
+                ;; multicol-balanced-height's floor). It is the larger of
+                ;; the two, because a single unbreakable item can also
+                ;; overflow the height that was asked for.
+                seg-h (max (if (= :auto (:fill mc)) 0 h)
+                           (reduce max 0 (map :h cols))
+                           (reduce max 0 (for [c cols p (:parts c)]
+                                           (+ (- (max (nth tops (:item p)) (:origin c)) (:origin c))
+                                              (:box-h p)))))
                 placed (map-indexed
-                        (fn [k {:keys [from to origin]}]
+                        (fn [k {:keys [origin parts]}]
                           (let [dx (long (Math/round (* k (+ col-w gap))))]
-                            (reduce (fn [acc i]
-                                      (let [it (nth items i)
-                                            dy (+ content-y y (- (nth tops i) origin))]
+                            (reduce (fn [acc {:keys [item from to box-h]}]
+                                      (let [it (nth items item)
+                                            top-in-col (- (max (nth tops item) origin) origin)
+                                            dy (+ content-y y top-in-col)
+                                            cut? (or (pos? from) (< to (:h it)))
+                                            ops (frag-slice-ops (:draw it) from to box-h cut?)
+                                            ;; an out-of-flow descendant travels with
+                                            ;; the fragment its own origin falls in --
+                                            ;; a positioned box is not itself cut.
+                                            oof (filterv #(and (>= (:y %) (- from 0.5))
+                                                               (or (< (:y %) (- to 0.5))
+                                                                   (>= to (:h it))))
+                                                         (:oof it))]
                                         (-> acc
-                                            (update :draw into (translate-ops dx dy (:draw it)))
+                                            (update :draw into (translate-ops dx dy ops))
                                             (update :oof into (mapv #(-> % (update :x + dx)
-                                                                        (update :y + dy))
-                                                                    (:oof it))))))
+                                                                        (update :y + (- dy from)))
+                                                                    oof)))))
                                     {:draw [] :oof []}
-                                    (range from (inc to)))))
+                                    parts)))
                         cols)
                 ;; the rule is painted in the gap BEFORE each column after
                 ;; the first, centred in it, and is the reason `column-rule`
@@ -14323,7 +14856,11 @@
                               (range 1 (count cols))))]
             (recur (rest segs)
                    (+ y seg-h)
-                   (into (into draws (or rules [])) (mapcat :draw placed))
+                   ;; the fold is over the WHOLE segment, not one column:
+                   ;; an element's fragments live in different columns by
+                   ;; construction, and it reports one box across them.
+                   (into (into draws (or rules []))
+                         (frag-merge-nodes (vec (mapcat :draw placed))))
                    (into oofs (mapcat :oof placed)))))
         {:draw draws
          :h y
@@ -14668,6 +15205,19 @@
                           :class (attr node :class) :listeners (listeners node)
                           :opacity opacity}
                          (when (next overflow-hits) {:hit overflow-hits})
+                         ;; The block-start and block-end DECORATION bands
+                         ;; (padding + border), for layout-multicol's
+                         ;; frag-atoms: a column break may not fall in
+                         ;; either. Measured -- `<div style="padding-bottom:
+                         ;; 40px">a</div>` (60 tall, a 20px line at the top)
+                         ;; in two columns balances to 60 and reports ONE
+                         ;; rect, where the same box with `height: 60px`
+                         ;; instead of the padding balances to 30 and
+                         ;; reports two. The free band a break can land in
+                         ;; is the CONTENT box, not the border box, and
+                         ;; nothing else on this op says where that ends.
+                         (when (or (pos? inset-t0) (pos? inset-b))
+                           {:frag/insets [inset-t0 inset-b]})
                          (style-passthrough st))]
         ;; Scope cut, measured 2026-08-05 and deliberately left: this clips
         ;; at the BORDER box, and a browser clips at the PADDING box -- the

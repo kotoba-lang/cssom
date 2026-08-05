@@ -10524,8 +10524,8 @@
 ;; browser default 16px balance differently, because there a line box is
 ;; taller than these blocks' declared height and unbreakable content
 ;; forces the column taller). See cssom.layout's multicol section for the
-;; rules and for the one thing this engine deliberately does not do:
-;; fragment a block across a column boundary.
+;; rules, and its "where a column break is ALLOWED to fall" comment for
+;; the five measured ones that decide where a block is cut.
 
 (defn- multicol-build
   "A `.mc` container div holding one `.b<i>` div per entry in `blocks`,
@@ -10560,10 +10560,17 @@
   ;; THREE 30px blocks in two columns balance to 60, not to the 45 a naive
   ;; `total / count` would give: 45 is not a place this content can be cut,
   ;; and the smallest height that fits it in two columns is 60. Measured in
-  ;; Brave (which reaches the same 60 when the blocks cannot be split, i.e.
-  ;; under `break-inside: avoid`; without it a browser cuts the middle
-  ;; block, which this engine deliberately does not -- see the section
-  ;; header in cssom.layout).
+  ;; Brave.
+  ;;
+  ;; The `break-inside: avoid` in this stylesheet was, until fragmentation
+  ;; landed (2026-08-06), decoration: nothing was ever split, so the
+  ;; declaration could not change the answer and the test would have read
+  ;; 60 without it. It is load-bearing now, and that is the whole point of
+  ;; keeping it here -- re-measured in Brave the same day, the SAME three
+  ;; blocks WITHOUT it balance to 50, because the second one is cut at its
+  ;; own offset 20 (its rects are `[0,30,140,20]` and `[160,0,140,10]`).
+  ;; 60 and 50 are now two different, both-measured answers, where before
+  ;; they were one answer reached for a reason that did not exist.
   (let [[_root mc a b c]
         (cascaded-boxes (str ".mc{width:300px;column-count:2;column-gap:20px} "
                              ".mc>div{height:30px;break-inside:avoid}")
@@ -10754,6 +10761,295 @@
         "the columns are exactly where they are without a rule")
     (is (= {:x 148 :y 0 :w 4 :h 30} (select-keys rule [:x :y :w :h]))
         "centred in the 20px gap, which it does not widen")))
+
+;; ---- fragmentation: a block cut across a column boundary ----------------
+;;
+;; Landed 2026-08-06, replacing a documented scope cut ("a block is never
+;; fragmented -- one that does not fit moves whole into the next column").
+;; Every number below came out of the same headless Brave 151.1.93.129 the
+;; conformance harness drives, at font-size 14 / line-height 20, and the
+;; whole set was measured as 46 probe shapes BEFORE any of it was
+;; implemented. cssom.layout's "where a column break is ALLOWED to fall"
+;; comment states the five rules those shapes produced.
+;;
+;; What a browser reports for a fragmented block, which is what these
+;; assert: getClientRects() gives ONE RECT PER FRAGMENT, and
+;; getBoundingClientRect() gives their UNION -- a rectangle spanning both
+;; columns, covering ground the element does not occupy. This engine emits
+;; the union as the `:node` op's box and the fragments as its `:hit` rects,
+;; which is the same pair of answers this file already needs for a WRAPPED
+;; INLINE box (see the ns docstring's `:hit` section). Four of these tests
+;; are controls that read the same before and after fragmentation existed,
+;; and say so.
+
+(defn- cascaded-fragment-boxes
+  "cascaded-boxes, keeping each box's `:hit` rects -- the fragments of a
+   box that was cut. Their ABSENCE on a box that was not cut is the
+   assertion several of these tests are really making."
+  [css-text build]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        doc (build doc root)
+        doc (css/apply-cascade doc (css/parse-rules css-text))
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})]
+    (mapv (fn [op]
+            (cond-> (select-keys op [:x :y :w :h])
+              (seq (:hit op))
+              (assoc :frags (mapv #(select-keys % [:x :y :w :h]) (:hit op)))))
+          (filterv #(= :node (:draw/op %)) ops))))
+
+(defn- multicol-nested-build
+  "A `.mc` container whose children are described by `specs`: `{:class}`
+   for a leaf carrying text, `{:class :kids n}` for a wrapper holding n
+   leaves of its own."
+  [specs]
+  (fn [doc root]
+    (let [[mc doc] (dom/create-element doc :div)
+          doc (dom/append-child doc root mc)
+          doc (dom/set-attribute doc mc :class "mc")]
+      (reduce (fn [doc [i {:keys [class kids]}]]
+                (let [[b doc] (dom/create-element doc :div)
+                      doc (dom/append-child doc mc b)
+                      doc (dom/set-attribute doc b :class (or class (str "b" i)))]
+                  (if kids
+                    (reduce (fn [doc _]
+                              (let [[k doc] (dom/create-element doc :div)
+                                    doc (dom/append-child doc b k)
+                                    [t doc] (dom/create-text-node doc "x")]
+                                (dom/append-child doc k t)))
+                            doc (range kids))
+                    (let [[t doc] (dom/create-text-node doc "x")]
+                      (dom/append-child doc b t)))))
+              doc
+              (map-indexed vector specs)))))
+
+(deftest multicol-a-block-is-cut-at-the-column-boundary
+  ;; The corpus pair's own shape. Brave: the FIRST block (30 tall, holding
+  ;; a 20px line) is the one that splits -- rects `[0,0,140,25]` and
+  ;; `[160,0,140,5]`, bounding rect `[0,0,300,25]` -- and the second block
+  ;; then sits at y=5 in the second column. The used column height is 25:
+  ;; the smallest at which the flow fits in two columns given that 25 is a
+  ;; legal cut (it is in the empty band below the first block's line) and
+  ;; nothing smaller leaves room for what follows.
+  (let [[_root mc a b]
+        (cascaded-fragment-boxes
+         (str ".mc{width:300px;height:40px;column-count:2;column-gap:20px} "
+              ".b0{height:30px} .b1{height:20px}")
+         (multicol-nested-build [{} {}]))]
+    (is (= {:x 0 :y 0 :w 300 :h 40} mc))
+    (is (= {:x 0 :y 0 :w 300 :h 25
+            :frags [{:x 0 :y 0 :w 140 :h 25} {:x 160 :y 0 :w 140 :h 5}]}
+           a)
+        "one box -- the union across both columns -- and one hit rect per fragment")
+    (is (= {:x 160 :y 5 :w 140 :h 20} b)
+        "the block after the cut starts below the first block's remainder")))
+
+(deftest multicol-break-inside-avoid-moves-a-whole-wrapper
+  ;; The control the corpus pair was meant to be and, as written there, is
+  ;; not: its `avoid` block is a 20px box holding a 20px line, so it is
+  ;; unbreakable either way and both corpus cases read identically in
+  ;; Brave. This is the shape that discriminates -- a 40px WRAPPER of two
+  ;; 20px children which does not fit the 20px left in column one. BOTH
+  ;; halves are asserted, because the declaration only means anything
+  ;; against its own twin, and measured in Brave they differ:
+  ;;
+  ;;   with `break-inside: avoid`  the wrapper moves WHOLE, [160,0,140,40],
+  ;;                              one rect, children at y 0 and 20
+  ;;   without it                  the wrapper is CUT between its children,
+  ;;                              [0,20,140,20] and [160,0,140,20]
+  ;;
+  ;; On the pre-fragmentation engine both halves read like the first, which
+  ;; is precisely why `avoid` scored nothing there.
+  (let [css (fn [decl] (str ".mc{width:300px;height:40px;column-count:2;column-gap:20px} "
+                            ".b0{height:20px} .w{" decl "} .w>div{height:20px}"))
+        [_r1 _m1 a w x y]
+        (cascaded-fragment-boxes (css "break-inside:avoid")
+                                 (multicol-nested-build [{} {:class "w" :kids 2}]))
+        [_r2 _m2 a2 w2 x2 y2]
+        (cascaded-fragment-boxes (css "color:#000000")
+                                 (multicol-nested-build [{} {:class "w" :kids 2}]))]
+    (is (= {:x 0 :y 0 :w 140 :h 20} a))
+    (is (= {:x 160 :y 0 :w 140 :h 40} w) "one fragment -- no :hit at all")
+    (is (= [{:x 160 :y 0 :w 140 :h 20} {:x 160 :y 20 :w 140 :h 20}] [x y]))
+    (is (= {:x 0 :y 0 :w 140 :h 20} a2))
+    (is (= [{:x 0 :y 20 :w 140 :h 20} {:x 160 :y 0 :w 140 :h 20}] (:frags w2))
+        "without `avoid` the same wrapper is cut between its two children")
+    (is (= [{:x 0 :y 20 :w 140 :h 20} {:x 160 :y 0 :w 140 :h 20}] [x2 y2]))))
+
+(deftest multicol-a-block-with-empty-room-below-its-line-cuts-anywhere-in-it
+  ;; `<div style="height:90px">a</div>` alone in two columns: its content is
+  ;; a 20px line and 70px of empty content box under it, and Brave cuts it
+  ;; at 45 -- not at 20, not at any structural boundary, exactly at half.
+  ;; The free band is CONTINUOUS. Measured: the box is 45 tall and the div
+  ;; reports `[0,0,140,45]` and `[160,0,140,45]`.
+  (let [[_root mc a]
+        (cascaded-fragment-boxes
+         ".mc{width:300px;column-count:2;column-gap:20px} .b0{height:90px}"
+         (multicol-nested-build [{}]))]
+    (is (= 45 (:h mc)))
+    (is (= [{:x 0 :y 0 :w 140 :h 45} {:x 160 :y 0 :w 140 :h 45}] (:frags a)))))
+
+(deftest multicol-padding-above-the-first-line-is-not-a-break-opportunity
+  ;; The asymmetry, and the CONTROL for the test above: the same 60px of
+  ;; box with the empty band ABOVE the line instead of below it does not
+  ;; cut at all. `<div style="padding-top:40px">a</div>` in two columns is
+  ;; 60 tall with ONE rect in Brave, where `height:60px` over the same
+  ;; content balances to 30 and reports two. A `border-top:40px` reads the
+  ;; same.
+  ;;
+  ;; Passes on the pre-fragmentation engine too -- nothing was cut there --
+  ;; which is what makes it the control: it is the assertion fragmentation
+  ;; could most easily have broken.
+  (let [[_root mc a]
+        (cascaded-fragment-boxes
+         ".mc{width:300px;column-count:2;column-gap:20px} .b0{padding-top:40px}"
+         (multicol-nested-build [{}]))]
+    (is (= 60 (:h mc)))
+    (is (= {:x 0 :y 0 :w 140 :h 60} a) "one fragment, no :hit")))
+
+(deftest multicol-padding-below-the-last-line-is-not-a-break-opportunity-either
+  ;; The other end of the same rule: the free band a cut can land in is the
+  ;; CONTENT box, and `padding-bottom` is outside it.
+  ;; `<div style="padding-bottom:40px">a</div>` is 60 tall in Brave with one
+  ;; rect, where `height:60px` over the same content balances to 30 and
+  ;; reports two. Also a control.
+  (let [[_root mc a]
+        (cascaded-fragment-boxes
+         ".mc{width:300px;column-count:2;column-gap:20px} .b0{padding-bottom:40px}"
+         (multicol-nested-build [{}]))]
+    (is (= 60 (:h mc)))
+    (is (= {:x 0 :y 0 :w 140 :h 60} a))))
+
+(deftest multicol-break-inside-avoid-is-dropped-when-it-cannot-be-honoured
+  ;; `avoid` is a preference, not a guarantee: a block taller than a whole
+  ;; column has to go somewhere. Brave, on a 40px-tall two-column box
+  ;; holding a 20px block and a 100px `break-inside: avoid` block: the
+  ;; avoid block does not start in column one (20px left is not enough for
+  ;; any of it) and then fragments 40/40/20 across columns two, three and
+  ;; four -- `[160,0,140,40]`, `[320,0,140,40]`, `[480,0,140,20]`.
+  (let [[_root _mc a b]
+        (cascaded-fragment-boxes
+         (str ".mc{width:300px;height:40px;column-count:2;column-gap:20px} "
+              ".b0{height:20px} .b1{height:100px;break-inside:avoid}")
+         (multicol-nested-build [{} {}]))]
+    (is (= {:x 0 :y 0 :w 140 :h 20} a))
+    (is (= {:x 160 :y 0 :w 460 :h 40
+            :frags [{:x 160 :y 0 :w 140 :h 40}
+                    {:x 320 :y 0 :w 140 :h 40}
+                    {:x 480 :y 0 :w 140 :h 20}]}
+           b))))
+
+(deftest multicol-a-fragment-that-continues-fills-its-column
+  ;; A fragment's height is not always the content it holds. Brave, on a
+  ;; forced 30px column holding a two-line block: the fragments are 30 and
+  ;; 20, and the 30 holds ONE 20px line -- a box that continues into the
+  ;; next column is stretched to that column's bottom edge, and only the
+  ;; last fragment is as tall as what is left of it. (Three lines in the
+  ;; same 30px column read 30/30/20, measured the same way.)
+  (let [[_root mc a _br]
+        (cascaded-fragment-boxes
+         ".mc{width:300px;height:30px;column-count:2;column-gap:20px} "
+         (fn [doc root]
+           (let [[mc doc] (dom/create-element doc :div)
+                 doc (dom/append-child doc root mc)
+                 doc (dom/set-attribute doc mc :class "mc")
+                 [b doc] (dom/create-element doc :div)
+                 doc (dom/append-child doc mc b)
+                 [t1 doc] (dom/create-text-node doc "one")
+                 doc (dom/append-child doc b t1)
+                 [br doc] (dom/create-element doc :br)
+                 doc (dom/append-child doc b br)
+                 [t2 doc] (dom/create-text-node doc "two")]
+             (dom/append-child doc b t2))))]
+    (is (= 30 (:h mc)))
+    (is (= [{:x 0 :y 0 :w 140 :h 30} {:x 160 :y 0 :w 140 :h 20}] (:frags a))
+        "the first fragment fills its column though it holds one 20px line")))
+
+(deftest multicol-decorations-are-sliced-at-the-break-not-cloned
+  ;; `box-decoration-break`'s initial value is `slice`, and slice is what
+  ;; Brave does: a `border:5px; padding:3px; height:40px` block is 56 tall,
+  ;; and cut at 40 it reports fragments of 40 and 16 -- 40 + 16 = 56, the
+  ;; border ring cut open rather than repeated. (Under `clone`, measured on
+  ;; the same shape, they are 40 and 32: 56 plus 8px of decoration added at
+  ;; each cut edge. `clone` is NOT implemented -- see frag-slice-ops.)
+  ;;
+  ;; The block does not start in column one at all: 20px are left there and
+  ;; the earliest cut inside this block is at its own 28, below its line.
+  (let [[_root _mc a b]
+        (cascaded-fragment-boxes
+         (str ".mc{width:300px;height:40px;column-count:2;column-gap:20px} "
+              ".b0{height:20px} .b1{height:40px;border:5px solid #333333;padding:3px}")
+         (multicol-nested-build [{} {}]))]
+    (is (= {:x 0 :y 0 :w 140 :h 20} a))
+    (is (= [{:x 160 :y 0 :w 140 :h 40} {:x 320 :y 0 :w 140 :h 16}] (:frags b))
+        "40 + 16 = 56, the whole border box, sliced")))
+
+(deftest multicol-balanced-height-is-never-less-than-the-content-over-the-count
+  ;; Blink's balancer starts at `ceil(total / count)` and only grows; it
+  ;; never looks below it. Two 30px blocks with a 60px margin between them
+  ;; fit one per column at height 30 -- the margin is dropped at the break
+  ;; -- and Brave still reports the box 60 tall, which is ceil(120/2). The
+  ;; same shape with a 20px margin reads 40.
+  ;;
+  ;; This is the one rule here that is not about where a cut may fall, and
+  ;; it only became visible once cuts existed: before, nothing could drop a
+  ;; margin, so the search never returned less than the floor anyway.
+  (let [[_root mc a b]
+        (cascaded-fragment-boxes
+         (str ".mc{width:300px;column-count:2;column-gap:20px} "
+              ".b0{height:30px} .b1{height:30px;margin-top:60px}")
+         (multicol-nested-build [{} {}]))]
+    (is (= 60 (:h mc)))
+    (is (= [{:x 0 :y 0 :w 140 :h 30} {:x 160 :y 0 :w 140 :h 30}] [a b])
+        "one block per column, the 60px margin truncated at the break")))
+
+(deftest multicol-a-nested-block-is-cut-between-its-own-children
+  ;; The cut is not a top-level operation: a wrapper is fragmented at the
+  ;; boundary between two of its children, and the children themselves are
+  ;; placed whole on either side. Brave, on a 40px two-column box holding a
+  ;; 20px block and a wrapper of three 20px blocks: the wrapper reports
+  ;; `[0,20,140,20]` and `[160,0,140,40]`, with its children at (0,20),
+  ;; (160,0) and (160,20).
+  (let [[_root _mc a w x y z]
+        (cascaded-fragment-boxes
+         (str ".mc{width:300px;height:40px;column-count:2;column-gap:20px} "
+              ".b0{height:20px} .b1>div{height:20px}")
+         (multicol-nested-build [{} {:kids 3}]))]
+    (is (= {:x 0 :y 0 :w 140 :h 20} a))
+    (is (= [{:x 0 :y 20 :w 140 :h 20} {:x 160 :y 0 :w 140 :h 40}] (:frags w)))
+    (is (= [{:x 0 :y 20 :w 140 :h 20} {:x 160 :y 0 :w 140 :h 20} {:x 160 :y 20 :w 140 :h 20}]
+           [x y z])
+        "each child whole, on the side of the cut it belongs to")))
+
+(deftest multicol-an-overflow-hidden-block-is-monolithic
+  ;; A scroll container is not fragmented, and this is a CONTROL: it reads
+  ;; the same on the pre-fragmentation engine, and it is what Brave does
+  ;; too. The 60px block moves whole into the second column and overflows
+  ;; it (`[160,0,140,60]` in a 40px box) rather than splitting.
+  (let [[_root _mc a b]
+        (cascaded-fragment-boxes
+         (str ".mc{width:300px;height:40px;column-count:2;column-gap:20px} "
+              ".b0{height:20px} .b1{height:60px;overflow:hidden}")
+         (multicol-nested-build [{} {}]))]
+    (is (= {:x 0 :y 0 :w 140 :h 20} a))
+    (is (= {:x 160 :y 0 :w 140 :h 60} b) "one fragment, overflowing its column")))
+
+(deftest multicol-a-replaced-element-is-monolithic
+  ;; The other control of the same kind: an 80px `<img>` alone in two
+  ;; columns balances to 80 and reports one rect -- the browser leaves a
+  ;; column empty rather than cut a replaced element.
+  (let [[_root mc img]
+        (cascaded-fragment-boxes
+         ".mc{width:300px;column-count:2;column-gap:20px} img{display:block;width:50px;height:80px}"
+         (fn [doc root]
+           (let [[mc doc] (dom/create-element doc :div)
+                 doc (dom/append-child doc root mc)
+                 doc (dom/set-attribute doc mc :class "mc")
+                 [im doc] (dom/create-element doc :img)]
+             (dom/append-child doc mc im))))]
+    (is (= 80 (:h mc)))
+    (is (= {:x 0 :y 0 :w 50 :h 80} img) "one fragment, no :hit")))
 
 ;; ---- table: caption-side, and a cell's own declared width ----------------
 ;;
