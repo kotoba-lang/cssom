@@ -789,6 +789,101 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round twenty-nine: the marker that is not in the item, and the line-height that inherits a ratio
+
+Two residuals the geometry axis had localised to the pixel, both measured in
+Brave before anything was written.
+
+**`list-style-position`.** Its default is `outside`: the marker is a box of
+its own beside the item, not the first thing in the item's content. This
+engine synthesised the marker as the `<li>`'s own `::before` and let it flow
+inline, so it advanced the item's line and widened anything that
+shrink-wrapped the list. Round twenty-eight had already named this as the
+whole remaining cause of `:table/cell-with-a-list`, and named the property
+as the honest fix rather than a wider cell.
+
+| markup (14px monospace) | Brave | engine |
+|---|---|---|
+| `<ul><li><a>First section</a>` — `a` x | 40 | 53.70625 |
+| `<td><ul><li>one</li><li>two</li></ul>` — `td` w | 63 | 76.70625 |
+| the same, `ul` w / `li` w | 61 / 21 | 74.70625 / 34.70625 |
+
+13.70625 is exactly one `"• "` advance in every row. The marker now travels
+through the inline pipeline as a fragment of its own KIND: never merged into
+the item's text run, never collapsing whitespace against it, never moving
+the pen, contributing nothing to the run's max-content width, and painted at
+the negative x that puts it immediately before the content edge.
+`list-style-position: inside` keeps the old inline behaviour, which makes it
+a real property rather than an accident — Brave puts the same `<a>` at x=59
+and the same cell at 82px there, so the two values are 19px apart in the
+oracle and were 0 apart here.
+
+**What this axis cannot check, said out loud.** A `::marker` is not an
+element, so `getBoundingClientRect` has nothing to return for it and the
+oracle reports no box for it in either direction. Where the marker itself
+paints is therefore unverifiable by this harness, and no assertion here
+claims otherwise. What IS verifiable — and what all three failing cases
+measured — is the position and width of the item's CONTENT. The closest the
+harness can get to the marker's own size is the `inside` value, whose marker
+does take inline space: measured there, Brave's `<ol>` advance IS the width
+of the marker string (21px for `1. `, 28 for `10. `, 35 for `100. `), which
+is what this engine uses, while its `<ul>` disc box is a function of the
+font-size alone (19px at 14px, 14 at 10px, 37 at 28px — identical for Arial
+and monospace and for `list-style-type: square`, i.e. not the 6.7px bullet
+glyph). That 5.3px is recorded in `list-style-inside?` rather than modelled
+from three points.
+
+**Unitless `line-height` inherits the FACTOR.** `line-height: 1.5` inherits
+as the NUMBER, so a child with a different `font-size` re-multiplies it;
+`1.5em` resolves once and inherits as that length. `inherited` only ever
+carried resolved pixels, so both reached a 24px child as 21px. The corpus
+holds both halves on purpose (`:text/unitless-line-height-inherits-the-factor`
+and `:text/em-line-height-inherits-the-computed-value`) and only the unitless
+one failed, which is what localised it: Brave reports 36/36 for the first
+and 21/21 for the second.
+
+On the way, the multiplier forms are parsed explicitly instead of through
+`parse-dbl`, which does not answer the same question on both platforms —
+`Double/parseDouble` rejects a trailing unit and `js/parseFloat` ignores
+one. `line-height: 1.5em` was 21px under nbb (right, by accident) and the
+theme default on the JVM, and `150%` was **150x** the font-size rather than
+1.5x. `rem` and the viewport units now fall through to `normal` rather than
+being multiplied by a length this file cannot resolve.
+
+**Result**, at the same 341 cases: geometry 1244/1283 → **1256/1283**
+(321 → **324** clean), paint order 8429/8509 → **8444/8509** (319 → **321**
+clean), line structure and computed style unchanged at 326/328 and
+15678/17949 — this is a layout change and the cascade axis should not move.
+Four cases' boxes changed. `:page/table-of-contents`,
+`:table/cell-with-a-list` and `:text/unitless-line-height-inherits-the-factor`
+all went to **every box exact**; `:table/cell-with-a-list` had been 0/8 since
+the corpus gained tables.
+
+The fourth is a 1px cost, stated rather than hidden: `:selector/nth-child`
+bolds its second `<li>`, and that item now reaches the inline path (it has
+two children — marker and text — where the merged marker made it one) where
+it used to reach `layout-text`. The two paths round a bold line box
+differently, so it reports 21 where the browser and `layout-text` say 20. It
+stays within the 2px tolerance and the case stays clean, but it is a real
+pre-existing disagreement between two height models that this change
+exposed on more elements rather than one it introduced.
+
+**Still not fixed, and not the same cause.** `:page/two-column-text` and
+`:overflow/x-hidden-y-scroll` were in the same residual and were checked
+against these two causes before being left: both are margin questions. A
+flex ITEM's margins do not collapse (Brave puts each `<p>` at y=14 and the
+container at 68; this engine drops them), and an `overflow` container
+establishes a block formatting context so the margin inside it cannot
+collapse through (Brave y=14, this engine 0). Neither has anything to do
+with markers or line-height, and improving them from here would have meant
+guessing.
+
+An `<li>` whose content is a BLOCK (`<li><div>x</div></li>`) still gives its
+outside marker a row of its own where Brave puts it beside the block's first
+line — the item comes out one line too tall. Unchanged by this round (the
+marker had its own row before too), no corpus case covers it, and it is
+named in the namespace docstring.
+
 ### Round twenty-eight: the border every content box was standing on
 
 `inset-side` — the whole engine's answer to *where does this box's content

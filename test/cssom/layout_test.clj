@@ -276,6 +276,80 @@
               (box-h {:font-size 40 :line-height "1.5"}))
         "the SAME 1.5 multiplier must scale with a DIFFERENT font-size, proving it is genuinely re-resolved as a multiplier, not cached/misread as a literal pixel value")))
 
+(defn- nested-line-height-box-h
+  "The box heights of a `<div>` carrying `parent-style` and the `<p>`
+   inside it carrying `child-style`, in that order -- the shape the two
+   `line-height` inheritance rules differ on, since they differ only when
+   the child's font-size is not the parent's."
+  [parent-style child-style]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div parent-style)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc div p)
+        doc (dom/set-style doc p child-style)
+        [t doc] (dom/create-text-node doc "big")
+        doc (dom/append-child doc p t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480 :theme (assoc layout/default-theme
+                                                                     :padding 0 :gap 0)})
+        h-of (fn [tag] (:h (first (filter #(and (= :node (:draw/op %)) (= tag (:tag %))) ops))))]
+    [(h-of :div) (h-of :p)]))
+
+(deftest a-unitless-line-height-inherits-the-factor-and-a-length-inherits-the-length
+  ;; The one rule the two forms differ on, and the corpus holds both halves
+  ;; (:text/unitless-line-height-inherits-the-factor and
+  ;; :text/em-line-height-inherits-the-computed-value) because only the
+  ;; pair localises it: `inherited` carried the ancestor's already-resolved
+  ;; PIXELS, so a unitless 1.5 and a 1.5em both reached a 24px child as the
+  ;; same 21px and the unitless half was 15px short.
+  ;;
+  ;; Measured in Brave: `<div style="line-height: 1.5"><p style="font-size:
+  ;; 24px">big</p></div>` reports 36 for both boxes (1.5 x the P's OWN 24),
+  ;; and the same markup with `1.5em` reports 21 (1.5 x the DIV's 14,
+  ;; resolved once and inherited as that length).
+  (is (= [36 36] (nested-line-height-box-h {:line-height "1.5"} {:font-size 24}))
+      "a UNITLESS line-height inherits as the number, so the child
+       re-multiplies it by its own font-size")
+  (is (= [21 21] (nested-line-height-box-h {:line-height "1.5em"} {:font-size 24}))
+      "an `em` line-height is a LENGTH: it resolves once, against the
+       element that declared it, and inherits already resolved")
+  (is (= [21 21] (nested-line-height-box-h {:line-height 21} {:font-size 24}))
+      "an absolute length inherits as itself, unchanged by the child's own
+       font-size -- the case that already worked, kept as the control")
+  (is (= [36 36] (nested-line-height-box-h {:line-height "1.5"}
+                                           {:font-size 24 :line-height "1.5"}))
+      "re-declaring the same factor on the child is a no-op, not a
+       compounding: the factor multiplies the font-size, never the
+       inherited pixels")
+  (is (= [42 42] (nested-line-height-box-h {:line-height "1.5"}
+                                           {:font-size 24 :line-height "1.75"}))
+      "the child's OWN factor wins over the inherited one, and stops it:
+       1.75 x 24"))
+
+(deftest a-unitless-line-height-keeps-travelling-past-a-descendant-that-declares-none
+  ;; The factor is not consumed by the first element that uses it -- it is
+  ;; in force for the whole subtree, so a grandchild with its own font-size
+  ;; re-multiplies it too. Real CSS inherits the computed VALUE (the
+  ;; number), not the used one.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-style doc div {:line-height "2"})
+        [mid doc] (dom/create-element doc :div)
+        doc (dom/append-child doc div mid)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc mid p)
+        doc (dom/set-style doc p {:font-size 30})
+        [t doc] (dom/create-text-node doc "deep")
+        doc (dom/append-child doc p t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480 :theme (assoc layout/default-theme
+                                                                     :padding 0 :gap 0)})
+        p-op (first (filter #(and (= :node (:draw/op %)) (= :p (:tag %))) ops))]
+    (is (= 60 (:h p-op))
+        "2 x the <p>'s OWN 30px font-size, through an intermediate <div>
+         that declares no line-height of its own at all")))
+
 (deftest line-height-is-a-real-inheritable-property
   ;; The child SPAN declares no line-height of its own at all -- its own
   ;; wrapped lines' y-spacing must reflect the PARENT's inherited 60px,
@@ -439,6 +513,33 @@
         plain-x (:x (first (filter #(= :text (:draw/op %)) (layout/draw-ops plain-tree {:width 200}))))]
     (is (not= plain-x (:x text-op))
         "the inherited center alignment must move the child's text away from its default left-aligned x")))
+
+(defn- line-texts
+  "The text of each rendered LINE, as it reads left to right: every `:text`
+   draw-op grouped by its own baseline y, joined in x order, top line first.
+
+   Needed because a list item's MARKER is its own draw-op rather than a
+   prefix concatenated onto the item's first text run. It used to be the
+   latter -- with-implicit-list-markers wrote the marker as the <li>'s
+   ::before and with-generated-content merged it into the adjacent text --
+   and every test below asserted the merged string. The merge had to go:
+   `list-style-position` defaults to `outside`, which paints the marker in
+   the list's padding rather than in the item's own content, and a single
+   `:text` op has exactly one x, so a merged op could only put the marker
+   where the item's first word goes or the item's first word where the
+   marker goes. Measured in Brave, the `<a>` of `<ul><li><a>First
+   section</a></li></ul>` is at x=40, the item's content edge, and a `<td>`
+   around a two-item list shrink-wraps to 63px -- both of which say the
+   marker occupies no inline space at all.
+
+   Nothing about WHICH marker an item gets changed, which is what the tests
+   using this are about, so they read the line back rather than the op."
+  [ops]
+  (->> ops
+       (filter #(= :text (:draw/op %)))
+       (group-by :y)
+       (sort-by key)
+       (mapv (fn [[_ line-ops]] (str/join (map :text (sort-by :x line-ops)))))))
 
 ;; ---- text-transform rewrites the real rendered text, not just metadata ----
 
@@ -3454,7 +3555,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["• real row"] (mapv :text text-ops))
+    (is (= ["• real row"] (line-texts text-ops))
         "the template's own \"proto\" text never renders -- only the real
          sibling <li> does, with its normal implicit list-marker intact")))
 
@@ -4485,10 +4586,13 @@
         tree2 (dom/tree doc2)
         ops2 (layout/draw-ops tree2 {:width 480})
         ref-li-op (some #(and (= :node (:draw/op %)) (= :li (:tag %)) %) ops2)]
-    (is (= ["• Apple" "• Banana"] (mapv :text text-ops))
-        "each <li>'s implicit bullet marker is merged onto ONE shared line
-         with that <li>'s own real text -- not a separate stacked line, and
-         not shared across <li> siblings")
+    (is (= ["• Apple" "• Banana"] (line-texts text-ops))
+        "each <li>'s implicit bullet marker sits on ONE shared line with
+         that <li>'s own real text -- not a separate stacked line, and not
+         shared across <li> siblings. It is its own draw-op, beside the
+         text rather than concatenated onto it (see line-texts), because
+         `list-style-position: outside` paints it outside the item's
+         content box")
     (is (= (:h ref-li-op) (:h (first li-node-ops)))
         "the first <li>'s own content box is exactly as tall as a <li>
          whose only child is the SAME already-prefixed text as one real
@@ -4514,9 +4618,9 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. First" "2. Second" "3. Third"] (mapv :text text-ops))
-        "sequential, 1-based decimal markers, one per <li>, merged onto
-         each <li>'s own shared line, with zero author CSS")))
+    (is (= ["1. First" "2. Second" "3. Third"] (line-texts text-ops))
+        "sequential, 1-based decimal markers, one per <li>, each on its
+         own <li>'s shared line, with zero author CSS")))
 
 (deftest nested-ol-inside-li-of-outer-ol-numbers-independently-from-one
   ;; `<ol><li>Outer1<ol><li>Inner1</li><li>Inner2</li></ol></li>
@@ -4550,7 +4654,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. Outer1" "1. Inner1" "2. Inner2" "2. Outer2"] (mapv :text text-ops))
+    (is (= ["1. Outer1" "1. Inner1" "2. Inner2" "2. Outer2"] (line-texts text-ops))
         "the outer <ol> numbers its own two direct <li> children 1/2
          (Outer1/Outer2); the inner <ol> -- nested one level inside the
          outer <ol>'s FIRST <li> -- independently numbers its own two
@@ -4576,7 +4680,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["5. Five" "6. Six"] (mapv :text text-ops))
+    (is (= ["5. Five" "6. Six"] (line-texts text-ops))
         "start=5 shifts both markers by +4 -- position 1 displays as 5,
          position 2 as 6 -- while still counting positions 1/2 internally")))
 
@@ -4602,7 +4706,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["-2. NegTwo" "-1. NegOne" "0. Zero"] (mapv :text text-ops)))))
+    (is (= ["-2. NegTwo" "-1. NegOne" "0. Zero"] (line-texts text-ops)))))
 
 (deftest ol-malformed-start-falls-back-to-one-not-a-crash
   (let [[ol doc] (dom/create-element dom/empty-document :ol)
@@ -4616,7 +4720,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. Fallback"] (mapv :text text-ops))
+    (is (= ["1. Fallback"] (line-texts text-ops))
         "a malformed start= behaves exactly as if it were absent -- a
          graceful fallback, not a crash or a corrupted marker")))
 
@@ -4638,7 +4742,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["3. Outer3" "1. Inner1"] (mapv :text text-ops))
+    (is (= ["3. Outer3" "1. Inner1"] (line-texts text-ops))
         "the outer <ol>'s start=3 offset must not leak into the inner
          <ol>'s own, unrelated numbering -- the inner list has no start=
          of its own, so it correctly still begins at the plain default 1")))
@@ -4668,7 +4772,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. First" "5. Second" "6. Third"] (mapv :text text-ops))
+    (is (= ["1. First" "5. Second" "6. Third"] (line-texts text-ops))
         "the second item's value=5 overrides its own number, and the third
          item correctly continues from 6, not from its original position 3")))
 
@@ -4693,7 +4797,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["10. A" "1. B" "2. C"] (mapv :text text-ops))
+    (is (= ["10. A" "1. B" "2. C"] (line-texts text-ops))
         "start=10 sets the first item's number, but the second item's own
          value=1 completely overrides it regardless, and the third item
          continues from THAT (2), not from start's own number space")))
@@ -4718,7 +4822,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. A" "-2. B" "-1. C"] (mapv :text text-ops)))))
+    (is (= ["1. A" "-2. B" "-1. C"] (line-texts text-ops)))))
 
 (deftest li-malformed-value-falls-back-to-plain-continuation-not-a-crash
   (let [[ol doc] (dom/create-element dom/empty-document :ol)
@@ -4740,7 +4844,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. A" "2. B" "3. C"] (mapv :text text-ops))
+    (is (= ["1. A" "2. B" "3. C"] (line-texts text-ops))
         "a malformed value= behaves exactly as if it were absent -- a
          graceful fallback to plain +1 continuation, not a crash")))
 
@@ -4764,7 +4868,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["• First" "• Second"] (mapv :text text-ops)))))
+    (is (= ["• First" "• Second"] (line-texts text-ops)))))
 
 (deftest li-value-on-a-suppressed-li-still-shifts-later-siblings
   ;; CSS list-style:none only hides that ONE marker BOX -- it must not
@@ -4790,14 +4894,15 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["1. A" "B" "6. C"] (mapv :text text-ops))
+    (is (= ["1. A" "B" "6. C"] (line-texts text-ops))
         "the suppressed second item shows no marker at all, but its own
          value=5 still shifts the third item's number to 6")))
 
 (defn- reversed-ol-markers
   "Builds a real <ol> with `ol-attrs` and one <li> per `[text li-attrs]`
-   pair in `li-specs`, then returns the real merged marker+text draw-op
-   strings, in document order -- a small helper mirroring the shape of
+   pair in `li-specs`, then returns what each item's line READS as, marker
+   included (see line-texts -- the marker is its own draw-op beside the
+   text), in document order -- a small helper mirroring the shape of
    this file's own repeated ol/li-construction tests above, needed here
    since ol-reversed has more scenario combinations to cover than the
    earlier start=/value= tests did."
@@ -4816,7 +4921,7 @@
         [_ doc] (dom/consume-ops doc)
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})]
-    (mapv :text (filterv #(= :text (:draw/op %)) ops))))
+    (line-texts ops)))
 
 (deftest ol-reversed-with-no-start-defaults-to-li-count-and-counts-down
   ;; Real HTML5/browser semantics: reversed with no explicit start=
@@ -5479,7 +5584,7 @@
         tree (dom/tree doc)
         ops (layout/draw-ops tree {:width 480})
         text-ops (filterv #(= :text (:draw/op %)) ops)]
-    (is (= ["First" "2. Second"] (mapv :text text-ops))
+    (is (= ["First" "2. Second"] (line-texts text-ops))
         "the suppressed first <li> gets no marker of any kind (its own real
          text renders alone); the second <li> still reads '2. Second', not
          renumbered down to '1. Second' -- suppressing one marker does not
@@ -6132,7 +6237,78 @@
         lis (filterv #(and (= :node (:draw/op %)) (= :li (:tag %))) ops)]
     (is (= 2 (count lis)))
     (is (every? #(= 20 (:h %)) lis)
-        "one line each -- the width the cell was given holds the marker too")))
+        "one line each -- the two paths agree about the marker. They agree
+         by both EXCLUDING it now: `list-style-position: outside` gives the
+         marker no inline width, so it neither widens the cell nor has to
+         fit in it. Measured in Brave, the cell is 63px -- exactly the two
+         bare words plus the UA cell padding")))
+
+(deftest an-outside-marker-does-not-widen-the-cell-that-shrink-wraps-the-list
+  ;; The measurement that made `list-style-position` a real property here
+  ;; rather than a documented non-goal. Measured in Brave, at 14px
+  ;; monospace: `<td><ul><li>one</li><li>two</li></ul></td>` reports td 63 /
+  ;; ul 61 / li 21, and this engine reported 76.7 / 74.7 / 34.7 -- every one
+  ;; of them 13.7px wide, exactly one `"• "` advance, because the marker
+  ;; was inline content of the item. With `list-style-position: inside` the
+  ;; SAME markup reports td 82 / li 40 in Brave: the marker really is 19px
+  ;; of content there, and none at all here.
+  (let [w (fn [style]
+            (let [ops (table-ops [[:tr {}
+                                   [:td {} [:ul style [:li {} "one"] [:li {} "two"]]]
+                                   [:td {} "next"]]])
+                  tag-w (fn [tag] (:w (first (filter #(and (= :node (:draw/op %))
+                                                           (= tag (:tag %)))
+                                                     ops))))]
+              [(tag-w :td) (tag-w :li)]))
+        [td-outside li-outside] (w {})
+        [td-inside li-inside] (w {:list-style-position "inside"})
+        [td-none li-none] (w {:list-style-type "none"})]
+    (is (= [td-none li-none] [td-outside li-outside])
+        "a list with NO marker at all measures exactly as wide as one with
+         an outside marker -- the marker adds nothing. Brave agrees: both
+         put the item's content at the same x")
+    (is (< li-outside li-inside)
+        "an INSIDE marker is real inline content and does widen the item")
+    (is (= (- td-inside td-outside) (- li-inside li-outside))
+        "and the cell that shrink-wraps the list is wider by exactly that
+         same amount, not by some other one")))
+
+(deftest an-outside-marker-is-painted-left-of-the-items-content-edge
+  ;; What the conformance harness CANNOT check, stated here instead: the
+  ;; oracle reports one box per element and `::marker` is not an element, so
+  ;; `getBoundingClientRect` has nothing to return for the marker itself.
+  ;; The corpus can only measure that the item's CONTENT starts at the
+  ;; content edge (:page/table-of-contents, :table/cell-with-a-list). This
+  ;; test is the other half, and it is an assertion about THIS engine's
+  ;; model -- the marker is drawn immediately before the content edge --
+  ;; not a claim measured against a browser.
+  (let [[ul doc] (dom/create-element dom/empty-document :ul)
+        doc (dom/set-root doc ul)
+        [li doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li)
+        [a doc] (dom/create-element doc :a)
+        doc (dom/append-child doc li a)
+        [t doc] (dom/create-text-node doc "First")
+        doc (dom/append-child doc a t)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 480 :theme {:padding 0 :gap 0}})
+        text-ops (filterv #(= :text (:draw/op %)) ops)
+        marker (first (filter #(= "• " (:text %)) text-ops))
+        content (first (filter #(= "First" (:text %)) text-ops))
+        li-op (first (filter #(and (= :node (:draw/op %)) (= :li (:tag %))) ops))
+        a-op (first (filter #(and (= :node (:draw/op %)) (= :a (:tag %))) ops))]
+    (is (= (:x li-op) (:x content))
+        "the item's own content starts at the item's content edge -- this is
+         the half the oracle measures, and Brave puts the <a> at x=40 for
+         this markup where this engine had it at 53.7")
+    (is (= (:x li-op) (:x a-op))
+        "and the inline <a> box around it starts there too: the marker is
+         not one of that box's fragments")
+    (is (< (:x marker) (:x content))
+        "the marker is painted BEFORE the content edge, in the list's own
+         padding, which is where `list-style-position: outside` puts it")
+    (is (= (:y marker) (:y content))
+        "on the item's first line, not on a line of its own")))
 
 (deftest table-emits-row-and-cell-node-ops-for-hit-testing
   (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {} "b"]]])]

@@ -150,9 +150,8 @@
    kotoba-lang/browser's own live demo. Rather than new rendering machinery,
    this reuses the exact same ::before/generated-content pipeline described
    above: an implicit marker is written as if it were the `<li>`'s own
-   cascade-resolved `:pseudo/before` attr, so it gets the SAME same-line
-   merge with the `<li>`'s own real text (merge-generated-with-text) the
-   explicit-CSS numbered-list idiom already gets. Numbering is a purely
+   cascade-resolved `:pseudo/before` attr, sharing the `<li>`'s own line the
+   way the explicit-CSS numbered-list idiom already does. Numbering is a purely
    POSITIONAL 1-based count of an `<li>`'s index among its OWN parent's
    direct `<li>` children only — deliberately NOT cssom.core's general
    counter-reset/counter-increment machinery, so it can never collide with
@@ -173,9 +172,36 @@
    HTML5 semantics exactly). An `<ol>`'s own `reversed` HTML5 boolean
    attribute is also honored (counts DOWN instead of up; with no
    explicit `start=`, defaults `start` to the total count of direct
-   <li> children, matching real HTML5/browser semantics). Explicitly
-   out of scope: the full `list-style-type` property (circle/square/
-   roman/alpha/...), `list-style-position`, and `<menu>`.
+   <li> children, matching real HTML5/browser semantics).
+
+   `list-style-position` IS honored, in the only way that is measurable
+   here. Its default, `outside`, puts the marker in a box of its own beside
+   the item rather than in the item's content: the marker takes no inline
+   space, so the item's own content starts at the item's content edge and
+   a box that shrink-wraps the list is no wider for the marker's sake.
+   Measured in Brave, `<ul><li><a>First section</a></li></ul>` puts the
+   `<a>` at x=40 and a `<td>` around a two-item list at 63px, where this
+   engine had them at 53.7 and 76.7 -- one marker advance out in both. The
+   marker itself is painted immediately left of that content edge, and that
+   part is NOT verified against a browser by anything: a `::marker` is not
+   an element, so the conformance oracle has no box to report for it (see
+   with-implicit-list-markers, PLACEMENT). `inside` keeps the marker as the
+   first thing on the item's first line, which is measurable and measured
+   (list-style-inside?) -- exactly right for an `<ol>`, whose inside marker
+   advance in Brave IS the width of the number and its space (21px for
+   `1. `, 28 for `10. `, 35 for `100. ` at 14px monospace), and 5.3px short
+   for a `<ul>`, whose disc marker box Brave sizes from the font-size alone
+   (19px at 14px, 14 at 10px, 37 at 28px, the same for every family and
+   every bullet-ish list-style-type) rather than from the glyph.
+
+   Explicitly out of scope: the full `list-style-type` property (circle/
+   square/roman/alpha/...), the `list-style` SHORTHAND (only the
+   `list-style-type`/`list-style-position` longhands, plus a whole-value
+   `list-style: none`, are read), `display: list-item` on anything that is
+   not an `<li>` inside a `<ul>`/`<ol>`, and `<menu>`. An `<li>` whose own
+   content is a BLOCK (`<li><div>x</div></li>`) still gives its outside
+   marker a row of its own rather than putting it beside the block's first
+   line, where a browser puts it -- the item comes out one line too tall.
 
    `<details>`/`<summary>` default disclosure hiding (see
    with-details-visibility, right below with-implicit-list-markers): a
@@ -1890,6 +1916,39 @@
     (+ (reduce max 0 (filter pos? ms))
        (reduce min 0 (filter neg? ms)))))
 
+(def ^:private line-height-multiplier-pattern
+  "A `line-height` written as a multiple of the element's own `font-size`:
+   a bare unitless number (`1.5`), an `em` length (`1.5em`), or a
+   percentage (`150%`). All three end up multiplying the same font-size --
+   they differ only in what INHERITS (see line-height-factor) and, for the
+   percentage, by a factor of a hundred."
+  #"([+-]?(?:\d+\.?\d*|\.\d+))(em|%)?")
+
+(defn- line-height-multiplier
+  "The number `raw` multiplies this element's own `font-size` by, or nil
+   when it is not one of the three multiplying forms at all (`normal`, a
+   `rem`/`vh`/`ch` length, anything unparseable).
+
+   This exists instead of `parse-dbl` because parse-dbl does not answer the
+   same question on both platforms: it is `Double/parseDouble` under Clojure,
+   which REJECTS a trailing unit, and `js/parseFloat` under ClojureScript,
+   which silently ignores one. So `line-height: 1.5em` resolved to the
+   theme default on the JVM and to 1.5 x font-size under nbb -- the same
+   markup, two answers, and the conformance harness (which runs on nbb) only
+   ever saw the second. `150%` was worse in the same way: parseFloat says
+   150, so the browser's 1.5 x font-size came out as 150 x font-size.
+
+   `em` here is the element's own font-size, which is what `em` means for
+   `line-height` (CSS 2.1 10.8.1 -- unlike `font-size: 1.5em`, which is
+   relative to the PARENT). `rem` and the viewport units are deliberately
+   NOT handled: this file has no root font-size or viewport in `inherited`
+   to resolve them against, so they fall through to `normal` rather than
+   being multiplied by the wrong length."
+  [raw]
+  (when-let [[_ n unit] (re-matches line-height-multiplier-pattern (str/trim (str raw)))]
+    (when-let [n (parse-dbl n nil)]
+      (if (= "%" unit) (/ n 100.0) n))))
+
 (defn- resolve-line-height
   "Real CSS `line-height` is either an absolute length (`24`/`24px`, already
    coerced to a plain number by `cssom.core/parse-style-value` before this
@@ -1901,9 +1960,14 @@
    no unit to strip and isn't a whole integer either, so it survives to
    here as the untouched STRING `\"1.5\"`, letting this fn tell the two
    real forms apart by type alone: a number is already resolved pixels;
-   a string is a raw multiplier (or `normal`/anything else unparseable,
-   which reasonably falls back to the theme default the exact same way an
-   absent `line-height` always has). Before this fix, `line-height` was
+   a string is a multiplier of this element's own font-size --
+   line-height-multiplier reads the three forms that are one (`1.5`,
+   `1.5em`, `150%`) and returns nil for everything else, which falls back
+   to the theme default the exact same way an absent `line-height` always
+   has. What this fn resolves is what THIS element uses; what a descendant
+   that declares none inherits is line-height-factor's separate question,
+   and the two answers differ (only a UNITLESS value inherits as a ratio).
+   Before this fix, `line-height` was
    read from `node-style` NOWHERE at all -- every single line of text
    anywhere on any page used the SAME fixed `(:line-height theme)` pixel
    constant regardless of any real author CSS, confirmed via direct REPL
@@ -1932,10 +1996,75 @@
                  (max (or theme-default 0) (long (* 1.2 font-size))))]
     (cond
       (number? raw) (long raw)
-      (string? raw) (if-let [multiplier (parse-dbl raw nil)]
+      (string? raw) (if-let [multiplier (line-height-multiplier raw)]
                       (long (* multiplier font-size))
                       normal)
       :else normal))))
+
+(def ^:private unitless-line-height-pattern
+  "A `line-height` value that is a bare NUMBER with no unit at all, which
+   real CSS reads as a per-element ratio rather than a length. Deliberately
+   stricter than `parse-dbl`, which is what makes this a different question
+   from resolve-line-height's own: `parse-dbl` is `js/parseFloat` under
+   ClojureScript, and parseFloat answers 1.5 for `\"1.5em\"` and 150 for
+   `\"150%\"` -- both LENGTHS, which resolve once against the declaring
+   element and then inherit as the resolved pixel count. Only a value this
+   pattern matches whole may travel down the tree as a ratio."
+  #"[+-]?(?:\d+\.?\d*|\.\d+)")
+
+(defn- line-height-factor
+  "The RATIO a descendant with no `line-height` of its own inherits, or nil
+   when what inherits is a resolved length instead.
+
+   Real CSS computes `line-height` differently depending on the form it was
+   written in, and the difference is only visible on a descendant with a
+   different `font-size`: a UNITLESS `1.5` inherits as the NUMBER, so each
+   element multiplies it by its OWN font-size, while `1.5em`/`21px` resolve
+   at the declaring element and inherit as that one pixel count. Measured
+   in Brave: `<div style=\"line-height: 1.5\"><p style=\"font-size: 24px\">`
+   reports a 36px box for the `<p>` (1.5 x 24) and the same markup with
+   `1.5em` reports 21 (1.5 x the DIV's 14) -- and this engine reported 21
+   for both, because `inherited` only ever carried the resolved pixels.
+
+   `raw` is the element's OWN cascade-resolved `:line-height`:
+   - absent -> whatever ratio was already in force keeps travelling;
+   - a unitless number (`\"1.5\"`, and `\"2\"` -- `cssom.core` deliberately
+     keeps a unitless INTEGER as a string for exactly this distinction, see
+     its `line-height` case) -> a new ratio from here down;
+   - anything else -- a number (an absolute px length), `1.5em`, `150%`,
+     `normal`, an unparseable value -> nil, i.e. a length (or the font's own
+     natural leading) inherits and no ratio is in force below this element.
+
+   SCOPE CUT, and it is the reason this is a separate function from
+   resolve-line-height rather than a branch inside it: this decides only
+   what INHERITS. What the declaring element itself resolves to is still
+   resolve-line-height's `parse-dbl` branch, which treats `1.5em` as
+   1.5 x font-size (numerically right, since that is what `em` means here)
+   and `150%` as 150 x font-size (wrong -- `150%` is 1.5 x font-size). That
+   percentage bug predates this function, no case in the corpus measures it,
+   and multiplying by the wrong factor is not made better or worse by
+   whether the result then inherits as a length."
+  [raw inherited-factor]
+  (cond
+    (nil? raw) inherited-factor
+    (and (string? raw) (re-matches unitless-line-height-pattern (str/trim raw)))
+    (parse-dbl raw nil)
+    :else nil))
+
+(defn- inherited-line-height
+  "The `line-height` in force for an element that declares none of its own,
+   in pixels, or nil when nothing is in force -- the value every caller
+   used to read straight off `(:line-height inherited)`.
+
+   The one thing it adds is line-height-factor's ratio: when the value in
+   force is a unitless one, it is re-multiplied by THIS element's own
+   `font-size` instead of handing down the pixel count the ancestor
+   resolved for itself. Callers pass their own already-resolved font-size,
+   because that is exactly the number real CSS multiplies."
+  [inherited font-size]
+  (if-let [f (:line-height/factor inherited)]
+    (long (* f font-size))
+    (:line-height inherited)))
 
 (defn- leading-ascent
   "How far ABOVE the baseline one inline box reaches inside its line box:
@@ -3608,17 +3737,37 @@
    resolved it had no real document-tree-walk context behind it -- see
    cssom.core/resolve-style-for's `counters` argument). Returns nil when
    there's nothing to generate, so a node with no matching ::before/::after
-   rule lays out exactly as it did before this feature existed."
+   rule lays out exactly as it did before this feature existed.
+
+   `:generated/marker :outside` is lifted out of the pseudo style onto the
+   node itself when this is a LIST MARKER positioned outside its item's
+   principal box -- see with-implicit-list-markers, which is the only thing
+   that ever sets it, and outside-marker-node?, which is what every reader
+   downstream asks. An author's own `::before` never carries it: a
+   `::before` is not a `::marker`, and real CSS gives it no such placement."
   [node pseudo-key]
   (let [style (pseudo-style node pseudo-key)]
     (when-let [content (:content style)]
-      {:generated/pseudo pseudo-key
-       :generated/text (str content)
-       :generated/style style})))
+      (cond-> {:generated/pseudo pseudo-key
+               :generated/text (str content)
+               :generated/style style}
+        (:marker/outside? style) (assoc :generated/marker :outside)))))
 
 (defn- generated-node?
   [node]
   (and (map? node) (boolean (:generated/pseudo node))))
+
+(defn- outside-marker-node?
+  "True for a generated node that is a list marker at
+   `list-style-position: outside` -- the default, and the one every bare
+   `<ul>`/`<ol>` in the corpus gets.
+
+   Such a marker is NOT part of its item's inline content: real CSS puts it
+   in a box of its own, outside the item's principal box, where it neither
+   advances the line's pen nor widens the item. Every place that treats
+   generated content as ordinary inline text asks this first."
+  [node]
+  (and (map? node) (= :outside (:generated/marker node))))
 
 (defn- real-text-child
   "Returns the plain string content of `child` if it's a genuine DOM text
@@ -3810,7 +3959,17 @@
   (let [before (generated-content-node node :before)
         after (generated-content-node node :after)
         children (merge-adjacent-text-runs children)
-        [before children] (if-let [t (and before (seq children) (real-text-child (first children)))]
+        ;; An OUTSIDE list marker is never merged with the item's own text:
+        ;; the merge exists to put a ::before and the text after it on one
+        ;; line, and an outside marker is not on that line at all -- it is
+        ;; its own box beside it (outside-marker-node?). Merging it would
+        ;; fuse the two into a single `:text` draw-op, which has exactly one
+        ;; x, so the marker could not be placed anywhere the item's first
+        ;; word is not.
+        [before children] (if-let [t (and before
+                                          (not (outside-marker-node? before))
+                                          (seq children)
+                                          (real-text-child (first children)))]
                              [(merge-generated-with-text before t true) (subvec children 1)]
                              [before children])
         [after children] (if-let [t (and after (seq children) (real-text-child (peek children)))]
@@ -3904,6 +4063,38 @@
   (or (= "none" (style node :list-style))
       (= "none" (style node :list-style-type))))
 
+(defn- list-style-inside?
+  "True when `node`'s OWN cascade-resolved `list-style-position` is
+   literally `inside` -- the non-default value, which puts the marker back
+   INSIDE the item's principal box as the first thing on its first line.
+
+   Measured in Brave, at 14px monospace, `<ul><li><a>First section</a>`:
+   the `<a>` is at x=40 (the item's content edge) by default and at x=59
+   under `list-style-position: inside`, i.e. the marker advances the line
+   by 19px there and by nothing at all here. The same pair inside a `<td>`
+   shrink-wraps the cell to 63px and 82px respectively -- so this is not
+   only where the marker paints, it is whether the item is 19px wider.
+
+   The `inside` advance this engine produces is the WIDTH OF THE MARKER
+   STRING, which is exactly what Brave uses for an `<ol>` (measured: 21px
+   for `1. `, 28 for `10. `, 35 for `100. `) and 5.3px more than it uses
+   for a `<ul>`, where Brave's disc marker box is 19px at 14px, 14 at 10px
+   and 37 at 28px -- a function of the font-size only, identical for Arial
+   and monospace and for `list-style-type: square`, i.e. not the bullet
+   glyph's own advance (6.7px) at all. No corpus case measures `inside`, so
+   that 5.3px is recorded here rather than modelled from three points.
+
+   Deliberately as narrow as list-style-none? above, and for the same
+   reason: the `list-style` SHORTHAND is not parsed (`list-style: disc
+   inside` is not recognised), and there is no case-folding. What this does
+   NOT read is an INHERITED value: real CSS inherits `list-style-position`,
+   and this engine threads only a fixed set of properties through
+   `inherited`. with-implicit-list-markers therefore asks it of both the
+   container and the item, which is where an author writes it in practice
+   (both forms are measured above)."
+  [node]
+  (= "inside" (style node :list-style-position)))
+
 (defn- implicit-marker-content
   "The implicit marker text for a direct `:li` child of a `parent-tag`
    (:ul/:ol) container, already resolved to its final displayed `number`
@@ -3987,6 +4178,30 @@
        explicit ::before still applies as its own, separate mechanism,
        unaffected by this feature's existence.
 
+   PLACEMENT (`list-style-position`). The synthetic entry carries
+   `:marker/outside? true` unless the container or the <li> declares
+   `list-style-position: inside` (see list-style-inside?, which has the
+   measurements). That flag is what downstream reads to keep the marker out
+   of the item's inline content entirely -- it neither advances the line's
+   pen (inline-line-breaker), nor widens the item (inline-max-content-
+   width), nor joins the item's own text run (with-generated-content). It is
+   painted immediately to the LEFT of the item's content edge instead.
+
+   What that placement is and is NOT verified against: the conformance
+   oracle reports one box per ELEMENT, and a `::marker` is not an element --
+   `getBoundingClientRect` has nothing to return for it, so where the marker
+   itself paints cannot be checked by that harness in either direction. What
+   IS checked, and is what the three failing cases measured, is the
+   position and width of the item's CONTENT: Brave puts the `<a>` of
+   `<ul><li><a>First section</a></li></ul>` at x=40, the item's content
+   edge, where this engine had it at 53.7 -- exactly one marker advance in
+   -- and shrink-wraps a `<td>` holding a two-item list to 63px where this
+   engine gave 76.7. Both follow from the marker taking no inline space;
+   neither says where the glyph lands. `list-style-position: inside`, whose
+   marker DOES take inline space, is measurable that way and is measured
+   (again, list-style-inside?), which is the closest this harness can get to
+   the outside marker's own width.
+
    Numbering (`:ol` only): a purely POSITIONAL 1-based index among this
    node's OWN direct `:li` element children, in document order -- counting
    EVERY direct <li> child (even a suppressed one, so suppressing one <li>'s
@@ -4060,7 +4275,8 @@
             li-count (count (filter #(and (map? %) (= :li (:tag %))) children))
             start (parse-int (get-in node [:attrs :start]) (if reversed? li-count 1))
             step (if reversed? dec inc)
-            init-n (if reversed? (inc start) (dec start))]
+            init-n (if reversed? (inc start) (dec start))
+            container-inside? (list-style-inside? node)]
         (first
          (reduce (fn [[out n] child]
                    (if (and (map? child) (= :li (:tag child)))
@@ -4068,7 +4284,9 @@
                        (if (or (list-style-none? child) (pseudo-content child :before))
                          [(conj out child) n]
                          [(conj out (assoc-in child [:attrs :pseudo/before]
-                                               {:content (implicit-marker-content parent-tag n)}))
+                                              (cond-> {:content (implicit-marker-content parent-tag n)}
+                                                (not (or container-inside? (list-style-inside? child)))
+                                                (assoc :marker/outside? true))))
                           n]))
                      [(conj out child) n]))
                  [[] init-n]
@@ -4313,7 +4531,11 @@
         text-inherited (assoc inherited
                               :color (or (:color st) (:color inherited))
                               :font-size font-size
-                              :line-height (resolve-line-height (:line-height st) font-size (or (:line-height inherited) (:line-height theme)))
+                              :line-height (resolve-line-height (:line-height st) font-size
+                                                                (or (inherited-line-height inherited font-size)
+                                                                    (:line-height theme)))
+                              :line-height/factor (line-height-factor (:line-height st)
+                                                                      (:line-height/factor inherited))
                               :font-weight (or (:font-weight st) (:font-weight inherited))
                               :font-style (or (:font-style st) (:font-style inherited))
                               :font-family (or (:font-family st) (:font-family inherited))
@@ -4613,6 +4835,13 @@
     (reduce (fn [total t]
               (case (:kind t)
                 :break total
+                ;; an OUTSIDE list marker is not in the run's content: it
+                ;; takes no inline space, so it cannot widen the box that
+                ;; shrink-wraps around it. Measured in Brave, a `<td>`
+                ;; holding `<ul><li>one</li><li>two</li></ul>` is 63px wide
+                ;; and 82px under `list-style-position: inside` -- the
+                ;; second is a real 19px contribution, the first is none.
+                :marker total
                 :atomic (+ total (:w t))
                 (+ total
                    (w-of (:text t) (:style t))
@@ -4939,7 +5168,7 @@
   (let [fs (parse-int (:font-size st) (:font-size inherited (:font-size theme)))
         {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                (:font-style st) (:font-family st))
-        lh (or (parse-int (:line-height st) nil) (:line-height inherited) fs)
+        lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)
         half (/ (- lh (+ ascent descent)) 2)]
     (+ (or (:padding-top st) (:padding st) 0)
        (:border-width st)
@@ -6824,8 +7053,10 @@
     (assoc inherited
            :color (or (:color st) (:color inherited))
            :font-size font-size
-           :line-height (resolve-line-height (:line-height st) font-size (:line-height inherited)
+           :line-height (resolve-line-height (:line-height st) font-size
+                                            (inherited-line-height inherited font-size)
                                             (boolean (:line-height/explicit? inherited)))
+           :line-height/factor (line-height-factor (:line-height st) (:line-height/factor inherited))
            :font-weight (or (:font-weight st) (:font-weight inherited))
            :font-style (or (:font-style st) (:font-style inherited))
            :font-family (or (:font-family st) (:font-family inherited))
@@ -7011,7 +7242,7 @@
                            (let [fs (parse-int (:font-size st) (:font-size inherited))
                                  {:keys [ascent descent]} (font-metrics theme fs (:font-weight st)
                                                                         (:font-style st) (:font-family st))
-                                 lh (or (parse-int (:line-height st) nil) (:line-height inherited) fs)]
+                                 lh (or (parse-int (:line-height st) nil) (inherited-line-height inherited fs) fs)]
                              (+ mt (or (:padding-top st) (:padding st) 0) (:border-width st)
                                 (leading-ascent ascent descent lh))))]
                      (conj acc (cond-> {:kind :atomic
@@ -7025,7 +7256,14 @@
                                  (assoc :rel (rel+ (rel-of owners) st)))))
 
                    (generated-node? child)
-                   (conj acc {:kind :text
+                   ;; An OUTSIDE list marker is a fragment of its own KIND,
+                   ;; not text: it is drawn in the run's font on the run's
+                   ;; first baseline, but it is not IN the run -- no
+                   ;; whitespace collapsing applies to it, it never wraps,
+                   ;; and it advances nothing. See outside-marker-node? and,
+                   ;; for each of those three, inline-tokens /
+                   ;; inline-line-breaker / layout-inline-run.
+                   (conj acc {:kind (if (outside-marker-node? child) :marker :text)
                               :text (:generated/text child)
                               :style (inline-inherited inherited (:generated/style child))
                               :owners owners
@@ -7124,6 +7362,16 @@
         (= :break (:kind fr))
         (recur (rest frs) nil (conj out fr))
 
+        ;; An outside list marker is not part of the text stream: it passes
+        ;; through whole (never split into words, never text-transformed
+        ;; along with the line) and, crucially, leaves `pending-style`
+        ;; exactly as it found it -- it can neither absorb a pending space
+        ;; nor contribute one, because there is no whitespace between it and
+        ;; the item's first word for CSS to collapse. See
+        ;; outside-marker-node?.
+        (= :marker (:kind fr))
+        (recur (rest frs) pending-style (conj out fr))
+
         ;; An atomic inline is one indivisible token. It consumes any
         ;; pending whitespace as its own leading space (`text <img> text`
         ;; keeps a space on each side, exactly as a browser renders it) and
@@ -7188,6 +7436,15 @@
                (if measure-text
                  (measure-text text (:font-size st) (:font-weight st) (:font-style st) (:font-family st))
                  (* (count text) (long (* 0.6 (:font-size st))))))
+        ;; An outside list marker is a piece on the line but not CONTENT on
+        ;; it: every question this loop asks about "is there anything on the
+        ;; line already" -- does a space separate me from it, must I wrap
+        ;; before adding myself, may I merge into it -- has to answer no for
+        ;; it alone, or the item's first word gets a leading space it never
+        ;; had, wraps to a second line behind a marker sitting on an empty
+        ;; first one, or is concatenated into the marker's own draw-op and
+        ;; dragged outside the content edge with it.
+        content? (fn [pieces] (boolean (some #(not= :marker (:kind %)) pieces)))
         flush (fn [lines pieces w style] (conj lines {:pieces pieces :w w :style style}))]
     (loop [ts tokens x 0 pieces [] lines []]
       (if-let [t (first ts)]
@@ -7201,17 +7458,35 @@
                  (conj lines {:pieces pieces :w x :style (:style t)
                               :break-owners (:owners t)}))
 
+          ;; An OUTSIDE list marker gets a piece whose x is its own NEGATIVE
+          ;; width and which does not move the pen: it is painted in the
+          ;; space immediately before the line's content edge, and the first
+          ;; real word still starts at x=0. Because the pen does not move,
+          ;; the marker is also absent from this line's `:w` -- so it takes
+          ;; no part in wrapping, in `text-align`, or in the run's
+          ;; max-content width.
+          ;;
+          ;; `(- w)` is the item's content edge minus the marker, not the
+          ;; pen minus the marker, and it is correct only because such a
+          ;; marker is always the FIRST child of its item (with-implicit-
+          ;; list-markers writes it as the item's ::before and nothing else
+          ;; ever sets :generated/marker), so the pen is at 0 when it
+          ;; arrives.
+          (= :marker (:kind t))
+          (let [w (w-of (:text t) (:style t))]
+            (recur (rest ts) x (conj pieces (assoc t :x (- w) :w w)) lines))
+
           ;; An atomic inline never merges with a neighbouring piece and is
           ;; never split: it wraps to the next line whole, or overflows
           ;; alone, exactly like an over-wide single word.
           (= :atomic (:kind t))
-          (let [sep (if (and (seq pieces) (:space-before? t))
+          (let [sep (if (and (content? pieces) (:space-before? t))
                       (w-of " " (or (:space-style t)
                                     {:font-size (or (:font-size (:style (peek pieces))) 14)}))
                       0)
                 piece (fn [x] (assoc (select-keys t [:owners :opacity :draw :h :ml :mt :baseline-offset])
                                      :kind :atomic :x x :w (:w t)))]
-            (if (and (seq pieces) (> (+ x sep (:w t)) content-w))
+            (if (and (content? pieces) (> (+ x sep (:w t)) content-w))
               (recur (rest ts) (:w t) [(piece 0)] (flush lines pieces x nil))
               (recur (rest ts) (+ x sep (:w t)) (conj pieces (piece (+ x sep))) lines)))
 
@@ -7219,15 +7494,16 @@
           (let [st (:style t)
                 word (:text t)
                 ww (w-of word st)
-                sep (if (and (seq pieces) (:space-before? t))
+                sep (if (and (content? pieces) (:space-before? t))
                       (w-of " " (or (:space-style t) st))
                       0)]
-            (if (and (seq pieces) (> (+ x sep ww) content-w))
+            (if (and (content? pieces) (> (+ x sep ww) content-w))
               (recur (rest ts) ww
                      [{:text word :style st :owners (:owners t) :opacity (:opacity t) :x 0 :w ww}]
                      (flush lines pieces x st))
               (let [last-piece (peek pieces)
                     merge? (and last-piece
+                                (not= :marker (:kind last-piece))
                                 (= (:style last-piece) st)
                                 (= (:owners last-piece) (:owners t))
                                 (= (:opacity last-piece) (:opacity t))
@@ -7550,7 +7826,34 @@
                 [line-draws rects]
                 (reduce
                  (fn [[draws rects] piece]
-                   (if (= :atomic (:kind piece))
+                   (cond
+                     ;; An OUTSIDE list marker: painted on this line's
+                     ;; baseline in the run's own font, at the negative x
+                     ;; inline-line-breaker gave it, and that is ALL it does
+                     ;; here. It contributes to no owner's box, deliberately:
+                     ;; real CSS makes `::marker` a box of its own, and the
+                     ;; oracle agrees -- Brave reports the `<li>` of
+                     ;; `<ul><li><a>x</a></li></ul>` starting at its content
+                     ;; edge, with the marker outside it, so folding the
+                     ;; marker into the item's own fragments would report an
+                     ;; `<li>`/`<a>` box wider and further left than the one
+                     ;; a browser reports.
+                     (= :marker (:kind piece))
+                     (let [st (:style piece)]
+                       [(conj draws
+                              (cond-> {:draw/op :text
+                                       :text (:text piece)
+                                       :x (+ base-x (:x piece))
+                                       :y (- baseline (:font-size st))
+                                       :font-size (:font-size st)
+                                       :color (:color st)
+                                       :opacity (:opacity piece)}
+                                (:font-weight st) (assoc :font-weight (:font-weight st))
+                                (:font-style st) (assoc :font-style (:font-style st))
+                                (:font-family st) (assoc :font-family (:font-family st))))
+                        rects])
+
+                     (= :atomic (:kind piece))
                      ;; Atomic inline: the element was already laid out at
                      ;; the origin by inline-fragments, so placing it is a
                      ;; translate -- its bottom edge onto the baseline, the
@@ -7572,6 +7875,8 @@
                            rects (owner-fragments rects (:owners piece) 0
                                                   px0 (:w piece) (:opacity piece))]
                        [(into draws (translate-ops px py (:draw piece))) rects])
+
+                     :else
                      (let [st (:style piece)
                            ;; the `position: relative` shift in force
                            ;; INSIDE the innermost inline box this text sits
@@ -7796,7 +8101,21 @@
                                     (and inline-context?
                                          (map? (first group))
                                          (= :element (:node/type (first group)))
-                                         (inline-fragment-bearing? theme (first group)))))
+                                         (inline-fragment-bearing? theme (first group)))
+                                    ;; a LONE OUTSIDE LIST MARKER, i.e. an
+                                    ;; `<li>` that is empty or whose content
+                                    ;; is a block. Only the inline path can
+                                    ;; place such a marker outside the
+                                    ;; content edge -- the block-row path
+                                    ;; (layout-node's generated-node? branch)
+                                    ;; paints generated text at x=0 like any
+                                    ;; other row, i.e. exactly where the
+                                    ;; content it is supposed to sit BESIDE
+                                    ;; starts. The row is the same height
+                                    ;; either way.
+                                    (and inline-context?
+                                         (= 1 n)
+                                         (outside-marker-node? (first group)))))
                       emitted (if run?
                                 (conj (vec (mapcat #(floats-at %) (range base (+ base n))))
                                       {:inline/run group})
@@ -9467,7 +9786,8 @@
      (let [gstyle (:generated/style node)
            color (or (:color gstyle) (:color inherited))
            font-size (parse-int (:font-size gstyle) (:font-size inherited))
-           line-height (resolve-line-height (:line-height gstyle) font-size (or (:line-height inherited) (:line-height theme)))
+           line-height (resolve-line-height (:line-height gstyle) font-size
+                                            (or (inherited-line-height inherited font-size) (:line-height theme)))
            font-weight (or (:font-weight gstyle) (:font-weight inherited))
            font-style (or (:font-style gstyle) (:font-style inherited))
            font-family (or (:font-family gstyle) (:font-family inherited))
@@ -9524,8 +9844,10 @@
                color (or (:color st) (:color inherited))
                font-size (parse-int (:font-size st) (:font-size inherited))
                line-height (resolve-line-height (:line-height st) font-size
-                                                (or (:line-height inherited) (:line-height theme))
+                                                (or (inherited-line-height inherited font-size)
+                                                    (:line-height theme))
                                                 (boolean (:line-height/explicit? inherited)))
+               line-height-ratio (line-height-factor (:line-height st) (:line-height/factor inherited))
                font-weight (or (:font-weight st) (:font-weight inherited))
                font-style (or (:font-style st) (:font-style inherited))
                font-family (or (:font-family st) (:font-family inherited))
@@ -9572,6 +9894,7 @@
                                 :direction direction
                                 :line-height/explicit? (boolean (or (:line-height st)
                                                                     (:line-height/explicit? inherited)))
+                                :line-height/factor line-height-ratio
                                 :color color :font-size font-size :line-height line-height
                                 :font-weight font-weight :font-style font-style :font-family font-family
                                 :text-shadow-x text-shadow-x :text-shadow-y text-shadow-y
