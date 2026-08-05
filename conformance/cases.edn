@@ -2029,4 +2029,448 @@
   :group :text
   ;; `visibility: hidden` still occupies space, unlike `display: none`.
   :html "<div style=\"width: 400px\"><div style=\"visibility: hidden; height: 20px\">gone</div><div style=\"height: 20px\">after</div></div>"}
+
+ ;; ---- text: letter-spacing and word-spacing, at widths where they SHOW ----
+ ;;
+ ;; Both properties already reach `cssom.layout` (they are in its inherited
+ ;; set) and neither is added to a text run's advance, so the only shapes
+ ;; that can see them are ones where the extra width changes a wrap point or
+ ;; an inline box's own width. The first draft of these cases used widths
+ ;; that were roomy enough for BOTH answers to fit on one line, and passed
+ ;; while measuring nothing -- every width below was picked by measuring the
+ ;; browser at that width first.
+
+ {:id :text/letter-spacing-forces-a-wrap
+  :group :text
+  ;; `alpha beta` is 70px bare and 110px at 4px/char, so 100px is the
+  ;; width at which the two engines must disagree about the line count.
+  :html "<div style=\"width: 100px\"><p style=\"letter-spacing: 4px\">alpha beta</p></div>"}
+
+ {:id :text/negative-letter-spacing-fits-one-line
+  :group :text
+  ;; The mirror: 70px bare does NOT fit in 60px, 50px at -2px/char does.
+  :html "<div style=\"width: 60px\"><p style=\"letter-spacing: -2px\">alpha beta</p></div>"}
+
+ {:id :text/letter-spacing-inherits-into-a-child
+  :group :text
+  :html "<div style=\"width: 100px; letter-spacing: 4px\"><p>alpha beta</p></div>"}
+
+ {:id :text/letter-spacing-on-an-inline-child
+  :group :text
+  :html "<p>a <b style=\"letter-spacing: 3px\">wide</b> b</p>"}
+
+ {:id :text/letter-spacing-widens-a-shrink-to-fit-box
+  :group :text
+  :html "<div style=\"width: 200px\"><span style=\"display: inline-block; letter-spacing: 4px\">abcd</span></div>"}
+
+ {:id :text/word-spacing-forces-a-wrap
+  :group :text
+  ;; `one two three` is 91px bare and 131px with 20px added at each of its
+  ;; two spaces.
+  :html "<div style=\"width: 120px\"><p style=\"word-spacing: 20px\">one two three</p></div>"}
+
+ {:id :text/negative-word-spacing-fits-one-line
+  :group :text
+  :html "<div style=\"width: 80px\"><p style=\"word-spacing: -6px\">one two three</p></div>"}
+
+ {:id :text/word-spacing-on-an-inline-child
+  :group :text
+  :html "<p>a <b style=\"word-spacing: 10px\">one two</b> b</p>"}
+
+ ;; ---- text: indentation ----
+
+ {:id :text/text-indent-only-indents-the-first-line
+  :group :text
+  ;; 22 characters is 154px and fits 160px unindented; the 40px indent
+  ;; pushes the last word onto a second line, and ONLY the first line is
+  ;; indented -- an engine that indented every line would break earlier.
+  :html "<p style=\"width: 160px; text-indent: 40px\">alpha beta gamma delta</p>"}
+
+ {:id :text/text-indent-percentage-of-the-containing-block
+  :group :text
+  ;; 50% of the 200px containing block, not of anything the <p> owns.
+  :html "<div style=\"width: 200px\"><p style=\"text-indent: 50%\">alpha beta gamma</p></div>"}
+
+ {:id :text/text-indent-inherits-into-a-block-child
+  :group :text
+  :html "<div style=\"width: 150px; text-indent: 60px\"><p>alpha beta gamma</p></div>"}
+
+ {:id :text/text-indent-hanging-skips-the-first-line
+  :group :text
+  ;; `hanging` inverts it: the first line is flush and every later line is
+  ;; indented, so this wraps to THREE lines where the same text without
+  ;; `hanging` wraps to two.
+  :html "<p style=\"width: 160px; text-indent: 40px hanging\">alpha beta gamma delta epsilon zeta eta theta</p>"}
+
+ {:id :text/text-indent-each-line-indents-after-a-break
+  :group :text
+  ;; `each-line` re-applies the indent after a FORCED break, so the <br>
+  ;; ends up 30px further right than the first line's own indent alone.
+  :html "<p style=\"width: 200px; text-indent: 30px each-line\">alpha<br>beta</p>"}
+
+ ;; ---- text: white-space, wrapping and break opportunities ----
+
+ {:id :text/white-space-break-spaces-keeps-newlines
+  :group :text
+  ;; `break-spaces` is one of the four preserving values, so this is two
+  ;; lines. Shaped around the newline rather than around a run of spaces on
+  ;; purpose: the oracle measures one Range per WORD and so cannot see
+  ;; where a run of preserved spaces breaks, which is the only thing
+  ;; `break-spaces` does that `pre-wrap` does not.
+  :html "<div style=\"width: 200px; white-space: break-spaces\">aa\nbb</div>"}
+
+ {:id :text/white-space-pre-keeps-leading-spaces
+  :group :text
+  ;; Shrink-to-fit so the preserved spaces are IN the measured width:
+  ;; 11 characters, not 8.
+  :html "<span style=\"display: inline-block; white-space: pre\">   indented</span>"}
+
+ {:id :text/tab-in-pre-advances-to-the-next-eight-column-stop
+  :group :text
+  ;; A tab is not one space: it advances to the next multiple of `tab-size`
+  ;; (initially 8), so `a<tab>b` is 9 characters wide, 63px.
+  :html "<span style=\"display: inline-block; white-space: pre\">a\tb</span>"}
+
+ {:id :text/tab-size-four-in-pre
+  :group :text
+  ;; The same shape at `tab-size: 4` is 5 characters, 35px. The pair is
+  ;; what separates 'the tab stop is wrong' from 'tab-size is ignored'.
+  :html "<span style=\"display: inline-block; white-space: pre; tab-size: 4\">a\tb</span>"}
+
+ {:id :text/overflow-wrap-anywhere-shrinks-min-content
+  :group :text
+  ;; The three break keywords differ ONLY when a box is being SIZED:
+  ;; `anywhere` and `break-all` let the long word break while its
+  ;; min-content width is computed, so the inline-block takes the 60px on
+  ;; offer; `break-word` does not, so the same box is 105px and overflows.
+  :html "<div style=\"width: 60px\"><span style=\"display: inline-block; overflow-wrap: anywhere\">aaaaaaaaaaaaaaa</span></div>"}
+
+ {:id :text/overflow-wrap-break-word-keeps-min-content
+  :group :text
+  :html "<div style=\"width: 60px\"><span style=\"display: inline-block; overflow-wrap: break-word\">aaaaaaaaaaaaaaa</span></div>"}
+
+ {:id :text/word-break-break-all-shrinks-min-content
+  :group :text
+  :html "<div style=\"width: 60px\"><span style=\"display: inline-block; word-break: break-all\">aaaaaaaaaaaaaaa</span></div>"}
+
+ {:id :text/soft-hyphen-is-a-break-opportunity
+  :group :text
+  ;; U+00AD is a conditional break point (`hyphens: manual` is the initial
+  ;; value), so the browser breaks the word there and this box is two lines
+  ;; tall. The LINE axis's rendering of this one is an artifact -- a word
+  ;; broken across lines reports a union rect that the harness re-groups
+  ;; per character -- so the geometry axis is the honest reading here.
+  :html "<div style=\"width: 90px\">super&shy;califragilistic</div>"}
+
+ {:id :text/hyphens-auto-breaks-inside-a-word
+  :group :text
+  ;; With `hyphens: auto` and a language, Chromium's own hyphenation
+  ;; dictionary breaks `hyphenation` and the box becomes three lines tall
+  ;; instead of two.
+  :html "<div style=\"width: 70px; hyphens: auto\" lang=\"en\">hyphenation example</div>"}
+
+ {:id :text/nowrap-inline-inside-a-wrapping-paragraph
+  :group :text
+  ;; `white-space: nowrap` on an INLINE child keeps its own words together
+  ;; without making it a break point either side.
+  :html "<p style=\"width: 120px\">alpha <span style=\"white-space: nowrap\">beta gamma</span> delta</p>"}
+
+ {:id :text/text-wrap-balance-evens-the-lines
+  :group :text
+  ;; A greedy line breaker fills the first line; `balance` does not.
+  :html "<p style=\"width: 200px; text-wrap: balance\">alpha beta gamma delta epsilon</p>"}
+
+ ;; ---- text: font-size keywords ----
+
+ {:id :text/font-size-absolute-keyword
+  :group :text
+  ;; The absolute keywords are keyed on the DEFAULT font of the family in
+  ;; use (`large` is 16px in this page's monospace, 18 in a proportional
+  ;; one), which is why `resolve-font-size` returns nil for them. Measured
+  ;; here rather than asserted, and it costs more than the font size: the
+  ;; UA `p { margin: 1em 0 }` then resolves against the wrong size too.
+  :html "<p style=\"font-size: large\">large</p>"}
+
+ {:id :text/font-size-larger-scales-off-the-parent
+  :group :text
+  ;; The contrast partner: `larger`/`smaller` are a pure ratio off the
+  ;; parent and need no family table, so they DO resolve.
+  :html "<div style=\"font-size: 20px\"><p style=\"font-size: larger\">bigger</p></div>"}
+
+ ;; ---- generated content the box tree can still be measured through ----
+
+ {:id :inline/q-adds-quotation-marks
+  :group :inline
+  ;; The oracle's per-word Ranges cannot see generated content, so the LINE
+  ;; axis is blind here -- but the <q>'s own BOX is two characters wider on
+  ;; each side, and geometry reads that directly.
+  :html "<p>he said <q>hello</q> loudly</p>"}
+
+ {:id :inline/nested-q-uses-the-second-quote-level
+  :group :inline
+  :html "<p>x <q>a <q>b</q> c</q> y</p>"}
+
+ {:id :generated/counter-numbers-the-items
+  :group :generated
+  :oracle/blind true
+  :html "<div class=\"cnt\"><p>one</p><p>two</p><p>three</p></div>"
+  :css ".cnt { counter-reset: step } .cnt p::before { counter-increment: step; content: counter(step) \". \" }"}
+
+ {:id :generated/attr-content-after
+  :group :generated
+  :oracle/blind true
+  :html "<p>label<span data-label=\"note\"></span></p>"
+  :css "span::after { content: attr(data-label) }"}
+
+ ;; ---- a margin rule the `:empty` case above exposed, isolated ----
+
+ {:id :block/an-empty-block-collapses-through-itself
+  :group :block
+  ;; A block with no content and no border or padding is SELF-COLLAPSING:
+  ;; its own top and bottom margins collapse into one, that one then
+  ;; collapses with the next sibling's, and with nothing to stop it at the
+  ;; parent's top edge the whole set escapes. The browser puts both
+  ;; children at y=0 and the parent is 20px tall.
+  :html "<div><div style=\"margin: 14px 0\"></div><div style=\"height: 20px\">after</div></div>"}
+
+ ;; ---- selectors: structural ----
+ ;;
+ ;; Written with <p> siblings rather than <li>: a list's marker is
+ ;; generated content the oracle cannot see, so an otherwise perfectly good
+ ;; selector case in a <ul> can only ever be scored `unscorable`.
+
+ {:id :selector/nth-child-negative-coefficient
+  :group :selector
+  :html "<div><p>1</p><p>2</p><p>3</p><p>4</p></div>"
+  :css "p:nth-child(-n+2) { color: #ff0000 }"}
+
+ {:id :selector/nth-child-an-plus-b
+  :group :selector
+  :html "<div><p>1</p><p>2</p><p>3</p><p>4</p><p>5</p></div>"
+  :css "p:nth-child(2n+1) { color: #ff0000 }"}
+
+ {:id :selector/nth-child-odd-and-even-keywords
+  :group :selector
+  :html "<div><p>1</p><p>2</p><p>3</p><p>4</p></div>"
+  :css "p:nth-child(odd) { color: #ff0000 } p:nth-child(even) { color: #0000ff }"}
+
+ {:id :selector/nth-child-of-a-selector
+  :group :selector
+  ;; `of <selector>` counts only among the matching siblings, so `2n+1 of
+  ;; .m` is the FIRST `.m` and would be the third -- which does not exist.
+  ;; An engine that ignores the `of` clause bolds both `.m` paragraphs.
+  :html "<div><p class=\"m\">1</p><p>2</p><p class=\"m\">3</p><p>4</p></div>"
+  :css "p:nth-child(2n+1 of .m) { font-weight: bold }"}
+
+ {:id :selector/nth-of-type-counts-per-tag
+  :group :selector
+  :html "<div><p>p1</p><span>s1</span><p>p2</p><span>s2</span></div>"
+  :css "p:nth-of-type(2) { color: #ff0000 } span:nth-of-type(1) { color: #0000ff }"}
+
+ {:id :selector/nth-last-child-counts-from-the-end
+  :group :selector
+  :html "<div><p>1</p><p>2</p><p>3</p></div>"
+  :css "p:nth-last-child(1) { font-weight: bold }"}
+
+ {:id :selector/first-last-and-only-child
+  :group :selector
+  ;; The lone child of the second group is first, last AND only, so source
+  ;; order decides between three equally specific rules.
+  :html "<div><div><p>1</p><p>2</p><p>3</p></div><div><p>only</p></div></div>"
+  :css "p:first-child { color: #ff0000 } p:last-child { color: #0000ff } p:only-child { color: #008000 }"}
+
+ {:id :selector/first-of-type-among-mixed-siblings
+  :group :selector
+  :html "<div><span>s</span><p>p1</p><p>p2</p></div>"
+  :css "p:first-of-type { font-style: italic }"}
+
+ {:id :selector/empty-pseudo-class
+  :group :selector
+  :html "<div><p></p><p>x</p></div>"
+  :css "p:empty { padding-left: 20px }"}
+
+ {:id :selector/not-with-a-nested-pseudo-class
+  :group :selector
+  :html "<div><p>1</p><p>2</p><p>3</p></div>"
+  :css "p:not(:first-child) { font-style: italic }"}
+
+ ;; ---- selectors: :has() ----
+
+ {:id :selector/has-a-descendant
+  :group :selector
+  :html "<div><p><a href=\"/x\">link</a></p><p>plain</p></div>"
+  :css "p:has(a) { font-weight: bold }"}
+
+ {:id :selector/has-a-direct-child
+  :group :selector
+  :html "<div><p><span><a href=\"/x\">deep</a></span></p><p><a href=\"/y\">shallow</a></p></div>"
+  :css "p:has(> a) { font-weight: bold }"}
+
+ {:id :selector/has-a-following-sibling
+  :group :selector
+  ;; The sibling-relative form, named as out of scope in `cssom.core`'s own
+  ;; docstring and never measured until now.
+  :html "<div><h2>head</h2><p>after</p></div>"
+  :css "h2:has(~ p) { font-style: italic }"}
+
+ ;; ---- selectors: combinators ----
+
+ {:id :selector/adjacent-sibling-combinator
+  :group :selector
+  :html "<div><h2>head</h2><p>right after</p><p>later</p></div>"
+  :css "h2 + p { font-style: italic }"}
+
+ {:id :selector/general-sibling-combinator
+  :group :selector
+  :html "<div><h2>head</h2><p>one</p><span>s</span><p>two</p></div>"
+  :css "h2 ~ p { font-style: italic }"}
+
+ ;; ---- selectors: attributes ----
+
+ {:id :selector/attribute-prefix-match
+  :group :selector
+  :html "<p><a href=\"https://x\">ext</a> <a href=\"/y\">int</a></p>"
+  :css "a[href^=\"https\"] { font-weight: bold }"}
+
+ {:id :selector/attribute-suffix-match
+  :group :selector
+  :html "<p><a href=\"/a.pdf\">pdf</a> <a href=\"/b.html\">page</a></p>"
+  :css "a[href$=\".pdf\"] { font-weight: bold }"}
+
+ {:id :selector/attribute-substring-match
+  :group :selector
+  :html "<p><a href=\"/docs/x\">docs</a> <a href=\"/blog/y\">blog</a></p>"
+  :css "a[href*=\"docs\"] { font-weight: bold }"}
+
+ {:id :selector/attribute-whitespace-list-match
+  :group :selector
+  :html "<div><p data-tags=\"one two\">has</p><p data-tags=\"onetwo\">none</p></div>"
+  :css "p[data-tags~=\"two\"] { font-weight: bold }"}
+
+ {:id :selector/attribute-hyphen-match
+  :group :selector
+  :html "<div><p lang=\"en-GB\">gb</p><p lang=\"english\">no</p></div>"
+  :css "p[lang|=\"en\"] { font-style: italic }"}
+
+ {:id :selector/attribute-case-insensitive-flag
+  :group :selector
+  :html "<div><p data-k=\"VALUE\">upper</p><p data-k=\"value\">lower</p></div>"
+  :css "p[data-k=\"value\" i] { font-weight: bold }"}
+
+ ;; ---- selectors: specificity ----
+
+ {:id :selector/is-and-where-differ-in-specificity
+  :group :selector
+  ;; `:is()` takes its argument's specificity -- an id, so it beats `p`;
+  ;; `:where()` is always zero, so the same argument loses to `p`. The two
+  ;; halves are in one case because the difference IS the measurement.
+  :html "<div><p id=\"sel-is-a\">is</p><p id=\"sel-where-b\">where</p></div>"
+  :css ":is(#sel-is-a) { color: #ff0000 } p { color: #0000ff } :where(#sel-where-b) { color: #ff0000 }"}
+
+ {:id :selector/is-with-a-descendant-combinator
+  :group :selector
+  ;; A combinator chain INSIDE `:is()`. `cssom.core`'s docstring names this
+  ;; form as out of scope -- measured, it works, and a control
+  ;; (`:is(.nomatch xyz) p`) correctly matches nothing, so the docstring is
+  ;; stale rather than the engine incomplete. Pinned so it stays that way.
+  :html "<div class=\"wrap\"><section><p>nested</p></section></div>"
+  :css ":is(.wrap section) p { font-weight: bold }"}
+
+ {:id :selector/not-takes-a-selector-list
+  :group :selector
+  :html "<div><p class=\"x\">a</p><p class=\"y\">b</p><p>c</p></div>"
+  :css "p:not(.x, .y) { font-weight: bold }"}
+
+ {:id :selector/not-specificity-comes-from-its-argument
+  :group :selector
+  ;; `p:not(#nope)` is (1,0,1) and beats `.lead`'s (0,1,0) even though the
+  ;; id it names matches nothing.
+  :html "<div><p class=\"lead\">t</p></div>"
+  :css "p:not(#nope) { color: #ff0000 } .lead { color: #0000ff }"}
+
+ {:id :selector/specificity-is-not-additive-across-levels
+  :group :selector
+  ;; Eleven classes still lose to one id.
+  :html "<div><p id=\"sel-many\" class=\"a b c d e f g h i j k\">t</p></div>"
+  :css "#sel-many { color: #ff0000 } .a.b.c.d.e.f.g.h.i.j.k { color: #0000ff }"}
+
+ {:id :selector/source-order-breaks-a-specificity-tie
+  :group :selector
+  :html "<div><p class=\"tie\">t</p></div>"
+  :css ".tie { color: #ff0000 } .tie { color: #0000ff }"}
+
+ ;; ---- cascade: importance and inline styles ----
+
+ {:id :cascade/author-important-beats-an-inline-style
+  :group :selector
+  ;; An inline `style=\"\"` outranks any selector -- until the selector's
+  ;; declaration is `!important`, which outranks the inline one.
+  :html "<div><p style=\"color: #0000ff\">text</p></div>"
+  :css "p { color: #ff0000 !important }"}
+
+ {:id :cascade/inline-important-beats-author-important
+  :group :selector
+  :html "<div><p style=\"color: #0000ff !important\">text</p></div>"
+  :css "p { color: #ff0000 !important }"}
+
+ {:id :cascade/inline-style-beats-an-id-selector
+  :group :selector
+  :html "<div><p id=\"sel-inline\" style=\"color: #0000ff\">text</p></div>"
+  :css "#sel-inline { color: #ff0000 }"}
+
+ ;; ---- cascade: var(), shorthands and the CSS-wide keywords ----
+
+ {:id :cascade/var-fallback-when-undefined
+  :group :selector
+  :html "<div><p>uses a fallback</p></div>"
+  :css "p { padding: var(--nope, 12px) }"}
+
+ {:id :cascade/var-invalid-at-computed-value-time-inherits
+  :group :selector
+  ;; A `var()` naming nothing makes the WHOLE declaration invalid at
+  ;; computed-value time, and an inherited property then INHERITS -- it
+  ;; does not fall back to the earlier declaration in the same block.
+  :html "<div style=\"color: #008000\"><p>text</p></div>"
+  :css "p { color: #0000ff; color: var(--missing) }"}
+
+ {:id :cascade/var-invalid-on-a-non-inherited-property
+  :group :selector
+  ;; ...and a non-inherited one takes its INITIAL value, not the 20px.
+  :html "<div><p>text</p></div>"
+  :css "p { padding-left: 20px; padding-left: var(--missing) }"}
+
+ {:id :cascade/shorthand-after-longhand-resets-it
+  :group :selector
+  :html "<div><p>text</p></div>"
+  :css "p { padding-left: 30px; padding: 5px }"}
+
+ {:id :cascade/longhand-after-shorthand-wins
+  :group :selector
+  :html "<div><p>text</p></div>"
+  :css "p { padding: 5px; padding-left: 30px }"}
+
+ {:id :cascade/initial-keyword-resets-to-the-css-initial-value
+  :group :selector
+  :html "<div style=\"text-align: center\"><p style=\"text-align: initial\">text</p></div>"}
+
+ {:id :cascade/unset-on-an-inherited-property-inherits
+  :group :selector
+  :html "<div style=\"color: #008000\"><p style=\"color: unset\">text</p></div>"}
+
+ {:id :cascade/unset-on-a-non-inherited-property-is-initial
+  :group :selector
+  :html "<div style=\"padding-left: 40px\"><p style=\"padding-left: unset\">text</p></div>"}
+
+ {:id :cascade/inherit-on-a-non-inherited-property
+  :group :selector
+  :html "<div style=\"padding-left: 40px\"><p style=\"padding-left: inherit\">text</p></div>"}
+
+ {:id :cascade/revert-drops-to-the-user-agent-value
+  :group :selector
+  ;; The author rule has to be there for this to measure anything: with no
+  ;; author declaration to roll back, IGNORING `revert` and OBEYING it both
+  ;; leave the UA `margin: 1em 0` standing.
+  :html "<div><p class=\"rv\" style=\"margin: revert\">b</p></div>"
+  :css "p.rv { margin: 0 }"}
+
 ]
