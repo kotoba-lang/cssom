@@ -804,6 +804,233 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round thirty-three: the corpus grows 501 → 576, and the paint axis was asking the wrong question
+
+Seventy-five cases, in seven areas the corpus had never entered, chosen by
+inventorying every case-id prefix and then asking of each candidate *can
+one of the five axes actually see this*. Every number below was read out of
+a real headless Brave 151.1.93.129 over CDP **before** the case was
+written, on a page built with the harness's own wrapper.
+
+| axis | 501 cases | 576 cases |
+|---|---|---|
+| line structure | 473/482 = **98%** | 540/553 = **98%** |
+| geometry (boxes) | 1702/1766 = **96%** | 1823/1959 = **93%** |
+| geometry (clean cases) | 469/501 | **502/576** |
+| paint order (points) | 12421/12514 = **99%** | 13936/14389 = **97%** |
+| paint order (clean cases) | 479/501 | **524/576** |
+| computed style (values) | 24797/24816 = **100%** | 27483/27528 = **100%** |
+| computed style (clean cases) | 492/501 | **556/576** |
+| cascade-attributed residual | **11** | **30** |
+
+The right column is *after* the two fixes below. 789 tests / 1817
+assertions, 0 failures (783/1804 before, +6 tests for the `inset` fix); 0
+lint errors and the same 25 pre-existing warnings, all in `test/`.
+
+Of the 75, **21 agree with Brave on first contact** and are in the corpus
+as controls rather than as findings — several of the pairs below exist
+for no other reason, because a divergence next to an agreement is a
+measurement of a RULE and a divergence on its own is a number.
+
+#### The harness defect, which is worth more than any of the cases
+
+**`engine-topmost-at` was not reading `:pointer-events` or `:visibility`,
+and both of the engine's real hit-testers do.** `style-passthrough` puts
+both keys on every `:node` draw-op for exactly this purpose — its own
+docstring says so — and `browser.session/node-at` (session.cljc) and
+dom-gpu's `retained` host each drop an op whose `:pointer-events` is
+`none` or whose `:visibility` is `hidden`/`collapse` before taking the
+topmost. This harness did not, so the question it was asking was one no
+consumer of this engine asks, and it charged the engine for two behaviours
+the engine has *right*: 40 sample points across
+`:stacking/pointer-events-none-falls-through` and
+`:stacking/visibility-hidden-is-not-hit`, where Brave answers the box
+UNDERNEATH the transparent one and this engine's own hosts would too.
+
+Reading the two keys is not re-deriving stacking in the harness — it is
+reading two more fields of the answer the engine already emitted, exactly
+like `:hit`. Measured per case over the whole corpus: **two cases changed,
+both to zero disagreements, and nothing else moved at all.**
+
+**And a second, structural one: the axis compared TAG NAMES.** Two
+overlapping `<div>`s were indistinguishable to it however they were
+stacked, which is most of what stacking is about on a real page — so a
+case built out of two divs would have passed while measuring nothing. The
+oracle now reports the author's `class` beside the tag and
+`engine-topmost-at` returns `[tag class]`, because `:class (attr node
+:class)` is already on every `:node` op and is the one identity both sides
+can read off the same markup. Corpus-wide effect on landing: **zero** —
+no existing case changed by a single point — and
+`:stacking/same-tag-opacity-lifts-the-earlier-box` (Brave `div.lower`,
+this engine `div.upper`) is the case that could not have existed before
+it, with `:stacking/same-tag-later-sibling-covers-earlier` as its control.
+
+#### The one engine fix: the `inset` shorthand
+
+`inset: 10px 20px` was stored verbatim under an `:inset` key nothing
+reads, so an absolutely positioned box declaring it fell back to its
+static position and shrink-to-fit width. Measured in Brave: **x=20 y=10
+w=260 h=40** in a 300x60 relative parent, against **0,0,7x20** here.
+Expanded now by the same 1-to-4 rule `margin`/`padding` use, into the
+four BARE side names `layout-absolute-children` already reads — which is
+the only reason it needed a function of its own rather than
+`expand-box-side-shorthand`. `auto` is admitted (it is the property's own
+initial value); a percentage is declined, exactly as margin/padding
+decline one. Per-case box diff over all 576 cases: **one case changed,
+0/2 boxes → 2/2, and no paint-order point moved.**
+
+#### The new divergences, ranked by size
+
+**Logical properties — 12 cases, every one diverging, one cause.**
+`margin-inline-*`, `padding-inline-*`, `padding-block-*`, `inline-size`,
+`block-size`, `border-inline-*` and `inset-inline-*` match NOTHING in
+`src/` (a repo-wide grep for each is zero in both namespaces). The two
+that matter most are the ones that FLIP: `margin-inline: 20px 60px` is
+x=20 w=220 in an ltr block and **x=60 w=220** in an rtl one, and
+`padding-inline-start: 50px` under rtl puts the padding on the right
+(outer box 350 wide, inner `<p>` still at x=0). Those two are the only
+cases in the corpus that can tell a logical property from an alias for a
+physical one.
+
+**Replaced elements with no box — 8 cases.** `inline-atomic-tags` is
+`#{:img :input :button :select :textarea}` and its docstring names
+`svg`/`canvas`/`video`/`audio`/`iframe` as a deliberate cut, on the
+grounds that a box for them "would place an empty rectangle in the middle
+of a sentence rather than fix anything". Measured, the cost is not an
+empty rectangle: Brave reserves **300x150** for a bare `<canvas>`,
+`<video>` and `<svg>`, and **304x154** for an `<iframe>` (the 300x150
+default plus Chrome's UA `border: 2px inset`), where this engine lays each
+one out as a BLOCK that fills its container and is 0px tall. So a page
+with a `<canvas>` in it is 150px shorter here than anywhere else, and
+`:replaced/canvas-in-a-sentence` shows the line-axis half: Brave keeps
+`before <canvas> after` on one line with the canvas an atomic inline at
+x=49 y=4 w=20 h=10, and this engine puts the text on two lines around a
+400px block. The `<img>` half is an intrinsic **ratio**: a 40x20 SVG data
+URI at `width: 200px` is **200x100** in Brave and 200x**0** here, and its
+mirror at `height: 60px` is **120x60** against 0x60. Its control agrees —
+`width`/`height` ATTRIBUTES are presentational hints, so a CSS `width`
+replaces the width hint and the height hint stands alone: **200x20** on
+both sides, which is what says the gap is the resource's ratio and not the
+attributes.
+
+**Stacking contexts — 10 diverging cases out of 18, and every geometry box
+in all eighteen agrees exactly.** That is the paint-order axis's entire
+reason to exist. Four separate triggers put a box above a later in-flow
+sibling that overlaps it, and all four are missed:
+`opacity: 0.99`, `transform: translateY(0px)`, `filter: blur(0px)` and
+plain `position: relative` — Brave answers the EARLIER box at all 25
+points in each, this engine the later one. Round twenty-seven already
+named the transform half ("a transformed element also establishes a
+stacking context in real CSS and this engine does not model that"); this
+is that sentence with a number, plus three more triggers it did not name.
+The other half is confinement, and it is a discriminating pair:
+`position: relative` with `z-index: auto` is NOT a stacking context so a
+`z-index: 5` descendant escapes it (Brave `section`, engine `article`),
+while the same markup with `z-index: 0` confines it (Brave `article`, and
+this engine **agrees**) — because this engine confines a descendant's
+z-index in *both* shapes, which is what makes it right by accident in one
+and wrong in the other. `isolation: isolate` is the same accident.
+`z-index` on a **flex item** is missed too (it applies without
+positioning), and so is the Appendix E step-1/step-2 order: a `z-index:
+-1` child stays ABOVE its own stacking context's background (Brave
+`article`) and sinks past a parent that is not one (Brave `section`) —
+this engine sinks it in both.
+
+**Percentage margins and padding in the block axis — 4 cases.** CSS 2.1
+§8.3/§8.4 resolves a percentage margin or padding against the containing
+block's INLINE size on all four sides. Measured: `padding-top: 10%` of a
+300px container is **30px** (inner box 50 tall), `padding-bottom: 50%`
+alone makes a **300x150** box with no height anywhere, `margin-top: 10%`
+puts the child at **y=31**. This engine reads the number and drops the
+unit — 10px, 50px, 10px — which is the same defect round thirty-two
+recorded for percentage GAPS ("`node-style` runs `parse-int` on the
+string, and it has no available size to resolve a percentage against").
+The inline-axis control fails identically (`margin-left: 10%` is x=30
+against x=10), so it is not a block-axis problem: the unit is dropped on
+every side, and a fix belongs where round thirty-two said it did.
+
+**`vertical-align` on an atomic inline — 6 of 7 cases.** The machinery
+exists: `vertical-align-shift` knows `super`/`sub`, `line-edge-aligned`
+knows `top`/`bottom`, and `middle` is resolved in `inline-fragments`. But
+only `middle` reaches an inline-BLOCK — and it reaches it exactly, both
+sides reporting **y=31.828125**, which is what makes the other six a
+finding rather than "the property does nothing here". Against a 40px
+inline-block setting a 46px line box, Brave puts a 10px one at y=**0**
+(`top`), **36** (`bottom`), **28** (`text-top`), **33** (`text-bottom`),
+**18** (`12px`) and **20** (`50%`); this engine leaves it on the baseline
+at 30 in all six.
+
+**Per-side border shorthands — 2 cases.** Round twenty-six named
+"per-side border widths" as not implemented, on the grounds that this
+engine has one uniform `:border-width`. Measured, it is sharper than that:
+a per-side SHORTHAND is not read *at all*. `border-top: 10px solid` gives
+Brave a 30-tall box with its `<p>` at y=10 and the full w=300 (a top
+border costs height and nothing else) and gives this engine 20 tall with
+the `<p>` at y=0 — not ten pixels on four sides, zero on all of them. Its
+control agrees and constrains the fix: `border-width: 10px;
+border-style: none` computes to a border width of ZERO on both sides, so
+a fix must not simply start adding declared widths up.
+
+**`visibility: collapse` on a table row — 1 case, with two controls.**
+Brave gives the collapsed `<tr>` and its `<td>` **0px** of height, moves
+the third row up to y=22 and makes the table **44** tall rather than 66.
+This engine renders it as `hidden` — which the two controls say is right
+everywhere else: on a plain block and on a flex item, `collapse` is
+exactly `hidden` and both sides agree.
+
+**Form controls with a UA box of their own — 5 cases.** `<progress>` is
+**140x14** and `<meter>` **70x14** in Brave, and neither tag exists in
+`src/` at all (both come out as 400x0 blocks). Three `<input>` types all
+come out of this engine's text-field rule at 153x21 where Brave says
+**129x16 at x=2 y=2** (`range`, which carries `margin: 2px` and no
+padding — those four padding values are the only cascade-attributed
+computed-style residual these cases add), **50x27** (`color`) and
+**253x27** (`file`, which is the button plus its label text, i.e. a
+different KIND of number that a per-type constant table would not
+produce).
+
+**Generated content where the oracle can see it — 2 of 4.** A
+`display: block` ::before is a block box, so Brave's `<p>` is **40** tall
+with `tail` at y=22 and this engine flows the generated text into the
+paragraph's own line and reports 20. `list-style-position: inside` — the
+value round twenty-nine implemented the default of, measured alongside,
+and never gave a case — puts the `<a>` at **x=59** against this engine's
+53.70625; that 5.29 is exactly the number that round recorded in
+`list-style-inside?` rather than modelling (Brave's disc advance is a
+function of the font size, 19px at 14px, not the 13.70625 the `"• "`
+string measures). Both controls agree: an `::after` string widens the
+`<b>`'s box to 37.03 on both sides, and `counter-reset: k 7` starts the
+counter at 7 on both.
+
+**Three singles.** `display: inline-table` is an inline 28x20 box at x=49
+in Brave and three stacked 400px blocks here. `writing-mode: vertical-rl`
+matches nothing in `src/`: Brave lays the text down the page in a
+**20x70** box and this engine gives it a horizontal 300x20 — a deep gap,
+recorded rather than chased, because a vertical writing mode is a second
+axis convention through every function in `layout.cljc` and not a property
+to read. And `border-radius: 50%` shrinks a box's HIT region without
+changing the box: Brave answers the wrapper at the four corner sample
+points of an 800x200 rounded box and the box itself at the other 21 — the
+third measured case of a reported box and a hit region being different
+rectangles, and the first where the region is not a union of rectangles at
+all.
+
+#### Two things measured and deliberately NOT added
+
+**`shape-outside`.** `circle(30px)` on a 60px left float in a 200px box
+moves the first line's text from x=60 to **x=58.281** and leaves the
+second line identical — a 1.7px difference, inside the geometry axis's 2px
+tolerance, on a coordinate (a word's x) that no axis compares, and with
+the same words on the same lines either way. There is nothing here for the
+five axes to disagree about at this size, and a shape large enough to move
+a wrap point would be measuring the float band rather than the shape.
+
+**`overflow: clip`.** Its boxes and its hit region are identical to
+`overflow: hidden`'s in Brave (inner box reports its full 700x60, hit only
+inside the 200px clip), and the corpus already has the `hidden` case. What
+differs — that `clip` does not create a scroll container — is not
+observable on any axis here.
+
 ### Round thirty-two: the corpus grows 370 → 431, into layout it had never entered
 
 All four axes were at or rounding to **100%** on the 370-case corpus —
