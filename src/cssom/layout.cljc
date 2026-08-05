@@ -808,6 +808,71 @@
                   :else
                   (recur words nil (conj lines cur)))))))))))
 
+(defn- preserved-space-lines
+  "Wraps one segment under a `white-space` that PRESERVES its spaces and
+   still soft-wraps -- `pre-wrap` and `break-spaces`, which differ from each
+   other in exactly one place and are therefore one function with one flag.
+
+   Neither can use text-lines-measured, and that is the point: that
+   function packs WORDS and throws away the whitespace between them,
+   rejoining with a single space. Under a collapsing `white-space` that is
+   correct and is what its own docstring promises. Under a preserving one
+   it silently rewrites the text -- which stayed invisible only because
+   kotoba-lang/htmldom used to collapse space runs at parse time, so a
+   `pre-wrap` segment never actually arrived with a run in it. Deferring
+   that collapse to layout is what exposed it (`<div style=\"width:60px;
+   white-space:pre-wrap\">aa` + six spaces + `bb</div>` measured 60x20
+   against Brave's 60x40: the six spaces were rejoined to one, and 'aa bb'
+   fits where the real text does not).
+
+   The unit packed here is an ATOM -- a maximal run of non-whitespace, or a
+   single whitespace character. An atom that alone exceeds `max-w` takes
+   its own overflowing line, matching this file's convention everywhere
+   else that it never splits a word it has no shaping model for.
+
+   `hang?` is the one difference. Under `pre-wrap` a run of preserved
+   spaces at the end of a line HANGS past the content edge: it is appended
+   whatever its width and never causes a break by itself. Under
+   `break-spaces` a space is ordinary content -- measured, and a place the
+   line may break after -- so it is fit-tested like a word.
+
+   Measured in Brave 151, 2026-08-06, in the harness's 14px monospace /
+   20px line page (7px per character, so a 60px box holds eight); every row
+   is a PAIR, because one value alone cannot tell 'the rule is right' from
+   'this shape does not discriminate':
+
+   | markup, in a 60px box       | pre-wrap  | break-spaces |
+   |-----------------------------|-----------|--------------|
+   | `aa` + 10 spaces            | 60x20     | **60x40**    |
+   | `aa` + 20 spaces + `bb`     | 60x40     | **60x60**    |
+   | `aa` + 6 spaces + `bb`      | 60x40     | 60x40        |
+   | `aaaa` + 6 spaces + `bbbb`  | 60x40     | 60x40        |
+
+   The bottom two rows are the content an earlier round tried and correctly
+   reported as NON-discriminating -- a space run that ends the line it sits
+   on hangs the same way under both, so the two values only part company
+   once the spaces themselves overflow. The top row is the cheapest shape
+   that does it: trailing spaces with nothing after them at all."
+  [line-w max-w hang? s]
+  (let [s (str s)]
+    (if (<= (line-w s) (max 0 max-w))
+      [s]
+      (let [atoms (re-seq #"\s|\S+" s)]
+        (if (empty? atoms)
+          [s]
+          (loop [as atoms cur nil lines []]
+            (if (empty? as)
+              (if cur (conj lines cur) lines)
+              (let [a (first as)
+                    space? (str/blank? a)
+                    candidate (str cur a)]
+                (cond
+                  (nil? cur) (recur (rest as) a lines)
+                  ;; A hanging space never has to fit, and never breaks.
+                  (and hang? space?) (recur (rest as) candidate lines)
+                  (<= (line-w candidate) max-w) (recur (rest as) candidate lines)
+                  :else (recur as nil (conj lines cur)))))))))))
+
 (defn- apply-text-transform
   "Applies `text-transform`'s `uppercase`/`lowercase`/`capitalize` to
    `text`, returning it unmodified for `nil`/`\"none\"`/any other
@@ -1167,9 +1232,7 @@
    splitting) and does NOT re-wrap each resulting segment, preserving
    whatever verbatim whitespace/structure is already inside each one --
    this is a real, confirmed-via-REPL paint bug fix: BEFORE this, a text
-   node containing an embedded `\\n` (kotoba-lang/htmldom already
-   preserves these verbatim for real `<pre>`/raw-text-tag content, see
-   htmldom.core/preserve-whitespace-context?) either silently vanished
+   node containing an embedded `\\n` either silently vanished
    into a single :text draw-op whose string still had the `\\n` baked in
    (a raw newline character inside one Canvas 2D `fillText` call does
    NOT create a visual line break -- browsers render it as an invisible
@@ -1177,41 +1240,48 @@
    silently destroyed by ordinary word-wrap collapsing (`text-lines`'s
    `#\"\\s+\"` split treats a newline as just another whitespace run to
    collapse away) -- either way, a real `<pre>` block's line structure
-   was never actually visible in a real rendered page. KNOWN,
-   deliberately scoped limitation: `white-space: pre` on an ORDINARY
-   element (not `<pre>`/a raw-text tag) whose source HTML already had
-   its embedded newlines collapsed to single spaces by
-   kotoba-lang/htmldom's own HTML-structural (not CSS-driven) parse-time
-   whitespace handling cannot recover those lost newlines here -- by the
-   time this file ever sees the text, they are already gone. A real
-   browser defers ALL whitespace collapsing to layout time (CSS-driven,
-   tag-independent), which this pipeline does not; fixing that
-   architectural gap would mean changing htmldom's parse-time behavior
-   itself, out of scope for this cycle. `<pre>`'s own UA-stylesheet
+   was never actually visible in a real rendered page.
+
+   This used to carry a KNOWN scoped limitation: `white-space: pre` on an
+   ORDINARY element (not a `<pre>`/raw-text tag) could not work at all,
+   because kotoba-lang/htmldom collapsed whitespace at PARSE time and the
+   characters were gone before this file ever ran. **That is fixed as of
+   2026-08-06 and the limitation is retired.** Measured in Brave 151, a
+   real HTML parser collapses nothing whatsoever -- `<div>   a   b   </div>`
+   keeps every space in the DOM -- so htmldom now defers all of it here,
+   where `white-space` can decide, exactly as a browser does. A
+   `<span style=\"white-space: pre\">   indented</span>` is 77px and
+   `a<tab>b` is 63px, the browser's numbers. `<pre>`'s own UA-stylesheet
    default (`white-space: pre` with no author CSS at all, matching every
    real browser's default stylesheet) is wired in node-style below, so a
    bare, unstyled `<pre>` renders its line structure correctly out of
    the box without requiring an author to write explicit CSS for it.
 
-   `pre-wrap` combines `pre`'s literal-`\\n`-splitting with `normal`'s
-   own existing per-segment word-wrap: each `\\n`-delimited segment is
-   independently re-wrapped via `text-lines`/`text-lines-measured` if it
-   doesn't fit `content-w` -- unlike a bare `pre`, an overly long
-   `pre-wrap` line DOES get broken at a word boundary rather than
-   overflowing its box. KNOWN, deliberately accepted simplification: real
-   CSS `pre-wrap` preserves EVERY whitespace character verbatim, even
-   inside a segment that needs wrapping, but `text-lines`/`text-lines-
-   measured`'s own word-packing collapses runs of inter-word whitespace
-   to a single space once a segment is long enough to actually need
-   re-wrapping (see text-lines' own docstring: the ORIGINAL string is
-   preserved byte-for-byte ONLY when it already fits on one line without
-   wrapping at all). This means `pre-wrap`'s hard line breaks and any
-   segment that already fits on one line are both fully verbatim, and
-   ONLY a segment that genuinely needs word-wrapping loses its exact
-   original inter-word spacing (collapsing to single spaces, matching
-   `normal`'s own long-standing behavior) -- a real, narrow divergence
-   from the CSS spec's own more exacting semantics, accepted rather than
-   rewriting the established word-wrap algorithm itself for this cycle.
+   `pre-wrap` combines `pre`'s literal-`\\n`-splitting with a per-segment
+   re-wrap, so unlike a bare `pre` an overly long `pre-wrap` line DOES get
+   broken rather than overflowing its box.
+
+   That re-wrap used to go through `text-lines`/`text-lines-measured`,
+   which pack WORDS and rejoin them with ONE space -- documented at the
+   time as a narrow accepted simplification, on the grounds that only a
+   segment long enough to need wrapping would lose its exact spacing. It
+   was a real divergence and it became REACHABLE the moment htmldom
+   stopped collapsing (2026-08-06): before that, a `pre-wrap` segment
+   never actually arrived with a run of spaces in it, so the
+   simplification cost nothing that could be observed. Measured after,
+   `<div style=\"width:60px;white-space:pre-wrap\">aa` + six spaces +
+   `bb</div>` was 60x20 against Brave's 60x40 -- the six spaces had been
+   rejoined into one and `aa bb` fits where the real text does not.
+   Segments are now packed by preserved-space-lines, which keeps every
+   character.
+
+   `break-spaces` is the fourth preserving value and splits on newlines
+   exactly as `pre-wrap` does. The one thing it does differently is what
+   preserved-space-lines' `hang?` flag selects: under `pre-wrap` a run of
+   spaces at the end of a line hangs past the content edge, and under
+   `break-spaces` it is measured and may be broken inside. See that
+   function for the four measured pairs, including the two shapes that
+   look identical under both values.
 
    `pre-line` is the third, final combination: preserves hard `\\n`
    breaks like `pre`/`pre-wrap`, but ALWAYS collapses each segment's own
@@ -1367,11 +1437,14 @@
         text (apply-text-transform text-transform text)
         line-w #(text-advance theme st %)
         ;; Preserving white-space values keep a TAB, and a tab is not a
-        ;; space: it advances to the next tab stop. `pre-line` and
-        ;; `normal`/`nowrap` collapse it to a space before it ever gets
-        ;; here (measured in Brave: `a<tab>b` is 21px under both, against
-        ;; 63 under `pre`), so only these two ever expand one.
-        tabs? (contains? #{"pre" "pre-wrap"} white-space)
+        ;; space: it advances to the next tab stop. Measured in Brave 151,
+        ;; 2026-08-06, on `<span style="display:inline-block">a<tab>b</span>`
+        ;; -- `pre`, `pre-wrap` and `break-spaces` are all **63px** (nine
+        ;; columns, to the next initial `tab-size: 8` stop) while `pre-line`
+        ;; and `normal` are both **21px**, because those two collapse the
+        ;; tab to a space before it ever gets here. `break-spaces` was
+        ;; missing from this set and read 21.
+        tabs? (contains? #{"pre" "pre-wrap" "break-spaces"} white-space)
         tab-w (when tabs? (tab-stop-width theme st))
         ;; Which lines carry `text-indent`, and how wide it is -- see
         ;; text-indent-of for the percentage basis and indented-line? for
@@ -1407,23 +1480,45 @@
         ;; Each `[segment re-wrap?]` starts at a FORCED break -- the
         ;; block's own beginning, or a preserved newline -- which is the
         ;; distinction `text-indent: ... each-line` turns on.
+        ;;
+        ;; `break-spaces` is the fourth PRESERVING value and it used to fall
+        ;; through to the `:else` branch, where the whole run became one
+        ;; re-wrapped segment and the newline in it was collapsed away like
+        ;; any other whitespace -- `<div style="width:200px;white-space:
+        ;; break-spaces">aa\nbb</div>` was 20px tall against Brave's 40. It
+        ;; splits on newlines exactly as `pre-wrap` does; what it does
+        ;; differently is how each segment is then packed (see the `wrap-of`
+        ;; below and break-spaces-lines).
         segments (cond
                    (= "pre" white-space) (mapv #(vector % false) (str/split (str text) #"\n" -1))
                    (= "nowrap" white-space) [[(str text) false]]
-                   (= "pre-wrap" white-space) (mapv #(vector % true) (str/split (str text) #"\n" -1))
+                   (contains? #{"pre-wrap" "break-spaces"} white-space)
+                   (mapv #(vector % true) (str/split (str text) #"\n" -1))
                    (= "pre-line" white-space) (mapv #(vector (str/replace % #"\s+" " ") true)
                                                     (str/split (str text) #"\n" -1))
                    :else [[text true]])
+        ;; Which packer a re-wrapped segment gets. The two PRESERVING
+        ;; wrapping values keep their spaces and so cannot use the
+        ;; word-packing one, which rejoins words with a single space (see
+        ;; preserved-space-lines); everything else is unchanged and gets the
+        ;; identical `wrap` every caller has always had.
+        wrap-of (if (contains? #{"pre-wrap" "break-spaces"} white-space)
+                  (fn [max-w-of s]
+                    (preserved-space-lines line-w (max-w-of 0)
+                                           (= "pre-wrap" white-space) s))
+                  wrap)
         ;; `{:text :indent}` per line, in document order, with `:indent`
         ;; already resolved for that line's position in the block.
         lines (loop [segs segments k 0 out []]
                 (if-let [[s re-wrap?] (first segs)]
                   (let [ls (if re-wrap?
-                             (wrap (fn [i] (- content-w (indent-of (+ k i) (zero? i)))) s)
+                             (wrap-of (fn [i] (- content-w (indent-of (+ k i) (zero? i)))) s)
                              [(if (and (= "nowrap" white-space) (= "ellipsis" text-overflow))
                                 (ellipsize (str s) (- content-w (indent-of k true)) line-w)
                                 (str s))])
-                        ls (if (and re-wrap? (not (contains? #{"pre-wrap" "pre-line"} white-space)))
+                        ls (if (and re-wrap?
+                                    (not (contains? #{"pre-wrap" "pre-line" "break-spaces"}
+                                                    white-space)))
                              (break-lines ls)
                              ls)]
                     (recur (rest segs) (+ k (count ls))
@@ -11868,11 +11963,24 @@
    - **`white-space: break-spaces`** never reaches this function at all,
      and neither do `pre-wrap` and `pre-line`: collapsing-white-space
      keeps every value whose whitespace does not collapse on the
-     single-text-child path. Measured, a 60px box holding `aa` then SIX
-     spaces then `bb` is 60x40 with `aa` at 0,2 and `bb` at 0,22 under
-     BOTH `break-spaces` and `pre-wrap` -- that content does not
-     discriminate the two, and finding content that does is the first
-     step of implementing either."
+     single-text-child path, which is where all three are implemented
+     (layout-text's `segments`, and preserved-space-lines for the two
+     that both preserve and wrap).
+
+     This entry used to end by saying that a 60px box holding `aa`, six
+     spaces and `bb` is 60x40 under BOTH `break-spaces` and `pre-wrap`, so
+     that content cannot discriminate them, and that finding content that
+     does was the first step. Both halves were right. **The content was
+     found on 2026-08-06**: a space run that merely ENDS the line it sits
+     on hangs under both, so the two only part company once the spaces
+     themselves overflow -- `aa` plus TEN spaces in the same box is 60x20
+     under `pre-wrap` and 60x40 under `break-spaces`. Four corpus cases and
+     preserved-space-lines' own table carry the pairs.
+
+     What is still true is the first sentence: none of the three is
+     available to an inline RUN, only to a lone text child. A `<span
+     style=\"white-space: pre-wrap\">` among siblings still falls off the
+     inline path."
   [theme block-ws content-w tokens indent]
   (let [w-of (fn [text st] (text-advance theme st text))
         {ind :px hanging? :hanging? each-line? :each-line?} indent
