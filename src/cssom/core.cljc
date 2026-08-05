@@ -3767,6 +3767,203 @@
   [value]
   (and (string? value) (= "inherit" (str/lower-case (str/trim value)))))
 
+;; ---- the user-agent stylesheet ----
+;;
+;; A browser's cascade has THREE origins -- user-agent, author, inline --
+;; and until now this one had only the last two. The UA origin's knowledge
+;; lived in `cssom.layout`, as a column of `(or (style node :x) <ua
+;; default>)` fallbacks and half a dozen tag->value tables beside them, so
+;; the cascade never wrote those values and `computed-style` reported
+;; `display: inline` for a `<div>`, weight 400 for a `<b>` and black for a
+;; link. Layout was right; everyone who ASKED was told something false --
+;; devtools, an accessibility projection, a `getComputedStyle`-compatible
+;; API, a script that branches on style. Measured against a real browser by
+;; the conformance harness on 2026-08-05: 2,260 of 2,315 computed-style
+;; mismatches were that one architectural fact repeated, and the genuinely
+;; cascade-attributed residual behind them was NINE values. See
+;; ADR-2800003100.
+;;
+;; It is CSS text rather than a tag->value map on purpose. Real UA rules
+;; are not keyed on the tag alone and pretending they are is the trap this
+;; measurement walked into first: an `<a>` is blue only when it HAS an
+;; `href` (Chrome's own rule is `a:-webkit-any-link`, and a bare `<a>`
+;; measures ZERO non-initial properties), an `<input>`'s box depends
+;; entirely on its `type`, and `[hidden]` is an attribute rule that applies
+;; to every element there is. Written as CSS, `parse-rules` and `matches?`
+;; -- the same selector engine an author's stylesheet goes through --
+;; express all three directly, and specificity orders `input[type=...]`
+;; over `input` for free.
+
+(def ^:private ua-stylesheet-text
+  "The user-agent stylesheet, as CSS.
+
+   SCOPE, stated exactly, because what is NOT here matters as much as what
+   is. This sheet carries the UA declarations whose value is an ABSOLUTE
+   length or a keyword. The `em`-relative half of a real UA sheet --
+   `p { margin: 1em 0 }`, `h1 { font-size: 2em }`, a `<fieldset>`'s
+   `padding: 0.35em 0.75em 0.625em` -- is NOT here: `em` resolves against
+   the element's own computed `font-size`, which this cascade does not
+   compute (it stores whatever the author declared, it does not resolve a
+   length). Those still live in `cssom.layout`'s `ua-margin-scale` /
+   `ua-font-scale` / `ua-em-box`, which resolve them against the theme's
+   base size at layout time. Splitting on `em` rather than on property is
+   what keeps this file from having to grow a length-resolution pass to
+   land anything at all.
+
+   Deliberately absent, each for a reason that is not 'not got to yet':
+
+   - `display: none` for `<head>`/`<script>`/`<style>`/... . `cssom.layout`
+     suppresses those by tag (`non-rendered-tags`) BEFORE it looks at
+     `display` at all, and the set of tags a real UA hides is wider than
+     the set this engine renders -- writing the rule would change what
+     `<datalist>`/`<source>`/`<track>` lay out, which is a rendering change
+     wearing a cascade change's clothes. `[hidden]` IS here: that one is
+     already spelled in `node-style`, as an attribute rule, and moving it
+     is a move rather than a new rule.
+   - `meter`/`progress` -> `inline-block`. Real browsers say so, but this
+     engine's `inline-atomic-displays` turns `inline-block` into an ATOMIC
+     inline, and these two are in `inline-level-tags` (text-like). The
+     declaration is true; acting on it here would silently rewrite how they
+     flow, which is a layout decision needing its own measurement.
+   - `<select>`'s block padding. `cssom.layout`'s `ua-control-box` gives it
+     1px top and bottom, and a browser reports `padding: 0px` -- the 1px is
+     this engine's expression of Chrome's own internal button padding,
+     measured as a constant +4px of height at every font size (see that
+     table's docstring). It is a box constant with no `getComputedStyle`
+     counterpart, so writing it into the cascade would make the reported
+     value WRONG to make a box right.
+   - `text-align: center` on `<th>`/`<button>` and `-webkit-center` on
+     `<caption>`. Real, and this engine has neither -- so they are new UA
+     knowledge, not a move. Landed separately, measured against geometry.
+
+   Values are the ones `cssom.layout` already used, which are themselves
+   readings off `getComputedStyle` in Brave 151 (see each table's docstring
+   there for the measurement). Where the browser and this engine differ,
+   the ENGINE's value is written: this sheet moves where a value comes
+   from, not what it is, and a `<input type=radio>`'s margins (this engine
+   3px 3px 3px 4px, Brave 3px 3px 0 5px) stay wrong here rather than
+   changing a box under cover of a cascade change.
+
+   The `margin`/`padding` SHORTHAND is used only where the uniform value it
+   also emits (see expand-box-side-shorthand) is the one this engine's
+   uniform `:padding`/`:margin` reader should see. `input`/`button` state
+   their four sides as longhands for exactly that reason: their shorthand's
+   first token is the 1px BLOCK padding, and letting it land on the uniform
+   key would narrow every text field by the difference."
+  "
+  html, body, address, article, aside, blockquote, center, dd, details,
+  dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form,
+  h1, h2, h3, h4, h5, h6, header, hgroup, hr, legend, main, menu, nav,
+  ol, optgroup, option, p, pre, search, section, ul { display: block }
+  li, summary { display: list-item }
+  table { display: table }
+  tr { display: table-row }
+  td, th { display: table-cell }
+  thead { display: table-header-group }
+  tbody { display: table-row-group }
+  tfoot { display: table-footer-group }
+  caption { display: table-caption }
+  col { display: table-column }
+  colgroup { display: table-column-group }
+  button, input, select, textarea { display: inline-block }
+  [hidden] { display: none }
+
+  b, strong, th, h1, h2, h3, h4, h5, h6 { font-weight: bold }
+  address, cite, dfn, em, i, var { font-style: italic }
+  sub { vertical-align: sub }
+  sup { vertical-align: super }
+  pre { white-space: pre }
+  a[href] { color: #0000EE }
+  hr { color: #808080 }
+
+  table { border-spacing: 2px }
+  td, th { padding: 1px }
+  ul, ol, menu, dir { padding-left: 40px }
+  blockquote, figure { margin-left: 40px; margin-right: 40px }
+  dd { margin-left: 40px }
+  fieldset { margin-left: 2px; margin-right: 2px }
+  legend { padding-left: 2px; padding-right: 2px }
+  textarea { padding-top: 2px; padding-right: 2px;
+             padding-bottom: 2px; padding-left: 2px }
+  input { padding-top: 1px; padding-bottom: 1px;
+          padding-left: 2px; padding-right: 2px }
+  button { padding-top: 1px; padding-bottom: 1px;
+           padding-left: 6px; padding-right: 6px }
+  input[type=\"checkbox\"], input[type=\"radio\"] {
+    padding-top: 0; padding-right: 0; padding-bottom: 0; padding-left: 0;
+    margin-top: 3px; margin-right: 3px; margin-bottom: 3px; margin-left: 4px }
+  ")
+
+(def ua-rules
+  "`ua-stylesheet-text`, parsed once. Public so `cssom.layout` can read the
+   SAME rules when it is handed a document that was never cascaded -- see
+   `ua-style-for`."
+  (parse-rules ua-stylesheet-text))
+
+(def ^:private ua-rules-by-tag
+  "`ua-rules` indexed by the tag its selector's SUBJECT names, so matching
+   costs one map lookup plus the two or three rules that can possibly apply
+   instead of a scan of the whole sheet on every element of every document.
+
+   `nil` is the bucket for a selector with no tag in its subject compound
+   (`[hidden]`), which has to be tried against everything."
+  (reduce (fn [idx rule]
+            (reduce (fn [idx selector]
+                      (let [subject (if (:selector/parts selector)
+                                      (last (:selector/parts selector))
+                                      selector)
+                            tag (:selector/tag subject)]
+                        (update idx tag (fnil conj [])
+                                (assoc rule :rule/selectors [selector]))))
+                    idx
+                    (:rule/selectors rule)))
+          {}
+          ua-rules))
+
+(defn- ua-rules-for
+  "The UA rules that can possibly apply to `node` -- its tag's bucket plus
+   the tagless one."
+  [node]
+  (concat (get ua-rules-by-tag (:tag node)) (get ua-rules-by-tag nil)))
+
+(def ^:private ua-origin
+  "The cascade ORIGIN of a user-agent declaration. Sorted before
+   `author-origin`, so the last-sorted (winning) entry for a property is an
+   author's whenever an author declared one at all -- real CSS's
+   origin step, and the reason this is a separate tuple element rather
+   than a very low :specificity (a UA `input[type=\"checkbox\"]` must still
+   lose to an author's bare `input`, which specificity alone would get
+   backwards)."
+  0)
+
+(def ^:private author-origin 1)
+
+(defn ua-style-for
+  "The user-agent declarations that apply to `node`, resolved among
+   themselves by specificity, as a plain `{property value}` map.
+
+   The cascade (`apply-cascade`/`computed-style`) does NOT go through this
+   -- it folds the same rules in as a real origin, so an author declaration
+   can beat them. This exists for the one caller that has no cascade to
+   read: `cssom.layout`, handed a tree whose `:style/*` attrs were written
+   by something other than `apply-cascade` (a host that renders a page with
+   no stylesheet at all takes exactly that path -- see
+   `browser.core/render-document`, where `apply-cascade` runs only
+   `(seq css-rules)`). Layout consults this ONE table rather than carrying
+   its own copy, which is the point: the drift this whole change exists to
+   remove is the same knowledge written down twice."
+  ([node] (ua-style-for nil node))
+  ([document node]
+   (->> (for [rule (ua-rules-for node)
+              selector (:rule/selectors rule)
+              :when (if document
+                      (matches? document node selector)
+                      (matches? node selector))]
+          {:declarations (:rule/declarations rule)
+           :sort-key [(specificity selector) (:rule/order rule)]})
+        (sort-by :sort-key)
+        (reduce (fn [m entry] (merge m (:declarations entry))) {}))))
+
 (defn- resolve-style-for
   "Cascade-resolves the declarations that target `pseudo-element` (nil for
    the real element itself, :before/:after for its generated content) on
@@ -3956,16 +4153,48 @@
                           {:property property
                            :value value
                            :important? important?
+                           :origin author-origin
                            :specificity (specificity selector)
                            :inline? false
                            :layer (if important? (- raw-layer) raw-layer)
                            :order order}))
+         ;; The USER-AGENT origin, at the bottom of the cascade: every
+         ;; author declaration of the same importance beats it, which is
+         ;; the whole of what "UA stylesheet" means and is why :origin sits
+         ;; between :important? and :inline? in the sort tuple below. It is
+         ;; only ever consulted for the element itself -- this sheet has no
+         ;; ::before/::after rule (a real one has `li::marker`, which this
+         ;; engine does not model), so a pseudo-element resolution is
+         ;; unchanged from before this origin existed.
+         ua-declarations (when (nil? pseudo-element)
+                           (for [rule (ua-rules-for node)
+                                 selector (:rule/selectors rule)
+                                 :when (if document
+                                         (matches? document node selector)
+                                         (matches? node selector))
+                                 [property value] (:rule/declarations rule)]
+                             {:property property
+                              :value value
+                              ;; No UA declaration here is `!important`, so
+                              ;; real CSS's importance REVERSAL (a UA
+                              ;; `!important` outranks an author one) never
+                              ;; arises and is deliberately not modelled:
+                              ;; :important? sorts before :origin, so an
+                              ;; author `!important` wins here, which is
+                              ;; correct for every rule this sheet has.
+                              :important? false
+                              :origin ua-origin
+                              :specificity (specificity selector)
+                              :inline? false
+                              :layer 0
+                              :order (:rule/order rule)}))
          node-inline-importance (inline-style-importance node)
          inline-declarations (when (nil? pseudo-element)
                                 (map-indexed (fn [idx [property value]]
                                                {:property property
                                                 :value value
                                                 :important? (contains? node-inline-importance property)
+                                                :origin author-origin
                                                 :specificity [1 0 0]
                                                 :inline? true
                                                 :layer max-layer-priority
@@ -3976,8 +4205,8 @@
                           (dissoc m property)
                           (assoc m property value)))
                       {}
-                      (sort-by (juxt :important? :inline? :layer :specificity :order)
-                               (concat declarations inline-declarations)))]
+                      (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
+                               (concat ua-declarations declarations inline-declarations)))]
        (if (contains? m :content)
          (let [resolved (resolve-content-value node counters (:content m))]
            (if (nil? resolved)

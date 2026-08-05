@@ -5381,10 +5381,25 @@
 (deftest hidden-attribute-xhtml-explicit-form-also-suppresses
   (is (nil? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "hidden") ""))))
 
-(deftest hidden-attribute-literal-false-string-does-not-suppress
-  ;; Mirrors truthy-attr?'s own existing convention for every other
-  ;; boolean attribute (checked/required/reversed/open, etc.).
-  (is (some? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "false") ""))))
+(deftest hidden-attribute-literal-false-string-still-suppresses
+  ;; This asserted the OPPOSITE until the UA stylesheet moved into the
+  ;; cascade (ADR-2800003100), on the grounds that it "mirrors truthy-attr?'s
+  ;; own existing convention for every other boolean attribute
+  ;; (checked/required/reversed/open, etc.)". The convention is real;
+  ;; `hidden` is not an instance of it.
+  ;;
+  ;; `hidden` is not read as a boolean attribute by anything at all -- it
+  ;; is hidden by a UA STYLESHEET rule whose selector is
+  ;; `[hidden]`, i.e. attribute PRESENCE, and a CSS attribute-presence
+  ;; selector does not look at the value. Measured in Brave 151 on
+  ;; 2026-08-05, `<div hidden="false">`, `<div hidden="">` and
+  ;; `<div hidden="hidden">` all report `display: none` and
+  ;; `offsetHeight: 0`, against a bare `<div>`'s `block`/24.
+  ;;
+  ;; The old behaviour was invisible while the rule was a `truthy-attr?`
+  ;; test buried in node-style. Writing it as the CSS it actually is made
+  ;; the divergence a one-line question with a measurable answer.
+  (is (nil? (hidden-attr-text-op #(dom/set-attribute %1 %2 :hidden "false") ""))))
 
 (deftest absent-hidden-attribute-renders-normally
   (is (some? (hidden-attr-text-op (fn [doc _] doc) ""))))
@@ -7916,11 +7931,19 @@
         i (fieldset-boxes [[:input {:width 200 :type "text"}]])]
     (is (= 200 (nth (box-for b :button) 3)))
     (is (= 200 (nth (box-for s :select) 3)))
-    (is (= 204 (nth (box-for i :input) 3))
-        "an <input> stays content-box, so its 200 GROWS -- by its 2px of
-         side padding here, and by that plus its 2px border (208) in Brave;
-         the missing border is the same content-box residual named in
-         ua-control-box, and is not what this test is about")))
+    (is (= 208 (nth (box-for i :input) 3))
+        "an <input> stays content-box, so its 200 GROWS -- by its 4px of
+         side padding AND its 4px of border, which is Brave's own 208.
+
+         This asserted 204 until the UA stylesheet moved into the cascade
+         (ADR-2800003100), and the shortfall was a consequence of WHERE the
+         UA padding lived rather than of the box model: `declared-inset-side`
+         reads the per-side padding and, failing that, `:padding/declared`
+         -- and a control's padding was in cssom.layout's own
+         `ua-control-box` table, which is neither. So a content-box
+         control's declared width grew by its border alone. The padding is
+         a cascade declaration now, the per-side read finds it, and the
+         number is the browser's.")))
 
 (deftest a-line-box-after-a-block-keeps-the-pending-bottom-margin
   ;; CSS wraps inline content in an ANONYMOUS block, and the preceding
