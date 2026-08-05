@@ -213,7 +213,20 @@
       for (var j = 0; j < els.length; j++) {
         var el = els[j];
         var r = el.getBoundingClientRect();
+        // Whether this element GENERATES A BOX at all, asked of the DOM
+        // rather than inferred from the numbers: getClientRects() is
+        // empty exactly when there is no box to report. Measured across
+        // nine shapes in Brave 151 (2026-08-05), it is empty for
+        // `display: none` and `display: contents` and for nothing else --
+        // an empty inline, an empty block, a `width: 0; height: 0` block,
+        // a `<br>` and a `visibility: hidden` inline all report one rect.
+        // getBoundingClientRect() still hands back 0,0,0,0 for the
+        // boxless ones, and that origin is the VIEWPORT's, so subtracting
+        // the case root below turns it into whatever negative offset the
+        // case happens to sit at down the page. See geometry-agreement
+        // for what is done with the flag.
         boxes.push({ tag: el.tagName.toLowerCase(),
+                     boxless: el.getClientRects().length === 0,
                      x: r.left - rootRect.left, y: r.top - rootRect.top,
                      w: r.width, h: r.height });
       }
@@ -835,11 +848,43 @@
    Matching by tag+occurrence rather than by injected ids keeps the corpus
    readable (cases stay plain HTML a person can eyeball) at the cost of
    being wrong if one side drops an element entirely; that shows up as a
-   count mismatch, which is reported rather than silently zipped away."
+   count mismatch, which is reported rather than silently zipped away.
+
+   AN ELEMENT THAT GENERATES NO BOX IS NOT A BOX, and is excluded here --
+   counted and printed under EXCLUDED, never dropped silently. `display:
+   none` and `display: contents` are the two cases (see the `boxless`
+   flag the page script sets, and the nine shapes measured to establish
+   that they are the only two). The browser still answers
+   getBoundingClientRect() for them, with a 0,0,0,0 rect in VIEWPORT
+   coordinates, so the case root's offset comes off it and leaves a
+   position that says only where on the page the case happened to land:
+   `:display/contents-is-transparent`'s wrapper read y=-28.03 in a full
+   run and y=0 when the same case ran alone. There is nothing for an
+   engine to agree or disagree with there. This engine emits a 0x0 box for
+   a `display: contents` element (deliberately -- splice-display-contents
+   says why) and nothing at all for a `display: none` one, so the same
+   number of ZERO-AREA engine boxes of that tag come out with them; a
+   zero-area engine box is the only thing that can be standing in for an
+   element that generates no box, and dropping a positioned box would be
+   hiding a real disagreement.
+
+   What this does NOT excuse: whether the element's children were promoted
+   into the right formatting context, at the right sizes, is scored in
+   full -- three of this case's four boxes carry that signal, and they are
+   the reason the case is in the corpus."
   [oracle-boxes engine-boxes]
   (let [by-tag (fn [boxes] (group-by :tag boxes))
-        o (by-tag oracle-boxes)
-        e (by-tag engine-boxes)
+        zero-area? (fn [b] (and (zero? (or (:w b) 0)) (zero? (or (:h b) 0))))
+        drop-n (fn [n pred coll]
+                 (:out (reduce (fn [acc b]
+                                 (if (and (pos? (:left acc)) (pred b))
+                                   (update acc :left dec)
+                                   (update acc :out conj b)))
+                               {:left n :out []} coll)))
+        o (by-tag (remove :boxless oracle-boxes))
+        boxless (->> oracle-boxes (filter :boxless) (map :tag) frequencies)
+        e (reduce-kv (fn [m tag n] (update m tag #(drop-n n zero-area? (vec %))))
+                     (by-tag engine-boxes) boxless)
         tags (distinct (concat (keys o) (keys e)))
         close? (fn [a b] (<= (abs (- (or a 0) (or b 0))) geometry-tolerance-px))
         dist (fn [a b] (reduce + (map (fn [k] (abs (- (or (get a k) 0) (or (get b k) 0))))
@@ -883,7 +928,10 @@
                     (update :by-tag update tag (fnil (fn [[a t]] [(+ a agree) (+ t (max (count os) (count es)))]) [0 0]))
                     (cond-> (not= (count os) (count es))
                       (update :missing conj tag)))))
-            {:total 0 :agree 0 :missing [] :by-tag {} :deltas []}
+            {:total 0 :agree 0 :missing [] :by-tag {} :deltas []
+             :excluded (mapv (fn [[tag n]] {:reason :element-generates-no-box
+                                            :tag tag :n n})
+                             boxless)}
             tags)))
 
 (defn- engine-boxes
@@ -1422,7 +1470,15 @@
   (when (:debug-geometry (parse-args *command-line-args*))
     (doseq [r results :when (seq (:oracle-boxes r))]
       (println "GEO" (:id r))
-      (println "  oracle:" (pr-str (mapv (juxt :tag :x :y :w :h) (:oracle-boxes r))))
+      ;; `boxless` prints in place of the coordinates rather than beside
+      ;; them: the numbers there are a viewport-origin 0,0,0,0 with the
+      ;; case root's offset taken off it, and showing them invites the
+      ;; reader to chase a delta that is not one -- see
+      ;; geometry-agreement.
+      (println "  oracle:" (pr-str (mapv #(if (:boxless %)
+                                            [(:tag %) :boxless]
+                                            ((juxt :tag :x :y :w :h) %))
+                                         (:oracle-boxes r))))
       (println "  engine:" (pr-str (mapv (juxt :tag :x :y :w :h) (:engine-boxes r))))))
   (doseq [r results]
     (println (str (pad-right (name (:status r)) 16)
@@ -1473,7 +1529,21 @@
       (doseq [[tag [a t]] (->> per-tag (sort-by (fn [[_ [a t]]] (- a t))) (take 10))
               :when (< a t)]
         (println (str "            " (pad-right tag 12) a "/" t))))
-    (println))
+    ;; The same discipline the computed-style axis already keeps: what was
+    ;; taken out of the denominator, why, and where -- so an exclusion can
+    ;; never quietly flatter the number above it.
+    (let [ex (->> results
+                  (mapcat (fn [r] (map #(assoc % :id (:id r)) (:excluded (:geo r)))))
+                  (group-by :reason))]
+      (when (seq ex)
+        (println (str "          EXCLUDED from comparison ("
+                      (reduce + 0 (map :n (mapcat val ex))) " boxes), never silently:"))
+        (doseq [[reason xs] ex]
+          (println (str "            " (pad-right (name reason) 36)
+                        (pad-left (reduce + 0 (map :n xs)) 3) "  "
+                        (str/join " " (map #(str (:tag %) "(" (:n %) ")") (take 4 xs)))
+                        "   " (str/join ", " (map str (distinct (take 2 (map :id xs)))))))))
+    (println)))
 
   ;; ---- the paint-order axis ----
   (let [paints (keep :paint results)
