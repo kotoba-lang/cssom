@@ -3798,17 +3798,16 @@
   "The user-agent stylesheet, as CSS.
 
    SCOPE, stated exactly, because what is NOT here matters as much as what
-   is. This sheet carries the UA declarations whose value is an ABSOLUTE
-   length or a keyword. The `em`-relative half of a real UA sheet --
-   `p { margin: 1em 0 }`, `h1 { font-size: 2em }`, a `<fieldset>`'s
-   `padding: 0.35em 0.75em 0.625em` -- is NOT here: `em` resolves against
-   the element's own computed `font-size`, which this cascade does not
-   compute (it stores whatever the author declared, it does not resolve a
-   length). Those still live in `cssom.layout`'s `ua-margin-scale` /
-   `ua-font-scale` / `ua-em-box`, which resolve them against the theme's
-   base size at layout time. Splitting on `em` rather than on property is
-   what keeps this file from having to grow a length-resolution pass to
-   land anything at all.
+   is. The sheet landed in two halves. The first carried every UA
+   declaration whose value is an ABSOLUTE length or a keyword. The second
+   -- `p { margin: 1em 0 }`, `h1 { font-size: 2em }`, a `<fieldset>`'s
+   `padding: 0.35em 0.75em 0.625em`, `small { font-size: smaller }` -- had
+   to wait for the cascade to be able to resolve a length at all, because
+   `em` resolves against the element's OWN computed font size and this
+   cascade used to store whatever the author declared without ever
+   computing one. `resolve-relative-lengths` is that step, and those rules
+   are now here with the rest; `cssom.layout`'s `ua-margin-scale` /
+   `ua-font-scale` / `ua-em-box` are gone.
 
    Deliberately absent, each for a reason that is not 'not got to yet':
 
@@ -3825,6 +3824,13 @@
      inline, and these two are in `inline-level-tags` (text-like). The
      declaration is true; acting on it here would silently rewrite how they
      flow, which is a layout decision needing its own measurement.
+   - the ABSOLUTE font-size keywords. Chrome's real sheet says
+     `pre { font-family: monospace; font-size: -webkit-xxx-large }`-style
+     things whose value comes out of a table keyed on the default font of
+     the family in use (measured: `font-size: medium` is 13px on a
+     monospace page and 16 on a proportional one). `smaller`/`larger` ARE
+     here, on `<small>`/`<sub>`/`<sup>`, because they are a plain ratio
+     off the parent (see `font-size-scale-step`) and need no such table.
    - `<select>`'s block padding. `cssom.layout`'s `ua-control-box` gives it
      1px top and bottom, and a browser reports `padding: 0px` -- the 1px is
      this engine's expression of Chrome's own internal button padding,
@@ -3838,11 +3844,14 @@
 
    Values are the ones `cssom.layout` already used, which are themselves
    readings off `getComputedStyle` in Brave 151 (see each table's docstring
-   there for the measurement). Where the browser and this engine differ,
-   the ENGINE's value is written: this sheet moves where a value comes
-   from, not what it is, and a `<input type=radio>`'s margins (this engine
-   3px 3px 3px 4px, Brave 3px 3px 0 5px) stay wrong here rather than
-   changing a box under cover of a cascade change.
+   there for the measurement). Where the browser and this engine differed,
+   the ENGINE's value was written when the sheet's first half landed: that
+   change moved where a value comes from, not what it is. The one place
+   that left a knowingly-wrong number -- `<input type=radio>`, given a
+   CHECKBOX's `3px 3px 3px 4px` where a browser measures `3px 3px 0 5px`
+   -- is corrected here, re-measured in Brave 151 on 2026-08-05, because
+   the second half moves boxes anyway and a 4-value residual charged to
+   the cascade is not worth carrying to look tidy.
 
    The `margin`/`padding` SHORTHAND is used only where the uniform value it
    also emits (see expand-box-side-shorthand) is the one this engine's
@@ -3885,7 +3894,46 @@
    - `[hidden] { display: none }` is attribute PRESENCE and does not look
      at the value. Measured in Brave 151, 2026-08-05: `hidden=\"false\"`,
      `hidden=\"\"` and `hidden=\"hidden\"` all report `display: none` and
-     `offsetHeight: 0`, against a bare `<div>`'s `block`/24."
+     `offsetHeight: 0`, against a bare `<div>`'s `block`/24.
+
+   And the `em`-relative half, every number of it re-measured in Brave 151
+   on 2026-08-05 inside a 14px page (which is what makes the ratios
+   readable: an `<h5>` reports font-size 11.62 and margin 19.4054, i.e.
+   0.83 and 1.67 exactly, and 1.67 of its OWN 11.62 rather than of the
+   page's 14):
+
+   - `h1..h6`: font-size 2 / 1.5 / 1.17 / 1 / 0.83 / 0.67 em, margin-block
+     0.67 / 0.83 / 1 / 1.33 / 1.67 / 2.33 em. `h4`'s `font-size: 1em` is
+     not written: it is the inherited size by definition, and writing it
+     would turn an inherited value into a declared one for no effect.
+   - `p, blockquote, dl, pre, figure, ul, ol, menu, dir { margin-block:
+     1em }` and `hr { margin-block: 0.5em }`.
+   - `:is(ul, ol, menu, dir) :is(ul, ol, menu, dir) { margin-block: 0 }`,
+     spelled out as sixteen descendant selectors because this sheet's
+     matching stays inside the plain-selector subset. Chrome's own rule is
+     the `:is()` form. This is the ONE rule here with a combinator, and it
+     is why `ua-style-of` has a no-document branch -- see there.
+   - `small, sub, sup { font-size: smaller }`. This engine used to say
+     `0.83em`, close enough to survive the harness's tolerance (11.62
+     against the browser's 11.6667) but not the same rule; `smaller` is
+     what a UA sheet actually says and it is exactly 1/1.2.
+   - `fieldset { padding: 0.35em 0.75em 0.625em }`, as longhands for the
+     reason stated above -- measured 4.9 / 10.5 / 8.75 at 14px and
+     7 / 15 / 12.5 at 20px, which is what separates the em terms from the
+     px ones.
+   - `button, input, select, textarea { font-size: 13.3333px }`. Not `em`
+     at all, and the reason it is in this half rather than the first is
+     that it needed the same machinery: a control's UA font is an absolute
+     13.3333px in every browser (an `<input>` inside a `font-size: 30px`
+     div still measures 13.3333), and until `resolve-relative-lengths`
+     normalised a fractional length to a number, writing it here would
+     have handed `cssom.layout` the string \"13.3333px\" where it wants a
+     number. The FAMILY that goes with it (Arial, monospace for
+     `<textarea>`) stays in `cssom.layout`'s `ua-control-font` -- this
+     sheet has no font-family rule at all and adding one is a separate
+     measurement.
+   - `input[type=\"radio\"]`'s own margins, `3px 3px 0 5px`, split out of
+     the checkbox rule they were wrongly sharing."
   "
   html, body, address, article, aside, blockquote, center, dd, details,
   dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form,
@@ -3927,7 +3975,32 @@
            padding-left: 6px; padding-right: 6px }
   input[type=\"checkbox\"], input[type=\"radio\"] {
     padding-top: 0; padding-right: 0; padding-bottom: 0; padding-left: 0;
-    margin-top: 3px; margin-right: 3px; margin-bottom: 3px; margin-left: 4px }
+    margin-top: 3px; margin-right: 3px }
+  input[type=\"checkbox\"] { margin-bottom: 3px; margin-left: 4px }
+  input[type=\"radio\"] { margin-bottom: 0; margin-left: 5px }
+
+  h1 { font-size: 2em }
+  h2 { font-size: 1.5em }
+  h3 { font-size: 1.17em }
+  h5 { font-size: 0.83em }
+  h6 { font-size: 0.67em }
+  small, sub, sup { font-size: smaller }
+  button, input, select, textarea { font-size: 13.3333px }
+
+  h1 { margin-top: 0.67em; margin-bottom: 0.67em }
+  h2 { margin-top: 0.83em; margin-bottom: 0.83em }
+  h3 { margin-top: 1em; margin-bottom: 1em }
+  h4 { margin-top: 1.33em; margin-bottom: 1.33em }
+  h5 { margin-top: 1.67em; margin-bottom: 1.67em }
+  h6 { margin-top: 2.33em; margin-bottom: 2.33em }
+  p, blockquote, dl, pre, figure, ul, ol, menu, dir {
+    margin-top: 1em; margin-bottom: 1em }
+  hr { margin-top: 0.5em; margin-bottom: 0.5em }
+  ul ul, ul ol, ul menu, ul dir, ol ul, ol ol, ol menu, ol dir,
+  menu ul, menu ol, menu menu, menu dir, dir ul, dir ol, dir menu, dir dir {
+    margin-top: 0; margin-bottom: 0 }
+  fieldset { padding-top: 0.35em; padding-right: 0.75em;
+             padding-bottom: 0.625em; padding-left: 0.75em }
   ")
 
 (def ua-rules
@@ -3987,9 +4060,9 @@
          (:attr/name a))))
 
 (def ^:private ua-sheet-is-tag-and-attr-only?
-  "Whether every selector in the sheet is a bare tag, or a tag plus an
-   attribute-PRESENCE-implying condition -- no class, id, pseudo-class,
-   `:not()`/`:is()`/`:where()`/`:has()`, and no combinator.
+  "Whether every COMPOUND in every selector in the sheet is a bare tag, or
+   a tag plus an attribute-PRESENCE-implying condition -- no class, id,
+   pseudo-class, `:not()`/`:is()`/`:where()`/`:has()`.
 
    `ua-style-for`'s fast path rests on exactly this: if it holds, an
    element carrying none of `ua-conditional-attrs` cannot match anything
@@ -3997,46 +4070,63 @@
    costs one lookup. A `:not([hidden])` or a `.foo` in the sheet would
    break that reasoning, so it is CHECKED at load rather than remembered --
    fail the check and every element takes the general path, which is
-   slower and still correct."
+   slower and still correct.
+
+   A COMBINATOR does not break it, and used not to be allowed here at all.
+   The sheet now has one rule with combinators (the nested-list margin
+   cancellation), and what makes the precompute still sound is that a
+   combinator selector is skipped outright when there is no document to
+   walk (see `ua-style-of`), so the precomputed answer and the answer this
+   path would compute are the same answer: the one for an element with no
+   ancestors. That is exactly what the fast path's single caller wants --
+   see `ua-style-for`."
   (every? (fn [rule]
             (every? (fn [selector]
-                      (let [parts (or (:selector/parts selector) [selector])]
-                        (and (= 1 (count parts))
-                             (let [p (first parts)]
-                               (and (nil? (:selector/id p))
-                                    (empty? (:selector/classes p))
-                                    (empty? (:selector/pseudos p))
-                                    (nil? (:selector/pseudo-element p))
-                                    (empty? (:selector/not p))
-                                    (empty? (:selector/is p))
-                                    (empty? (:selector/where p))
-                                    (empty? (:selector/has p))
-                                    (nil? (:selector/combinator p)))))))
+                      (every? (fn [p]
+                                (and (nil? (:selector/id p))
+                                     (empty? (:selector/classes p))
+                                     (empty? (:selector/pseudos p))
+                                     (nil? (:selector/pseudo-element p))
+                                     (empty? (:selector/not p))
+                                     (empty? (:selector/is p))
+                                     (empty? (:selector/where p))
+                                     (empty? (:selector/has p))))
+                              (or (:selector/parts selector) [selector])))
                     (:rule/selectors rule)))
           ua-rules))
 
 (defn- ua-style-of
   "The general path: match every candidate rule and merge the winners in
-   specificity then source order."
+   specificity then source order.
+
+   With no `document`, a selector that has a COMBINATOR is skipped rather
+   than matched on its subject compound alone. `matches?`'s own 1-arity
+   does the latter -- it is the right answer for an author's stylesheet
+   being probed against a detached node -- and here it would be actively
+   wrong: `ul ul { margin-block: 0 }` would then zero the margins of every
+   list on the page, nested or not. Skipping means a caller with no
+   document gets the no-ancestors answer, which is the honest one."
   [document node]
   (->> (for [rule (ua-rules-for node)
              selector (:rule/selectors rule)
              :when (if document
                      (matches? document node selector)
-                     (matches? node selector))]
+                     (and (<= (count (:selector/parts selector [selector])) 1)
+                          (matches? node selector)))]
          {:declarations (:rule/declarations rule)
           :sort-key [(specificity selector) (:rule/order rule)]})
        (sort-by :sort-key)
        (reduce (fn [m entry] (merge m (:declarations entry))) {})))
 
 (def ^:private ua-style-by-tag
-  "The UA style of an element that carries none of `ua-conditional-attrs`,
-   precomputed per tag. `cssom.layout` asks for this once per `node-style`
-   call and `node-style` runs many times per element over a layout pass
-   (measure, intrinsic width, then the real one), so the difference between
-   a lookup and a match-and-sort is the difference between a layout pass
-   and a noticeably slower one -- measured on the 357-case conformance
-   corpus, the general path alone cost +80% end to end."
+  "The UA style of an element that carries none of `ua-conditional-attrs`
+   and has no ancestors, precomputed per tag. `cssom.layout` asks for this
+   once per `node-style` call and `node-style` runs many times per element
+   over a layout pass (measure, intrinsic width, then the real one), so the
+   difference between a lookup and a match-and-sort is the difference
+   between a layout pass and a noticeably slower one -- measured on the
+   357-case conformance corpus, the general path alone cost +80% end to
+   end."
   (when ua-sheet-is-tag-and-attr-only?
     (into {} (map (fn [tag] [tag (ua-style-of nil {:node/type :element :tag tag :attrs {}})]))
           (remove nil? (keys ua-rules-by-tag)))))
@@ -4054,13 +4144,233 @@
    `browser.core/render-document`, where `apply-cascade` runs only
    `(seq css-rules)`). Layout consults this ONE table rather than carrying
    its own copy, which is the point: the drift this whole change exists to
-   remove is the same knowledge written down twice."
+   remove is the same knowledge written down twice.
+
+   Values may be RELATIVE (`1em`, `smaller`): this returns the declarations,
+   not computed values, and only the caller knows the font size to resolve
+   them against. `cssom.layout` runs them through
+   `resolve-relative-lengths` with its theme's base size, the same call the
+   cascade makes with the real inherited size.
+
+   The precomputed fast path is taken only when there is no `document`,
+   because that is the only case where an ancestor-dependent rule provably
+   does not apply (see `ua-style-of`). Handed a document, this takes the
+   general path and answers correctly for the nested-list rule too."
   ([node] (ua-style-for nil node))
   ([document node]
-   (if (and ua-style-by-tag
+   (if (and (nil? document)
+            ua-style-by-tag
             (not-any? #(contains? (:attrs node) %) ua-conditional-attrs))
      (get ua-style-by-tag (:tag node) {})
      (ua-style-of document node))))
+
+;; ---- relative lengths: `em`, `rem`, and the computed font size ----
+;;
+;; The second half of the UA stylesheet is `em`-relative -- `p { margin: 1em
+;; 0 }`, `h1 { font-size: 2em }`, a `<fieldset>`'s `padding: 0.35em 0.75em
+;; 0.625em` -- and none of it could be written down until this cascade could
+;; resolve a length. Measured in Brave 151 on 2026-08-05, the model is
+;; exactly real CSS's and nothing less will do:
+;;
+;;   - `em` compounds. Three nested `font-size: 1.5em` divs inside a 14px
+;;     page report 21, 31.5 and 47.25px. A single "base size" option
+;;     cannot express that; only a top-down walk carrying the PARENT's
+;;     computed size can.
+;;   - the two `em`s on ONE element resolve against DIFFERENT sizes.
+;;     `<div style="font-size:2em; margin-top:1em">` inside 14px reports
+;;     font-size 28px and margin-top 28px: the font-size's own `em` is the
+;;     parent's 14, every other `em` on that element is its own 28. This is
+;;     why the UA sheet's `h3 { font-size: 1.17em; margin-block: 1em }`
+;;     comes out 16.38/16.38 rather than 16.38/14, and it is the single
+;;     fact a "resolve everything against one number" design gets wrong.
+;;   - `rem` is the ROOT element's computed size, not the parent's: inside
+;;     a 28px div, `font-size: 1rem` reports 16px on a page whose <html> is
+;;     the browser default.
+;;   - a percentage font-size is the parent's size (`150%` of 14 -> 21,
+;;     then `50%` of that -> 10.5). A percentage on any OTHER property is
+;;     the containing BLOCK's, not a font size at all (`margin-top: 50%`
+;;     in an 800px box measured 400px) -- so percentages are resolved here
+;;     for `font-size` and left completely alone everywhere else.
+;;   - `smaller`/`larger` are the parent's size over/times 1.2, and they
+;;     compound (14 -> 11.6667 -> 9.72222; 14 -> 16.8).
+
+(def default-base-font-size
+  "The font size the ROOT element's own relative units resolve against, and
+   the value of `rem` in a document whose root declares no font-size, when
+   `apply-cascade` is not told otherwise (its `:base-font-size` opt).
+
+   14, which is NOT CSS's own initial `font-size: medium` (16 in every
+   browser) and is chosen against it deliberately. `1em` has exactly one
+   honest meaning -- the size of the text this engine actually DRAWS -- and
+   that size is `cssom.layout/default-theme`'s, which is 14. Defaulting to
+   16 here was tried first and is what a spec reading argues for; it
+   produced a document whose bare `<p>` was given 16px margins around 14px
+   text, and 42 of this repo's own layout tests said so immediately. A
+   number that disagrees with the renderer beside it is not more correct
+   for matching a spec that assumed a different renderer.
+
+   So the number is defined HERE and `cssom.layout/default-theme` reads it,
+   rather than the two agreeing by coincidence -- the same rule that put
+   the UA stylesheet in one place (ADR-2800003100). A host that draws at
+   another size must pass BOTH a `:theme` with its `:font-size` and this
+   opt with the same number; passing one without the other is precisely the
+   drift this arrangement exists to make visible.
+
+   What it costs a caller who supplies nothing: a document that declares no
+   font-size anywhere reports `margin-top: 14px` on a bare `<p>` where a
+   browser reports 16. The moment ANY ancestor declares a size -- which
+   every real page and every case in the conformance corpus does -- this
+   number is replaced by that one and never appears again."
+  14)
+
+(def ^:private font-size-scale-step
+  "The ratio `font-size: smaller`/`larger` divides/multiplies the parent's
+   computed size by. Measured in Brave 151, 2026-08-05, at a size outside
+   the absolute-keyword table: `smaller` of 14px is 11.6667 and `larger` of
+   14px is 16.8, i.e. exactly 1.2 either way, and a second `smaller` inside
+   the first gives 9.72222 -- it compounds off the already-scaled parent."
+  1.2)
+
+(def ^:private absolute-length-pattern
+  "A whole value that is a single signed number plus `px`, `em` or `rem`.
+   Deliberately does NOT admit `ex`/`ch`/`vw`/`vh`/`%` or a `calc()`:
+   `ex`/`ch` need font METRICS this namespace has never had, the viewport
+   units need a viewport height nobody passes, and a percentage means
+   something different on every property (see the block comment above)."
+  #"(?i)^([+-]?(?:\d+\.?\d*|\.\d+))(px|em|rem)$")
+
+(def ^:private percentage-pattern
+  #"^([+-]?(?:\d+\.?\d*|\.\d+))%$")
+
+(defn- parse-number
+  [s]
+  #?(:clj (try (Double/parseDouble s) (catch Exception _ nil))
+     :cljs (let [n (js/parseFloat s)] (when-not (js/isNaN n) n))))
+
+(defn- as-length
+  "`n` as a long when it is integral, unchanged otherwise.
+
+   Purely a numeric SHAPE normalisation, and it earns its place: `2em` of
+   14 is 28, and `(= 28 28.0)` is FALSE on the JVM. This namespace's own
+   `<n>px` coercion has always produced longs (see `parse-style-value`),
+   and every reader, test and stored golden downstream compares resolved
+   lengths with `=`. A genuinely fractional result -- an `<h3>`'s 16.38, a
+   control's 13.3333 -- is left exactly as it is; the whole point of this
+   step is that those numbers survive."
+  [n]
+  (if (and (number? n) (== n (long n))) (long n) n))
+
+(defn- resolve-font-size
+  "`v` -- a `font-size` declaration's already-var()-substituted value -- as
+   an absolute number of px, or nil when this namespace cannot resolve it.
+
+   `parent-px` is the parent element's computed font size (real CSS's
+   reference for `em`, `%`, `smaller` and `larger` ON font-size itself);
+   `root-px` is the root element's, which is what `rem` means.
+
+   nil for the ABSOLUTE keywords (`medium`, `small`, `x-large`, ...) on
+   purpose rather than for want of a table: measured in Brave 151,
+   `font-size: medium` reports 13px and `x-large` 20px on a page whose
+   font-family is monospace, against 16 and 24 on a proportional one --
+   the keyword table is keyed on the default font of the FAMILY in use,
+   which this cascade has no way to know. Guessing 16 would be wrong by
+   3px on every monospace page. An unresolved value is left exactly as
+   the author wrote it, which is this namespace's posture everywhere else."
+  [v parent-px root-px]
+  (cond
+    (number? v) v
+    (not (string? v)) nil
+    :else
+    (let [s (str/trim v)]
+      (some->
+       (or (when-let [[_ n unit] (re-matches absolute-length-pattern s)]
+             (when-let [n (parse-number n)]
+               (case (str/lower-case unit)
+                 "px" n
+                 "em" (* n parent-px)
+                 "rem" (* n root-px))))
+           (when-let [[_ n] (re-matches percentage-pattern s)]
+             (when-let [n (parse-number n)]
+               (* (/ n 100.0) parent-px)))
+           (case (str/lower-case s)
+             "smaller" (/ parent-px font-size-scale-step)
+             "larger" (* parent-px font-size-scale-step)
+             nil))
+       as-length))))
+
+(defn- resolve-em-length
+  "`v` as an absolute number of px when it is a single `<n>em`/`<n>rem`
+   length, nil otherwise -- including for a plain `<n>px`, which is left
+   alone so this step only ever touches values it actually changes."
+  [v own-px root-px]
+  (when (string? v)
+    (when-let [[_ n unit] (re-matches absolute-length-pattern (str/trim v))]
+      (let [unit (str/lower-case unit)]
+        (when (not= "px" unit)
+          (when-let [n (parse-number n)]
+            (as-length (if (= "em" unit) (* n own-px) (* n root-px)))))))))
+
+(def ^:private em-resolvable-properties
+  "The properties whose value is a LENGTH, and so whose `em`/`rem` this
+   step resolves. Enumerated rather than inferred from the value's shape
+   because the shape is ambiguous: a `content: \"2em\"` is a string that
+   must survive untouched, and a custom property (`--gap: 1em`) is a raw
+   token list whose `em` belongs to whatever substitutes it, not to the
+   element that declares it.
+
+   `font-size` is here for completeness but is handled separately by
+   `resolve-relative-lengths` -- its own `em` resolves against the PARENT,
+   every other one against this element's own computed size."
+  #{:font-size :line-height
+    :width :height :min-width :max-width :min-height :max-height
+    :top :right :bottom :left
+    :margin :margin-top :margin-right :margin-bottom :margin-left
+    :padding :padding-top :padding-right :padding-bottom :padding-left
+    :border-width :border-top-width :border-right-width
+    :border-bottom-width :border-left-width :border-radius
+    :border-spacing :outline-width :outline-offset
+    :box-shadow-x :box-shadow-y :box-shadow-blur :box-shadow-spread
+    :text-shadow-x :text-shadow-y :text-shadow-blur
+    :gap :row-gap :column-gap :flex-basis :text-indent
+    :letter-spacing :word-spacing})
+
+(defn resolve-relative-lengths
+  "Returns `[style computed-font-size]`: `style` with every `em`/`rem`
+   length resolved to an absolute number of px, and the element's own
+   computed font size (which its children inherit, and which every `em` on
+   this element other than `font-size` itself resolved against).
+
+   `parent-font-size` is the parent element's computed size; `root-font-size`
+   is the root element's, or nil on the root element itself (where `rem`
+   falls back to the element's own size, real CSS's rule for the root).
+
+   `font-size` is written back as a NUMBER whenever it resolved -- a
+   computed font size in real CSS is always an absolute length, and every
+   downstream reader here already coerces. Every other property is written
+   back only when it actually carried an `em`/`rem`, so a plain `10.5px`
+   stays the string it has always been and this step has no blast radius
+   beyond the values it exists to fix.
+
+   Public because `cssom.layout` needs the same resolution on the ONE path
+   that has no cascade behind it (`ua-style-for`, a document nobody
+   cascaded) -- the same reason `ua-style-for` itself is public, and the
+   same rule against writing this knowledge down twice."
+  [style parent-font-size root-font-size]
+  (let [resolved-own (resolve-font-size (:font-size style) parent-font-size
+                                        (or root-font-size parent-font-size))
+        own (or resolved-own parent-font-size)
+        root (or root-font-size own)
+        style (cond-> style resolved-own (assoc :font-size own))]
+    [(reduce-kv (fn [m k v]
+                  (if (and (not= :font-size k)
+                           (contains? em-resolvable-properties k))
+                    (if-let [px (resolve-em-length v own root)]
+                      (assoc m k px)
+                      m)
+                    m))
+                style
+                style)
+     own]))
 
 (defn- resolve-style-for
   "Cascade-resolves the declarations that target `pseudo-element` (nil for
@@ -4267,9 +4577,18 @@
          ua-declarations (when (nil? pseudo-element)
                            (for [rule (ua-rules-for node)
                                  selector (:rule/selectors rule)
+                                 ;; Same no-document rule as `ua-style-of`,
+                                 ;; and for the same reason: `matches?`'s
+                                 ;; 1-arity tests only the SUBJECT compound,
+                                 ;; which would let `ul ul` zero the margins
+                                 ;; of a top-level list. apply-cascade always
+                                 ;; has a document; `computed-style`'s
+                                 ;; 2-arity does not, and honestly answers
+                                 ;; without the ancestor-dependent rules.
                                  :when (if document
                                          (matches? document node selector)
-                                         (matches? node selector))
+                                         (and (<= (count (:selector/parts selector [selector])) 1)
+                                              (matches? node selector)))
                                  [property value] (:rule/declarations rule)]
                              {:property property
                               :value value
@@ -4590,8 +4909,21 @@
    `counter-reset`/`counter-increment`, see `style-with-counters`).
    `container-ctx` is threaded straight through to `style-with-counters`
    (nil unless this is apply-cascade's real second pass -- see its
-   docstring)."
-  [document rules node-id inherited-env inherited-counters container-ctx]
+   docstring).
+
+   `parent-font-size`/`root-font-size` are the third thing this walk
+   inherits, alongside the custom-property environment and the running
+   counters: `em` resolves against the element's OWN computed font size,
+   which is its declared/UA one resolved against the PARENT's, so the
+   chain has to come down the tree the same way (see
+   `resolve-relative-lengths`). The extra return value is this element's
+   own computed size, which its children inherit. Resolution runs AFTER
+   `resolve-style-map` because a `font-size: var(--x)` is not a length
+   until the substitution has happened, and it covers the pseudo-element
+   maps too, against this element's size -- a `::before`'s `em` is its
+   own font size, which it inherits from the element it hangs off."
+  [document rules node-id inherited-env inherited-counters container-ctx
+   parent-font-size root-font-size]
   (let [node (get-in document [:nodes node-id])
         [style node-counters] (style-with-counters document rules node inherited-counters container-ctx)
         pseudo-keys #{:pseudo/before :pseudo/after}
@@ -4601,8 +4933,16 @@
         normal (into {} (remove (fn [[k _]] (custom-property? k))) regular)
         resolved-custom (into {} (map (fn [[k v]] [k (resolve-value inherited-env v)])) custom)
         node-env (merge inherited-env resolved-custom)
-        resolved-normal (resolve-style-map node-env normal)
-        resolved-pseudo (into {} (map (fn [[k v]] [k (resolve-style-map node-env v)])) pseudo)
+        [resolved-normal node-font-size]
+        (resolve-relative-lengths (resolve-style-map node-env normal)
+                                  parent-font-size root-font-size)
+        resolved-pseudo (into {}
+                              (map (fn [[k v]]
+                                     [k (first (resolve-relative-lengths
+                                                (resolve-style-map node-env v)
+                                                node-font-size
+                                                (or root-font-size node-font-size)))]))
+                              pseudo)
         final-style (resolve-current-color (merge resolved-custom resolved-normal resolved-pseudo))
         document (reduce-kv
                   (fn [d k v]
@@ -4611,7 +4951,7 @@
                       (dom/set-attribute d node-id (keyword "style" (name k)) v)))
                   (clear-style-attrs document node-id)
                   final-style)]
-    [document node-env node-counters]))
+    [document node-env node-counters node-font-size]))
 
 (defn- run-cascade-walk
   "The actual top-down tree walk apply-cascade performs (see its own
@@ -4627,26 +4967,43 @@
    declaration. When `rules` has no @container rule at all, apply-cascade
    calls this exactly once with container-ctx nil -- byte-for-byte the same
    single walk this namespace always performed, so stylesheets that never
-   use `@container` see no behavior or performance change."
-  [document rules container-ctx]
-  (letfn [(walk [document node-id inherited-env inherited-counters visited]
+   use `@container` see no behavior or performance change.
+
+   `base-font-size` is what the ROOT element's own relative units resolve
+   against (see `apply-cascade`'s `:base-font-size`). `root-font-size`
+   starts nil and is fixed by the FIRST element styled -- the root element,
+   in document order -- to that element's own computed size, which is
+   exactly what `rem` means for everything below it.
+
+   A subtree unreachable from `:root` is styled with `base-font-size` as
+   both its parent's and the root's size, the same honest simplification
+   the empty inherited environment above it already makes: a detached node
+   has no ancestor chain to read either number off."
+  [document rules container-ctx base-font-size]
+  (letfn [(walk [document node-id inherited-env inherited-counters visited
+                 parent-font-size root-font-size]
             (let [node (get-in document [:nodes node-id])
-                  [document node-env node-counters]
-                  (if (= :element (:node/type node))
-                    (style-element document rules node-id inherited-env inherited-counters container-ctx)
-                    [document inherited-env inherited-counters])
+                  element? (= :element (:node/type node))
+                  [document node-env node-counters node-font-size]
+                  (if element?
+                    (style-element document rules node-id inherited-env inherited-counters
+                                   container-ctx parent-font-size root-font-size)
+                    [document inherited-env inherited-counters parent-font-size])
+                  root-font-size (if element? (or root-font-size node-font-size) root-font-size)
                   visited (conj visited node-id)]
               (reduce (fn [[document visited counters] child-id]
-                        (walk document child-id node-env counters visited))
+                        (walk document child-id node-env counters visited
+                              node-font-size root-font-size))
                       [document visited node-counters]
                       (:children node))))]
     (let [[document visited] (if-let [root (:root document)]
-                                (walk document root {} {} #{})
+                                (walk document root {} {} #{} base-font-size nil)
                                 [document #{}])]
       (reduce-kv
        (fn [document node-id node]
          (if (and (= :element (:node/type node)) (not (contains? visited node-id)))
-           (first (style-element document rules node-id {} {} container-ctx))
+           (first (style-element document rules node-id {} {} container-ctx
+                                 base-font-size base-font-size))
            document))
        document
        (:nodes document)))))
@@ -4683,9 +5040,21 @@
 
    `opts` (optional, 3-arity) may include :viewport-width (default
    `default-viewport-width`) used to decide whether `@media (min-width:...)`
-   / `(max-width:...)` rule blocks apply, and :color-scheme (default
+   / `(max-width:...)` rule blocks apply, :color-scheme (default
    `default-color-scheme`, \"light\"/\"dark\") used to decide whether
-   `@media (prefers-color-scheme: ...)` rule blocks apply.
+   `@media (prefers-color-scheme: ...)` rule blocks apply, and
+   :base-font-size (default `default-base-font-size`, 16).
+
+   :base-font-size is what the ROOT element's own `em`/`%`/`smaller` resolve
+   against, and what `rem` means in a document whose root declares no
+   font-size. It is one number and it is only ever the START of the chain:
+   the moment any element declares a font-size, its own subtree resolves
+   against THAT (see `resolve-relative-lengths`), which is why this is an
+   opt rather than the design -- a single base size cannot express `em`
+   compounding, and compounding is what a browser does. A caller that
+   supplies nothing gets `default-base-font-size`, the size this engine's
+   own theme draws at; see that def for what it costs and why it is not
+   CSS's 16.
 
    `@container` support (see the namespace docstring's own `@container`
    paragraph for the feature's scope) is why this function may run
@@ -4731,11 +5100,12 @@
   ([document rules opts]
    (let [viewport-width (or (:viewport-width opts) default-viewport-width)
          color-scheme (or (:color-scheme opts) default-color-scheme)
+         base-font-size (or (:base-font-size opts) default-base-font-size)
          rules (filterv #(rule-applies-to-viewport? % viewport-width color-scheme) rules)]
      (if (some :rule/container rules)
        (let [pass1-rules (filterv #(nil? (:rule/container %)) rules)
-             pass1-document (run-cascade-walk document pass1-rules nil)
+             pass1-document (run-cascade-walk document pass1-rules nil base-font-size)
              container-ctx {:containers (build-containers pass1-document)
                             :parent-index (parent-index pass1-document)}]
-         (run-cascade-walk document rules container-ctx))
-       (run-cascade-walk document rules nil)))))
+         (run-cascade-walk document rules container-ctx base-font-size))
+       (run-cascade-walk document rules nil base-font-size)))))

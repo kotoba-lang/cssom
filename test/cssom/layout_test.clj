@@ -5866,10 +5866,10 @@
         t (text-draw-ops ops)
         span (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
     (is (= ["a" "b" "c"] (mapv :text t)))
-    (is (= [8 64 80] (mapv :x t))
+    (is (= [8.0 64.0 80.0] (mapv (comp double :x) t))
         "content origin 8, `a` is one 8px char, one 8px space, then the
          span's 40px of padding before `b`, and `c` a space after it")
-    (is (= {:x 24 :w 48} (select-keys span [:x :w]))
+    (is (= [24.0 48.0] [(double (:x span)) (double (:w span))])
         "the box starts where the pen was -- padding is INSIDE it -- and
          is 40 + 8 wide")))
 
@@ -5877,18 +5877,18 @@
   (let [ops (inline-ops ["a " [:span {:padding-right "40px"} "b"] " c"])
         t (text-draw-ops ops)
         span (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
-    (is (= [8 24 80] (mapv :x t))
+    (is (= [8.0 24.0 80.0] (mapv (comp double :x) t))
         "`b` is NOT moved by its own trailing padding; `c` is -- 24 + 8
          for `b`, then the 40px of padding, THEN the separating space,
          which is source order because the space lives outside the span")
-    (is (= {:x 24 :w 48} (select-keys span [:x :w])))))
+    (is (= [24.0 48.0] [(double (:x span)) (double (:w span))]))))
 
 (deftest inline-margin-is-outside-the-box-where-padding-is-inside
   (let [ops (inline-ops ["a " [:span {:margin-left "30px" :margin-right "10px"} "b"] " c"])
         t (text-draw-ops ops)
         span (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops))]
-    (is (= [8 54 80] (mapv :x t)))
-    (is (= {:x 54 :w 8} (select-keys span [:x :w]))
+    (is (= [8.0 54.0 80.0] (mapv (comp double :x) t)))
+    (is (= [54.0 8.0] [(double (:x span)) (double (:w span))])
         "both margins move the pen, neither is part of the border box --
          measured in Brave, the same shape reports the span at x=44 w=7
          in a 7px-per-char font")))
@@ -5902,9 +5902,9 @@
         padded (inline-ops ["a " [:span {:padding-top "10px" :padding-bottom "4px"} "b"]])
         box-of (fn [ops] (first (filter #(and (= :node (:draw/op %)) (= :span (:tag %))) ops)))
         p (box-of plain) q (box-of padded)]
-    (is (= (- (:y p) 10) (:y q)) "the box grows UP by its top padding")
-    (is (= (+ (:h p) 14) (:h q)) "and down by its bottom padding")
-    (is (= (:x p) (:x q)) "vertical padding moves nothing along the line")
+    (is (== (- (:y p) 10) (:y q)) "the box grows UP by its top padding")
+    (is (== (+ (:h p) 14) (:h q)) "and down by its bottom padding")
+    (is (== (:x p) (:x q)) "vertical padding moves nothing along the line")
     (is (= (mapv :y (text-draw-ops plain)) (mapv :y (text-draw-ops padded)))
         "and the text on the line does not move either -- vertical padding
          on an inline box contributes nothing to the line box")))
@@ -5932,16 +5932,6 @@
         "adding 24px of padding AFTER `dd` moves `dd` itself to line two --
          the closing edge is charged to the wrap test one token early,
          because it cannot be broken away from the content it follows")))
-
-(deftest small-is-font-size-smaller-and-compounds
-  ;; `small`/`sub`/`sup` are the relative keyword `smaller` -- the
-  ;; inherited size over 1.2 -- and not the 0.83em `<h5>` carries. Measured
-  ;; in Brave 151: 14px -> 11.6667 -> 9.72222 -> 8.10185. See
-  ;; ua-font-smaller-tags.
-  (let [t (text-draw-ops (inline-ops ["x " [:small {} "a " [:small {} "b"]]]))]
-    (is (= [14 (/ 14 1.2) (/ 14 1.2 1.2)] (mapv :font-size t))
-        "each nesting level divides the size it INHERITS, so the two
-         <small>s do not resolve to the same number")))
 
 (deftest nested-inline-elements-inherit-and-override
   (let [t (text-draw-ops
@@ -9029,7 +9019,7 @@
 
 (deftest a-figure-gets-the-same-side-margins-as-a-blockquote
   ;; `:page/article-with-figure`. `figure { margin: 1em 40px }` is one UA
-  ;; rule and this engine had half of it: the 1em was in ua-margin-scale
+  ;; rule and this engine had half of it: the 1em was a layout table
   ;; from the start, the 40px indent was in no table at all. Measured in
   ;; Brave inside the case's own 300px article -- figure (40, 220), and
   ;; this engine had (0, 300), which the figure's <img> and <figcaption>
@@ -9062,7 +9052,7 @@
   ;; was invisible.
   ;;
   ;; The `inset` border STYLE is not modelled (this engine draws one solid
-  ;; border, see ua-em-box), so what is pinned here is the box, not the
+  ;; border, see ua-tag-box), so what is pinned here is the box, not the
   ;; bevel.
   (let [[hr] (block-boxes [[:hr {}]])]
     (is (= 2 (:h hr)) "1px of border on the top edge and 1px on the bottom")

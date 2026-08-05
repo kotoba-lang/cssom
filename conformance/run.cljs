@@ -1091,13 +1091,15 @@
 ;;                 `(or (:prop st) (:prop inherited))` fallback
 ;;                 cssom.layout applies at paint time.
 ;;   :initial   -- nobody in the ancestor chain declared it, so CSS's own
-;;                 INITIAL value stands. NOT the browser's UA value: this
-;;                 engine's UA stylesheet lives in cssom.layout (see its
-;;                 `node-style`'s `(or (style node :x) <ua default>)`
-;;                 chains) and is invisible to anything reading the
-;;                 cascade's output.
+;;                 INITIAL value stands. This used to mean something much
+;;                 weaker than it sounds: the UA stylesheet lived in
+;;                 cssom.layout and was invisible to anything reading the
+;;                 cascade, so 2,123 of these were the engine not SAYING
+;;                 what it drew. Both halves of that sheet are now a real
+;;                 cascade origin (ADR-2800003100), and what is left in
+;;                 this bucket is genuinely undeclared.
 ;;
-;; That last one is the axis's whole point rather than a flaw in it, so a
+;; The classification below outlived the divergence it was built for, so a
 ;; mismatch is CLASSIFIED rather than just counted, against a UA baseline
 ;; measured in the oracle itself (see the measurement script's `__ua__`
 ;; probe):

@@ -148,12 +148,27 @@ tolerance, for the browser's fractional device pixels), `bold`/`normal` to
 | `:inherited` | no value here, but an ancestor had one and the property inherits. Supplied by the harness walking up the engine's own document — exactly the `(or (:prop st) (:prop inherited))` fallback `cssom.layout` applies at paint time. | 709 |
 | `:initial` | nobody in the ancestor chain declared it, so CSS's own INITIAL value stands. **Not** the browser's UA value. | 9205 |
 
-That `:initial` row is the whole story of the number, and it is a real
+That `:initial` row is the whole story of the number, and it was a real
 architectural fact rather than nine thousand bugs: **this engine's UA
-stylesheet lives in `cssom.layout`** (`node-style`'s `(or (style node :x)
+stylesheet lived in `cssom.layout`** (`node-style`'s `(or (style node :x)
 <ua default>)` chains), so nothing reading the cascade's output —
 `cssom.core/computed-style`, a devtools panel, a live page's
-`getComputedStyle` — can see that a `<b>` is bold or a `<div>` is a block.
+`getComputedStyle` — could see that a `<b>` is bold or a `<div>` is a block.
+
+**Both halves of that sheet moved into the cascade on 2026-08-05
+(ADR-2800003100), and this axis is now 100%.** The first half was the
+declarations whose value is an absolute length or a keyword (87% → 97%,
+layout byte-identical). The second was everything `em`-relative —
+`p { margin: 1em 0 }`, `h1 { font-size: 2em }`, a fieldset's
+`padding: 0.35em 0.75em 0.625em` — which needed the cascade to compute a
+font size at all, since `em` resolves against the element's OWN computed
+size and a font-size's own `em` resolves against its parent's. That landed
+the axis at **18687/18763 (100%)**, `ua-default` 2123 → 557 → **35**, and
+the cascade-attributed residual at **1**. What is left in `ua-default` is
+not `em` and not a length: `<th>`/`<button>` `text-align: center`,
+`<caption>`'s `-webkit-center`, and `<option>`'s padding — three UA rules
+this engine does not have at all, which are new knowledge to be measured
+against geometry rather than a move.
 
 The axis reads the cascaded document directly and **never touches
 `cssom.layout`**, so it shares no machinery with the geometry axis: a
@@ -1177,7 +1192,7 @@ box constants were already written down in `ua-control-box` by an earlier
 round, which deliberately left the case failing rather than half-fixed
 because the legend's placement is not a constant. It is now implemented.
 A fieldset carries `margin-inline: 2px`, a 2px groove border and
-`0.35em 0.75em 0.625em` of padding — **em**, so `ua-em-box` resolves it
+`0.35em 0.75em 0.625em` of padding — **em**, which the cascade resolves
 against the element's own font size (14 → 4.9/10.5/8.75, 20 → 7/15/12.5)
 instead of pinning one row of numbers — and its content box establishes an
 independent formatting context (measured on `border:0;padding:0;margin:0`,

@@ -225,7 +225,12 @@
             [cssom.core :as css]))
 
 (def default-theme
-  {:font-size 14
+  ;; `:font-size` is cssom.core's number, not a second copy of it. Half the
+  ;; UA stylesheet is `em`-relative and the cascade resolves it against
+  ;; `cssom.core/default-base-font-size`; if that and the size this file
+  ;; DRAWS text at were two independent 14s, a host could move one and get
+  ;; `1em` margins that are not the height of a line -- see that def.
+  {:font-size css/default-base-font-size
    :line-height 20
    :padding 4
    :gap 4
@@ -1040,39 +1045,6 @@
       (when (and v (re-matches #"\d+" (str v)))
         (parse-int v nil)))))
 
-(def ^:private ua-margin-scale
-  "Vertical margins from the HTML5 UA stylesheet, as multiples of the
-   element's OWN font size -- `p { margin: 1em 0 }`, `h1 { margin: .67em 0 }`
-   and so on. These are the rules that make a page look like a document
-   rather than a wall of text, and this engine had none of them: the
-   conformance harness's geometry axis reported `p` 40/54 for exactly this
-   reason.
-
-   They are VERTICAL only, which is why they had to wait for the per-side
-   box model: applied as this engine's old uniform margin they would have
-   indented every paragraph sideways as well.
-
-   `menu`/`dir` are the legacy list containers: `list-container-tags`
-   already treats them as lists for the nested-list cancellation, and
-   Brave gives them the same `margin: 1em 0` as `<ul>` (measured 2026-08-05
-   on a bare `<menu><li>a</li></menu>`: `margin-block: 16px`,
-   `padding-left: 40px`).
-
-   `hr`'s is half an em, and the 1px border that is the rest of an
-   `<hr>`'s box lives in ua-em-box -- see there for why.
-
-   NOT here, and for a reason worth stating rather than leaving as a
-   silent omission (measured in Brave 151 the same day):
-
-   - `pre`'s margin IS 1em and is in this table, but its em is the wrong
-     size: a browser also gives `pre` `font-family: monospace` and, with
-     it, the monospace default size of 13px, so the real margin is 13 and
-     this engine computes 16. Fixing the margin without the font would
-     make the number right for a reason that is not true."
-  {:p 1.0 :blockquote 1.0 :ul 1.0 :ol 1.0 :menu 1.0 :dir 1.0
-   :dl 1.0 :pre 1.0 :figure 1.0 :hr 0.5
-   :h1 0.67 :h2 0.83 :h3 1.0 :h4 1.33 :h5 1.67 :h6 2.33})
-
 (def ^:private list-container-tags
   "The elements a browser's UA stylesheet treats as a list container -- the
    left half of its `:is(ul, ol) ul` nested-list rules. `<menu>`/`<dir>`
@@ -1196,9 +1168,10 @@
    inset-side). A fieldset's inner `<p>` was 4px wide of Brave for exactly
    that reason and no other, and `:form/fieldset-and-legend` is clean.
 
-   `<fieldset>` and `<legend>` are NOT in this map -- their box is em-based
-   rather than constant, so it lives in `ua-em-box` next door, and the
-   legend's placement is a layout rule (`fieldset-legend`), not a box."
+   `<fieldset>` and `<legend>` are NOT in this map -- what is left of
+   their box after cssom.core's UA stylesheet took the padding and margins
+   is in `ua-tag-box` next door, and the legend's placement is a layout
+   rule (`fieldset-legend`), not a box."
   ;; The PER-SIDE padding a browser reports for these controls
   ;; (`input { padding: 1px 2px }`, `button { padding: 1px 6px }`,
   ;; `textarea { padding: 2px }`) now lives in cssom.core's UA stylesheet
@@ -1316,127 +1289,30 @@
 
       :else (get ua-control-box tag))))
 
-(def ^:private ua-em-box
-  "The UA box of the two form-GROUPING elements, whose padding is stated in
-   `em` rather than pixels and so cannot live in `ua-control-box` beside the
-   controls' constants. Measured in Brave 2026-08-04 via `getComputedStyle`,
-   at font-size 14 and again at 20 to separate the em terms from the px
-   ones:
+(def ^:private ua-tag-box
+  "What is left of the UA box of the form-GROUPING elements and `<hr>` once
+   everything a browser REPORTS through `getComputedStyle` has moved into
+   cssom.core's UA stylesheet: the borders, and two zeroes this engine's
+   own readers want to see as numbers rather than nils.
 
-     fieldset  margin-inline 2px, border 2px groove,
-               padding 0.35em 0.75em 0.625em
-               (14px -> 4.9/10.5/8.75, 20px -> 7/15/12.5)
-     legend    padding-inline 2px, no block padding, no border
-               (2px at 14, 20 and 30px font -- a constant, not an em)
+   A `<fieldset>`'s `padding: 0.35em 0.75em 0.625em` and its 2px inline
+   margins are in that sheet now (they are `em` and px lengths a browser
+   reports, and the cascade can resolve both); its 2px `groove` BORDER
+   stays here because `node-style`'s `:border-width` consults this table
+   for a UA border and nothing else does. Same for `<hr>`: measured in
+   Brave 151, 2026-08-05, `border: 1px inset`, no padding, no content -- a
+   2px-tall box, where this engine drew a 0px-tall one and every block
+   below it sat 2px high. The `inset` STYLE is not modelled (this engine
+   draws one solid border), so the line is a hairline rectangle in the
+   border colour rather than a two-tone bevel -- geometry, not paint.
 
-   `:em` values are multiples of the element's own font size, resolved by
-   `ua-em-box-for`; everything else is pixels. The fieldset's is the LAST
-   piece of the `:form/fieldset-and-legend` cluster that is a box at all --
-   where the legend actually goes is a layout rule, see `fieldset-legend`.
-
-   A `<legend>` gets its 2px whether or not it is inside a fieldset:
-   measured, a bare `<legend>bare legend</legend>` is a full-width block
-   whose text still starts at x=2.
-
-   `<hr>` is here for the mechanism rather than the em: this is the only
-   table `node-style`'s `:border-width` consults for a UA border, and an
-   `<hr>`'s entire visible self IS its border. Measured in Brave 151,
-   2026-08-05: `border: 1px inset`, no padding, no content -- a 2px-tall
-   box, where this engine drew a 0px-tall one and every block below it sat
-   2px high. Its `margin: 0.5em 0` is in ua-margin-scale with the other
-   vertical margins. The `inset` STYLE is not modelled (this engine draws
-   one solid border), so the line is a hairline rectangle in the border
-   colour rather than a two-tone bevel -- geometry, not paint."
-  {:fieldset {:border 2
-              :em {:padding-top 0.35 :padding-right 0.75
-                   :padding-bottom 0.625 :padding-left 0.75}}
+   A `<legend>` gets its 2px inline padding whether or not it is inside a
+   fieldset: measured, a bare `<legend>bare legend</legend>` is a
+   full-width block whose text still starts at x=2. Where the legend
+   actually goes is a layout rule, see `fieldset-legend`."
+  {:fieldset {:border 2}
    :legend {:padding-top 0 :padding-bottom 0}
    :hr {:border 1 :padding 0}})
-
-(defn- ua-em-box-for
-  "`ua-em-box`'s entry for `node`, with its `:em` terms resolved against the
-   element's own font size.
-
-   The font size is the element's DECLARED one or the theme's base, exactly
-   as `ua-margin-y` and `ua-font-scale` already resolve their own em terms
-   -- and with exactly the same honest simplification: a fieldset nested
-   inside larger text will not compound the way real `em` would, because
-   the inherited size is not available here. Measured to be worth having
-   anyway: it is the difference between 4.9px and a guess."
-  [node theme]
-  (when-let [box (get ua-em-box (:tag node))]
-    (if-let [em (:em box)]
-      (let [fs (or (parse-int (get-in node [:attrs :style/font-size]) nil)
-                   (:font-size theme))]
-        (merge (dissoc box :em)
-               (reduce-kv (fn [m k v] (assoc m k (* v fs))) {} em)))
-      box)))
-
-(def ^:private ua-font-scale
-  "Heading font sizes from the HTML5 UA stylesheet, as multiples of the
-   base font size (`h1 { font-size: 2em }` and so on down). Resolved
-   against the THEME's base size rather than the inherited size -- an
-   honest simplification: a heading nested inside larger text will not
-   compound, which real `em` would."
-  {:h1 2.0 :h2 1.5 :h3 1.17 :h4 1.0 :h5 0.83 :h6 0.67})
-
-(def ^:private ua-font-smaller-tags
-  "The tags whose UA `font-size` is the RELATIVE keyword `smaller`, which
-   is NOT an `em` multiple and does not belong in `ua-font-scale`.
-
-   `small`, `sub` and `sup` used to sit in that table at 0.83 -- the same
-   number `<h5>` has -- and they are not the same rule. Measured in Brave
-   151 on 2026-08-05, all in the conformance harness's own 14px monospace
-   page:
-
-     <h5>                    11.62px   = 0.83 x 14, an em multiple
-     <small> <sub> <sup>   11.6667px   = 14 / 1.2, the `smaller` keyword
-
-   and `smaller` COMPOUNDS on the inherited size, which an em multiple
-   resolved against the theme base cannot: `x <small>a <small>b <small>c
-   </small></small></small> y` reports 11.6667 / 9.72222 / 8.10185, each
-   the one before it divided by 1.2 again, and a `<small>` in a
-   `font-size: 20px` paragraph reports 16.6667 rather than the 11.6667 a
-   theme-base rule would give. `inline-fragments` therefore resolves these
-   three against the size they actually inherit; the entry in `node-style`
-   is the theme-base fallback for the callers that have no inherited size
-   in hand, and keeps `ua-font-scale`'s documented non-compounding
-   simplification for them.
-
-   The divisor is 1.2 rather than the 0.83 it approximates because it is
-   the ratio CSS states, and 0.83 x 14 truncated by `long` to 11 was 0.67px
-   short of the browser -- the whole of the `small w -3.3125` /
-   `code x -3.3125` residual the geometry axis reported for
-   :inline/small-and-code."
-  #{:small :sub :sup})
-
-(def ^:private ua-font-smaller-ratio
-  "CSS's own `smaller`/`larger` step. Not a measurement to tune -- see
-   ua-font-smaller-tags for the three sizes it reproduces exactly."
-  1.2)
-
-(defn- ua-margin-y
-  "The UA vertical margin for `node`, in pixels, resolved against the
-   element's own (possibly UA-scaled) font size the way real `em` margins
-   are.
-
-   A NESTED list has none: Chrome's UA stylesheet cancels it outright
-   (`:is(ul,ol) ul, :is(ul,ol) ol { margin-block-start: 0;
-   margin-block-end: 0 }`), so a sublist sits flush against the line above
-   it. Measured on `<ul><li>a<ul><li>b</li></ul></li></ul>`: Chrome reports
-   the inner `<ul>` at `margin-block: 0px` and its `<li>` at y=20, where
-   this engine gave the sublist a full 1em top margin and put the same
-   `<li>` at y=34 -- the whole of the harness's `li y +14` residual. The
-   `:ua/list-descendant` mark is written by with-nested-list-margins."
-  [node theme]
-  (when-not (and (contains? list-container-tags (:tag node))
-                 (attr node :ua/list-descendant))
-    (when-let [scale (get ua-margin-scale (:tag node))]
-      (let [fs (or (parse-int (get-in node [:attrs :style/font-size]) nil)
-                   (when-let [heading-scale (get ua-font-scale (:tag node))]
-                     (long (* heading-scale (:font-size theme))))
-                   (:font-size theme))]
-        (long (* scale fs))))))
 
 (defn- gap-shorthand-axis
   "One axis of the `gap` shorthand's `<row-gap> [<column-gap>]` value, in
@@ -1552,10 +1428,10 @@
 
 (defn- node-style [node theme]
   ;; `ua-box` is this element's UA box: the control constants
-  ;; (ua-control-box-for) or, for the two form-grouping elements whose
-  ;; padding is stated in em, ua-em-box-for. One lookup, read by every
-  ;; side below -- they used to call ua-control-box-for ten times over.
-  (let [ua-box (or (ua-control-box-for node) (ua-em-box-for node theme))
+  ;; (ua-control-box-for) or, for `<fieldset>`/`<legend>`/`<hr>`, the
+  ;; borders in ua-tag-box. One lookup, read by every side below -- they
+  ;; used to call ua-control-box-for ten times over.
+  (let [ua-box (or (ua-control-box-for node) (get ua-tag-box (:tag node)))
         ;; The user-agent origin of the cascade, at the bottom of every
         ;; lookup in this map -- one shadowed accessor rather than the
         ;; column of `(or (style node :x) <ua default>)` chains and the
@@ -1571,7 +1447,41 @@
         ;; there. Reading cssom.core's own table rather than keeping a
         ;; second copy is the whole point -- the drift this change exists
         ;; to remove is the same knowledge written down twice.
-        ua (css/ua-style-for node)
+        ;;
+        ;; Half that sheet is `em`-relative (`p { margin: 1em 0 }`,
+        ;; `h1 { font-size: 2em }`), and a declaration is not a computed
+        ;; value until something resolves it against a font size. The
+        ;; cascade resolves against the real INHERITED size; this path has
+        ;; no inheritance to read, so it resolves against the element's own
+        ;; declared size or the theme's base -- the same honest
+        ;; simplification the tables this replaced already made, and for
+        ;; the same reason (a heading nested inside larger text will not
+        ;; compound here, where the cascade's own chain does). The
+        ;; resolution itself is cssom.core's, not a second copy of it.
+        ;;
+        ;; A NESTED list's cancelled margins are the one UA rule that needs
+        ;; an ANCESTOR (`ul ul { margin-block: 0 }`), and `ua-style-for`
+        ;; without a document honestly declines to evaluate it (see there).
+        ;; So the mark `with-nested-list-margins` already writes is what
+        ;; applies it on this path: measured on
+        ;; `<ul><li>a<ul><li>b</li></ul></li></ul>`, Chrome reports the
+        ;; inner `<ul>` at `margin-block: 0px` and its `<li>` at y=20,
+        ;; where a full 1em top margin put the same `<li>` at y=34.
+        ua (cond-> (first (css/resolve-relative-lengths
+                           ;; The element's OWN declared size, injected so
+                           ;; it wins over the sheet's `h1 { font-size:
+                           ;; 2em }` the way an author declaration wins in
+                           ;; the real cascade -- without it a
+                           ;; `<h1 style="font-size:20px">`'s margins would
+                           ;; resolve against 40.
+                           (let [declared (parse-px (get-in node [:attrs :style/font-size]) nil)
+                                 sheet (css/ua-style-for node)]
+                             (cond-> sheet declared (assoc :font-size declared)))
+                           (:font-size theme)
+                           (:font-size theme)))
+             (and (contains? list-container-tags (:tag node))
+                  (attr node :ua/list-descendant))
+             (assoc :margin-top 0 :margin-bottom 0))
         style (fn [node k] (or (get-in node [:attrs (keyword "style" (name k))])
                                (get ua k)))]
   {:display (style node :display)
@@ -1604,18 +1514,26 @@
    ;; widen a content-box `width` would make `div{width:50px}` occupy 58px
    ;; because of a styling choice the author never made.
    :padding/declared (parse-int (style node :padding) nil)
-   :padding-top (parse-int (style node :padding-top)
-                           (:padding-top ua-box))
-   :padding-right (parse-int (style node :padding-right)
-                             (:padding-right ua-box))
-   :padding-bottom (parse-int (style node :padding-bottom)
-                              (:padding-bottom ua-box))
-   :padding-left (parse-int (style node :padding-left)
-                            (:padding-left ua-box))
-   :margin-top (parse-int (style node :margin-top)
-                          (ua-margin-y node theme))
-   :margin-bottom (parse-int (style node :margin-bottom)
-                             (ua-margin-y node theme))
+   ;; parse-PX, not parse-int: a UA padding is not always a whole number of
+   ;; them. A `<fieldset>`'s is `0.35em 0.75em 0.625em`, which at 14px is
+   ;; 4.9 / 10.5 / 8.75, and Brave reports and USES those thirds and halves
+   ;; -- its fieldset is 65.641 tall where truncating each side to 4 and 8
+   ;; gives 64. This survived before only by accident of WHERE the number
+   ;; entered: the em table was consulted as parse-int's FALLBACK, which is
+   ;; not parsed at all. Now that the value comes through the cascade like
+   ;; any other declaration, the coercion is the one place that has to know
+   ;; a padding can be fractional. Author `padding: 10.5px` keeps its half
+   ;; pixel too, which it did not before and which is simply right.
+   :padding-top (parse-px (style node :padding-top)
+                          (:padding-top ua-box))
+   :padding-right (parse-px (style node :padding-right)
+                            (:padding-right ua-box))
+   :padding-bottom (parse-px (style node :padding-bottom)
+                             (:padding-bottom ua-box))
+   :padding-left (parse-px (style node :padding-left)
+                           (:padding-left ua-box))
+   :margin-top (parse-int (style node :margin-top) nil)
+   :margin-bottom (parse-int (style node :margin-bottom) nil)
    :margin-left (parse-int (style node :margin-left) nil)
    :margin-right (parse-int (style node :margin-right) nil)
    ;; A USED height injected by the layout itself (force-cross-size's
@@ -1727,17 +1645,14 @@
    :outline-offset (parse-int (style node :outline-offset) 0)
    :background (or (style node :background) (style node :background-color))
    :color (style node :color)
-   :font-size (or (style node :font-size)
-                  (when (contains? form-control-tags (:tag node)) (:size ua-control-font))
-                  ;; `font-size: smaller` against the theme base -- the
-                  ;; fallback for a caller with no inherited size in hand.
-                  ;; inline-fragments resolves the same three tags against
-                  ;; the size they really inherit, which is what makes them
-                  ;; compound. See ua-font-smaller-tags.
-                  (when (contains? ua-font-smaller-tags (:tag node))
-                    (/ (:font-size theme) ua-font-smaller-ratio))
-                  (when-let [scale (get ua-font-scale (:tag node))]
-                    (long (* scale (:font-size theme)))))
+   ;; Already an absolute number for anything the cascade (or, on the
+   ;; uncascaded path, the `ua` map above) resolved -- a computed font size
+   ;; in real CSS is a length, never `2em` or `smaller`. parse-px'd anyway
+   ;; because an author can still write a value neither side can resolve
+   ;; (`font-size: medium`, whose keyword table is family-dependent -- see
+   ;; cssom.core/resolve-font-size), and every reader downstream does
+   ;; arithmetic on this without coercing.
+   :font-size (parse-px (style node :font-size) nil)
    :font-family (or (style node :font-family)
                     (when (contains? form-control-tags (:tag node))
                       (or (get ua-control-font-family (:tag node))
@@ -4987,8 +4902,10 @@
   "Returns `children` with every ELEMENT child carrying a synthetic
    `:ua/list-descendant` attr -- but only when `node` is itself a list
    container (`list-container-tags`) or already carries the mark itself.
-   `ua-margin-y` reads it to cancel a nested list's vertical margins, the
-   way Chrome's own UA stylesheet does.
+   The margin cancellation itself is a real rule in cssom.core's UA
+   stylesheet (`ul ul { margin-block: 0 }` and its fifteen siblings), and
+   the cascade applies it from the document. This mark is what carries it
+   on the ONE path that has no document to walk -- see node-style's `ua`.
 
    The mark propagates through EVERY element rather than only through
    `<li>` because the UA rule is a DESCENDANT selector (`:is(ul, ol) ul`),
@@ -8104,27 +8021,7 @@
                    (and (map? child) (= :element (:node/type child)))
                    (if (non-rendered-tag? (:tag child))
                      acc
-                     (let [st (node-style child theme)
-                           ;; `font-size: smaller` resolved where the size
-                           ;; it is smaller THAN is actually known. Nothing
-                           ;; declares a size for `<small>`/`<sub>`/`<sup>`
-                           ;; -- the UA sheet cannot, the keyword is not a
-                           ;; length -- so `node-style` could only divide
-                           ;; the theme base, and a `<small>` inside a
-                           ;; `<small>` or inside sized text got the same
-                           ;; answer as one at the top of the page. Here
-                           ;; `inherited` is still the PARENT's, so the
-                           ;; division lands on the right operand and
-                           ;; nesting compounds the way the browser's does.
-                           ;; See ua-font-smaller-tags for the three
-                           ;; measured chains. An author-declared size
-                           ;; wins, as it must -- the keyword is a UA
-                           ;; default, not an override.
-                           st (if (and (contains? ua-font-smaller-tags (:tag child))
-                                       (nil? (get-in child [:attrs :style/font-size])))
-                                (assoc st :font-size (/ (:font-size inherited)
-                                                        ua-font-smaller-ratio))
-                                st)]
+                     (let [st (node-style child theme)]
                        (if (= "none" (:display st))
                          acc
                          (let [opacity (* opacity (:opacity st)
@@ -10501,7 +10398,7 @@
         ;; A rendered legend is not in the flow at all: it sits in the
         ;; fieldset's block-start BORDER, and the border band grows to hold
         ;; it. Measured in Brave at width 800 / font 14 (see fieldset-legend
-        ;; for the shape rules and ua-em-box for the box constants):
+        ;; for the shape rules and ua-tag-box for the box constants):
         ;;
         ;;   band      = max(border-block-start-width, legend height +
         ;;               legend margin-block-END)
