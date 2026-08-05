@@ -2590,24 +2590,59 @@
   ;; `break-spaces` does that `pre-wrap` does not.
   :html "<div style=\"width: 200px; white-space: break-spaces\">aa\nbb</div>"}
 
- ;; The next three are BLOCKED UPSTREAM OF cssom, measured 2026-08-05.
- ;; kotoba-lang/htmldom collapses whitespace at PARSE time on an
- ;; HTML-STRUCTURAL rule (a real `<pre>` or a raw-text tag), where a
- ;; browser defers all of it to layout and decides it from CSS -- so by the
- ;; time `cssom.layout` sees a `<span style="white-space: pre">`, its
- ;; leading spaces are already one space and its tab is already a space.
- ;; Reproduced directly: `(htmldom.core/parse-into-document "<span>a\tb
- ;; </span>")` yields the text `"a b"`, and the same markup in a `<pre>`
- ;; yields `"a\tb"`.
+ ;; The four below are the content that DOES discriminate `break-spaces`
+ ;; from `pre-wrap`, which the round that added the case above looked for
+ ;; and did not find. Its own note is right about why: the oracle measures
+ ;; one Range per word, so it cannot see where a run of spaces breaks. What
+ ;; it can see is the BOX, and the two values give it different heights as
+ ;; soon as the spaces themselves overflow the line -- which the six-space
+ ;; shape that round tried never does.
  ;;
- ;; cssom's own half is implemented and measured against the same
- ;; browser -- in `<pre>` form, where the characters survive the parser,
- ;; the engine now answers 63/35/42 for these three shapes exactly (see
- ;; the `a-preserved-tab-*` and `a-shrink-to-fit-box-measures-its-own-
- ;; white-space-declaration` tests in test/cssom/layout_test.clj, which
- ;; assert those numbers). Closing them needs htmldom to stop collapsing
- ;; at parse time, which is its own change in its own repo; they are left
- ;; in the corpus, failing, as the measurement that will report it.
+ ;; Measured in Brave 151, 2026-08-06, at 14px monospace / 20px lines, so
+ ;; 7px a character and eight of them to a 60px box. Each `break-spaces`
+ ;; case is followed by its `pre-wrap` twin, because a single height cannot
+ ;; distinguish 'the rule is implemented' from 'this shape does not
+ ;; discriminate'.
+
+ {:id :text/white-space-break-spaces-wraps-inside-a-run-of-spaces
+  :group :text
+  ;; 60x40. `aa` plus ten spaces is 84px of preserved content in a 60px
+  ;; box, and under `break-spaces` a space is measured and may be broken
+  ;; after, so the run wraps onto a second line.
+  :html "<div style=\"width: 60px; white-space: break-spaces\">aa          </div>"}
+
+ {:id :text/white-space-pre-wrap-hangs-a-run-of-spaces
+  :group :text
+  ;; 60x20 -- the twin, and the whole difference. Under `pre-wrap` the same
+  ;; ten spaces HANG past the content edge rather than wrapping, so the box
+  ;; is one line tall.
+  :html "<div style=\"width: 60px; white-space: pre-wrap\">aa          </div>"}
+
+ {:id :text/white-space-break-spaces-wraps-a-run-before-the-next-word
+  :group :text
+  ;; 60x60: `aa` + six spaces, then eight spaces, then six spaces + `bb`.
+  ;; Three lines, and the only way to get three is to measure the spaces.
+  :html "<div style=\"width: 60px; white-space: break-spaces\">aa                    bb</div>"}
+
+ {:id :text/white-space-pre-wrap-hangs-a-run-before-the-next-word
+  :group :text
+  ;; 60x40 for the identical markup -- the spaces hang and only `bb` wraps.
+  :html "<div style=\"width: 60px; white-space: pre-wrap\">aa                    bb</div>"}
+
+ ;; The next three were BLOCKED UPSTREAM OF cssom from 2026-08-05 and are
+ ;; UNBLOCKED as of 2026-08-06. kotoba-lang/htmldom used to collapse
+ ;; whitespace at PARSE time, on the belief that space collapsing was
+ ;; HTML-structural, so `cssom.layout` never saw the characters: a
+ ;; `<span style="white-space: pre">   indented</span>` arrived as
+ ;; `" indented"` and a tab arrived as a space.
+ ;;
+ ;; Measured in Brave 151, 2026-08-06 (htmldom's conformance/ws_probe.cljs),
+ ;; the belief was wrong: the browser's HTML parser collapses NOTHING --
+ ;; `<div>   a   b   </div>` keeps every one of its spaces in the DOM, and
+ ;; `<div>a\tb</div>` keeps its tab. The only whitespace it drops is the
+ ;; single leading newline after a `<pre>`/`<textarea>` start tag. htmldom
+ ;; now defers all of it to layout, where `white-space` can decide, and
+ ;; these three answer 77/63/35 -- the browser's numbers exactly.
 
  {:id :text/white-space-pre-keeps-leading-spaces
   :group :text
