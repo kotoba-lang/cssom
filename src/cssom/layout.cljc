@@ -2633,11 +2633,23 @@
   (long (Math/floor (+ ascent (/ (- line-height (+ ascent descent)) 2)))))
 
 (defn- translate-ops
+  "Every op moved by (dx, dy).
+
+   `:hit` moves with the op, not separately: it is a SECOND geometry on
+   the same op (a `:node` op's hit region, in the same coordinate space as
+   its box -- see the ns docstring), and an op whose box moved while its
+   hit region stayed put is an element painted in one place and clicked in
+   another. Found by clicking one: a two-line `<a>` inside a `<p>` came
+   back with a box at y=30 and hit rects at y=16, because the block flow
+   translated the run and the rects rode along untouched."
   [dx dy ops]
   (mapv (fn [op]
           (cond-> op
             (contains? op :x) (update :x + dx)
-            (contains? op :y) (update :y + dy)))
+            (contains? op :y) (update :y + dy)
+            (seq (:hit op)) (update :hit
+                                    (fn [rs]
+                                      (mapv #(-> % (update :x + dx) (update :y + dy)) rs)))))
         ops))
 
 (defn- default-bg
@@ -11157,21 +11169,30 @@
   [[a b c d e f] ops]
   (let [px (fn [x y] (round-4 (+ (* a x) (* c y) e)))
         py (fn [x y] (round-4 (+ (* b x) (* d y) f)))
-        scale (Math/sqrt (Math/abs (- (* a d) (* b c))))]
+        scale (Math/sqrt (Math/abs (- (* a d) (* b c))))
+        bbox (fn [{:keys [x y w h] :or {x 0 y 0 w 0 h 0}}]
+               (let [xs [(px x y) (px (+ x w) y) (px x (+ y h)) (px (+ x w) (+ y h))]
+                     ys [(py x y) (py (+ x w) y) (py x (+ y h)) (py (+ x w) (+ y h))]
+                     x0 (apply min xs) y0 (apply min ys)]
+                 {:x x0 :y y0
+                  :w (round-4 (- (apply max xs) x0))
+                  :h (round-4 (- (apply max ys) y0))}))]
     (mapv (fn [op]
             (if (= :text (:draw/op op))
               (let [x (:x op 0) y (:y op 0)]
                 (cond-> (assoc op :x (px x y) :y (py x y))
                   (:font-size op) (update :font-size #(round-4 (* % scale)))))
               (if (and (contains? op :x) (contains? op :y))
-                (let [x (:x op 0) y (:y op 0)
-                      w (:w op 0) h (:h op 0)
-                      xs [(px x y) (px (+ x w) y) (px x (+ y h)) (px (+ x w) (+ y h))]
-                      ys [(py x y) (py (+ x w) y) (py x (+ y h)) (py (+ x w) (+ y h))]
-                      x0 (apply min xs) y0 (apply min ys)]
-                  (cond-> (assoc op :x x0 :y y0)
-                    (contains? op :w) (assoc :w (round-4 (- (apply max xs) x0)))
-                    (contains? op :h) (assoc :h (round-4 (- (apply max ys) y0)))))
+                (let [{:keys [x y w h]} (bbox op)]
+                  (cond-> (assoc op :x x :y y)
+                    (contains? op :w) (assoc :w w)
+                    (contains? op :h) (assoc :h h)
+                    ;; a hit region is the op's SECOND geometry, in the same
+                    ;; space as its box, so it maps through the same matrix
+                    ;; and by the same axis-aligned rule -- a transformed
+                    ;; element whose box moved and whose hit region did not
+                    ;; is painted in one place and clicked in another
+                    (seq (:hit op)) (update :hit #(mapv bbox %))))
                 op)))
           ops)))
 
