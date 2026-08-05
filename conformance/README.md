@@ -848,7 +848,7 @@ hit testing, `[]` meaning "not a hit-test candidate". Absent — the
 overwhelmingly common case — means the border box, so nothing that reads
 `:node` ops today changes shape. Widening the box instead would have made
 every `getBoundingClientRect` comparison wrong to fix the hit test, and
-this corpus scores both: **geometry did not move at all** (1334/1335, 369
+this corpus scores both: **geometry did not move at all** (1335/1335, 370
 clean, byte-identical residual).
 
 A fourth cause was ordinary paint order rather than a hit region.
@@ -872,8 +872,8 @@ see. Five points, all of `:float/float-right-block-with-width`.
 | axis | before | after |
 |---|---|---|
 | line structure | 356/356 | 356/356 |
-| geometry (boxes) | 1334/1335 | 1334/1335 |
-| geometry (clean cases) | 369/370 | 369/370 |
+| geometry (boxes) | 1335/1335 | 1335/1335 |
+| geometry (clean cases) | 370/370 | 370/370 |
 | paint order | 9202/9234 | **9227/9234** |
 | paint order (clean cases) | 356/370 | **364/370** |
 | computed style | 18687/18763 | 18687/18763 |
