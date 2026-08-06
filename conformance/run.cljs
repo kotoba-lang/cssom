@@ -509,6 +509,19 @@
       imgs.push([im.getAttribute('src'), im.naturalWidth, im.naturalHeight, im.complete]);
     }
     out['__images__'] = imgs;
+    // The viewport `@media` is evaluated against, measured rather than
+    // assumed. The corpus's cases are 800px wide but the headless window
+    // is not: `innerWidth` reads 756 in Brave 151 headless on this
+    // machine, while `cssom.core/default-viewport-width` is 800. Every
+    // `@media` threshold between those two numbers would have diverged
+    // for a reason that is a property of the harness rather than of the
+    // cascade. See `*oracle-viewport-width*`.
+    out['__viewport__'] = [window.innerWidth, window.innerHeight];
+    // ...and the colour scheme `prefers-color-scheme` is evaluated
+    // against, for the same reason. Measured rather than assumed because
+    // the assumption was wrong: `cssom.core/default-color-scheme` is
+    // \"light\" and headless Brave 151 on this machine reports DARK.
+    out['__scheme__'] = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
     var pre = document.createElement('pre');
     pre.id = 'kotoba-conformance-out';
     pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(out))));
@@ -516,25 +529,106 @@
   })();
   ")
 
+(def ^:private conditional-group-at-rules
+  "At-rules whose body holds RULES, not declarations, and which are
+   therefore transparent to scoping: the selectors inside them still have
+   to be prefixed, and the at-rule's own prelude must not be.
+
+   Everything else that opens a block -- `@font-face`, `@property`,
+   `@keyframes`, `@page`, `@counter-style` -- holds DECLARATIONS, and
+   prefixing anything inside one would corrupt it. Those are emitted
+   verbatim, which also means they are document-global on the shared page:
+   a case registering `@property --x` registers it for every case, so a
+   case using one must pick a name nothing else uses."
+  #{"media" "supports" "layer" "container" "scope" "document"})
+
+(defn- matching-brace
+  "Index of the `}` closing the `{` at `open`, or nil if it is unbalanced.
+   The corpus is hand-written CSS with no braces inside strings, and an
+   unbalanced block is caught by the corpus-wide balance check rather than
+   guessed at here."
+  [s open]
+  (loop [i (inc open) depth 1]
+    (cond
+      (>= i (count s)) nil
+      (= \{ (nth s i)) (recur (inc i) (inc depth))
+      (= \} (nth s i)) (if (= 1 depth) i (recur (inc i) (dec depth)))
+      :else (recur (inc i) depth))))
+
 (defn- scope-css
-  "Prefixes every selector in a case's CSS with that case's container id, so
-   all cases can share one page without one case's `li::before` reaching
-   into another's markup. Deliberately naive (split on `}`, then on `,`):
-   the corpus is hand-written and stays within plain selector lists, and a
-   real @media/@supports block would be visible as a mis-scoped rule rather
-   than silently wrong."
+  "Prefixes every STYLE RULE selector in a case's CSS with that case's
+   container id, so all cases can share one page without one case's
+   `li::before` reaching into another's markup.
+
+   Brace-balanced rather than `split` on `}`, because a cascade corpus is
+   made of at-rules and the naive version corrupted every one of them.
+   Measured on the shape this round needed first:
+   `@media (min-width: 600px) { p { color: red } }` came out as
+   `#case-0 @media (min-width: 600px) { p { color: red }` -- the at-rule's
+   PRELUDE prefixed with an id (so the whole block is invalid and the
+   browser drops it), the inner `p` left UNSCOPED (so had it parsed it
+   would have reached every other case on the page), and the closing brace
+   lost. `@layer a, b;` became `#case-0 @layer a, #case-0 b;`, because the
+   comma-split for a selector list was applied to a layer-name list.
+   No case in the corpus contained an `@` rule before this round, so none
+   of that had ever run.
+
+   Three shapes, and the rule for each:
+   - an at-rule STATEMENT (`@layer a, b;`) is emitted verbatim -- it names
+     layers, not elements, and there is nothing in it to scope;
+   - a conditional group at-rule (see `conditional-group-at-rules`) keeps
+     its prelude and has its BODY scoped recursively, so
+     `@media (...) { @layer x { p { ... } } }` reaches `#case-0 p`;
+   - a style rule has its selector list scoped and its body emitted
+     verbatim. The body is verbatim on purpose: a NESTED rule
+     (`p { & span { ... } }`) is relative to its parent and already
+     scoped by it -- prefixing it again would make it `#case-0 & span`,
+     which matches nothing."
   [css scope]
   (when-not (str/blank? (str css))
-    (->> (str/split css #"\}")
-         (keep (fn [chunk]
-                 (when-let [[sel body] (when (str/includes? chunk "{") (str/split chunk #"\{" 2))]
-                   (str (->> (str/split sel #",")
-                             (map str/trim)
-                             (remove str/blank?)
-                             (map #(str scope " " %))
-                             (str/join ", "))
-                        " {" body "}"))))
-         (str/join "\n"))))
+    (let [s (str css)
+          n (count s)]
+      (loop [i 0 out []]
+        (let [i (loop [i i] (if (and (< i n) (re-matches #"\s" (str (nth s i)))) (recur (inc i)) i))]
+          (if (>= i n)
+            (let [out (remove str/blank? out)]
+              (when (seq out) (str/join "\n" out)))
+            (let [brace (str/index-of s "{" i)
+                  semi (str/index-of s ";" i)]
+              (cond
+                ;; an at-rule statement: `@layer a, b;`, `@import ...;`
+                (and semi (or (nil? brace) (< semi brace)))
+                (recur (inc semi) (conj out (str/trim (subs s i (inc semi)))))
+
+                (nil? brace)
+                (let [out (remove str/blank? out)]
+                  (when (seq out) (str/join "\n" out)))
+
+                :else
+                (if-let [close (matching-brace s brace)]
+                  (let [prelude (str/trim (subs s i brace))
+                        body (subs s (inc brace) close)
+                        at-name (second (re-find #"^@([A-Za-z-]+)" prelude))]
+                    (recur (inc close)
+                           (conj out
+                                 (cond
+                                   (and at-name (contains? conditional-group-at-rules
+                                                           (str/lower-case at-name)))
+                                   (str prelude " {" (or (scope-css body scope) "") "}")
+
+                                   at-name (str prelude " {" body "}")
+
+                                   :else
+                                   (str (->> (str/split prelude #",")
+                                             (map str/trim)
+                                             (remove str/blank?)
+                                             (map #(str scope " " %))
+                                             (str/join ", "))
+                                        " {" body "}")))))
+                  ;; unbalanced: emit the remainder untouched rather than
+                  ;; silently dropping it, so it is visible as a broken rule
+                  (let [out (conj out (subs s i))]
+                    (str/join "\n" (remove str/blank? out))))))))))))
 
 (defn- corpus-page [cases width]
   (str "<!doctype html><html><head><meta charset=\"utf-8\"><style>"
@@ -777,6 +871,32 @@
   [face]
   (if (contains? #{:control :control-bold :control-italic} face) 13.3333 14))
 
+(def ^:dynamic *oracle-viewport-width*
+  "The width `@media` is evaluated against on the ENGINE side, read out of
+   the oracle's own `window.innerWidth` (see the measurement script's
+   `__viewport__` probe) rather than left at `cssom.core`'s 800px default.
+
+   Not a thumb on the scale, and the same class of correction as the
+   wrapper carrying the page's `line-height`: the browser answers
+   `@media (min-width: 780px)` against 756 and the engine answered it
+   against 800, so every threshold in that band was a disagreement about
+   WHICH VIEWPORT, not about the cascade. What is being compared is
+   whether the two sides evaluate the same condition the same way; the
+   number the condition is evaluated against has to be the same one.
+
+   nil means 'the oracle did not report one' -- the engine's own default
+   then stands, which is what happened for every run before this round."
+  nil)
+
+(def ^:dynamic *oracle-color-scheme*
+  "The colour scheme `prefers-color-scheme` is evaluated against on the
+   ENGINE side, read out of the oracle's own `matchMedia` (see the
+   measurement script's `__scheme__` probe). Same correction as
+   `*oracle-viewport-width*`, and it had to be measured to be believed:
+   `cssom.core/default-color-scheme` is \"light\", and headless Brave 151
+   on this machine answers `(prefers-color-scheme: dark)` with **true**."
+  nil)
+
 (defn- cascaded-document
   "One parse + cascade pass: htmldom parse -> cssom.core/apply-cascade,
    stopping BEFORE layout. This is the document the computed-style axis
@@ -798,7 +918,12 @@
   [{:keys [html css]}]
   (-> (html/parse-into-document
        (str "<div id=\"root\" style=\"font-size: 14px; line-height: 20px\">" html "</div>"))
-      (css/apply-cascade (css/parse-rules (or css "")))))
+      (css/apply-cascade (css/parse-rules (or css ""))
+                         (cond-> {}
+                           *oracle-viewport-width*
+                           (assoc :viewport-width *oracle-viewport-width*)
+                           *oracle-color-scheme*
+                           (assoc :color-scheme *oracle-color-scheme*)))))
 
 (defn- engine-ops
   "One layout pass through the real pipeline: htmldom parse -> cssom.core
@@ -1814,9 +1939,19 @@
       ua (:__ua__ oracle)
       _ (println (str "UA base: user-agent baseline probed in the oracle for "
                       (count ua) " tags (bare element, no author CSS)\n"))
-      results (vec (map-indexed (fn [i c]
-                                  (compare-case (get oracle (keyword (str "case-" i)) []) ua width host c))
-                                cases))
+      viewport (:__viewport__ oracle)
+      scheme (:__scheme__ oracle)
+      _ (println (str "viewport: " (if viewport
+                                     (str (first viewport) "x" (second viewport)
+                                          "px, " (or scheme "?") " scheme -- measured in the"
+                                          " oracle and used for @media on BOTH sides")
+                                     "not reported; the engine's own default stands")
+                      "\n"))
+      results (binding [*oracle-viewport-width* (first viewport)
+                        *oracle-color-scheme* scheme]
+                (vec (map-indexed (fn [i c]
+                                    (compare-case (get oracle (keyword (str "case-" i)) []) ua width host c))
+                                  cases)))
       scorable (remove #(= :unscorable (:status %)) results)
       passed (filter #(= :pass (:status %)) scorable)
       by-group (->> scorable

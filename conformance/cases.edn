@@ -29,6 +29,14 @@
 ;;    turned a one-line paragraph into two. A case that deliberately leaves
 ;;    a float uncontained must wrap it in an `overflow: hidden` box and say
 ;;    in a comment that the wrapper is not the subject.
+;; 3. A NAME declared by an at-rule is document-global (round 44).
+;;    `scope-css` prefixes SELECTORS, and there is nothing in
+;;    `@layer base { ... }`, `@property --x { ... }` or
+;;    `@scope (#root) { ... }` to prefix -- so two cases both naming a
+;;    layer `base` would share one layer and one ordering, and two both
+;;    registering `--x` would share one registration. Every such name must
+;;    be unique across the whole file; the convention here is to prefix it
+;;    with something derived from the case's own id.
 ;;
 ;; Keys: :id :group :html :css, plus
 ;;   :oracle/blind true -- the oracle structurally CANNOT see this case's
@@ -4144,4 +4152,679 @@
   :group :multicol
   ;; And so is a column flex container, between its items.
   :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"display: flex; flex-direction: column\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div><div style=\"height: 20px\">c</div></div></div>"}
+
+ ;; ==================================================================
+ ;; Round forty-four: cascade machinery -- which declarations reach a
+ ;; box, rather than where the box goes.
+ ;;
+ ;; The corpus had 48 selector/cascade cases and **not one at-rule**:
+ ;; `grep '@' cases.edn` found two email addresses. `@layer`,
+ ;; `@supports`, `@media`, `@container` and CSS nesting were an entire
+ ;; unmeasured subsystem, and three of those five are implemented in
+ ;; `cssom.core` -- implemented and never differentially tested.
+ ;;
+ ;; Every expected value below was read out of a real headless Brave
+ ;; 151.1.93.129 over CDP before the case was written.
+ ;;
+ ;; A THIRD HAZARD OF THE SHARED PAGE, on top of the two at the top of
+ ;; this file: **a layer name, a `@property` name and a `@scope` root are
+ ;; DOCUMENT-GLOBAL.** `scope-css` prefixes selectors, and there is
+ ;; nothing in `@layer a { ... }` to prefix -- so two cases both naming a
+ ;; layer `base` would share one layer and one ordering. Every layer name
+ ;; here is prefixed with its case's own initials, every `@property` name
+ ;; is unique, and every `@scope` root is an id nothing else uses.
+
+ ;; ---- @layer: layer order, specificity, and the !important reversal ----
+
+ {:id :layer/a-later-layer-wins
+  :group :layer
+  ;; The baseline both the divergences below are read against: of two
+  ;; layers, the one declared LATER wins, whatever the specificity.
+  ;; Brave: red.
+  :html "<div><p id=\"lw1\">text</p></div>"
+  :css "@layer lw-a { #lw1 { color: #0000ff } } @layer lw-b { #lw1 { color: #ff0000 } }"}
+
+ {:id :layer/a-layer-beats-a-more-specific-earlier-layer
+  :group :layer
+  ;; Layer membership is checked BEFORE specificity: `p#lc1` (1,0,1) in
+  ;; the earlier layer loses to a bare `#lc1` (1,0,0) in the later one.
+  ;; The `@layer a, b;` statement is what fixes the order here -- the
+  ;; blocks appear in the opposite order. Brave: red.
+  :html "<div><p id=\"lc1\">text</p></div>"
+  :css "@layer lc-a, lc-b; @layer lc-b { #lc1 { color: #ff0000 } } @layer lc-a { p#lc1 { color: #0000ff } }"}
+
+ {:id :layer/the-order-is-the-first-appearance-of-the-block
+  :group :layer
+  ;; With no ordering statement, a layer's position is where its first
+  ;; BLOCK appears. `li-b` is written first, so `li-a` is the later layer
+  ;; and wins. Brave: red.
+  :html "<div><p id=\"li1\">text</p></div>"
+  :css "@layer li-b { #li1 { color: #0000ff } } @layer li-a { #li1 { color: #ff0000 } }"}
+
+ {:id :layer/an-unlayered-declaration-beats-a-layered-one
+  :group :layer
+  ;; Unlayered author declarations are the LAST layer, so they win over
+  ;; every layered one of the same importance regardless of specificity.
+  ;; Brave: padding-left 10px, not 30.
+  :html "<div><p id=\"lj1\">text</p></div>"
+  :css "@layer lj-a { #lj1 { padding-left: 30px } } #lj1 { padding-left: 10px }"}
+
+ {:id :layer/important-reverses-the-layer-order
+  :group :layer
+  ;; ...and for `!important` declarations real CSS reverses that order, so
+  ;; the EARLIER layer wins. Brave: red, from the earlier layer.
+  :html "<div><p id=\"lm1\">text</p></div>"
+  :css "@layer lm-a { #lm1 { color: #ff0000 !important } } @layer lm-b { #lm1 { color: #0000ff !important } }"}
+
+ {:id :layer/a-layered-important-beats-an-unlayered-important
+  :group :layer
+  ;; The reversal reaches the unlayered declarations too: for `!important`
+  ;; they are the WEAKEST, not the strongest -- the mirror image of
+  ;; `an-unlayered-declaration-beats-a-layered-one` above. Brave: red,
+  ;; from inside the layer. This engine agrees, which is worth having a
+  ;; case for: its own docstring says "any unlayered declaration beats
+  ;; every layered one of the same importance", and that sentence is only
+  ;; true of the normal half.
+  :html "<div><p id=\"lg1\">text</p></div>"
+  :css "@layer lg-a { #lg1 { color: #ff0000 !important } } #lg1 { color: #0000ff !important }"}
+
+ {:id :layer/a-layer-inside-media-keeps-its-layer
+  :group :layer
+  ;; `@layer` nested inside `@media` is fully supported here, and the
+  ;; control for the case below it. Brave: red -- `le-b` is the later
+  ;; layer and beats the one declared inside the `@media` block.
+  :html "<div><p id=\"le1\">text</p></div>"
+  :css "@layer le-a, le-b; @media (min-width: 1px) { @layer le-a { #le1 { color: #0000ff } } } @layer le-b { #le1 { color: #ff0000 } }"}
+
+ {:id :layer/media-inside-a-layer-keeps-the-layer
+  :group :layer
+  ;; The other nesting order, and the engine's own documented cut:
+  ;; `parse-rules` says an `@media` nested inside `@layer` "loses the
+  ;; outer layer tag on that block". Measured, losing it does not merely
+  ;; forget the layer -- it promotes the rule to UNLAYERED, which is the
+  ;; strongest normal position there is. Brave: blue (`ld-b` is later);
+  ;; this engine: red, because the rule inside `@media` escaped `ld-a`
+  ;; altogether.
+  :html "<div><p id=\"ld1\">text</p></div>"
+  :css "@layer ld-a, ld-b; @layer ld-b { #ld1 { color: #0000ff } } @layer ld-a { @media (min-width: 1px) { #ld1 { color: #ff0000 } } }"}
+
+ {:id :layer/two-anonymous-layers-are-two-layers
+  :group :layer
+  ;; Each `@layer { ... }` with no name is its OWN anonymous layer, so the
+  ;; second beats the first even though the first is more specific.
+  ;; Brave: blue. This engine tags both with the same empty-string layer
+  ;; name, so they land in one layer and specificity decides: red.
+  :html "<div><p id=\"la1\">text</p></div>"
+  :css "@layer { p#la1 { color: #ff0000 } } @layer { #la1 { color: #0000ff } }"}
+
+ {:id :layer/a-nested-layer-is-the-layer-its-dotted-name-names
+  :group :layer
+  ;; `@layer o { @layer i { ... } }` and `@layer o.i { ... }` are the SAME
+  ;; layer, so the two declarations below are in one layer and specificity
+  ;; decides: Brave reports red, from the more specific `p#lb1`. This
+  ;; engine flattens the nested block to its OUTER name (`lb-o`) and reads
+  ;; `lb-o.lb-i` as an unrelated third name, so it sees two different
+  ;; layers, puts the dotted one later, and reports blue.
+  :html "<div><p id=\"lb1\">text</p></div>"
+  :css "@layer lb-o { @layer lb-i { p#lb1 { color: #ff0000 } } } @layer lb-o.lb-i { #lb1 { color: #0000ff } }"}
+
+ {:id :layer/revert-layer-rolls-back-to-the-previous-layer
+  :group :layer
+  ;; `revert-layer` drops the declaration back to the value the PREVIOUS
+  ;; layer left, so the 120px in `rg-b` is rolled back to `rg-a`'s 200.
+  ;; Brave: 200x20. This engine stores the literal string `revert-layer`
+  ;; as the width, which `cssom.layout` cannot read, so the box is `auto`
+  ;; and fills its container: 800x20.
+  :html "<div><div id=\"rg1\">w</div></div>"
+  :css "@layer rg-a { #rg1 { width: 200px } } @layer rg-b { #rg1 { width: 120px; width: revert-layer } }"}
+
+ ;; ---- @supports: a condition this engine does not evaluate at all ----
+ ;;
+ ;; `@supports` is not in `cssom.core` in any form. `parse-rules` does not
+ ;; recognise the at-rule, and its inner rules are picked up by the plain
+ ;; selector parser as if the wrapper were not there -- so every
+ ;; `@supports` block applies UNCONDITIONALLY. The four controls below
+ ;; agree for exactly that reason and are here to make the four
+ ;; divergences mean something: "applies when it should" is not evidence
+ ;; on an engine that applies everything.
+
+ {:id :supports/a-supported-condition-applies
+  :group :supports
+  ;; Control. Brave supports `display: grid`, so the block applies: red.
+  :html "<div><p id=\"sb1\">text</p></div>"
+  :css "@supports (display: grid) { #sb1 { color: #ff0000 } }"}
+
+ {:id :supports/an-unsupported-value-does-not-apply
+  :group :supports
+  ;; Brave does not support `display: flurb`, so the block does NOT
+  ;; apply and the paragraph stays black. This engine applies it: red.
+  :html "<div><p id=\"sa1\">text</p></div>"
+  :css "@supports (display: flurb) { #sa1 { color: #ff0000 } }"}
+
+ {:id :supports/an-unknown-property-name-does-not-apply
+  :group :supports
+  ;; The same in the other half of the declaration -- the PROPERTY is the
+  ;; unknown one. Brave: black. This engine: red.
+  :html "<div><p id=\"sg1\">text</p></div>"
+  :css "@supports (flurb: 1px) { #sg1 { color: #ff0000 } }"}
+
+ {:id :supports/not-inverts-a-supported-condition
+  :group :supports
+  ;; `not (display: grid)` is FALSE in a browser that supports grid, so
+  ;; the block does not apply: black. This engine applies it: red. The
+  ;; discriminating half of `not` -- the version that wraps an
+  ;; UNsupported condition would agree by accident, since both sides then
+  ;; apply the block.
+  :html "<div><p id=\"sc1\">text</p></div>"
+  :css "@supports not (display: grid) { #sc1 { color: #ff0000 } }"}
+
+ {:id :supports/and-with-one-false-arm-does-not-apply
+  :group :supports
+  ;; Brave: black -- one false arm is enough. This engine: red.
+  :html "<div><p id=\"sd1\">text</p></div>"
+  :css "@supports (display: grid) and (display: flurb) { #sd1 { color: #ff0000 } }"}
+
+ {:id :supports/or-with-one-true-arm-applies
+  :group :supports
+  ;; Control, and the pair of the case above: one TRUE arm is enough, so
+  ;; both sides apply it. Brave: red.
+  :html "<div><p id=\"se1\">text</p></div>"
+  :css "@supports (display: flurb) or (display: grid) { #se1 { color: #ff0000 } }"}
+
+ {:id :supports/selector-function-on-a-supported-selector
+  :group :supports
+  ;; Control. `selector(p:has(b))` is true in Brave 151: red.
+  :html "<div><p id=\"sf1\">text</p></div>"
+  :css "@supports selector(p:has(b)) { #sf1 { color: #ff0000 } }"}
+
+ {:id :supports/selector-function-on-an-unknown-pseudo-class
+  :group :supports
+  ;; ...and false for a pseudo-class that does not exist, so Brave leaves
+  ;; it black. This engine: red.
+  :html "<div><p id=\"sz1\">text</p></div>"
+  :css "@supports selector(:frobnicate) { #sz1 { color: #ff0000 } }"}
+
+ ;; ---- @media: evaluated against the oracle's own viewport ----
+ ;;
+ ;; The harness now reads `window.innerWidth` out of the oracle and hands
+ ;; it to `apply-cascade` (see `*oracle-viewport-width*`), because the two
+ ;; numbers were not the same: cases are 800px wide, the headless window
+ ;; reports **756**, and `cssom.core/default-viewport-width` is 800. Every
+ ;; threshold in that band would otherwise have diverged over WHICH
+ ;; VIEWPORT rather than over the cascade.
+
+ {:id :media/min-width-below-the-viewport-applies
+  :group :media
+  ;; Brave: red. 600 < 756.
+  :html "<div><p id=\"ma1\">text</p></div>"
+  :css "@media (min-width: 600px) { #ma1 { color: #ff0000 } }"}
+
+ {:id :media/min-width-above-the-viewport-does-not-apply
+  :group :media
+  ;; Brave: black. 5000 > 756.
+  :html "<div><p id=\"mb1\">text</p></div>"
+  :css "@media (min-width: 5000px) { #mb1 { color: #ff0000 } }"}
+
+ {:id :media/max-width-above-the-viewport-applies
+  :group :media
+  ;; Brave: red.
+  :html "<div><p id=\"mc1\">text</p></div>"
+  :css "@media (max-width: 5000px) { #mc1 { color: #ff0000 } }"}
+
+ {:id :media/a-threshold-between-the-case-width-and-the-viewport
+  :group :media
+  ;; The case that measures the plumbing rather than the cascade: 780 is
+  ;; wider than the 756px viewport and narrower than the 800px case, so
+  ;; the answer depends entirely on which number `@media` is evaluated
+  ;; against. Brave: black. The engine agrees only because the harness
+  ;; hands it the oracle's own `innerWidth`; on `default-viewport-width`
+  ;; it reported red.
+  :html "<div><p id=\"md1\">text</p></div>"
+  :css "@media (min-width: 780px) { #md1 { color: #ff0000 } }"}
+
+ {:id :media/and-combines-two-features
+  :group :media
+  ;; Brave: red -- 756 is inside [400, 900].
+  :html "<div><p id=\"me1\">text</p></div>"
+  :css "@media (min-width: 400px) and (max-width: 900px) { #me1 { color: #ff0000 } }"}
+
+ {:id :media/the-screen-media-type-applies
+  :group :media
+  ;; Brave: red.
+  :html "<div><p id=\"mf1\">text</p></div>"
+  :css "@media screen { #mf1 { color: #ff0000 } }"}
+
+ {:id :media/the-print-media-type-does-not-apply
+  :group :media
+  ;; Brave: black. The pair of the case above -- one of them alone cannot
+  ;; tell "the media type is read" from "everything matches".
+  :html "<div><p id=\"ml1\">text</p></div>"
+  :css "@media print { #ml1 { color: #ff0000 } }"}
+
+ {:id :media/prefers-color-scheme-matches-the-oracle
+  :group :media
+  ;; The oracle's own scheme, measured (`matchMedia`) and handed to the
+  ;; engine the same way the viewport is. Headless Brave 151 on this
+  ;; machine reports **dark**, where `cssom.core/default-color-scheme` is
+  ;; "light" -- so this case and the one below it were a matched pair of
+  ;; false divergences until the harness stopped assuming. Brave: red.
+  :html "<div><p id=\"mi1\">text</p></div>"
+  :css "@media (prefers-color-scheme: dark) { #mi1 { color: #ff0000 } }"}
+
+ {:id :media/the-other-color-scheme-does-not-apply
+  :group :media
+  ;; ...and its mirror: Brave: black.
+  :html "<div><p id=\"mh1\">text</p></div>"
+  :css "@media (prefers-color-scheme: light) { #mh1 { color: #ff0000 } }"}
+
+ {:id :media/range-syntax-above-the-viewport-does-not-apply
+  :group :media
+  ;; Media Queries 4 range syntax. Brave: black (5000 > 756). This engine
+  ;; does not parse `width >= N` and falls through to its documented
+  ;; "unrecognized features match, so nothing is silently hidden"
+  ;; default: red. The case is written ABOVE the viewport on purpose --
+  ;; below it, both sides apply the block and the case measures nothing.
+  :html "<div><p id=\"mm1\">text</p></div>"
+  :css "@media (width >= 5000px) { #mm1 { color: #ff0000 } }"}
+
+ {:id :media/min-width-in-em-above-the-viewport-does-not-apply
+  :group :media
+  ;; 60em against the ROOT font size (16px in Brave, not the case's 14) is
+  ;; 960px, wider than the 756px viewport, so Brave leaves it black.
+  ;; `media-feature-pattern` accepts only `<digits>` or `<digits>px`, so
+  ;; this engine does not recognise the feature and applies it: red.
+  :html "<div><p id=\"mn1\">text</p></div>"
+  :css "@media (min-width: 60em) { #mn1 { color: #ff0000 } }"}
+
+ {:id :media/not-inverts-a-query
+  :group :media
+  ;; `not all and (min-width: 5000px)` is TRUE at 756px, so Brave applies
+  ;; it: red. This engine has no `not` qualifier -- it splits on `and`,
+  ;; evaluates `(min-width: 5000px)` as false and drops the rule: black.
+  ;; The inversion is what makes this the discriminating direction; a
+  ;; `not` around a matching query would leave both sides agreeing.
+  :html "<div><p id=\"mj1\">text</p></div>"
+  :css "@media not all and (min-width: 5000px) { #mj1 { color: #ff0000 } }"}
+
+ {:id :media/an-unrecognized-feature-still-applies
+  :group :media
+  ;; Control for the two above, and the rule they are exceptions to:
+  ;; `min-resolution` is a feature neither side evaluates, and both apply
+  ;; the block rather than hiding it. Brave: red. The engine's default is
+  ;; deliberate and stated in `media-condition-matches?`; what the two
+  ;; cases above show is that `not` and range syntax are not features,
+  ;; they are GRAMMAR, and defaulting them to "matches" inverts an answer
+  ;; rather than widening one.
+  :html "<div><p id=\"mo1\">text</p></div>"
+  :css "@media (min-resolution: 1dppx) { #mo1 { color: #ff0000 } }"}
+
+ ;; ---- @container: implemented, and never differentially measured ----
+ ;;
+ ;; `cssom.core` has a whole `@container` implementation with an honestly
+ ;; drawn boundary -- a container whose OWN width is already a literal
+ ;; number is queryable, anything layout-driven is not -- and the corpus
+ ;; contained the string `container-type` zero times. Seven of these eight
+ ;; agree with Brave exactly, which is the first evidence that the feature
+ ;; works rather than merely exists.
+
+ {:id :container/min-width-matches-the-containers-width
+  :group :container
+  ;; Brave: red. The container is 400px and declares `container-type`.
+  :html "<div style=\"container-type: inline-size; width: 400px\"><p id=\"qa1\" style=\"margin: 0\">text</p></div>"
+  :css "@container (min-width: 300px) { #qa1 { color: #ff0000 } }"}
+
+ {:id :container/min-width-above-the-containers-width-does-not-match
+  :group :container
+  ;; Brave: black. Same container, a threshold it does not reach.
+  :html "<div style=\"container-type: inline-size; width: 400px\"><p id=\"qb1\" style=\"margin: 0\">text</p></div>"
+  :css "@container (min-width: 900px) { #qb1 { color: #ff0000 } }"}
+
+ {:id :container/max-width-matches
+  :group :container
+  ;; Brave: red.
+  :html "<div style=\"container-type: inline-size; width: 400px\"><p id=\"qc1\" style=\"margin: 0\">text</p></div>"
+  :css "@container (max-width: 900px) { #qc1 { color: #ff0000 } }"}
+
+ {:id :container/an-exact-width-query-matches
+  :group :container
+  ;; `(width: 400px)` is an equality query. Brave: red.
+  :html "<div style=\"container-type: inline-size; width: 400px\"><p id=\"qf1\" style=\"margin: 0\">text</p></div>"
+  :css "@container (width: 400px) { #qf1 { color: #ff0000 } }"}
+
+ {:id :container/a-named-container-matches-its-own-name
+  :group :container
+  ;; Brave: red.
+  :html "<div style=\"container-type: inline-size; container-name: qside; width: 400px\"><p id=\"qd1\" style=\"margin: 0\">text</p></div>"
+  :css "@container qside (min-width: 300px) { #qd1 { color: #ff0000 } }"}
+
+ {:id :container/a-named-query-does-not-match-another-name
+  :group :container
+  ;; ...and the pair that makes the one above evidence: the SAME container
+  ;; and the same condition, queried under a name it does not have. Brave:
+  ;; black.
+  :html "<div style=\"container-type: inline-size; container-name: qside; width: 400px\"><p id=\"qe1\" style=\"margin: 0\">text</p></div>"
+  :css "@container qother (min-width: 300px) { #qe1 { color: #ff0000 } }"}
+
+ {:id :container/no-container-ancestor-never-matches
+  :group :container
+  ;; A 400px wrapper that does NOT declare `container-type` is not a query
+  ;; container, so there is nothing to query and the rule cannot apply.
+  ;; Brave: black. This is the case that separates "the condition is
+  ;; evaluated" from "the condition is ignored and the block applies".
+  :html "<div style=\"width: 400px\"><p id=\"qh1\" style=\"margin: 0\">text</p></div>"
+  :css "@container (min-width: 300px) { #qh1 { color: #ff0000 } }"}
+
+ {:id :container/a-percentage-width-container-is-not-queryable
+  :group :container
+  ;; The engine's documented cut, measured rather than asserted. A
+  ;; container sized `50%` has a real width once layout runs -- 400px, and
+  ;; Brave applies the rule: red. This engine's cascade finishes BEFORE
+  ;; layout and `resolvable-container-width` accepts only an already-literal
+  ;; number, so the query honestly does not apply: black. Closing this one
+  ;; means a re-cascade after layout, which is a pipeline change and not a
+  ;; parser change.
+  :html "<div style=\"container-type: inline-size; width: 50%\"><p id=\"qp1\" style=\"margin: 0\">text</p></div>"
+  :css "@container (min-width: 300px) { #qp1 { color: #ff0000 } }"}
+
+ {:id :container/container-type-establishes-a-containment-context
+  :group :container
+  ;; Found by the eight cases above failing on GEOMETRY while agreeing on
+  ;; every colour they were written for: `container-type: inline-size`
+  ;; applies layout containment, which makes the box an independent
+  ;; formatting context, so the paragraph's UA `margin: 1em 0` no longer
+  ;; escapes through the wrapper's top edge. Measured in Brave: the
+  ;; container is **400x48** with the paragraph at y=14, against **400x20**
+  ;; with the paragraph at y=0 for the identical wrapper without
+  ;; `container-type`. This engine reports 400x20 for both -- it reads
+  ;; `container-type` as a query marker only.
+  ;;
+  ;; The other eight cases now pin `margin: 0` on their paragraph so they
+  ;; measure the QUERY and not this; that is what a case isolating one
+  ;; behaviour means, and this is the one they were accidentally carrying.
+  :html "<div><div style=\"container-type: inline-size; width: 400px\"><p>contained</p></div></div>"}
+
+ {:id :container/a-plain-wrapper-does-not-contain-its-childs-margin
+  :group :container
+  ;; The control beside it: the same wrapper with no `container-type`, so
+  ;; the paragraph's top margin collapses through and the wrapper is
+  ;; 400x20 with the paragraph at y=0. Both sides agree. Without it, the
+  ;; case above measures "these two boxes differ" rather than "this
+  ;; declaration is what makes them differ".
+  :html "<div><div style=\"width: 400px\"><p>not contained</p></div></div>"}
+
+ ;; ---- CSS nesting ----
+ ;;
+ ;; Not implemented, and the failure mode is not "the nested rule does not
+ ;; apply". `parse-rules` splits on braces without tracking depth, so a
+ ;; block holding BOTH declarations and a nested rule loses the
+ ;; declarations -- the outer rule is destroyed by the presence of the
+ ;; inner one. The first case below is the control that isolates that:
+ ;; with the nested rule in a block of its OWN, both sides agree.
+
+ {:id :nesting/an-ampersand-descendant-rule-in-its-own-block
+  :group :nesting
+  ;; Control. `#na1 { & span { ... } }` with nothing else in the block:
+  ;; Brave paints the paragraph blue and the span red, and so does this
+  ;; engine -- the brace splitter happens to recover `& span { color: red }`
+  ;; as a rule of its own, and `& span` matches the span for the wrong
+  ;; reason (a stray `&` in a compound selector is ignored rather than
+  ;; resolved against a parent). Kept because it is what makes the four
+  ;; cases below findings rather than "nesting is unsupported".
+  :html "<div><p id=\"na1\">n <span>d</span></p></div>"
+  :css "#na1 { color: #0000ff } #na1 { & span { color: #ff0000 } }"}
+
+ {:id :nesting/a-declaration-beside-a-nested-rule
+  :group :nesting
+  ;; One block, one declaration, one nested rule. Brave: paragraph blue,
+  ;; span red. This engine: the span is red and the paragraph has NO
+  ;; colour at all -- `color: #0000ff` was dropped on the floor because a
+  ;; nested rule shared its block. A declaration silently vanishing is a
+  ;; worse failure than a nested rule not applying, and it is the reason
+  ;; this group is five cases rather than one.
+  :html "<div><p id=\"nc1\">n <span>d</span></p></div>"
+  :css "#nc1 { color: #0000ff; span { color: #ff0000 } }"}
+
+ {:id :nesting/a-nested-child-combinator
+  :group :nesting
+  ;; `& > b` -- Brave: paragraph blue, bold red. This engine: neither.
+  :html "<div><p id=\"nb1\">n <b>c</b></p></div>"
+  :css "#nb1 { color: #0000ff; & > b { color: #ff0000 } }"}
+
+ {:id :nesting/a-nested-compound-on-the-ampersand
+  :group :nesting
+  ;; `&.on` is the element itself when it also has the class -- the one
+  ;; nesting form with no descendant in it. Brave: red. This engine: no
+  ;; colour, so not even the `#0000ff` beside it survives.
+  :html "<div><p id=\"nd1\" class=\"nd-on\">text</p></div>"
+  :css "#nd1 { color: #0000ff; &.nd-on { color: #ff0000 } }"}
+
+ {:id :nesting/a-nested-sibling-combinator
+  :group :nesting
+  ;; `& + p` reaches the NEXT paragraph, not this one. Brave: the first
+  ;; paragraph is blue and the second red. This engine: neither is
+  ;; coloured.
+  :html "<div><p id=\"ne1\">first</p><p>second</p></div>"
+  :css "#ne1 { color: #0000ff; & + p { color: #ff0000 } }"}
+
+ {:id :nesting/a-media-block-nested-in-a-style-rule
+  :group :nesting
+  ;; Nesting is not only selectors: a conditional at-rule can be nested in
+  ;; a style rule and its declarations apply to that rule's own subject.
+  ;; Brave: red. This engine: no colour -- and note the `@media` here
+  ;; MATCHES, so the divergence is the nesting and not the query.
+  :html "<div><p id=\"nf1\">text</p></div>"
+  :css "#nf1 { color: #0000ff; @media (min-width: 1px) { color: #ff0000 } }"}
+
+ ;; ---- min() / max() / clamp(), and the calc() that already works ----
+ ;;
+ ;; `parse-style-value` resolves a whole-value `calc()` over a constant
+ ;; px/number subset and nothing else, so every one of these lands in the
+ ;; cascade as a raw string `cssom.layout` cannot read -- which for a
+ ;; `width` means `auto`, i.e. the whole container. The last two cases in
+ ;; the group are the controls that place the boundary: constant `calc()`
+ ;; arithmetic agrees exactly, so the gap is the math FUNCTIONS and not
+ ;; the value pipeline.
+
+ {:id :math/min-takes-the-smaller-length
+  :group :math
+  ;; Brave: 50x20. This engine: 800x20.
+  :html "<div><div id=\"ca1\">w</div></div>"
+  :css "#ca1 { width: min(100px, 50px) }"}
+
+ {:id :math/max-takes-the-larger-length
+  :group :math
+  ;; Brave: 100x20. This engine: 800x20.
+  :html "<div><div id=\"cb1\">w</div></div>"
+  :css "#cb1 { width: max(100px, 50px) }"}
+
+ {:id :math/min-of-three-lengths
+  :group :math
+  ;; `min()` takes any number of arguments, not two. Brave: 50x20.
+  :html "<div><div id=\"ch1\">w</div></div>"
+  :css "#ch1 { width: min(100px, 50px, 70px) }"}
+
+ {:id :math/clamp-takes-the-middle-value
+  :group :math
+  ;; Brave: 80x20 -- the preferred 500 is cut to the 80px ceiling.
+  :html "<div><div id=\"cc1\">w</div></div>"
+  :css "#cc1 { width: clamp(10px, 500px, 80px) }"}
+
+ {:id :math/clamp-below-its-floor-takes-the-floor
+  :group :math
+  ;; The other end, so the pair cannot both be satisfied by reading one
+  ;; argument. Brave: 90x20.
+  :html "<div><div id=\"cd1\">w</div></div>"
+  :css "#cd1 { width: clamp(90px, 5px, 300px) }"}
+
+ {:id :math/min-inside-calc
+  :group :math
+  ;; A math function nests inside `calc()`. Brave: 60x20 -- 50 + 10.
+  :html "<div><div id=\"ce1\">w</div></div>"
+  :css "#ce1 { width: calc(min(100px, 50px) + 10px) }"}
+
+ {:id :math/min-of-a-percentage-and-a-length
+  :group :math
+  ;; The form `min()` is actually written for: a percentage against a cap.
+  ;; 50% of the 800px case is 400, so the 300px cap wins. Brave: 300x20.
+  ;; A percentage inside a math function needs the containing block, which
+  ;; is the same "resolve at layout, not at cascade" boundary
+  ;; `parse-calc` already draws for `calc()`.
+  :html "<div><div id=\"cf1\">w</div></div>"
+  :css "#cf1 { width: min(50%, 300px) }"}
+
+ {:id :math/max-in-a-margin
+  :group :math
+  ;; Not a width: `max(10px, 2em)` at the case's 14px font is 28px, and
+  ;; Brave puts the box at x=28 with a 772px width. This engine leaves the
+  ;; margin unset, so the box is at x=0 and 800 wide. In the corpus for
+  ;; the property as much as the function -- a margin is where the
+  ;; computed-style axis can see a length at all.
+  :html "<div><div id=\"cg1\">w</div></div>"
+  :css "#cg1 { margin-left: max(10px, 2em) }"}
+
+ {:id :math/min-in-a-padding-shorthand
+  :group :math
+  ;; The one case in this group the COMPUTED STYLE axis can score: an
+  ;; unresolvable `width` is excluded as a non-absolute length, but an
+  ;; absent `padding` is compared against the browser's number. Brave:
+  ;; padding 4px on all four sides, so the box is 800x28 with a 792px
+  ;; content width. This engine: no padding at all, 800x20.
+  :html "<div><div id=\"jb1\">w</div></div>"
+  :css "#jb1 { padding: min(4px, 9px) }"}
+
+ {:id :math/constant-calc-multiplication-and-division
+  :group :math
+  ;; Control, and the boundary marker: `calc(100px * 2 / 4)` is inside
+  ;; `parse-calc`'s constant subset and both sides report 50x20. The eight
+  ;; cases above are not "this engine cannot do arithmetic".
+  :html "<div><div id=\"ci1\">w</div></div>"
+  :css "#ci1 { width: calc(100px * 2 / 4) }"}
+
+ {:id :math/a-percentage-calc-is-resolved-against-the-container
+  :group :math
+  ;; The other side of that boundary, in `calc()` itself: a percentage
+  ;; makes the expression layout-dependent and `parse-calc` correctly
+  ;; declines it -- but nothing downstream resolves it either, so the
+  ;; declared 100px is lost too. Brave: 780x20 (800 - 20). This engine:
+  ;; 800x20.
+  :html "<div><div id=\"ic1\">w</div></div>"
+  :css "#ic1 { width: 100px; width: calc(100% - 20px) }"}
+
+ ;; ---- the CSS-wide keywords, registered properties, and the rest ----
+
+ {:id :cascade/all-initial-resets-every-property
+  :group :cascade
+  ;; `all` is the shorthand for every property, and `initial` on it takes
+  ;; a `<div>` back to `display: inline`, `font-size: 16px` (the initial
+  ;; value, NOT the inherited 14) and an auto width -- Brave reports a
+  ;; 9.2x16 inline box where the two declarations before it asked for
+  ;; 120x30. This engine does not know the `all` shorthand at all and
+  ;; reports 120x30, block, 14px.
+  :html "<div><div id=\"rd1\">a</div></div>"
+  :css "#rd1 { width: 120px; height: 30px; all: initial }"}
+
+ {:id :cascade/all-unset-inherits-what-inherits
+  :group :cascade
+  ;; `unset` is `inherit` for inherited properties and `initial` for the
+  ;; rest, so the paragraph keeps the inherited 14px font and loses its
+  ;; `display: block` -- Brave reports an inline box and black text where
+  ;; the block declared red. This engine: red, block.
+  :html "<div><p id=\"re1\">a</p></div>"
+  :css "#re1 { color: #ff0000; all: unset }"}
+
+ {:id :cascade/all-revert-drops-the-whole-author-block
+  :group :cascade
+  ;; `revert` rolls the AUTHOR origin back, so the 40px margin goes and
+  ;; the UA `p { margin: 1em 0 }` stands: Brave reports margin-left 0 and
+  ;; the box at x=0. This engine keeps 40. The one case in this group the
+  ;; computed-style axis scores as a mismatch rather than excluding, since
+  ;; both sides' answers are plain numbers.
+  :html "<div><p id=\"rf1\">a</p></div>"
+  :css "#rf1 { margin-left: 40px; all: revert }"}
+
+ {:id :cascade/a-registered-custom-property-has-an-initial-value
+  :group :cascade
+  ;; `@property` with an `initial-value` makes `var(--casc-pw)` resolve
+  ;; even where nothing declared it: Brave reports 60x20. This engine has
+  ;; no `@property`, so the reference is invalid at computed-value time,
+  ;; the width is the empty string and the box is auto: 800x20.
+  :html "<div><div id=\"pa1\">w</div></div>"
+  :css "@property --casc-pw { syntax: \"<length>\"; inherits: false; initial-value: 60px } #pa1 { width: var(--casc-pw) }"}
+
+ {:id :cascade/an-undefined-custom-property-is-invalid
+  :group :cascade
+  ;; The control the case above is read against: with no `@property`
+  ;; registration the same reference IS invalid, and both sides report an
+  ;; auto 800x20 box. Without it, "the engine reports 800" says nothing
+  ;; about whether it read the registration or simply failed twice.
+  :html "<div><div id=\"pd1\">w</div></div>"
+  :css "#pd1 { width: var(--casc-undefined) }"}
+
+ {:id :cascade/a-var-fallback-chain-nests
+  :group :cascade
+  ;; Control. A fallback whose own value is another `var()` with its own
+  ;; fallback: both sides report 90x20.
+  :html "<div><div id=\"pb1\">w</div></div>"
+  :css "#pb1 { width: var(--casc-n1, var(--casc-n2, 90px)) }"}
+
+ {:id :cascade/a-custom-property-redeclared-at-depth-shadows-the-ancestor
+  :group :cascade
+  ;; Control. The inner element declares the same custom property the
+  ;; wrapper did; the reference on the inner element resolves against its
+  ;; OWN value, not the inherited one. Both sides: 40x20.
+  :html "<div id=\"id1\" style=\"--casc-shadow: 10px\"><div class=\"casc-inner\" style=\"--casc-shadow: 40px\">w</div></div>"
+  :css "#id1 .casc-inner { width: var(--casc-shadow) }"}
+
+ {:id :cascade/env-resolves-a-known-variable-rather-than-its-fallback
+  :group :cascade
+  ;; `env(safe-area-inset-left, 120px)` is DEFINED in Brave and its value
+  ;; is 0, so the fallback is not used and the box is 0x20. This engine
+  ;; keeps the raw string and reports 800x20. The fallback is deliberately
+  ;; a value neither 0 nor 800, so "used the fallback", "resolved the
+  ;; variable" and "read neither" are three different answers.
+  :html "<div><div id=\"pe1\">w</div></div>"
+  :css "#pe1 { width: env(safe-area-inset-left, 120px) }"}
+
+ {:id :cascade/attr-in-a-length
+  :group :cascade
+  ;; CSS Values 5 `attr()` outside `content`: Brave 151 resolves
+  ;; `attr(data-w px, 30px)` to 55px from the attribute. This engine
+  ;; supports `attr()` in `content` only, so the width is a raw string and
+  ;; the box is 800x20. Three-way again: 55 from the attribute, 30 from
+  ;; the fallback, 800 from neither.
+  :html "<div><div id=\"ie1\" data-w=\"55\">w</div></div>"
+  :css "#ie1 { width: attr(data-w px, 30px) }"}
+
+ {:id :cascade/a-scope-rule-does-not-reach-outside-its-root
+  :group :cascade
+  ;; `@scope (#casc-sc) { ... }` limits its rules to that subtree. Brave:
+  ;; the paragraph inside is red and the one outside is black. This engine
+  ;; has no `@scope`, so -- exactly like `@supports` -- the wrapper is
+  ;; transparent and BOTH are red. Both paragraphs are in the case on
+  ;; purpose: the inner one agrees, and an agreement beside the
+  ;; disagreement is what says the rule was found rather than lost.
+  :html "<div><div id=\"casc-sc\"><p class=\"casc-sp\">in</p></div><p class=\"casc-sp\">out</p></div>"
+  :css "@scope (#casc-sc) { .casc-sp { color: #ff0000 } }"}
+
+ ;; ---- two selector shapes the earlier rounds named as unscorable ----
+
+ {:id :selector/first-letter-changes-the-line-box
+  :group :selector
+  ;; Round thirty-two left `::first-letter` out because "neither produces
+  ;; an element box, so neither the geometry axis nor the oracle's element
+  ;; probe can see one". True of the pseudo-element -- and not of its
+  ;; effect: a 40px first letter grows the paragraph's OWN box, which the
+  ;; geometry axis reads directly. Brave: 800x29 against a plain 800x20,
+  ;; which is 9px and well outside the 2px tolerance. This engine has no
+  ;; `::first-letter`: 800x20.
+  :html "<div><p id=\"fa1\">Alpha beta gamma delta</p></div>"
+  :css "#fa1::first-letter { font-size: 40px }"}
+
+ {:id :selector/the-universal-selector-adds-no-specificity
+  :group :selector
+  ;; Control. `#ua1 *` is (1,0,0) and `#ua1 p` is (1,0,1), so the type
+  ;; selector wins even though the universal rule is written first and
+  ;; matches the same element. Brave: blue.
+  :html "<div id=\"ua1\"><p>text</p></div>"
+  :css "#ua1 * { color: #ff0000 } #ua1 p { color: #0000ff }"}
 ]

@@ -13046,3 +13046,52 @@
                              "<tr style=\"visibility: collapse\"><td>three</td></tr></table>")))
       (str "CONTROL: a collapsed LAST row drops the gap BEFORE it, and comes to the same "
            "total -- Brave 82 with rows at 10/46/72, this frame 74 with rows at 10/42/64")))
+
+;; ---- container-type applies layout containment ----
+
+(defn- container-type-wrapper-boxes
+  "A 400px wrapper holding one `<p>`, laid out through the real CSS text ->
+   parse-rules + apply-cascade -> draw-ops pipeline. `extra` is appended to
+   the wrapper's own declarations."
+  [extra]
+  (let [[wrap doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc wrap)
+        [p doc] (dom/create-element doc :p)
+        doc (dom/append-child doc wrap p)
+        [t doc] (dom/create-text-node doc "t")
+        doc (dom/append-child doc p t)
+        rules (css/parse-rules (str "div { width: 400px; " extra " }"))
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0}})]
+    (mapv (juxt :tag :x :y :w :h) (filterv #(= :node (:draw/op %)) ops))))
+
+(deftest container-type-establishes-an-independent-formatting-context
+  ;; `container-type` was read only by `cssom.core`, to decide what an
+  ;; `@container` rule may query. It is also a layout declaration:
+  ;; `inline-size`/`size` apply layout containment, and a box with layout
+  ;; containment is an independent formatting context, so a first child's
+  ;; margin no longer collapses out through its top edge.
+  ;;
+  ;; Measured in Brave 151 over CDP on 2026-08-06, both shapes on one page:
+  ;;   container-type: inline-size -> wrapper 400x48, <p> at y=14
+  ;;   no declaration              -> wrapper 400x20, <p> at y=0
+  (let [[[_ _ _ cw ch] [_ _ cy]] (container-type-wrapper-boxes
+                                  "container-type: inline-size;")
+        [[_ _ _ pw ph] [_ _ py]] (container-type-wrapper-boxes "")]
+    (is (= [400 48] [cw ch])
+        "the paragraph's UA `margin: 1em 0` is held INSIDE the container")
+    (is (= 14 cy) "...so the paragraph starts 1em down")
+    (is (= [400 20] [pw ph])
+        "control: the identical wrapper without the declaration lets the
+         same margin collapse straight out")
+    (is (= 0 py) "...and the paragraph sits on the wrapper's own top edge"))
+
+  (is (= [400 48] (let [[[_ _ _ w h]] (container-type-wrapper-boxes "container-type: size;")]
+                    [w h]))
+      "`size` contains too -- it is the stronger of the two, not a
+       different kind of thing")
+  (is (= [400 20] (let [[[_ _ _ w h]] (container-type-wrapper-boxes "container-type: normal;")]
+                    [w h]))
+      "and the initial `normal` does not, so the property is read for its
+       VALUE rather than for its presence"))

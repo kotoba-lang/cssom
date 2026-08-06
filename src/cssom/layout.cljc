@@ -2492,6 +2492,25 @@
   [st]
   (boolean (some overflow-scrolling-values [(:overflow/x st) (:overflow/y st)])))
 
+(defn- container-type-contained?
+  "Does this box's `container-type` apply LAYOUT CONTAINMENT, and so make
+   it an independent formatting context?
+
+   `inline-size` and `size` both do; the initial `normal` does not. That
+   is the whole rule -- containment is not a side effect of being
+   queryable, it is what `container-type` is defined to apply, and it is
+   why a `@container` wrapper stops behaving like a plain `<div>` the
+   moment the declaration goes on. Measured in Brave 151 on 2026-08-06:
+   a 400px wrapper holding one `<p>` is **400x48** with `container-type:
+   inline-size` and **400x20** without it.
+
+   Kept separate from `scroll-container?` rather than folded into it
+   because the two answer different questions that happen to share this
+   consequence: `overflow` also clips and scrolls, and `container-type`
+   does neither."
+  [st]
+  (contains? #{"inline-size" "size"} (:container-type st)))
+
 (defn- overflow-visible?
   "True when NEITHER axis paints outside a boundary: both computed axes are
    `visible`. The complement of `scroll-container?` plus `clip`, and the
@@ -3084,6 +3103,19 @@
    ;; the same rule `overflow` triggers, but decided by the PARENT, which is
    ;; why it arrives as an attr rather than a declaration.
    :independent-fc? (boolean (attr node :kotoba/independent-fc))
+   ;; `container-type` was a CASCADE-only property: `cssom.core` reads it
+   ;; to decide what an `@container` rule may query and nothing downstream
+   ;; read it at all. It is also a LAYOUT declaration -- `inline-size` and
+   ;; `size` both apply layout containment, and a box with layout
+   ;; containment is an independent formatting context. Measured in Brave
+   ;; 151 on 2026-08-06: `<div style="container-type: inline-size;
+   ;; width:400px"><p>t</p></div>` is **400x48** with the paragraph at
+   ;; y=14 (its UA `margin: 1em 0` held INSIDE), against **400x20** with
+   ;; the paragraph at y=0 for the identical wrapper without the
+   ;; declaration. Found by the eight `:container/*` conformance cases
+   ;; failing on geometry while agreeing on every colour they were written
+   ;; for. See container-type-contained? for the value set.
+   :container-type (style node :container-type)
    ;; Two FRAGMENTATION properties, read only by layout-multicol's
    ;; frag-atoms via style-passthrough. `break-inside: avoid` makes this
    ;; box one a column break may not fall inside; `orphans` is how many of
@@ -4350,7 +4382,8 @@
    declaration at all).
 
    SCOPE, otherwise: the formatting-context test is `border-width` /
-   `scroll-container?` / `flow-root` / `:independent-fc?`, which is
+   `scroll-container?` / `container-type-contained?` / `flow-root` /
+   `:independent-fc?`, which is
    `layout-block`'s own `fc-free?` minus its `multicol` and `fieldset`
    terms -- both of those need more than the node, and both are already
    excluded by the terms that are here (a fieldset carries a 2px UA
@@ -4365,6 +4398,7 @@
        (zero? (or (:padding-top st) (:padding st) 0))
        (zero? (or (:padding-bottom st) (:padding st) 0))
        (not (scroll-container? st))
+       (not (container-type-contained? st))
        (not= "flow-root" (:display st))
        (not (:independent-fc? st))
        (not-any? #(= :text (:draw/op %)) draw)))
@@ -16276,6 +16310,7 @@
                       ;; the same child at y=21.
                       (zero? (border-y st))
                       (not (scroll-container? st))
+                      (not (container-type-contained? st))
                       (not= "flow-root" (:display st))
                       (not fieldset?)
                       (not (:independent-fc? st)))
@@ -16304,6 +16339,7 @@
                              (boolean (:independent-fc? st))
                              fieldset?
                              (scroll-container? st)
+                             (container-type-contained? st)
                              (contains? #{"flow-root" "inline-block" "table-cell" "table-caption"}
                                         (:display st))
                              (contains? #{"left" "right"} (:float st))
