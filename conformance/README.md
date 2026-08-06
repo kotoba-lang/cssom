@@ -827,6 +827,335 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round fifty-one: selector STATE, the pseudo-elements with no box, and the alignment shorthands
+
+Round thirty-two put forty-three cases into selectors and found the engine
+mostly right. What it did not enter was **state** — and the inventory that
+opened this round is the finding, before any measurement: `matches-pseudo?`
+implements THIRTEEN form-state pseudo-classes (`:checked`, `:disabled`,
+`:enabled`, `:required`, `:optional`, `:read-only`, `:read-write`, `:valid`,
+`:invalid`, `:in-range`, `:out-of-range`, `:focus`, `:focus-within`) and
+`grep ':checked' cases.edn` found **zero**. So did `:root`, `:lang`,
+`:only-of-type`, `::marker` and `place-items`. Implemented and never
+differentially tested is exactly the state `@layer` was in before round
+forty-four, and it is where the defects were.
+
+Seventy-three cases went in, in four areas, **thirty-three of them controls** --
+cases written to AGREE, so that the divergence beside each one measures a rule
+rather than a number.
+Every expected value was read out of a real headless Brave 151.1.93.129 over
+CDP on 2026-08-06, **one probe page per probe**, in this corpus's own frame,
+before the case was written.
+
+Three columns, because the corpus growing and the engine changing are two
+different things. All three share ONE harness — this round's, including two
+harness fixes whose neutrality is proved separately below. **They are
+pre-merge numbers by construction and are re-measured below**: round fifty
+(the value grammars) landed on `main` while this was in flight, so the
+post-merge scoreboard is at the end of this entry.
+
+| axis | 735, base engine | 808, base engine | 808, after |
+|---|---|---|---|
+| line structure | 704/707 | 773/778 | **773/778** |
+| geometry (boxes) | 2376/2384 | 2557/2605 | **2567/2605** |
+| geometry (clean cases) | 728/735 | 778/808 | **785/808** |
+| paint order (points) | 18343/18362 | 20087/20157 | **20087/20157** |
+| paint order (clean cases) | 724/735 | 789/807 | **789/807** |
+| computed style (values) | 33480/33487 | 36628/36665 | **36636/36665** |
+| computed style (cases clean) | 730/735 | 781/808 | **787/808** |
+| cascade-attributed residual | 6 | 32 | **24** |
+
+Geometry went 100% → 98% and the cascade residual 6 → 32 on coverage alone,
+which is the round working. `src/` was not touched between columns one and
+two.
+
+**The residual accounts for itself exactly.** Of the 24 left, **six are
+pre-existing and are the same six, with the same causes, as column one**:
+`:cascade/a-scope-rule-does-not-reach-outside-its-root` (2),
+`:text/font-size-absolute-keyword` (2),
+`:container/a-percentage-width-container-is-not-queryable` (1) and
+`:nesting/an-ampersand-carries-the-parent-lists-maximum-specificity` (1).
+Nothing pre-existing regressed. The other eighteen are new gaps this round
+measured and did not close, listed below. Sixteen new cases are also dirty on
+geometry, against the seven pre-existing ones that are unchanged.
+
+**`--dump-ops` was diffed corpus-wide between columns two and three, on the
+same 808 cases. Exactly seven cases' box lists changed, every one of them TO
+the browser's number, and the other 801 are byte-identical:**
+
+| case | base | after | Brave |
+|---|---|---|---|
+| `:selector/any-link-and-link-both-match-an-href` | a 7 wide | **67** | 67 |
+| `:grid/place-items-centers-both-axes` | 0,0 120×60 | **56,20 7×20** | 56.5,20 7×20 |
+| `:grid/place-items-is-align-then-justify` | 0,0 120×60 | **0,40 7×20** | 0,40 7×20 |
+| `:grid/place-self-single-value-is-both-axes` | 0,0 120×60 | **113,40 7×20** | 113,40 7×20 |
+| `:grid/place-self-two-values` | 0,0 120×60 | **56,40 7×20** | 56.5,40 7×20 |
+| `:flex/place-content-on-a-row` | x=0, 7 | **286, 293** | 286, 293 |
+| `:flex/place-items-applies-only-on-the-cross-axis` | 0,0 7×80 | **0,30 7×20** | 0,30 7×20 |
+
+The computed-style axis was read separately, because a cascade change shows
+up as a colour and the ops dump cannot see one: that is the residual
+arithmetic above. And the blast radius is bounded by construction — **no
+pre-existing case's CSS mentions any pseudo-class or property this round
+touched**, which was checked mechanically over all 735.
+
+1036 unit tests / 2733 assertions, 0 failures; lint 0 errors and the same 23
+pre-existing warnings, all in `test/`. **Eighteen new `deftest`s, of which
+eleven fail on the base commit (21 assertions) and pass after**; the other
+seven are pure controls that pass on both sides. Downstream, all against this
+branch's cssom: `browser` 754/0, `dom-gpu` 130/0, `htmldom` 180/0.
+
+#### Two harness defects, and the proof they are not a thumb on the scale
+
+Both are in `scope-css`/`cascaded-document`, both were found by writing cases
+that could not otherwise be expressed, and **the modified harness was run
+against the UNMODIFIED engine at the base commit on the UNMODIFIED 735-case
+corpus.**
+
+**A selector list was split on every comma, including the ones inside
+parentheses.** `div:has(b, i)` became `#case-N div:has(b, #case-N i)` — still
+valid CSS, still matching something, so nothing anywhere reported an error.
+Measured on `<div><i>i</i></div><div><b>b</b></div><div><u>u</u></div>`: the
+correct rule paints the first two divs red and the mis-scoped one paints only
+the second, because `:scope #case-N i` needs a `#case-N` *inside* the div.
+Every functional pseudo-class that takes a list is affected. The corpus
+contained exactly one such prelude (`p:not(.x, .y)`) and it survived **by
+luck** — `#case-N .y` matches the same element either way. `split-selector-list`
+now tracks parenthesis and bracket depth.
+
+*Proof:* with only this fix, the base engine on the base corpus reproduces
+the published baseline **to the value on all five axes** — line 704/707,
+geometry 2376/2384 with 728/735 clean, paint 18343/18362 with 724/735 clean,
+computed style 33481/33487 with 731/735 clean, residual 5.
+
+**The two sides were not evaluating the same selector.** The browser page
+scopes every rule by `#case-N` because 808 cases share one document; this
+side handed `cssom.core` the RAW css, because each case is its own document.
+But the wrapper is an ELEMENT either way, and `<div id="root">` was reachable
+where `#case-N` was held out of reach. Measured on
+`:selector/has-takes-a-selector-list`: a bare `div:has(b, i)` matched the
+wrapper, and the red it declared there INHERITED into the one div the rule is
+supposed to miss. **Four cases were written before this was noticed and all
+four looked like engine bugs.** `cascaded-document` now scopes by `#root`.
+
+*Proof, and it goes the OTHER way:* with both fixes, the base engine on the
+base corpus is byte-identical on the op dump and on line, geometry and paint,
+and **loses one computed-style value** — 33481 → 33480, residual 5 → 6. A
+harness change that costs a point is not one aimed at the score. What it
+costs is named: `:nesting/an-ampersand-carries-the-parent-lists-maximum-specificity`
+used to be handed a parent list of two COMPOUND selectors where the browser
+had two COMPLEX ones, and scoping this side lands it squarely on
+`expand-nested-selector`'s documented third branch. Round forty-nine already
+measured that branch and named the fix — letting this engine's `:is()` hold a
+complex selector — and it is not a nesting change. The case now carries the
+new cause.
+
+#### What the state pseudo-classes turned out to be, measured
+
+Not one of these is derivable from the pseudo-class's own name, which is why
+they are one table rather than one sentence each.
+
+| shape | Brave | this engine, before |
+|---|---|---|
+| `<option selected>` | `:checked` | not checked |
+| `<option checked>` | **not** `:checked` | checked |
+| `<div checked>` | not `:checked` | **checked** |
+| `<input required disabled>` | `:required` | neither |
+| `<input disabled>` | `:optional` | neither |
+| `<input disabled>` | `:read-only` | neither |
+| `<p contenteditable>`, and a `<p>` inside it | `:read-write` | neither |
+| `<p contenteditable="false">` inside it | `:read-only` | read-only |
+| `<textarea readonly>` | `:read-only` | same |
+| a bare `<option>` / `<fieldset>` | `:enabled` | neither |
+| a `<legend>` | not `:enabled` | not |
+| `<input type=number>` with no `min`/`max` | neither range | neither |
+| the same, `disabled` | **not** `:in-range` | not |
+
+Two rules fell out and were landed, and each replaced a list rather than
+extending one:
+
+- **`:checked` names the state of the control it is on.** `checked` on a
+  checkbox, `selected` on an `<option>`. The old rule read the `checked`
+  attribute off *any* node, so the two `<option>` cases came out exactly
+  inverted and a `<div checked>` matched.
+- **`:enabled` and `:disabled` are complements over what CAN be disabled**,
+  not over form controls. `:disabled` already used the wider set, so the pair
+  disagreed with itself: a bare `<option>` was neither.
+
+#### The rule that was written, measured, and then REVERTED
+
+**`:read-only` is not a second list, it is `(not :read-write)`**, and
+`:required`/`:optional` decide on the attribute alone. One predicate —
+`user-alterable?`: an editable form control that is neither `readonly` nor
+`disabled`, OR any element in a `contenteditable` subtree — makes all eleven
+measured rows above fall out, and it was written, and it passed, and the
+corpus went green on three more cases.
+
+It is not in this round, and the reason is not doubt about the measurement.
+**`:read-only` and `:optional` are consumed by `kotoba-lang/browser`'s
+`query-selector`, and that repo's suite asserts the answers this engine gives
+today.** With the fix in, three assertions fail:
+`dom_bridge_test`'s `query-selector-supports-form-state-pseudo-classes`
+requires `input:read-only` to skip a disabled input and return the `readonly`
+one, and `input:optional` to skip it too; `quickjs_execution_test`'s
+`quickjs-dom-query-uses-shared-form-state-pseudo-classes` pins the same node
+ids. All three encode a browser answer that does not exist — and correcting
+them is a change to a repo this round does not touch.
+
+So the fix was reverted, the measurement is written at `matches-pseudo?` as a
+table with the eleven rows and the three downstream assertions named, and
+four corpus cases carry it red. Closing it is a cross-repo change and belongs
+in a round that can land both halves. **The alternative — keeping the fix and
+reporting `browser` at 751/3 — would have been shipping a red downstream
+suite to make this one greener, which is the trade this corpus exists to
+refuse.**
+
+One scope cut in the same family survives either way, recorded at
+`matches-pseudo?` with its number: a `type="file"` input is declined via
+`validation-barred-control?`, where Brave reports
+`<input type="file" required>` as BOTH `:required` and `:invalid` — only
+`type="hidden"` is really barred.
+
+#### `place-items` is align then justify, and that had to be measured
+
+The three CSS Box Alignment shorthands were in neither the cascade's
+expanders nor `cssom.layout`'s readers. The order is the whole content of
+the fix and a guess gets it backwards half the time: `place-items: end start`
+reports `align-items: end` / `justify-items: start` and puts the item at
+(0, 40) in a 120×60 track, where reading the two values the other way round
+puts it at (113, 0). Block axis before inline axis — the same order
+`grid-area` uses and the opposite of `background-position`'s.
+
+`expand-place-shorthand` deliberately does **not** validate the tokens
+against an alignment vocabulary, for the reason `expand-border-box-shorthand`
+gives: `cssom.layout` is the file that knows which keywords it can act on,
+and a value this cannot check must reach it unchanged. Named cut: a
+`<baseline-position>` is two words and one value, so `place-items: first
+baseline` is read here as align `first` / justify `baseline`.
+
+Five of the seven `place-*` cases went exact. The sixth,
+`:grid/place-content-is-align-then-justify`, is the honest half-answer: the
+shorthand expands correctly and the LONGHANDS are not read, because
+`justify-content`/`align-content` on a grid container are unimplemented —
+which is what the three cases beside it measure.
+
+#### `::marker` has no box and its effect has a number
+
+Round thirty-two called `::first-letter` unscorable and was half right;
+`::marker` is the same shape. The pseudo-element produces nothing the
+geometry axis can see, and it is an inline box on the item's first line, so
+its font size grows the line: **800×29 against 800×20**, 9px and well outside
+the 2px tolerance, on a `<ul>` and on an `<ol>` alike. Its `content` is
+readable the other way, through a shrink-to-fit box: an inside marker written
+`content: "XXXX "` makes the item **56** wide against 40 — and 40 is exactly
+what this engine's own inside-marker advance formula gives, so the control
+was already pinned.
+
+`pseudo-element-pattern` recognises three pseudo-elements and deliberately
+nothing else, so a rule naming any other one becomes an unrecognised
+pseudo-CLASS and matches nothing. That is fail-CLOSED, and
+`:generated/an-unknown-pseudo-element-does-not-restyle-its-element` is the
+control that says so: Brave drops `p::frobnicate` from the stylesheet
+entirely (two rules survive on the page instead of three) and this engine
+reaches the same black by a different route. Two right answers for two
+reasons.
+
+**Three pseudo-elements were measured and deliberately NOT added**, because
+no axis can see them at any value, and saying so is worth more than a case
+that passes for the wrong reason:
+
+| | measured in this frame |
+|---|---|
+| `::placeholder` | a 40px `font-size` on it leaves the `<input>` at **153×21**, exactly its box without the rule |
+| `::selection` | nothing is selected, so a colour on it changes neither the box nor any of the fourteen compared properties |
+| `::backdrop` | a `<dialog open>` is not MODAL and has no backdrop; the dialog's box is **41×54** either way |
+
+`::first-line` stays out for round forty-four's reason, unchanged.
+
+#### Two selectors the harness cannot reach, and why
+
+- **`:root`.** Every case's CSS is scoped by its container id on both sides
+  now, and `#case-N :root` matches nothing in a browser — measured, black.
+  A case would measure the scoping, not the engine.
+- **`:target`.** The corpus page is loaded with no fragment (`location.hash`
+  is `""`, measured), so `:target` matches nothing on either side. Both would
+  agree for the wrong reason.
+
+Neither is a limitation of the engine, and both are recorded rather than
+worked around.
+
+#### Re-measured after the merge, which is the number that counts
+
+Round fifty (the value grammars) landed on `main` while this was in flight,
+so the three columns above are pre-merge. Everything was re-run against
+`main` AS MERGED (`2a33209`), on the merged 817-case corpus, and the middle
+column is that commit's own engine — so column two to column three is
+attributable to this round and nothing else.
+
+| axis | 735, base engine | 817, `main` as merged | 817, after |
+|---|---|---|---|
+| line structure | 704/707 | 782/787 | **782/787** |
+| geometry (boxes) | 2376/2384 | 2583/2631 | **2593/2631** |
+| geometry (clean cases) | 728/735 | 787/817 | **794/817** |
+| paint order (points) | 18343/18362 | 20322/20392 | **20322/20392** |
+| paint order (clean cases) | 724/735 | 798/816 | **798/816** |
+| computed style (values) | 33480/33487 | 36994/37029 | **37002/37029** |
+| computed style (cases clean) | 730/735 | 792/817 | **798/817** |
+| cascade-attributed residual | 6 | 30 | **22** |
+
+`--dump-ops` diffed across the merge as well: **the same seven cases changed
+and no others**, which is what says the two rounds do not overlap. They touch
+different parts of `cssom.core` — round fifty's grammars sit in the
+declaration parser, this round's in `matches-pseudo?` and one new shorthand
+expander — and the merge needed no resolution in `src/` at all. Line
+structure and paint order are byte-identical across the last two columns,
+which is what a change confined to the cascade and to two alignment
+longhands should look like.
+
+Downstream, re-run after the merge and all against this branch's cssom:
+`browser` **754/0**, `dom-gpu` **130/0**, `htmldom` **180/0**. 1048 unit
+tests / 2808 assertions, 0 failures; lint 0 errors, 23 pre-existing warnings.
+
+#### The new divergences that are NOT closed, with their numbers
+
+Ranked by how cheaply a fix would follow from what is already here.
+
+| case | Brave | this engine |
+|---|---|---|
+| `:form/read-only-matches-a-disabled-input`, `:form/read-write-matches-a-contenteditable`, `:form/required-still-matches-a-disabled-control` | see the table above | the fix exists, was measured, and was reverted -- cross-repo blocker |
+| `:selector/empty-ignores-a-comment` | a `<p>` holding only a comment IS `:empty` | not empty — `empty-pseudo-matches?` counts child nodes of every type |
+| `:form/placeholder-shown` | matches an empty field with a `placeholder` | unimplemented |
+| `:form/default-on-a-checked-checkbox` / `-on-the-first-submit-button` | margin-left 30px / red | unimplemented |
+| `:form/indeterminate-on-a-progress-with-no-value` | margin-left 30px | unimplemented |
+| `:form/indeterminate-on-a-radio-group-with-none-checked` | 30px on BOTH radios | unimplemented |
+| `:form/valid-matches-a-form-element` | a `<form>` is `:valid` when its controls are | `constraint-valid?` requires a form CONTROL |
+| `:selector/dir-matches-the-direction` | rtl red / ltr blue | `:dir()` unimplemented |
+| `:selector/dir-reads-the-attribute-and-not-the-css-property` | **blue** — `direction: rtl` in CSS does not change `:dir()` | same |
+| `:selector/a-lang-selector-list-is-not-valid-in-this-browser` | the rule is DROPPED — Blink 151 has not shipped `:lang(fr, de)` | matches; this engine is AHEAD of the oracle here, and the corpus records which |
+| `:selector/not-takes-a-complex-argument` | `p:not(.w p)` excludes only the nested one | over-excludes |
+| `:selector/has-nested-in-has-is-invalid` | `:has()` inside `:has()` invalidates the rule | matches |
+| `:selector/has-a-descendant-through-a-combinator` | `div:has(section b)` matches one div | matches both |
+| `:grid/justify-content-*`, `:grid/align-content-end`, `:grid/place-content-*` | tracks placed in the leftover space | placed from the start edge |
+| `:grid/auto-flow-dense-backfills-a-hole` | the third item goes back to (0,0) | (120,20) |
+| `:grid/order-reorders-grid-items` | `order` reorders grid auto-placement | flex only |
+| `:box/justify-self-on-a-block-child` | **x=120** — box alignment is not grid-only | x=0 |
+| `:form/file-selector-button-padding-grows-the-control` | 261×65 with `padding: 20px` on the button | 253×27 |
+
+Two of those are worth naming as findings rather than as gaps.
+`:box/justify-self-on-a-block-child` is the one in this round a spec reading
+would have got wrong: `justify-self: center` on an ordinary block-level child
+of an ordinary block container centres it, and `align-self: end` on the same
+child moves nothing (its control, measured at (0,0)). And
+`:selector/a-lang-selector-list-is-not-valid-in-this-browser` is the first
+case in this corpus where the ENGINE is ahead of the oracle — Selectors 4
+gives `:lang()` a comma list, Blink 151 drops the whole rule, and the case
+carries the browser's answer rather than the spec's.
+
+**One pre-existing gap this round surfaced without being about it**, recorded
+here so it is not rediscovered: the two `:in-range` cases report an
+`<input type="number">` at **153** wide where Brave reports **42**. That is
+this engine's default text-field intrinsic width reaching a control that does
+not want it, and it is unrelated to the pseudo-class the cases are named for.
 ### Round fifty: three value grammars, and one premise that was wrong
 
 Three gaps, each already measured by the round that left it, and each
