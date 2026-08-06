@@ -5100,6 +5100,416 @@
     (is (= 40 (:style/font-size attrs)))
     (is (nil? (:pseudo/first-letter attrs)))))
 
+;; ---- Round fifty: selector state, and the box-alignment shorthands ----
+;;
+;; Every expected value below was read out of a real headless Brave
+;; 151.1.93.129 over CDP on 2026-08-06, one probe page per probe, in the
+;; conformance corpus's own frame. Each behavioural group carries a CONTROL
+;; that passes on both sides of this commit, so a group going green is not
+;; the whole group being rewritten.
+
+;; :checked names the state of the control it is on, and that is not one
+;; attribute. Brave: `<option selected>` matches `option:checked`;
+;; `<option checked>` does not.
+
+(deftest checked-matches-a-selected-option-and-not-a-checked-one
+  (is (= "red" (:style/color (cascaded-attrs "option:checked { color: red }"
+                                             "<select><option id=\"a\" selected>a</option></select>" "a")))
+      "an <option> is :checked when it is SELECTED")
+  (is (nil? (:style/color (cascaded-attrs "option:checked { color: red }"
+                                          "<select><option id=\"a\" checked>a</option><option selected>b</option></select>" "a")))
+      "...and a `checked` attribute on an <option> is not its selectedness"))
+
+(deftest checked-still-matches-a-checked-checkbox
+  ;; The control. Reading the state per control must not stop the ordinary
+  ;; case working, and it is the same rule that used to answer everything.
+  (is (= "red" (:style/color (cascaded-attrs "input:checked { color: red }"
+                                             "<input id=\"a\" type=\"checkbox\" checked>" "a"))))
+  (is (nil? (:style/color (cascaded-attrs "input:checked { color: red }"
+                                          "<input id=\"a\" type=\"checkbox\">" "a")))))
+
+(deftest checked-does-not-match-an-arbitrary-element-carrying-the-attribute
+  ;; The old rule read the `checked` attribute off any node at all.
+  (is (nil? (:style/color (cascaded-attrs ":checked { color: red }"
+                                          "<div id=\"a\" checked>x</div>" "a")))))
+
+;; :read-only/:read-write and :required/:optional are measured in full and
+;; deliberately unchanged -- see the comment block above `matches-pseudo?` in
+;; src/cssom/core.cljc for the table and for why closing them is a cross-repo
+;; change (kotoba-lang/browser's query-selector suite pins the current
+;; answers in three assertions). What is asserted here is the part that
+;; already agrees with Brave, so that a future fix has a control to keep.
+
+(deftest read-only-still-matches-a-plain-paragraph-and-a-readonly-field
+  ;; The control: the two answers the old pair already got right.
+  (let [css "p:read-only { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<p id=\"a\">x</p>" "a")))))
+  (let [css "input:read-only { color: red } input:read-write { color: green }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<input id=\"a\" readonly>" "a")))))
+  (let [css "textarea:read-only { color: red } textarea:read-write { color: green }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<textarea id=\"a\" readonly></textarea>" "a"))))
+    (is (= "green" (:style/color (cascaded-attrs css "<textarea id=\"a\"></textarea>" "a"))))))
+
+(deftest the-range-pseudo-classes-do-depend-on-disabledness
+  ;; The control that a fix to the block above must keep: Brave DOES take a
+  ;; disabled control out of :in-range, where it does NOT take it out of
+  ;; :required. `font-style` rather than `color`, because the UA sheet writes
+  ;; `input:disabled { color: #545454 }` and a colour therefore cannot say
+  ;; whether the AUTHOR rule matched.
+  (let [css "input:in-range { font-style: italic }"]
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"number\" min=\"1\" max=\"10\" value=\"5\" disabled>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"number\" min=\"1\" max=\"10\" value=\"5\">" "a"))))))
+
+;; :enabled is the complement of :disabled over what CAN be disabled.
+
+(deftest enabled-reaches-every-element-that-can-be-disabled
+  (let [css ":enabled { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<select><option id=\"a\">o</option></select>" "a")))
+        "Brave: a bare <option> is :enabled")
+    (is (= "red" (:style/color (cascaded-attrs css "<fieldset id=\"a\"><input></fieldset>" "a")))
+        "...and so is a <fieldset>")))
+
+(deftest enabled-does-not-reach-an-element-that-cannot-be-disabled
+  ;; The control, on both sides of the widening: a <span> is not :enabled,
+  ;; and a <legend> -- measured at 2px, i.e. its UA padding and nothing
+  ;; else -- is not either.
+  (let [css ":enabled { color: red }"]
+    (is (nil? (:style/color (cascaded-attrs css "<span id=\"a\">x</span>" "a"))))
+    (is (nil? (:style/color (cascaded-attrs css "<fieldset><legend id=\"a\">l</legend></fieldset>" "a"))))))
+
+;; :only-of-type
+
+(deftest only-of-type-counts-the-same-tag-and-not-the-siblings
+  (let [css ":only-of-type { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<div><p id=\"a\">p</p><span>s</span><span>s</span></div>" "a")))
+        "the lone <p> is only-of-type although it has two siblings")
+    (is (= "red" (:style/color (cascaded-attrs css "<div><p>1</p><p>2</p><span id=\"a\">s</span></div>" "a")))
+        "and so is the lone <span> among two paragraphs")
+    (is (nil? (:style/color (cascaded-attrs css "<div><p id=\"a\">1</p><p>2</p></div>" "a")))
+        "while neither of two paragraphs is")))
+
+(deftest only-child-is-still-only-child
+  ;; The control: the pseudo-class :only-of-type is most easily confused
+  ;; with. Brave: the same lone <p> matches both, and the <span> above
+  ;; matches only-of-type alone.
+  (let [css ":only-child { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<div><p id=\"a\">p</p></div>" "a"))))
+    (is (nil? (:style/color (cascaded-attrs css "<div><p>1</p><p>2</p><span id=\"a\">s</span></div>" "a"))))))
+
+;; :link / :any-link
+
+(deftest link-and-any-link-need-an-href
+  (let [css "a:any-link { color: red } a:link { font-style: italic }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<a id=\"a\" href=\"/x\">l</a>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<a id=\"a\" href=\"/x\">l</a>" "a"))))
+    (is (= "red" (:style/color (cascaded-attrs css "<a id=\"a\" href=\"\">l</a>" "a")))
+        "Brave: an empty href is still a link")
+    (is (nil? (:style/color (cascaded-attrs css "<a id=\"a\">n</a>" "a")))
+        "...and a bare <a> is not")))
+
+(deftest visited-is-deliberately-not-implemented
+  ;; The control that says the gap is a choice: this engine has no history,
+  ;; so it declines rather than inventing one.
+  ;; `font-style` again: the UA sheet already colours a link `#0000EE`.
+  (is (nil? (:style/font-style (cascaded-attrs "a:visited { font-style: italic }"
+                                               "<a id=\"a\" href=\"/x\">l</a>" "a")))))
+
+;; The three box-alignment shorthands: ALIGN first, then JUSTIFY.
+
+(deftest place-items-expands-align-then-justify
+  (let [attrs (cascaded-attrs "#a { place-items: end start }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-items attrs)))
+    (is (= "start" (:style/justify-items attrs)))))
+
+(deftest place-content-expands-align-then-justify
+  (let [attrs (cascaded-attrs "#a { place-content: end center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-content attrs)))
+    (is (= "center" (:style/justify-content attrs)))))
+
+(deftest place-self-expands-align-then-justify
+  (let [attrs (cascaded-attrs "#a { place-self: end center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-self attrs)))
+    (is (= "center" (:style/justify-self attrs)))))
+
+(deftest a-single-place-value-sets-both-longhands
+  (let [attrs (cascaded-attrs "#a { place-self: center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "center" (:style/align-self attrs)))
+    (is (= "center" (:style/justify-self attrs)))))
+
+(deftest a-longhand-after-a-place-shorthand-still-wins
+  ;; The shorthand takes part in the cascade as its longhands, so ordinary
+  ;; declaration order decides -- the same property the box shorthands have.
+  (let [attrs (cascaded-attrs "#a { place-items: center; align-items: end }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-items attrs)))
+    (is (= "center" (:style/justify-items attrs))))
+  (let [attrs (cascaded-attrs "#a { align-items: end; place-items: center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "center" (:style/align-items attrs)))))
+
+(deftest a-place-shorthand-with-three-values-is-left-unexpanded
+  ;; The control on the parser's boundary: a value outside the grammar must
+  ;; reach the generic path raw rather than being guessed at, which is the
+  ;; posture every other expander in this file takes.
+  (let [attrs (cascaded-attrs "#a { place-items: a b c }" "<div id=\"a\">x</div>" "a")]
+    (is (nil? (:style/align-items attrs)))
+    (is (nil? (:style/justify-items attrs)))))
+
+(deftest the-longhands-a-place-shorthand-does-not-name-are-untouched
+  ;; The other control: `place-items` must not reach `*-self` or
+  ;; `*-content`, which is the mistake a single shared expander would make.
+  (let [attrs (cascaded-attrs "#a { place-items: center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "center" (:style/align-items attrs)))
+    (is (nil? (:style/align-self attrs)))
+    (is (nil? (:style/align-content attrs)))))
+;; ---- the third table this namespace cannot derive, gated the same way ----
+
+(deftest text-decoration-line-keywords-matches-what-the-renderer-draws
+  ;; `text-decoration-line-keywords` is the ONLY value table in
+  ;; `cssom.core` that is a copy. The branch that actually paints a
+  ;; decoration lives in dom-gpu's `.cljs` renderers, which a `.cljc`
+  ;; namespace cannot require without breaking the JVM path -- so the copy
+  ;; gets the same treatment `layout-read-properties` gets: re-extract the
+  ;; `case` keys from the renderer and fail if the two ever disagree.
+  ;;
+  ;; The extraction is deliberately over BOTH renderers: `webgl.cljs` and
+  ;; `webgpu.cljs` carry the same helper, and a table that matched one but
+  ;; not the other would be a real divergence rather than a stale copy.
+  ;;
+  ;; `none` is in the table and in neither `case`, because a renderer
+  ;; implements it by drawing nothing.
+  (let [renderer (fn [f]
+                   (let [path (str "../dom-gpu/src/kotoba/wasm/host/" f)]
+                     (when (.exists (java.io.File. path)) (slurp path))))
+        sources (keep renderer ["webgpu.cljs" "webgl.cljs"])
+        drawn (fn [source]
+                ;; anchored on the `case` and not on the `defn`, because
+                ;; the docstring between them is longer than the code.
+                (let [start (str/index-of source "(case decoration")
+                      body (subs source start (+ start 400))]
+                  (set (map second (re-seq #"\"([a-z-]+)\" \(" body)))))
+        table @#'css/text-decoration-line-keywords]
+    (is (= 2 (count sources))
+        "both renderers have to be readable for this gate to mean anything")
+    (doseq [source sources]
+      (is (seq (drawn source)) "the extraction itself has to find something")
+      (is (= (disj table "none") (drawn source))
+          (str "cssom.core/text-decoration-line-keywords and the renderer's own "
+               "case keys disagree: " (sort (drawn source)))))))
+
+;; ---- complex selector arguments: `:is()`/`:not()`/`:where()` ----
+;;
+;; Every assertion here is a row of the measurement block above
+;; `parse-simple-selector`, read out of headless Brave 151.1.93.129 one
+;; probe page per probe on 2026-08-06. Eleven of the twenty-two shapes
+;; measured diverged before this landed.
+
+(deftest is-holds-a-complex-selector-and-matches-it-structurally
+  ;; The row that makes this a MATCHING change and not only a specificity
+  ;; one: `.wA .wB` and `.wA.wB` select different elements.
+  (let [red (fn [html css]
+              (:style/color (cascaded-style css html "t")))]
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(.wA .wB) span { color: #ff0000 }"))
+        "Brave: RED -- the argument is a descendant relationship")
+    (is (nil? (red "<div class=\"wA wB\"><span id=\"t\">s</span></div>"
+                   ":is(.wA .wB) span { color: #ff0000 }"))
+        "Brave: black -- and NOT both classes on one element")
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(.wA > .wB) span { color: #ff0000 }")))
+    (is (nil? (red "<div class=\"wA\"><div><div class=\"wB\"><span id=\"t\">s</span></div></div></div>"
+                   ":is(.wA > .wB) span { color: #ff0000 }"))
+        "Brave: black -- the `>` is real, not decoration")
+    (is (= "#ff0000" (red "<div class=\"wA\"></div><div class=\"wB\"><span id=\"t\">s</span></div>"
+                          ":is(.wA + .wB) span { color: #ff0000 }")))
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(:is(.wA .wB)) span { color: #ff0000 }"))
+        "Brave: RED -- a complex argument nests")
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(:not(.q) .wB) span { color: #ff0000 }"))
+        "Brave: RED -- and holds a functional pseudo-class in one compound")
+    (is (nil? (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                   ":is(> .wB) span { color: #ff0000 }"))
+        "Brave: black -- a RELATIVE selector is invalid in :is(), unlike :has()")
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(%%bad, .wA .wB) span { color: #ff0000 }"))
+        "Brave: RED -- :is() is forgiving; one bad arm is dropped")))
+
+(deftest a-complex-is-argument-contributes-its-summed-specificity
+  ;; The list's contribution is still the MAXIMUM over its arms; a complex
+  ;; arm's own specificity is the SUM over its compounds. Three rows, and
+  ;; the second is the control that a change raising every `:is()` would
+  ;; turn red.
+  (let [c (fn [css] (:style/color
+                     (cascaded-style css
+                                     "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                                     "t")))]
+    (is (= "#ff0000" (c ":is(.wA .wB) span { color: #ff0000 } div.wB span { color: #0000ff }"))
+        "(0,2,1) beats (0,1,2)")
+    (is (= "#0000ff" (c ":is(.wA .wB) span { color: #ff0000 } div.wA .wB span { color: #0000ff }"))
+        "...and loses to (0,2,2)")
+    (is (= "#ff0000" (c ":is(#zz, .wA .wB) span { color: #ff0000 } div.wA .wB span { color: #0000ff }"))
+        "the maximum includes an arm that matches nothing")
+    (is (= "#0000ff" (c ":is(.wA .wB) span { color: #ff0000 } .wA .wB span { color: #0000ff }"))
+        "equal specificity: source order decides")
+    (is (= "#ff0000" (c ".wA .wB span { color: #0000ff } :is(.wA .wB) span { color: #ff0000 }"))
+        "...both ways round")
+    (is (= "#0000ff" (c ":where(.wA .wB) span { color: #ff0000 } span { color: #0000ff }"))
+        ":where() is still always zero")))
+
+(deftest not-takes-a-complex-argument-too
+  ;; One rule read from both sides. The first says the `:not()` matched
+  ;; (so the red rule did NOT apply); the control says it did not.
+  (let [c (fn [css] (:style/color
+                     (cascaded-style css
+                                     "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                                     "t")))]
+    (is (= "#0000ff" (c "span { color: #0000ff } span:not(.wA .wB span) { color: #ff0000 }")))
+    (is (= "#ff0000" (c "span { color: #0000ff } span:not(.wQ .wB span) { color: #ff0000 }")))))
+
+(deftest an-ampersand-with-a-complex-parent-carries-the-lists-maximum
+  ;; `&` is `:is(<parent list>)`, and until `:is()` could hold a complex
+  ;; selector a parent list with one complex arm fell back to one expansion
+  ;; per parent -- exact matching, per-arm specificity. All three rows
+  ;; measured; the third is the control that keeps the fix from raising
+  ;; every multi-parent nested rule.
+  (let [c (fn [html css] (:style/color (cascaded-style css html "t")))]
+    (is (= "#ff0000" (c "<div class=\"a\"><div class=\"b\"><span id=\"t\">s</span></div></div>"
+                        "#zz, .a .b { & span { color: #ff0000 } } div.a .b span { color: #0000ff }"))
+        "Brave: RED -- `&` is (1,0,0) from an arm that matches nothing")
+    (is (= "#ff0000" (c "<div class=\"q\"><span id=\"t\">s</span></div>"
+                        ".q, .a .b { & span { color: #ff0000 } } div.q span { color: #0000ff }"))
+        "Brave: RED -- the maximum comes from the COMPLEX arm, which did not match")
+    (is (= "#0000ff" (c "<div class=\"a\"><div class=\"b\"><span id=\"t\">s</span></div></div>"
+                        ".a .b, .c .d { & span { color: #ff0000 } } div.a .b span { color: #0000ff }"))
+        "Brave: BLUE -- no id anywhere, so the maximum is (0,2,0) and loses")
+    (is (= "#ff0000" (c "<div class=\"a\"><div class=\"b\"><span id=\"t\">s</span></div></div>"
+                        ".a .b { & span { color: #ff0000 } }"))
+        "one complex parent still matches...")
+    (is (nil? (c "<div class=\"b\"><span id=\"t\">s</span></div>"
+                 ".a .b { & span { color: #ff0000 } }"))
+        "...and does not overreach")))
+
+;; ---- `@property`'s `syntax` descriptor is a grammar ----
+
+(deftest an-unknown-syntax-component-drops-the-whole-registration
+  ;; The row that had to be measured rather than reasoned about. An unset
+  ;; REGISTERED property reports its initial value; an unset UNregistered
+  ;; one reports the empty string -- so `unset` is what tells "the syntax
+  ;; is not enforced" apart from "the registration was dropped". Brave:
+  ;; `<flurb>` and `<length>|<flurb>` both report the empty string.
+  (let [w (fn [syntax]
+            (:style/width
+             (cascaded-style
+              (str "@property --pq { syntax: \"" syntax "\"; inherits: false; initial-value: 60px }"
+                   " #a { width: var(--pq) }")
+              "<div><div id=\"a\">w</div></div>" "a")))]
+    (is (= "" (w "<flurb>")) "an unknown component name is not a well-formed <syntax>")
+    (is (= "" (w "<length>|<flurb>")) "...and one unknown alternative poisons the list")
+    ;; the controls: the same registration with a known syntax, with an
+    ;; alternation, with a literal ident, and with each multiplier.
+    (is (= 60 (w "<length>")))
+    (is (= 60 (w "<length> | <percentage>")))
+    (is (= 60 (w "auto | <length>")))))
+
+(deftest a-multiplied-syntax-registers-and-is-checked-per-repetition
+  ;; `<length>+` and `<length>#` register in Brave with a multi-value
+  ;; initial, which a whole-value absolute-length check reads as one
+  ;; unparseable string.
+  (let [reg (fn [syntax initial]
+              (get (@#'css/parse-property-registrations
+                    (str "@property --pm { syntax: \"" syntax "\"; initial-value: " initial " }"))
+                   :--pm))]
+    (is (some? (reg "<length>+" "1px 2px")))
+    (is (some? (reg "<length>#" "1px, 2px")))
+    (is (some? (reg "<integer>+" "1 2")))
+    ;; ...and the boundary is still there per repetition: `2em` is not
+    ;; computationally independent, so Brave drops the registration.
+    (is (nil? (reg "<length>+" "1px 2em")))
+    (is (nil? (reg "<length>" "2em")))))
+
+(deftest an-invalid-value-for-a-registered-color-becomes-its-initial
+  ;; The scope cut round forty-nine measured and declined:
+  ;; `@property --c { syntax: "<color>"; initial-value: red }` with
+  ;; `--c: 7` is `red` in Brave and was `7` here.
+  (let [c (fn [declared]
+            (:style/color
+             (cascaded-style
+              (str "@property --pc { syntax: \"<color>\"; inherits: false; initial-value: red }"
+                   " #a { --pc: " declared "; color: var(--pc) }")
+              "<div><div id=\"a\">w</div></div>" "a")))]
+    (is (= "red" (c "7")) "a number is not a colour")
+    (is (= "red" (c "flurb")) "...nor is an unknown identifier")
+    (is (= "red" (c "#zzz")) "...nor is hex that does not parse")
+    ;; the controls that must NOT move: real colours, and a colour
+    ;; FUNCTION this engine does not implement, which the browser does.
+    (is (= "blue" (c "blue")))
+    (is (= "#00ff00" (c "#00ff00")))
+    (is (= "oklch(0.5 0.1 20)" (c "oklch(0.5 0.1 20)"))
+        "an unimplemented colour function is fail-OPEN, not rejected")))
+
+(deftest a-registered-custom-ident-and-string-reject-a-number
+  (let [v (fn [syntax initial declared]
+            (:style/width
+             (cascaded-style
+              (str "@property --pu { syntax: \"" syntax "\"; inherits: false; initial-value: " initial " }"
+                   " #a { --pu: " declared "; width: var(--pu) }")
+              "<div><div id=\"a\">w</div></div>" "a")))]
+    (is (= "foo" (v "<custom-ident>" "foo" "7")) "Brave: the initial")
+    (is (= "bar" (v "<custom-ident>" "foo" "bar")) "...and a real ident stands")
+    (is (= "a" (v "<string>" "'a'" "7")) "Brave: the initial")))
+
+;; ---- the `@supports` value oracle now speaks for colours ----
+
+(deftest supports-answers-for-a-colour-with-the-grammar-it-actually-has
+  ;; `cssom.layout` never parses a colour -- it threads the string onto the
+  ;; draw-op -- so this needed a `require` of the parser one layer below,
+  ;; not a table mirrored across a one-directional dependency. Every row
+  ;; measured in Brave 151 on 2026-08-06.
+  (let [s (fn [c] (css/supports-condition-matches? c))]
+    (is (not (s "(color: #zzz)")) "Brave: black")
+    (is (not (s "(color: flurb)")))
+    (is (not (s "(color: 7)")))
+    (is (not (s "(color: 0)")))
+    (is (not (s "(background-color: #zzz)")))
+    (is (not (s "(border-top-color: flurb)")))
+    (is (not (s "(outline-color: #zzz)")))
+    ;; the controls, without which a `false` proves nothing
+    (is (s "(color: red)"))
+    (is (s "(color: #f00)"))
+    (is (s "(color: #ff000080)"))
+    (is (s "(color: currentcolor)"))
+    (is (s "(color: transparent)"))
+    (is (s "(color: rgb(1,2,3))"))
+    (is (s "(color: hsl(10, 20%, 30%))"))
+    (is (s "(background-color: red)"))
+    ;; ...and the fail-OPEN arm, which is a measurement and not a hedge:
+    ;; these are all RED in Brave and this engine implements none of them.
+    (is (s "(color: oklch(0.5 0.1 20))"))
+    (is (s "(color: lab(50% 20 30))"))
+    (is (s "(color: color-mix(in srgb, red, blue))"))
+    (is (s "(color: light-dark(red, blue))"))))
+
+(deftest supports-answers-for-text-decoration-per-component
+  (let [s (fn [c] (css/supports-condition-matches? c))]
+    (is (not (s "(text-decoration: flurb)")) "Brave: black")
+    (is (not (s "(text-decoration: 7)")))
+    (is (s "(text-decoration: underline)"))
+    (is (s "(text-decoration: line-through)"))
+    (is (s "(text-decoration: overline)"))
+    (is (s "(text-decoration: none)"))
+    (is (s "(text-decoration: underline dotted red)")
+        "Brave: red -- a multi-component value, and every token is known")))
+
+(deftest supports-still-fails-open-where-the-value-space-is-open
+  ;; The control on the whole colour/text-decoration change: three
+  ;; properties whose value space genuinely admits an arbitrary
+  ;; identifier. Brave says all three ARE supported, and an oracle that
+  ;; enumerated its way to `(color: flurb)` being false would have taken
+  ;; these with it.
+  (let [s (fn [c] (css/supports-condition-matches? c))]
+    (is (s "(font-family: flurb)"))
+    (is (s "(list-style-type: flurb)"))
+    (is (s "(will-change: flurb)"))))
+
 ;; ---- `@scope`: a range in the tree, and PROXIMITY in the cascade ----
 ;;
 ;; Every value below was read out of a real headless Brave 151.1.93.129

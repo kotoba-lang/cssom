@@ -5097,6 +5097,22 @@
   ;; both sides. Round forty-nine's residual arithmetic names them: the
   ;; other four new nesting cases account for all 8 of the cascade values
   ;; that changed, and these two for none.
+  ;;
+  ;; 2026-08-06: THIS CASE IS NOW RED, and the change is in the harness
+  ;; rather than in either engine. `cascaded-document` used to hand this
+  ;; side the RAW css while the browser page got it scoped by the case's
+  ;; own container id, so the two sides were reading two different
+  ;; selectors -- and the parent list this side saw (`#nz1, .nz-c`) was two
+  ;; COMPOUND selectors where the browser's (`#case-N #nz1, #case-N .nz-c`)
+  ;; was two COMPLEX ones. Scoping this side too (see `cascaded-document`)
+  ;; makes them the same question and lands the case squarely on
+  ;; `expand-nested-selector`'s third branch, which round forty-nine
+  ;; measured and named: with a COMPLEX parent it expands one rule per
+  ;; parent, so each carries its own specificity instead of the list's
+  ;; maximum, and this comes out blue where Brave says red. Closing it is
+  ;; the change that round already identified -- letting this engine's
+  ;; `:is()` hold a complex selector, in `parse-simple-selector`/
+  ;; `matches-simple?` -- and it is not a nesting change.
   :html "<div class=\"nz-c\"><span>s</span></div>"
   :css "#nz1, .nz-c { & span { color: #ff0000 } } div.nz-c span { color: #0000ff }"}
 
@@ -5348,6 +5364,742 @@
   ;; "dropped".
   :html "<div><p id=\"tr1\">text</p></div>"
   :css "@media (400px <= width <= 900px) { #tr1 { color: #ff0000 } }"}
+
+ ;; ---- form-state pseudo-classes ------------------------------------
+ ;;
+ ;; `matches-pseudo?` implements THIRTEEN of these -- :checked, :disabled,
+ ;; :enabled, :required, :optional, :read-only, :read-write, :valid,
+ ;; :invalid, :in-range, :out-of-range, plus :focus/:focus-within -- and
+ ;; before this round the corpus contained NOT ONE case for any of them.
+ ;; Implemented and never differentially tested is exactly the state
+ ;; `@layer` was in before round forty-four.
+ ;;
+ ;; None of these needs an interaction: every state below is decided by an
+ ;; attribute or by the document, so both sides can answer it from the same
+ ;; markup. `:focus`/`:focus-within`/`:hover`/`:active` are the ones that
+ ;; cannot be, and there is no case for them.
+ ;;
+ ;; Everything here was measured one probe page per probe in a real
+ ;; headless Brave 151.1.93.129 over CDP on 2026-08-06, in this corpus's own
+ ;; frame, BEFORE the case was written.
+
+ {:id :form/checked-matches-a-checked-checkbox
+  :group :form
+  ;; Brave: margin-left 30px on the checked box, 4px on the other -- 4px is
+  ;; this browser's UA `input[type=checkbox] { margin: 3px 3px 3px 4px }`,
+  ;; so the pair separates "the rule matched" from "the rule matched
+  ;; everything".
+  :html "<p><input type=\"checkbox\" checked><input type=\"checkbox\"></p>"
+  :css "input:checked { margin-left: 30px }"}
+
+ {:id :form/checked-matches-a-checked-radio
+  :group :form
+  ;; The same rule on the other control, and the UA number is NOT the same:
+  ;; Brave gives a radio `margin-left: 5px` where a checkbox gets 4. Brave:
+  ;; 5px then 30px.
+  :html "<p><input type=\"radio\" name=\"ck2\"><input type=\"radio\" name=\"ck2\" checked></p>"
+  :css "input:checked { margin-left: 30px }"}
+
+ {:id :form/checked-matches-a-selected-option
+  :group :form
+  ;; `:checked` is not one attribute. On an `<option>` the state is
+  ;; `selected`, and this engine tests `:checked` for every control alike.
+  ;; Brave: the first option black, the second red.
+  :html "<p><select><option>a</option><option selected>b</option></select></p>"
+  :css "option:checked { color: #ff0000 }"}
+
+ {:id :form/a-checked-attribute-on-an-option-is-not-selectedness
+  :group :form
+  ;; Its inverse, and the pair is the measurement: an `<option checked>` is
+  ;; NOT `:checked` and an `<option selected>` is. Brave: black then red --
+  ;; the same answer as the case above, from the opposite markup. An engine
+  ;; reading the `checked` attribute for every control gives red then black.
+  :html "<p><select><option checked>a</option><option selected>b</option></select></p>"
+  :css "option:checked { color: #ff0000 }"}
+
+ {:id :form/disabled-and-enabled-are-complementary
+  :group :form
+  ;; Brave: red then blue. Both halves in one case on purpose -- an engine
+  ;; that matched neither, or both, would show here and not in either half
+  ;; alone.
+  :html "<p><button disabled>a</button><button>b</button></p>"
+  :css "button:disabled { color: #ff0000 } button:enabled { color: #0000ff }"}
+
+ {:id :form/disabled-descends-from-a-fieldset
+  :group :form
+  ;; `:disabled` is not the attribute either: a disabled `<fieldset>`
+  ;; disables its descendants. Brave: input red, button blue -- both
+  ;; matched `:disabled` without carrying the attribute themselves.
+  :html "<fieldset disabled><input><button>b</button></fieldset>"
+  :css "input:disabled { color: #ff0000 } button:disabled { color: #0000ff }"}
+
+ {:id :form/the-first-legend-of-a-disabled-fieldset-escapes
+  :group :form
+  ;; The boundary of the rule above, and it is a real one: the controls in
+  ;; a disabled fieldset's FIRST `<legend>` stay enabled. Brave: the legend's
+  ;; input blue (enabled), the other red (disabled).
+  :html "<fieldset disabled><legend><input></legend><input></fieldset>"
+  :css "input:disabled { color: #ff0000 } input:enabled { color: #0000ff }"}
+
+ {:id :form/enabled-does-not-match-a-non-control
+  :group :form
+  ;; The control for the whole `:enabled` family: a bare `:enabled` is not
+  ;; "everything that is not disabled". Brave: the span black, the input red.
+  :html "<p><span id=\"en1\">x</span><input></p>"
+  :css ":enabled { color: #ff0000 }"}
+
+ {:id :form/enabled-and-disabled-on-an-option
+  :group :form
+  ;; An `<option>` takes part in the pair too. Brave: red then blue.
+  :html "<p><select><option>a</option><option disabled>b</option></select></p>"
+  :css "option:enabled { color: #ff0000 } option:disabled { color: #0000ff }"}
+
+ {:id :form/required-and-optional-are-complementary
+  :group :form
+  ;; Brave: red then blue.
+  :html "<p><input required><input></p>"
+  :css "input:required { color: #ff0000 } input:optional { color: #0000ff }"}
+
+ {:id :form/required-still-matches-a-disabled-control
+  :group :form
+  ;; Measured, and it is the one that separates `:required` from validity:
+  ;; disabling a control takes it OUT of constraint validation but does not
+  ;; stop it being required. Brave: BOTH red -- the disabled one matches
+  ;; `:required`, and `:optional` (written later, same specificity) does not
+  ;; rescue it. An engine that excludes disabled controls from `:required`
+  ;; leaves the first one with no colour at all -- which is what this one
+  ;; does, so the case is RED. `:valid`/`:invalid`/`:in-range`/
+  ;; `:out-of-range` DO keep their disabled test and Brave agrees they
+  ;; should, which is what makes this a rule about `:required` rather than
+  ;; about disabledness; `:form/in-range-does-not-match-a-disabled-control`
+  ;; is the control that says so, and it agrees.
+  :html "<p><input required disabled><input required></p>"
+  :css "input:required { color: #ff0000 } input:optional { color: #0000ff }"}
+
+ {:id :form/read-only-matches-a-non-editable-element
+  :group :form
+  ;; `:read-only` is not a form-control pseudo-class: it matches every
+  ;; element that is not user-alterable, a plain `<p>` included. Brave: red.
+  :html "<p id=\"ro1\">text</p>"
+  :css "p:read-only { color: #ff0000 }"}
+
+ {:id :form/read-only-matches-a-disabled-input
+  :group :form
+  ;; ...and a DISABLED text field is one of them, which is not what "read
+  ;; only" reads like. Brave: margin-left 30px on the disabled input and
+  ;; margin-right 30px on the enabled one -- so the disabled control is
+  ;; `:read-only` and not `:read-write`, and an engine that asks only about
+  ;; the `readonly` attribute gives it neither -- which is what this one
+  ;; does, so the case is RED. Measured and deliberately not closed: see the
+  ;; comment block above `matches-pseudo?` in src/cssom/core.cljc for the
+  ;; one-predicate rule the six measured rows want and for why closing it
+  ;; is a cross-repo change (kotoba-lang/browser's query-selector suite
+  ;; asserts the current answers in three places).
+  :html "<p><input disabled><input></p>"
+  :css "input:read-only { margin-left: 30px } input:read-write { margin-right: 30px }"}
+
+ {:id :form/read-write-matches-a-contenteditable
+  :group :form
+  ;; The other side of the same rule: `:read-write` reaches a
+  ;; `contenteditable` element, which is not a form control at all. Brave:
+  ;; the editable paragraph red, the plain one black. RED here -- this
+  ;; engine's `:read-write` requires a form control, so it matches neither.
+  ;; Same cross-repo blocker as the case above.
+  :html "<p contenteditable=\"true\">edit</p><p>plain</p>"
+  :css "p:read-write { color: #ff0000 }"}
+
+ {:id :form/valid-and-invalid-on-a-required-field
+  :group :form
+  ;; Brave: the empty required field red, the filled one blue.
+  :html "<p><input required><input required value=\"v\"></p>"
+  :css "input:invalid { color: #ff0000 } input:valid { color: #0000ff }"}
+
+ {:id :form/invalid-on-a-pattern-mismatch
+  :group :form
+  ;; Constraint validation is more than `required`. Brave: red then blue.
+  :html "<p><input pattern=\"[0-9]+\" value=\"abc\"><input pattern=\"[0-9]+\" value=\"123\"></p>"
+  :css "input:invalid { color: #ff0000 } input:valid { color: #0000ff }"}
+
+ {:id :form/valid-matches-a-form-element
+  :group :form
+  ;; `:valid`/`:invalid` apply to a `<form>` as well as to its controls --
+  ;; a form is valid when every control in it is. Brave: red.
+  :html "<form><input required value=\"v\"></form>"
+  :css "form:valid { color: #ff0000 }"}
+
+ {:id :form/in-range-and-out-of-range
+  :group :form
+  ;; Brave: the 15 red, the 5 blue, against `min=1 max=10`.
+  :html "<p><input type=\"number\" min=\"1\" max=\"10\" value=\"15\"><input type=\"number\" min=\"1\" max=\"10\" value=\"5\"></p>"
+  :css "input:out-of-range { color: #ff0000 } input:in-range { color: #0000ff }"}
+
+ {:id :form/an-unbounded-number-is-in-neither-range
+  :group :form
+  ;; The control that makes the pair above mean something: a control with
+  ;; no range limitations at all matches NEITHER pseudo-class -- not
+  ;; `:in-range` by default. Brave: black.
+  :html "<p><input type=\"number\" value=\"5\"></p>"
+  :css "input:in-range { color: #ff0000 } input:out-of-range { color: #0000ff }"}
+
+ {:id :form/in-range-does-not-match-a-disabled-control
+  :group :form
+  ;; And the other boundary: disabling a control DOES take it out of the
+  ;; range pseudo-classes, where it does not take it out of `:required`
+  ;; above. Brave: margin-left 0px then 30px.
+  :html "<p><input type=\"number\" min=\"1\" max=\"10\" value=\"5\" disabled><input type=\"number\" min=\"1\" max=\"10\" value=\"5\"></p>"
+  :css "input:in-range { margin-left: 30px }"}
+
+ {:id :form/placeholder-shown
+  :group :form
+  ;; Brave: the empty field red, the one holding a value black.
+  :html "<p><input placeholder=\"hint\"><input placeholder=\"hint\" value=\"typed\"></p>"
+  :css "input:placeholder-shown { color: #ff0000 }"}
+
+ {:id :form/default-on-a-checked-checkbox
+  :group :form
+  ;; `:default` is the state the control was BORN in, which for a checkbox
+  ;; is the `checked` attribute rather than its current checkedness. Brave:
+  ;; margin-left 30px then 4px.
+  :html "<p><input type=\"checkbox\" checked><input type=\"checkbox\"></p>"
+  :css "input:default { margin-left: 30px }"}
+
+ {:id :form/default-on-the-first-submit-button
+  :group :form
+  ;; The other half of `:default`, and it has nothing to do with checkedness:
+  ;; the first submit button of a form is the one Enter would press. Brave:
+  ;; the first button red, the second black.
+  :html "<form><button>one</button><button>two</button></form>"
+  :css "button:default { color: #ff0000 }"}
+
+ {:id :form/indeterminate-on-a-progress-with-no-value
+  :group :form
+  ;; A `<progress>` with no `value` is indeterminate -- the one shape of
+  ;; `:indeterminate` reachable without scripting. Brave: margin-left 30px
+  ;; then 0px.
+  :html "<p><progress></progress><progress value=\"0.5\"></progress></p>"
+  :css "progress:indeterminate { margin-left: 30px }"}
+
+ {:id :form/indeterminate-on-a-radio-group-with-none-checked
+  :group :form
+  ;; And the second shape: every radio of a group with nothing checked is
+  ;; indeterminate. Brave: margin-left 30px on BOTH.
+  :html "<p><input type=\"radio\" name=\"ig1\"><input type=\"radio\" name=\"ig1\"></p>"
+  :css "input:indeterminate { margin-left: 30px }"}
+
+ {:id :form/a-radio-group-with-one-checked-is-not-indeterminate
+  :group :form
+  ;; Its control, and the pair is what makes either a measurement: check one
+  ;; of the two and NEITHER is indeterminate any more. Brave: margin-left
+  ;; 5px on both, i.e. the UA value.
+  :html "<p><input type=\"radio\" name=\"ig2\" checked><input type=\"radio\" name=\"ig2\"></p>"
+  :css "input:indeterminate { margin-left: 30px }"}
+
+ ;; ---- structural and logical selectors -----------------------------
+
+ {:id :selector/only-of-type
+  :group :selector
+  ;; `:only-of-type` was in neither the engine's `matches-pseudo?` nor the
+  ;; corpus. Brave: the lone `<p>` red, the two `<span>`s black.
+  :html "<div><p>p</p><span>s1</span><span>s2</span></div>"
+  :css "div > :only-of-type { color: #ff0000 }"}
+
+ {:id :selector/only-of-type-is-not-only-child
+  :group :selector
+  ;; Its control, and it is the whole distinction: the `<span>` is the only
+  ;; one OF ITS TYPE while having two siblings. Brave: the span red, both
+  ;; paragraphs black.
+  :html "<div><p>1</p><p>2</p><span>s</span></div>"
+  :css "div > :only-of-type { color: #ff0000 }"}
+
+ {:id :selector/last-of-type-among-mixed-siblings
+  :group :selector
+  ;; The mirror of `first-of-type-among-mixed-siblings`, counted per tag
+  ;; from the end. Brave: the second span red, the second p blue, the first
+  ;; of each black.
+  :html "<div><span>s1</span><p>p1</p><span>s2</span><p>p2</p></div>"
+  :css "div span:last-of-type { color: #ff0000 } div p:last-of-type { color: #0000ff }"}
+
+ {:id :selector/nth-last-of-type
+  :group :selector
+  ;; An+B counted per tag AND from the end -- the one combination of the
+  ;; four `:nth-*` pseudo-classes the corpus had no case for. The `<span>`
+  ;; is in the middle to prove the count skips it. Brave: the second
+  ;; paragraph red.
+  :html "<div><p>1</p><span>s</span><p>2</p><p>3</p></div>"
+  :css "div p:nth-last-of-type(2) { color: #ff0000 }"}
+
+ {:id :selector/empty-ignores-a-comment
+  :group :selector
+  ;; `:empty` is "no child NODES", with one exception that has to be
+  ;; measured: a comment is not a child for this purpose and a whitespace
+  ;; text node is. Brave: the commented paragraph red, the one holding a
+  ;; single space black, the genuinely empty one red.
+  :html "<p><!--c--></p><p> </p><p></p>"
+  :css "p:empty { color: #ff0000 }"}
+
+ {:id :selector/first-child-ignores-a-comment
+  :group :selector
+  ;; Its control on the other structural family: a leading comment does not
+  ;; take the `:first-child` position away from the element after it.
+  ;; Brave: the first paragraph red, the second black.
+  :html "<div><!--c--><p>a</p><p>b</p></div>"
+  :css "p:first-child { color: #ff0000 }"}
+
+ {:id :selector/lang-matches-the-attribute
+  :group :selector
+  ;; Brave: the `en` paragraph red, the `fr` one black.
+  :html "<div lang=\"en\"><p>en</p></div><div lang=\"fr\"><p>fr</p></div>"
+  :css "p:lang(en) { color: #ff0000 }"}
+
+ {:id :selector/lang-matches-a-region-subtag
+  :group :selector
+  ;; `:lang()` is a language RANGE, not a string compare: `en` matches
+  ;; `en-GB`. Brave: red then black.
+  :html "<div lang=\"en-GB\"><p>gb</p></div><div lang=\"fr-CA\"><p>ca</p></div>"
+  :css "p:lang(en) { color: #ff0000 }"}
+
+ {:id :selector/lang-does-not-match-a-broader-tag
+  :group :selector
+  ;; The range runs one way only, which is the control for the case above:
+  ;; `:lang(en-GB)` does not match a bare `en`. Brave: black.
+  :html "<div lang=\"en\"><p>en</p></div>"
+  :css "p:lang(en-GB) { color: #ff0000 }"}
+
+ {:id :selector/lang-is-inherited-through-an-untagged-ancestor
+  :group :selector
+  ;; The language is the nearest ANCESTOR's `lang`, not the element's own.
+  ;; Brave: red.
+  :html "<div lang=\"fr\"><section><p>x</p></section></div>"
+  :css "p:lang(fr) { color: #ff0000 }"}
+
+ {:id :selector/a-lang-selector-list-is-not-valid-in-this-browser
+  :group :selector
+  ;; Selectors 4 gives `:lang()` a comma-separated list of ranges. Blink 151
+  ;; has not shipped it: measured, the rule is DROPPED from
+  ;; `document.styleSheets` entirely (two rules survive on the page instead
+  ;; of three) and the paragraph is black -- where `:lang(de)` alone, the
+  ;; case above's shape, is red. An engine that implements the list is
+  ;; ahead of this oracle rather than wrong, and the corpus records which.
+  :html "<div lang=\"de\"><p>de</p></div>"
+  :css "p:lang(fr, de) { color: #ff0000 }"}
+
+ {:id :selector/dir-matches-the-direction
+  :group :selector
+  ;; Brave: the rtl paragraph red, the ltr one blue.
+  :html "<div dir=\"rtl\"><p>a</p></div><div dir=\"ltr\"><p>b</p></div>"
+  :css "p:dir(rtl) { color: #ff0000 } p:dir(ltr) { color: #0000ff }"}
+
+ {:id :selector/dir-reads-the-attribute-and-not-the-css-property
+  :group :selector
+  ;; The rule that a spec reading gets wrong: `:dir()` is HTML
+  ;; directionality, and `direction: rtl` in CSS does not change it. Brave:
+  ;; BLUE -- `:dir(ltr)` still matches a box the CSS has turned rtl.
+  :html "<div style=\"direction: rtl\"><p>a</p></div>"
+  :css "p:dir(rtl) { color: #ff0000 } p:dir(ltr) { color: #0000ff }"}
+
+ {:id :selector/any-link-and-link-both-match-an-href
+  :group :selector
+  ;; Neither is implemented here, and both are ordinary non-interactive
+  ;; state: an `<a>` is a link exactly when it has an `href`. Brave:
+  ;; padding-left AND padding-right 30px on the first anchor, 0 on the
+  ;; second.
+  :html "<p><a href=\"/x\">l</a><a>n</a></p>"
+  :css "a:any-link { padding-left: 30px } a:link { padding-right: 30px }"}
+
+ {:id :selector/not-takes-a-complex-argument
+  :group :selector
+  ;; Selectors 4 lets `:not()` hold a full complex selector, and Blink has
+  ;; shipped it (the rule survives in `document.styleSheets`). Brave: the
+  ;; paragraph inside `.w` black, the one outside red.
+  :html "<div class=\"w\"><p>a</p></div><div><p>b</p></div>"
+  :css "p:not(.w p) { color: #ff0000 }"}
+
+ {:id :selector/has-a-next-sibling
+  :group :selector
+  ;; `:has(+ p)` -- the adjacent form, beside the `~` one the corpus
+  ;; already has. Brave: the first `<h2>` red, the second black.
+  :html "<div><h2>head</h2><p>p</p></div><div><h2>head</h2><b>b</b></div>"
+  :css "h2:has(+ p) { color: #ff0000 }"}
+
+ {:id :selector/has-a-direct-child-compound
+  :group :selector
+  ;; `:has(> b.m)` -- the child form with a compound argument, which is
+  ;; what separates it from the descendant form. Brave: the first div red,
+  ;; the one whose `b.m` is a level deeper black.
+  :html "<div><b class=\"m\">x</b></div><div><span><b class=\"m\">y</b></span></div>"
+  :css "div:has(> b.m) { color: #ff0000 }"}
+
+ {:id :selector/has-takes-a-selector-list
+  :group :selector
+  ;; :has()'s own comma list is an OR. Brave: the first two divs red, the
+  ;; third black. This case is ALSO the reason `scope-css` learned to split
+  ;; a selector list outside parentheses only -- before that it rewrote the
+  ;; second arm to `#case-N i`, and the first div came out black.
+  :html "<div><i>i</i></div><div><b>b</b></div><div><u>u</u></div>"
+  :css "div:has(b, i) { color: #ff0000 }"}
+
+ {:id :selector/has-specificity-comes-from-its-arguments
+  :group :selector
+  ;; :has()'s specificity is the MAXIMUM over its argument list, including
+  ;; an arm that matches nothing -- the same rule `:is()` has, and the same
+  ;; rule a nested `&` relies on. `#zz` makes the compound (1,0,1), which
+  ;; beats `div.c p`'s (0,1,2). Brave: RED.
+  :html "<div class=\"c\"><p><b>b</b></p></div>"
+  :css "p:has(#zz, b) { color: #ff0000 } div.c p { color: #0000ff }"}
+
+ {:id :selector/one-argument-does-not-raise-a-has-specificity
+  :group :selector
+  ;; Its control, and neither means anything alone: drop the `#zz` arm and
+  ;; `p:has(b)` is (0,0,2), which LOSES to the same `div.c p`. Brave: BLUE.
+  :html "<div class=\"c\"><p><b>b</b></p></div>"
+  :css "p:has(b) { color: #ff0000 } div.c p { color: #0000ff }"}
+
+ {:id :selector/has-inside-is
+  :group :selector
+  ;; `:has()` composes into `:is()`. Brave: the div holding a `<b>` red,
+  ;; the plain one black.
+  :html "<div><b>b</b></div><div>plain</div>"
+  :css ":is(div:has(b)) { color: #ff0000 }"}
+
+ {:id :selector/has-nested-in-has-is-invalid
+  :group :selector
+  ;; ...and does NOT compose into itself: `:has()` inside `:has()` is
+  ;; invalid, so the whole rule is dropped rather than the inner one being
+  ;; ignored. Measured: two rules survive on the page instead of three, and
+  ;; the div is black. An engine that parses the inner one and matches
+  ;; makes it red.
+  :html "<div><section><b>x</b></section></div>"
+  :css "div:has(section:has(b)) { color: #ff0000 }"}
+
+ {:id :selector/has-a-descendant-through-a-combinator
+  :group :selector
+  ;; The control for the case above: the same intent written legally, as a
+  ;; descendant combinator inside one `:has()`. Brave: the first div red,
+  ;; the second black.
+  :html "<div><section><b>x</b></section></div><div><section><i>y</i></section></div>"
+  :css "div:has(section b) { color: #ff0000 }"}
+
+ ;; ---- pseudo-elements ----------------------------------------------
+ ;;
+ ;; `pseudo-element-pattern` recognises `::before`, `::after` and
+ ;; `::first-letter` and deliberately nothing else, so a rule naming any
+ ;; other pseudo-element falls through to the pseudo-CLASS pattern, becomes
+ ;; an unrecognised pseudo-class, and matches nothing. That is fail-CLOSED,
+ ;; which is the safe direction -- these cases measure what it costs.
+ ;;
+ ;; THREE were measured and deliberately NOT added, because no axis can see
+ ;; them at any value (all three in this corpus's own frame):
+ ;;   ::placeholder  -- a 40px `font-size` on it leaves the `<input>` at
+ ;;                     153x21, exactly its box without the rule.
+ ;;   ::selection    -- nothing is selected, so a `color`/`background` on it
+ ;;                     changes neither the paragraph's box nor any of the
+ ;;                     fourteen compared properties.
+ ;;   ::backdrop     -- a `<dialog open>` is not MODAL and has no backdrop;
+ ;;                     the dialog's own box is 41x54 either way.
+ ;; A case that can never be scored does not belong here.
+
+ {:id :generated/marker-font-size-grows-the-item
+  :group :generated
+  ;; The oracle cannot read a marker's text -- no Range reaches generated
+  ;; content -- so only the LINE score is blind here. The geometry the case
+  ;; is written for is still compared, and it is the whole point of it.
+  :oracle/blind true
+  ;; `::marker` HAS no box of its own, and its effect still reaches the
+  ;; geometry axis: the marker is an inline box on the item's first line, so
+  ;; a bigger font grows the line. Brave: the `<li>` is 800x29 against
+  ;; 800x20 without the rule -- 9px, well outside the 2px tolerance.
+  :html "<ul><li>one</li></ul>"
+  :css "li::marker { font-size: 40px }"}
+
+ {:id :generated/marker-font-size-on-an-ordered-list
+  :group :generated
+  ;; The oracle cannot read a marker's text -- no Range reaches generated
+  ;; content -- so only the LINE score is blind here. The geometry the case
+  ;; is written for is still compared, and it is the whole point of it.
+  :oracle/blind true
+  ;; The same on an `<ol>`, whose marker is a string rather than a glyph.
+  ;; Brave: 800x29 against 800x20.
+  :html "<ol><li>one</li></ol>"
+  :css "li::marker { font-size: 40px }"}
+
+ {:id :generated/marker-content-widens-a-shrink-to-fit-item
+  :group :generated
+  ;; The other observable half: `content` on a `::marker` changes what the
+  ;; marker advances, which a shrink-to-fit box reads directly. Brave: the
+  ;; inline-block is 56 wide against 40 without the rule -- and 40 is
+  ;; exactly what this engine's own inside-marker advance formula gives, so
+  ;; the control is already pinned by `:list/list-style-position-inside`.
+  :html "<div style=\"display: inline-block\"><ul style=\"list-style-position: inside; margin: 0; padding: 0\"><li>one</li></ul></div>"
+  :css "li::marker { content: \"XXXX \" }"}
+
+ {:id :generated/an-unknown-pseudo-element-does-not-restyle-its-element
+  :group :generated
+  ;; The control beside the three above, and it is the failure mode they
+  ;; are the other side of: an unrecognised pseudo-element must not fall
+  ;; back to styling the ELEMENT. Measured: Brave drops the rule (two rules
+  ;; survive instead of three) and the paragraph is black; this engine
+  ;; reaches the same black by a different route (`:frobnicate` becomes an
+  ;; unrecognised pseudo-CLASS, which never matches). Two right answers for
+  ;; two reasons, which is what makes it a control and not a finding.
+  :html "<p>text</p>"
+  :css "p::frobnicate { color: #ff0000 }"}
+
+ {:id :form/file-selector-button-padding-grows-the-control
+  :group :form
+  ;; `::file-selector-button` styles a real box in the UA shadow tree, and
+  ;; the control's own size is computed from it. Brave: 261x65 with
+  ;; `padding: 20px` on the button, against 253x27 without -- and 253 is the
+  ;; `ceil(34 x advance("0"))` term round forty-five implemented, which is
+  ;; correct exactly while it wins. A fix needs the shadow tree, not a
+  ;; wider constant.
+  :html "<p><input type=\"file\"></p>"
+  :css "input::file-selector-button { padding: 20px }"}
+
+
+ ;; ---- box alignment ------------------------------------------------
+ ;;
+ ;; `place-items`, `place-content` and `place-self` are in neither
+ ;; `cssom.core`'s shorthand expanders nor `cssom.layout`'s readers, so
+ ;; every case below that uses one is measuring whether a shorthand is
+ ;; expanded at all. The order of the two values had to be measured rather
+ ;; than assumed and is the same for all three: ALIGN first, then JUSTIFY --
+ ;; block axis before inline axis, which is the opposite of the order the
+ ;; `gap` shorthand's two values are usually remembered in.
+
+ {:id :grid/place-items-centers-both-axes
+  :group :grid
+  ;; `place-items` is a size decision before it is a position one: the item
+  ;; stops filling the track. Brave: the item is 7x20 at (56.5, 20) in a
+  ;; 120x60 track.
+  :html "<div id=\"pi1\" style=\"display: grid; grid-template-columns: 120px; grid-template-rows: 60px; width: 300px\"><div>x</div></div>"
+  :css "#pi1 { place-items: center }"}
+
+ {:id :grid/place-items-is-align-then-justify
+  :group :grid
+  ;; The order, measured: `place-items: end start` reports
+  ;; `align-items: end` and `justify-items: start`, and the item lands at
+  ;; (0, 40) in the same 120x60 track. Reading the two values the other way
+  ;; round puts it at (113, 0), so this case tells the two apart.
+  :html "<div id=\"pi2\" style=\"display: grid; grid-template-columns: 120px; grid-template-rows: 60px; width: 300px\"><div>x</div></div>"
+  :css "#pi2 { place-items: end start }"}
+
+ {:id :grid/place-items-control-is-stretch
+  :group :grid
+  ;; The control for both: with no `place-items` the item fills its track.
+  ;; Brave: 120x60 at (0, 0).
+  :html "<div id=\"pi3\" style=\"display: grid; grid-template-columns: 120px; grid-template-rows: 60px; width: 300px\"><div>x</div></div>"}
+
+ {:id :grid/place-self-single-value-is-both-axes
+  :group :grid
+  ;; One value sets both. Brave: the item is 7x20 at (113, 40).
+  :html "<div style=\"display: grid; grid-template-columns: 120px; grid-template-rows: 60px; width: 300px\"><div id=\"ps1\">x</div></div>"
+  :css "#ps1 { place-self: end }"}
+
+ {:id :grid/place-self-two-values
+  :group :grid
+  ;; ...and two values are align then justify, same as `place-items`.
+  ;; `place-self: end center` puts the first item at (56.5, 40) while its
+  ;; sibling, untouched, still fills its own track at (0, 60) 120x20.
+  :html "<div style=\"display: grid; grid-template-columns: 120px; grid-template-rows: 60px; width: 300px\"><div id=\"ps2\">x</div><div>y</div></div>"
+  :css "#ps2 { place-self: end center }"}
+
+ {:id :grid/justify-content-centers-the-tracks
+  :group :grid
+  ;; `justify-content` on a grid CONTAINER places the tracks in the leftover
+  ;; space, which `cssom.layout` names as unimplemented (tracks are always
+  ;; placed from the start edge). Brave: the two 60px tracks at x=90 and
+  ;; x=150 in a 300px grid.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; width: 300px; justify-content: center\"><div>x</div><div>y</div></div>"}
+
+ {:id :grid/justify-content-space-between-spreads-the-tracks
+  :group :grid
+  ;; The distribution form of the same property, which a "centre it" fix
+  ;; would not cover. Brave: x=0 and x=240.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; width: 300px; justify-content: space-between\"><div>x</div><div>y</div></div>"}
+
+ {:id :grid/align-content-end
+  :group :grid
+  ;; The block-axis half. Brave: the two 20px rows at y=60 and y=80 in a
+  ;; 100px-tall grid.
+  :html "<div id=\"ac1\" style=\"display: grid; grid-template-rows: 20px 20px; height: 100px; width: 300px\"><div>x</div><div>y</div></div>"
+  :css "#ac1 { align-content: end }"}
+
+ {:id :grid/align-content-control
+  :group :grid
+  ;; Its control: without the declaration the rows start at the top edge.
+  ;; Brave: y=0 and y=20.
+  :html "<div id=\"ac2\" style=\"display: grid; grid-template-rows: 20px 20px; height: 100px; width: 300px\"><div>x</div><div>y</div></div>"}
+
+ {:id :grid/place-content-is-align-then-justify
+  :group :grid
+  ;; The shorthand over both of the above, in the same order. Brave:
+  ;; `place-content: end center` reports `align-content: end` and
+  ;; `justify-content: center`, and the two tracks land at (90, 80) and
+  ;; (150, 80).
+  :html "<div id=\"pc1\" style=\"display: grid; grid-template-columns: 60px 60px; grid-template-rows: 20px; width: 300px; height: 100px\"><div>x</div><div>y</div></div>"
+  :css "#pc1 { place-content: end center }"}
+
+ {:id :grid/auto-flow-dense-backfills-a-hole
+  :group :grid
+  ;; `dense` is named as unimplemented at `item-grid-placement`. Brave, in a
+  ;; three-column grid with an item locked to column 2 and a two-column
+  ;; spanner after it: the third item goes BACK to (0, 0), into the hole the
+  ;; explicit placement left.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px 60px; grid-auto-flow: row dense\"><div style=\"grid-column: 2\">1</div><div style=\"grid-column: span 2\">2</div><div>3</div></div>"}
+
+ {:id :grid/auto-flow-sparse-does-not-backfill
+  :group :grid
+  ;; Its control, identical but for the keyword: the cursor only ever moves
+  ;; forward, so the third item lands at (120, 20). The two cases differ in
+  ;; exactly one box, which is what makes the pair a measurement of `dense`
+  ;; rather than of placement in general.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px 60px\"><div style=\"grid-column: 2\">1</div><div style=\"grid-column: span 2\">2</div><div>3</div></div>"}
+
+ {:id :grid/order-reorders-grid-items
+  :group :grid
+  ;; `order` is not a flex property: it reorders a grid's auto-placement
+  ;; too. Brave: the first item at x=60 and the second at x=0.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px\"><div style=\"order: 2\">aa</div><div>bb</div></div>"}
+
+ {:id :flex/place-content-on-a-row
+  :group :flex
+  ;; The same shorthand on a flex container, where `align-content` has no
+  ;; effect on a single line and `justify-content` does all the work.
+  ;; Brave: the two items at x=286 and x=293, each 7x100.
+  :html "<div id=\"fpc\" style=\"display: flex; width: 300px; height: 100px\"><div>x</div><div>y</div></div>"
+  :css "#fpc { place-content: center flex-end }"}
+
+ {:id :flex/place-items-applies-only-on-the-cross-axis
+  :group :flex
+  ;; `place-items: center` on a flex row sets `align-items: center` (which
+  ;; applies) and `justify-items: center` (which a flex container ignores).
+  ;; Brave: the item 7x20 at (0, 30) in an 80px-tall container, against
+  ;; 7x80 at (0, 0) without the rule. Half of a shorthand applying is the
+  ;; shape a per-property fix gets wrong.
+  :html "<div id=\"fpi\" style=\"display: flex; width: 300px; height: 80px\"><div>x</div></div>"
+  :css "#fpi { place-items: center }"}
+
+ {:id :flex/order-negative-comes-first
+  :group :flex
+  ;; `order` defaults to 0, so a negative one sorts ahead of untouched
+  ;; siblings without any of them being renumbered. Brave: x=14, 0, 28.
+  :html "<div style=\"display: flex; width: 300px\"><div>aa</div><div style=\"order: -1\">bb</div><div>cc</div></div>"}
+
+ {:id :box/justify-self-on-a-block-child
+  :group :box
+  ;; Measured, and it is the one in this group a spec reading would have got
+  ;; wrong: box alignment is not grid-only. `justify-self` on an ordinary
+  ;; block-level child of an ordinary block container places it in the
+  ;; inline axis. Brave: the 60px box at x=120 in a 300px parent, i.e.
+  ;; centred, where `margin: 0 auto` would be needed to say the same thing.
+  :html "<div style=\"width: 300px\"><div style=\"justify-self: center; width: 60px\">x</div></div>"}
+
+ {:id :box/align-self-on-a-block-child-does-nothing
+  :group :box
+  ;; Its control, and the asymmetry is real: the BLOCK axis has no such
+  ;; rule, so `align-self: end` on the same child moves nothing. Brave:
+  ;; (0, 0), where `justify-self: end` on the same markup is x=240.
+  :html "<div style=\"width: 300px; height: 100px\"><div style=\"align-self: end; width: 60px\">x</div></div>"}
+
+ {:id :box/order-does-not-reorder-block-children
+  :group :box
+  ;; The control for the two `order` cases above: `order` applies to flex
+  ;; and grid items and to nothing else. Brave: the two blocks in document
+  ;; order at y=0 and y=20.
+  :html "<div><div style=\"order: 2\">aa</div><div>bb</div></div>"}
+ {:id :selector/is-holds-a-complex-selector
+  :group :selector
+  ;; `:is()` takes a COMPLEX selector, and this is a matching fact before
+  ;; it is a specificity one: `.cs-a .cs-b` and `.cs-a.cs-b` select
+  ;; different elements. Both are on the page because only the pair
+  ;; measures it -- a compound-only parser reads the argument as "both
+  ;; classes on ONE element" and gets each of them exactly backwards.
+  ;; Brave: the nested span RED, the one-element span BLACK.
+  :html "<div class=\"cs-a\"><div class=\"cs-b\"><span id=\"cs1\">s</span></div></div><div class=\"cs-a cs-b\"><span id=\"cs2\">t</span></div>"
+  :css ":is(.cs-a .cs-b) span { color: #ff0000 }"}
+
+ {:id :selector/a-complex-is-argument-carries-its-summed-specificity
+  :group :selector
+  ;; A complex argument's specificity is the SUM over its own compounds,
+  ;; so `:is(.cq-a .cq-b) span` is (0,2,1) and beats `div.cq-b span`'s
+  ;; (0,1,2). Brave: RED.
+  :html "<div class=\"cq-a\"><div class=\"cq-b\"><span id=\"cq1\">s</span></div></div>"
+  :css ":is(.cq-a .cq-b) span { color: #ff0000 } div.cq-b span { color: #0000ff }"}
+
+ {:id :selector/a-complex-is-argument-still-loses-to-a-longer-selector
+  :group :selector
+  ;; The control the row above needs: the SUM is not a promotion.
+  ;; `:is(.cr-a .cr-b) span` is (0,2,1) and `div.cr-a .cr-b span` is
+  ;; (0,2,2). Brave: BLUE.
+  :html "<div class=\"cr-a\"><div class=\"cr-b\"><span id=\"cr1\">s</span></div></div>"
+  :css ":is(.cr-a .cr-b) span { color: #ff0000 } div.cr-a .cr-b span { color: #0000ff }"}
+
+ {:id :nesting/an-ampersand-with-a-complex-parent-carries-the-lists-maximum
+  :group :nesting
+  ;; The third arity of `&`, and the one round forty-nine measured and
+  ;; left open. `.nq-q, .nq-a .nq-b` is a parent list with one COMPLEX
+  ;; arm; `&` is `:is()` of the list, so its specificity is the maximum
+  ;; over the arms -- (0,2,0), from the arm that matches NOTHING on this
+  ;; page. `& span` is therefore (0,2,1) and beats `div.nq-q span`'s
+  ;; (0,1,2). Brave: RED. Expanding the list one parent at a time, which
+  ;; is what this engine did until complex `:is()` arguments landed, gives
+  ;; `.nq-q span` = (0,1,1) and loses.
+  :html "<div class=\"nq-q\"><span id=\"nq1\">s</span></div>"
+  :css ".nq-q, .nq-a .nq-b { & span { color: #ff0000 } } div.nq-q span { color: #0000ff }"}
+
+ {:id :nesting/two-complex-parents-do-not-raise-a-nested-rule
+  :group :nesting
+  ;; ...and the control, which a change that simply raised every
+  ;; multi-parent nested rule would turn red. Both arms complex, no id
+  ;; anywhere: the maximum is (0,2,0), `& span` is (0,2,1), and
+  ;; `div.np-a .np-b span` is (0,2,2). Brave: BLUE. This case agrees on
+  ;; both sides of the change and is here for that reason.
+  :html "<div class=\"np-a\"><div class=\"np-b\"><span id=\"np1\">s</span></div></div>"
+  :css ".np-a .np-b, .np-c .np-d { & span { color: #ff0000 } } div.np-a .np-b span { color: #0000ff }"}
+
+ {:id :cascade/a-registered-custom-ident-rejects-a-number
+  :group :cascade
+  ;; `@property`'s `syntax` is a grammar, not three special cases. A `7`
+  ;; is not a `<custom-ident>`, so the declaration is invalid for the
+  ;; registration and the property falls back to its registered INITIAL --
+  ;; `center`, which `text-align` is one of the fourteen properties the
+  ;; computed-style axis compares. Brave: `text-align: center`. An engine
+  ;; that only checks `<length>`/`<number>`/`<integer>` keeps the 7 and
+  ;; lands on `text-align: 7`.
+  :html "<div><p id=\"pa1\">text</p></div>"
+  :css "@property --paz { syntax: \"<custom-ident>\"; inherits: false; initial-value: center } #pa1 { --paz: 7; text-align: var(--paz) }"}
+
+ {:id :cascade/a-registration-with-an-unknown-syntax-component-is-dropped
+  :group :cascade
+  ;; An unknown component NAME does not degrade to "syntax unchecked" --
+  ;; it makes the whole at-rule invalid, so the property is not registered
+  ;; at all and `var(--pfz)` has nothing to resolve to. Brave: 800 wide
+  ;; (the declaration is invalid at computed-value time and `width` is
+  ;; `auto`). Its control is
+  ;; `:cascade/a-registered-custom-property-has-an-initial-value`, the same
+  ;; shape with `<length>`, which must stay 60.
+  :html "<div><p id=\"pf1\">w</p></div>"
+  :css "@property --pfz { syntax: \"<flurb>\"; inherits: false; initial-value: 60px } #pf1 { width: var(--pfz) }"}
+
+ {:id :supports/a-colour-this-engine-cannot-parse-is-not-supported
+  :group :supports
+  ;; The value half of the `@supports` oracle now speaks for colours,
+  ;; because the colour grammar turned out to live one layer BELOW
+  ;; `cssom.core` (in dom-gpu) rather than above it in `cssom.layout`.
+  ;; Both halves on one page because a condition that correctly reports
+  ;; false proves nothing without a true one beside it. Brave: the first
+  ;; paragraph BLACK, the second RED.
+  :html "<div><p id=\"sz1\">a</p><p id=\"sz2\">b</p></div>"
+  :css "@supports (color: #zzz) { #sz1 { color: #ff0000 } } @supports (color: #f00) { #sz2 { color: #ff0000 } }"}
+
+ {:id :supports/text-decoration-is-answered-component-by-component
+  :group :supports
+  ;; The other row the oracle used to name as a scope cut. `flurb` is not
+  ;; a decoration component; `underline dotted red` is three of them, and
+  ;; a per-component walk is what tells them apart without answering
+  ;; `false` for a real declaration. Brave: BLACK then RED.
+  :html "<div><p id=\"sd1\">a</p><p id=\"sd2\">b</p></div>"
+  :css "@supports (text-decoration: flurb) { #sd1 { color: #ff0000 } } @supports (text-decoration: underline dotted red) { #sd2 { color: #ff0000 } }"}
 
  ;; ---- @scope: a range in the tree, and PROXIMITY in the cascade ----
  ;;

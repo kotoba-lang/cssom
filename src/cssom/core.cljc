@@ -432,7 +432,14 @@
      the moment a mandatory-whitespace requirement isn't there to forbid
      it."
   (:require [clojure.string :as str]
-            [kotoba.wasm.dom :as dom]))
+            [kotoba.wasm.dom :as dom]
+            ;; The `<color>` grammar. It is NOT a copy and NOT a table
+            ;; mirrored across a one-directional dependency: this engine's
+            ;; only colour parser lives one layer BELOW this namespace, in
+            ;; the same dependency `kotoba.wasm.dom` comes from, and
+            ;; `cssom.layout` never parses a colour at all -- it passes the
+            ;; string through onto the draw-op. See `color-value-support`.
+            [kotoba.wasm.host.color :as host-color]))
 
 ;; ---- calc() -- constant, percentage-free arithmetic only ----
 ;;
@@ -1876,6 +1883,58 @@
   [tok]
   (boolean (re-matches #"\d+(\.\d+)?" (str tok))))
 
+(def ^:private place-shorthands
+  "The three CSS Box Alignment shorthands, and the two longhands each one
+   sets. The ALIGN longhand is first in every pair, and that is the whole
+   content of this table: `place-items: end start` is `align-items: end`
+   and `justify-items: start`, not the other way round.
+
+   Measured in Brave 151 over CDP on 2026-08-06, one probe page per probe,
+   reading `getComputedStyle` back beside the box it produces: in a
+   120x60 grid track, `place-items: end start` reports `align-items: end`
+   / `justify-items: start` and puts the item at (0, 40); reading the two
+   values the other way round would put it at (113, 0). `place-content:
+   end center` reports `align-content: end` / `justify-content: center`
+   and lands its tracks at (90, 80). One value sets both longhands
+   (`place-self: end` reports `justify-self: end` and `align-self: end`).
+
+   Block axis before inline axis, which is the same order `grid-area` and
+   `gap` use and the opposite of the `x y` order the two-value forms of
+   `background-position` and `translate()` use -- which is why it was
+   measured rather than assumed."
+  {"place-items"   [:align-items :justify-items]
+   "place-content" [:align-content :justify-content]
+   "place-self"    [:align-self :justify-self]})
+
+(defn- expand-place-shorthand
+  "Expands one of `place-shorthands` into its two longhands: one value sets
+   both, two values are align then justify. Returns nil for a name that is
+   not one of the three, or for a value with no tokens or more than two, so
+   the generic path stores it raw rather than this guessing.
+
+   The tokens are NOT validated against an alignment vocabulary. That is
+   deliberate and it is the same posture `expand-border-box-shorthand`
+   takes: `cssom.layout` is the file that knows which alignment keywords it
+   can act on, and a value this cannot check must reach it unchanged rather
+   than being dropped here. `place-items: flurb` therefore expands to two
+   `flurb` longhands, which `cssom.layout` then ignores exactly as it
+   ignores a `justify-items: flurb` written by hand -- one wrong answer
+   instead of two different ones.
+
+   Not expanded, and named: `place-*` accepts a `<baseline-position>` whose
+   two words (`first baseline`) are ONE value, so `place-items: first
+   baseline` would be read here as align `first` / justify `baseline`.
+   Nothing in this repo reads `baseline` on the justify axis, so the cost
+   is confined to that keyword; recognising it means a real
+   `<self-position>` grammar, which is a larger change than this table."
+  [k v]
+  (when-let [[align justify] (get place-shorthands (str/lower-case (str k)))]
+    (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
+      (case (count tokens)
+        1 {align (first tokens) justify (first tokens)}
+        2 {align (first tokens) justify (second tokens)}
+        nil))))
+
 (defn- expand-flex-shorthand
   "Expands the `flex` shorthand into `:flex-grow`/`:flex-shrink`/
    `:flex-basis`, per CSS Flexible Box Layout §7.1
@@ -2127,6 +2186,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-flex-shorthand value))
+
+                         (some? (expand-place-shorthand k value))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-place-shorthand k value))
 
                          :else
                          (let [parsed (parse-property-value k value)]
@@ -2426,6 +2490,92 @@
             :else
             (recur (inc idx) start bracket-depth paren-depth quote-char selectors)))))))
 
+(defn- selector-parts
+  "The `:selector/parts` vector for an already-tokenized selector: one
+   compound-selector map per non-combinator token, each carrying the
+   :selector/combinator that joins it to the token before it (nil on the
+   first, which has nothing to its left).
+
+   `parse-compound` is passed IN rather than referenced by name because
+   this helper has two callers on opposite sides of `parse-simple-selector`
+   -- `parse-selector` below it, and `parse-simple-selector` ITSELF, for a
+   `:is()`/`:not()`/`:where()` argument that is a COMPLEX selector rather
+   than a compound one. This namespace deliberately avoids `declare`-based
+   forward references (see `parse-counter-amount`), and the same
+   pass-the-function-in shape `has-group-matches?` uses one screen down
+   sidesteps it here."
+  [tokens parse-compound]
+  (second
+   (reduce (fn [[combinator parts] token]
+             (case token
+               ">" [:child parts]
+               "+" [:next-sibling parts]
+               "~" [:subsequent-sibling parts]
+               [nil (conj parts
+                          (assoc (parse-compound token)
+                                 :selector/combinator
+                                 (if (seq parts) (or combinator :descendant) nil)))]))
+           [nil []]
+           (remove str/blank? tokens))))
+
+;; ---------------------------------------------------------------------
+;; `complex-selector-arguments` -- what `:is()`/`:not()`/`:where()` do with
+;; an argument that holds a combinator.
+;;
+;; Measured in headless Brave 151.1.93.129 over CDP on 2026-08-06, ONE
+;; PROBE PAGE PER PROBE. Every row is what the browser answered:
+;;
+;;   :is(.wA .wB) span            .wA > .wB > span      RED   -- matches
+;;   :is(.wA .wB) span            .wA.wB > span         black -- NOT a compound
+;;   :is(.wA > .wB) span          .wA > .wB > span      RED
+;;   :is(.wA > .wB) span          .wA > div > .wB       black -- the `>` is real
+;;   :is(.wA + .wB) span          .wA, .wB > span       RED
+;;   :is(:is(.wA .wB)) span                             RED   -- nests
+;;   :is(:not(.q) .wB) span                             RED   -- and holds a
+;;                                                              functional arm
+;;   :is(> .wB) span                                    black -- a RELATIVE
+;;                                                              selector is
+;;                                                              invalid here
+;;   :is(%%bad, .wA .wB) span                           RED   -- forgiving:
+;;                                                              one bad arm is
+;;                                                              dropped
+;;
+;; The second row is the whole reason this is a MATCHING change and not
+;; only a specificity one: `.wA .wB` and `.wA.wB` select different
+;; elements, and the compound-only parser answered for the wrong one.
+;;
+;; Specificity of a complex arm is the SUM over its own compounds, and the
+;; list's contribution is still the MAXIMUM over the arms:
+;;
+;;   :is(.wA .wB) span  vs  div.wB span            RED   (0,2,1) > (0,1,2)
+;;   :is(.wA .wB) span  vs  div.wA .wB span        BLUE  (0,2,1) < (0,2,2)
+;;   :is(.wA .wB) span  vs  .wA .wB span (later)   BLUE  equal; order decides
+;;   :is(.wA .wB) span  vs  .wA .wB span (earlier) RED   ...both ways
+;;   :is(#zz, .wA .wB) span vs div.wA .wB span     RED   max over an arm that
+;;                                                       matches NOTHING
+;;   :where(.wA .wB) span vs span (later)          BLUE  still always zero
+;;
+;; and `:not()` takes one too, which is a second matching fix rather than a
+;; specificity one:
+;;
+;;   span:not(.wA .wB span)   on a span inside .wA .wB   BLUE (the :not held)
+;;   span:not(.wQ .wB span)   -- the control              RED
+;;
+;; Nesting is where this is observable without anyone writing `:is()` at
+;; all, because `&` IS `:is(<parent list>)`:
+;;
+;;   #zz, .a .b { & span {red} }  div.a .b span {blue}   RED
+;;   .q,  .a .b { & span {red} }  div.q span {blue}      RED   (the max comes
+;;                                                              from the arm
+;;                                                              that did not
+;;                                                              match)
+;;   .a .b, .c .d { & span {red} } div.a .b span {blue}  BLUE  (no id: the max
+;;                                                              is (0,2,0) and
+;;                                                              loses)
+;;
+;; The last row is the control the pair needs: a change that raised every
+;; multi-parent nested rule would turn it red.
+
 (defn parse-simple-selector
   "Parses one compound-selector token (see `selector-tokens`) into its
    tag/id/classes/attrs/pseudos/pseudo-element parts, plus the
@@ -2482,14 +2632,19 @@
    via `matches-pseudo?`, same as :selector/not/:selector/is/:selector/where
    above).
 
-   SCOPED LIMITATION (deliberate, documented -- not a bug), shared by
-   `:not()`/`:is()`/`:where()`/`:has()` alike: the argument inside the
-   parens supports simple/compound selectors only (tag/id/class/
-   attribute/pseudo-class combinations) -- no descendant/child/sibling
-   combinators inside the parens (`:is(.a .b)` is misparsed as a single
-   compound requiring both classes on the SAME element, not a descendant
-   relationship; `:has()`'s own leading `>` is the one deliberate, narrow
-   exception -- a single leading combinator, never a chain -- see above).
+   `:not()`/`:is()`/`:where()` arguments MAY be complex selectors --
+   `:is(.a .b)`, `:is(.a > .b)`, `:is(.a + .b)` -- and are parsed by
+   `parse-arm` into a `:selector/parts` map that `matches-simple?` walks
+   through `parts-match?` and `simple-selector-specificity` sums. That was
+   a real gap and not a cosmetic one: until it landed, `:is(.a .b)` parsed
+   as a single compound requiring BOTH classes on the same element, which
+   is a different set of elements rather than a smaller one. See
+   `complex-selector-arguments` for the seventeen shapes that were measured
+   in Brave, including the one that makes an argument list's specificity
+   observable. `:has()` keeps its own argument parser (`parse-has-item`),
+   whose leading combinator is a RELATIVE selector rather than a complex
+   one -- and which `:is()` correspondingly rejects, as Brave does.
+
    A single level of nesting inside the argument IS supported (a
    parenthesized pseudo-class like `:not(:nth-child(1))`/
    `:is(:nth-child(odd), .x)`, or a once-nested functional pseudo-class
@@ -2499,11 +2654,9 @@
    all); genuinely DEEPER nesting (two levels, e.g.
    `:is(:not(:nth-child(1)))`) remains out of scope, the same bounded-
    nesting cut this file's own `calc()`/`var()` fallback parsing already
-   commits to elsewhere. This covers the overwhelming majority of real-
-   world usage: `:not(.hidden)`, `:is(h1, h2, h3)`, `:where(.card,
-   .panel)`, `:has(.badge)`, `:has(> img)`, and now also
-   `:not(:nth-child(2n+1))`-shaped forms, are all compound-selector-only
-   (plus, for `:has()`, at most one leading `>`) in practice.
+   commits to elsewhere -- it applies per COMPOUND, so each compound of a
+   complex argument gets its own level, which is why
+   `:is(:not(.q) .wB) span` works.
 
    Structural pseudo-classes (`:first-child`/`:last-child`/`:only-child`/
    `:nth-child()` and their `:first-of-type`/`:last-of-type`/
@@ -2538,10 +2691,34 @@
   [selector]
   (let [raw (str/trim selector)
         functional-matches (re-seq functional-pseudo-class-pattern raw)
+        ;; One comma-separated ARM of a `:is()`/`:not()`/`:where()`
+        ;; argument. A compound arm stays a bare compound-selector map,
+        ;; byte-for-byte what this function has always produced; a COMPLEX
+        ;; arm (one holding a combinator) becomes a `:selector/parts` map,
+        ;; which `matches-simple?` walks and `simple-selector-specificity`
+        ;; sums. See `complex-selector-arguments` for the measurements.
+        parse-arm (fn [arm]
+                    (let [tokens (remove str/blank? (selector-tokens arm))]
+                      (cond
+                        ;; A RELATIVE selector (leading combinator) is not
+                        ;; allowed in `:is()`; Brave drops the whole rule.
+                        ;; `:has()` is the one place it IS allowed, and it
+                        ;; has its own parser (`parse-has-item`).
+                        (contains? #{">" "+" "~"} (first tokens)) nil
+                        (< (count tokens) 2) (parse-simple-selector arm)
+                        :else {:selector/raw (str/trim (str arm))
+                               :selector/parts (selector-parts tokens parse-simple-selector)})))
         parse-group (fn [kind]
                       (->> functional-matches
                            (filter (fn [[_ fn-name _]] (= kind (str/lower-case fn-name))))
-                           (mapv (fn [[_ _ arg]] (mapv parse-simple-selector (split-selector-list arg))))))
+                           (mapv (fn [[_ _ arg]]
+                                   ;; `:is()` is FORGIVING: an arm it cannot
+                                   ;; parse is dropped and the rest of the
+                                   ;; list stands. Measured in Brave:
+                                   ;; `:is(> .wB) span` matches nothing at
+                                   ;; all, and `:is(%%bad, .wA .wB) span`
+                                   ;; still matches through the good arm.
+                                   (into [] (keep parse-arm) (split-selector-list arg))))))
         parse-has-item (fn [item]
                          (let [trimmed (str/trim item)
                                [_ combinator rest] (re-matches #"([>+~])\s*(.*)" trimmed)]
@@ -2594,22 +2771,8 @@
 
 (defn parse-selector
   [selector]
-  (let [tokens (selector-tokens selector)
-        [_ parts] (reduce (fn [[combinator parts] token]
-                            (case token
-                              ">" [:child parts]
-                              "+" [:next-sibling parts]
-                              "~" [:subsequent-sibling parts]
-                              [nil (conj parts
-                                         (assoc (parse-simple-selector token)
-                                                :selector/combinator
-                                                (if (seq parts)
-                                                  (or combinator :descendant)
-                                                  nil)))]))
-                          [nil []]
-                          (remove str/blank? tokens))]
-    {:selector/raw (str/trim (or selector ""))
-     :selector/parts parts}))
+  {:selector/raw (str/trim (or selector ""))
+   :selector/parts (selector-parts (selector-tokens selector) parse-simple-selector)})
 
 (defn- simple-selector-specificity
   "Specificity contribution -- a `[id-count class/attr/pseudo-count
@@ -2663,32 +2826,46 @@
   [simple]
   (if (:selector/scope-implicit? simple)
     [0 0 0]
-    (let [most-specific-in-group
-        (fn [group]
-          (reduce (fn [best arg]
-                    (let [candidate (simple-selector-specificity arg)]
-                      (if (pos? (compare candidate best)) candidate best)))
-                  [0 0 0]
-                  group))
-        groups-specificity
-        (fn [groups]
-          (reduce (fn [[a b c] group]
-                    (let [[ga gb gc] (most-specific-in-group group)]
-                      [(+ a ga) (+ b gb) (+ c gc)]))
-                  [0 0 0]
-                  groups))
-        has-groups (mapv (fn [group] (mapv :has/selector group)) (:selector/has simple))
-        [na nb nc] (groups-specificity (:selector/not simple))
-        [ia ib ic] (groups-specificity (:selector/is simple))
-        [ha hb hc] (groups-specificity has-groups)]
-    [(+ (if (:selector/id simple) 1 0) na ia ha)
-     (+ (count (:selector/classes simple))
-        (count (:selector/attrs simple))
-        (count (:selector/pseudos simple))
-        nb ib hb)
-     (+ (if (:selector/tag simple) 1 0)
-        (if (:selector/pseudo-element simple) 1 0)
-        nc ic hc)])))
+    (let [arg-specificity
+          (fn arg-specificity [arg]
+            (if-let [parts (:selector/parts arg)]
+              ;; a COMPLEX argument: its specificity is the SUM over its own
+              ;; compounds, exactly like a top-level selector's. Measured in
+              ;; Brave: `:is(.wA .wB) span` is (0,2,1) and beats
+              ;; `div.wB span`'s (0,1,2), and loses to `div.wA .wB span`'s
+              ;; (0,2,2). See `complex-selector-arguments`.
+              (reduce (fn [[a b c] part]
+                        (let [[pa pb pc] (arg-specificity part)]
+                          [(+ a pa) (+ b pb) (+ c pc)]))
+                      [0 0 0]
+                      parts)
+              (simple-selector-specificity arg)))
+          most-specific-in-group
+          (fn [group]
+            (reduce (fn [best arg]
+                      (let [candidate (arg-specificity arg)]
+                        (if (pos? (compare candidate best)) candidate best)))
+                    [0 0 0]
+                    group))
+          groups-specificity
+          (fn [groups]
+            (reduce (fn [[a b c] group]
+                      (let [[ga gb gc] (most-specific-in-group group)]
+                        [(+ a ga) (+ b gb) (+ c gc)]))
+                    [0 0 0]
+                    groups))
+          has-groups (mapv (fn [group] (mapv :has/selector group)) (:selector/has simple))
+          [na nb nc] (groups-specificity (:selector/not simple))
+          [ia ib ic] (groups-specificity (:selector/is simple))
+          [ha hb hc] (groups-specificity has-groups)]
+      [(+ (if (:selector/id simple) 1 0) na ia ha)
+       (+ (count (:selector/classes simple))
+          (count (:selector/attrs simple))
+          (count (:selector/pseudos simple))
+          nb ib hb)
+       (+ (if (:selector/tag simple) 1 0)
+          (if (:selector/pseudo-element simple) 1 0)
+          nc ic hc)])))
 
 (defn specificity
   [selector]
@@ -3236,15 +3413,6 @@
         (recur (rest positions) (inc p) (str out (subs s prev p) replacement))
         (str out (subs s prev))))))
 
-(defn- compound-selector?
-  "True when `sel` is a single compound selector -- no combinator and no
-   descendant whitespace -- which is exactly the shape this engine's
-   `:is()` argument parser accepts (see `parse-simple-selector`: each
-   comma-separated argument is parsed by `parse-simple-selector` itself,
-   which is compound-only)."
-  [sel]
-  (boolean (re-matches #"[^\s>+~,]+" (str/trim (str sel)))))
-
 (defn- expand-nested-selector
   "One nested selector, resolved against `parent` (the enclosing rule's own
    already-flat selector list) into a vector of flat selectors.
@@ -3262,25 +3430,23 @@
      X, including a complex one, so there is nothing for the `:is()` form
      to buy here.
 
-   - SEVERAL parents, all compound. `:is(p1, p2, ...)`, which this engine
-     parses and gives the max-of-arguments specificity real CSS gives it.
-     This is the case the `#q4zz, .q4c` measurement above pins.
-
-   - SEVERAL parents, at least one COMPLEX. Falls back to one expansion
-     per parent. MATCHING is still exact -- `.a .b span` selects the same
-     elements `:is(.a .b) span` does -- but each expansion then carries its
-     OWN specificity instead of the list's maximum. Measured cost, in
-     Brave: `#zz, .a .b { & span { color: red } }` against `div.a .b span
-     { color: blue }` is RED there (`&` is (1,0,0)) and would be BLUE
-     here (`.a .b span` is (0,1,2) against (0,1,3)). Closing it means
-     letting this engine's `:is()` hold a COMPLEX selector, which is a
-     change to `parse-simple-selector`/`matches-simple?` and not to
-     nesting."
+   - SEVERAL parents. `:is(p1, p2, ...)`, which this engine parses and
+     gives the max-of-arguments specificity real CSS gives it, whether the
+     arms are compound or COMPLEX. Until complex arguments landed this
+     branch was restricted to all-compound parent lists and everything
+     else fell back to one expansion per parent, which matched exactly but
+     gave each expansion its OWN specificity rather than the list's
+     maximum. Measured cost of that fallback, in Brave 151.1.93.129 on
+     2026-08-06: `#zz, .a .b { & span { color: red } }` against
+     `div.a .b span { color: blue }` is RED there and was BLUE here.
+     Its control, also measured, is `.q, .a .b { & span { … } }` against
+     `div.q span { … }`, RED because the maximum comes from the arm that
+     did NOT match. See `complex-selector-arguments`."
   [sel parent]
   (let [sel (str/trim (str sel))
         sel (if (re-find #"^[>+~]" sel) (str "& " sel) sel)
         sel (if (seq (amp-positions sel)) sel (str "& " sel))]
-    (if (and (> (count parent) 1) (every? compound-selector? parent))
+    (if (> (count parent) 1)
       [(replace-amps sel (str ":is(" (str/join ", " parent) ")"))]
       (mapv #(replace-amps sel %) parent))))
 
@@ -3417,25 +3583,316 @@
                     [(str/lower-case k) (str/replace (str/trim v) #"^[\"']|[\"']$" "")]))))
         (str/split (str body) #";")))
 
+;; ---------------------------------------------------------------------
+;; The `<syntax>` grammar -- shared by `@property`'s `syntax` descriptor
+;; (below) and, for its `<color>` component, by the `@supports` value
+;; oracle (`supports-value?`, far below).
+;;
+;; Measured in headless Brave 151.1.93.129 over CDP on 2026-08-06, one
+;; probe page per probe. Each row registered `--p { syntax: S;
+;; inherits: false; initial-value: I }`, set an INVALID value on one
+;; element and a VALID one on another, and read all three back through
+;; `getComputedStyle().getPropertyValue()` -- the third read being an
+;; element that declares nothing, which is what tells "the syntax is not
+;; enforced" apart from "the whole registration was dropped":
+;;
+;;   syntax                bad value      unset       verdict
+;;   <length>              -> initial     initial     ENFORCED
+;;   <number>              -> initial     initial     ENFORCED
+;;   <integer>  (1.5)      -> initial     initial     ENFORCED
+;;   <percentage>          -> initial     initial     ENFORCED
+;;   <length-percentage>   -> initial     initial     ENFORCED
+;;   <color>    (7)        -> rgb(255,0,0) same       ENFORCED
+;;   <image> <url> <angle> <time> <resolution>
+;;   <transform-function> <transform-list>
+;;   <custom-ident> <string>
+;;                         -> initial     initial     ENFORCED, all of them
+;;   *                     -> `flurb` kept, unset 7   accepts ANYTHING
+;;   <length> | <percentage>  -> initial, good 50%    ENFORCED, alternation
+;;   auto | <length>          -> initial, good 20px   ENFORCED, literal ident
+;;   <length>+   (`3px 4px`)  -> initial               ENFORCED, `+`
+;;   <length>#   (`3px, 4px`) -> initial               ENFORCED, `#`
+;;   <integer>+  (`1px`)      -> initial               ENFORCED
+;;   <flurb>               -> `flurb` kept, unset ""  REGISTRATION DROPPED
+;;   <length>|<flurb>      -> `7` kept,     unset ""  REGISTRATION DROPPED
+;;
+;; So Brave honours the whole grammar, and the last two rows are the ones
+;; that had to be measured rather than reasoned about: an unknown
+;; component name does not degrade to "unchecked", it invalidates the
+;; whole at-rule -- and ONE unknown alternative poisons a list whose other
+;; alternative is fine. `unset` reporting the empty string is what proves
+;; it (an unset REGISTERED property reports its initial value).
+;;
+;; SCOPE, and where it is drawn: every name the spec has is KNOWN here, so
+;; the drop rule above is right; only the components an axis of the
+;; conformance corpus can actually observe are CHECKED. `<image>`,
+;; `<url>`, `<angle>`, `<time>`, `<resolution>`, `<transform-function>`,
+;; `<transform-list>` and `<string>` are known-but-unchecked: they keep the
+;; registration alive and accept any value. Nothing in this engine reads a
+;; time or a resolution, and the computed-style axis compares fourteen
+;; properties none of which takes one -- a grammar for them would be
+;; unmeasurable either way, and rejecting a value this engine cannot check
+;; is how a working declaration disappears.
+
+(def ^:private syntax-component-names
+  "Every `<syntax-component-name>` CSS Properties and Values 1 defines. A
+   name NOT in this set makes the whole `@property` registration invalid
+   (measured above), so this set has to be complete even though only some
+   of its members are checked -- see `syntax-component-support`."
+  #{"length" "number" "percentage" "length-percentage" "color" "image"
+    "url" "integer" "angle" "time" "resolution" "transform-function"
+    "transform-list" "custom-ident" "string"})
+
+(def ^:private length-units
+  #{"px" "em" "rem" "vw" "vh" "vmin" "vmax" "ch" "ex" "pt" "pc" "in" "cm" "mm" "q"})
+
+(def ^:private dimension-pattern
+  #"(?i)^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)([a-z]+|%)$")
+
+(def ^:private math-function-pattern #"(?i)^(calc|min|max|clamp)\(")
+
+(defn- color-value-support
+  "Three-valued: is `value` a `<color>`? `:yes`, `:no`, or `:unknown`.
+
+   The grammar is `kotoba.wasm.host.color/parse-color`, which this file
+   REQUIRES rather than mirrors -- see the `ns` form's own comment. It
+   knows the 148 named colours, `transparent`, hex in all four lengths,
+   and `rgb()`/`rgba()`/`hsl()`/`hsla()`.
+
+   `:unknown` is not a hedge, it is the answer for a colour FUNCTION this
+   engine does not implement, and Brave says why it has to exist:
+   `@supports (color: oklch(0.5 0.1 20))`, `(color: lab(50% 20 30))`,
+   `(color: color-mix(in srgb, red, blue))` and
+   `(color: light-dark(red, blue))` are ALL red there, while
+   `(color: #zzz)`, `(color: flurb)`, `(color: 7)` and `(color: 0)` are
+   black. A number, a dimension and an unknown bare identifier are
+   genuinely not colours -- the named list is closed -- and an unknown
+   function genuinely might be."
+  [value]
+  (let [v (str/trim (str value))
+        lower (str/lower-case v)]
+    (cond
+      (str/blank? v) :no
+      (= "currentcolor" lower) :yes
+      (some? (host-color/parse-color v)) :yes
+      ;; a function this engine does not implement: `oklch()`, `lab()`,
+      ;; `color-mix()`, `light-dark()`, and whatever comes next
+      (some? (re-matches #"(?i)^[a-z][a-z0-9-]*\(.*\)$" v)) :unknown
+      ;; hex that parse-color rejected, a number, a dimension, or an
+      ;; identifier that is not one of the 148
+      :else :no)))
+
+(defn- syntax-component-support
+  "Three-valued support of `value` against ONE syntax component `name`
+   (the bare name, no angle brackets; `nil` for a literal identifier
+   whose text is `literal`). See the block comment above for which names
+   are checked and why the rest are `:unknown`.
+
+   TWO KINDS OF `value` reach here, and the difference is a real scope
+   limit rather than a convenience. At REGISTRATION time an
+   `initial-value` arrives as the author's raw string (`\"60px\"`). At USE
+   time a declared value has already been through `parse-style-value`, so
+   `--x: 200px` arrives as the NUMBER 200 and the unit is gone before this
+   function can see it. That is why a numeric `value` is admitted by every
+   dimension-shaped component: the engine cannot distinguish `--x: 7px`
+   from `--x: 7` at that point, so `@property --n { syntax: \"<number>\" }`
+   with `--n: 3px` is the initial in Brave and `3` here. The distinctions
+   this DOES make at use time are the ones that survive
+   `parse-style-value` as text -- `<color>`, `<custom-ident>`, `<string>`
+   -- which is where the measured `--c: 7` divergence lived."
+  [name literal value]
+  (let [numeric value
+        v (str/trim (str value))
+        lower (str/lower-case v)
+        [_ magnitude unit] (re-matches dimension-pattern v)
+        unit (some-> unit str/lower-case)
+        bare-number? (some? (re-matches #"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$" v))
+        zero? (some? (re-matches #"^[-+]?0*\.?0*$" v))
+        math? (some? (re-find math-function-pattern v))
+        ident? (some? (re-matches #"(?i)^-?[a-z_][-a-z0-9_]*$" v))
+        yes-no (fn [b] (if b :yes :no))]
+    (cond
+      (some? literal) (yes-no (= literal v))
+      (str/blank? v) :no
+
+      ;; Already an absolute number: see the docstring's TWO KINDS. Only
+      ;; a unitless number and a `px` length come out of
+      ;; `parse-style-value` numeric (`45deg` and `1s` stay strings), so a
+      ;; number here is definitely NOT an angle, a time, a resolution, a
+      ;; colour or an identifier -- `:no`, not `:unknown`.
+      (number? numeric)
+      (case name
+        ("length" "number" "percentage" "length-percentage") :yes
+        "integer" (yes-no (== numeric (long numeric)))
+        :no)
+
+      :else
+      (case name
+        "number" (cond math? (yes-no (number? (parse-style-value v)))
+                       bare-number? :yes
+                       :else :no)
+        "integer" (cond math? (yes-no (number? (parse-style-value v)))
+                        :else (yes-no (some? (re-matches #"^[-+]?\d+$" v))))
+        "length" (cond math? (yes-no (number? (parse-style-value v)))
+                       zero? :yes
+                       (some? magnitude) (yes-no (contains? length-units unit))
+                       :else :no)
+        "percentage" (cond math? (yes-no (number? (parse-style-value v)))
+                           zero? :yes
+                           :else (yes-no (= "%" unit)))
+        "length-percentage" (cond math? (yes-no (number? (parse-style-value v)))
+                                  zero? :yes
+                                  (some? magnitude) (yes-no (or (= "%" unit)
+                                                                (contains? length-units unit)))
+                                  :else :no)
+        "color" (color-value-support v)
+        ;; a `<custom-ident>` is any identifier that is not a CSS-wide
+        ;; keyword; `default` is excluded by the spec too.
+        "custom-ident" (yes-no (and ident?
+                                    (nil? (css-wide-keyword v))
+                                    (not= "default" lower)))
+        ;; known but not checked -- see the block comment's SCOPE
+        :unknown))))
+
+(defn- parse-property-syntax
+  "`syntax` as a vector of alternatives, each
+   `{:syntax/name \"length\" :syntax/literal nil :syntax/multiplier :plus}`,
+   or nil when the string is not a well-formed `<syntax>` -- which is what
+   makes the whole `@property` registration invalid, as Brave does.
+
+   `\"*\"` is the universal syntax and parses to the empty vector, which
+   `registered-value-valid?` reads as \"accepts anything\"."
+  [syntax]
+  (let [s (str/trim (str syntax))]
+    (cond
+      (str/blank? s) nil
+      (= "*" s) []
+      :else
+      (let [alternatives
+            (map (fn [alt]
+                   (let [alt (str/trim alt)
+                         [_ body multiplier] (re-matches #"^(.*?)([+#]?)$" alt)
+                         [_ type-name] (re-matches #"^<([a-zA-Z-]+)>$" (str body))]
+                     (cond
+                       (some? type-name)
+                       (when (contains? syntax-component-names (str/lower-case type-name))
+                         {:syntax/name (str/lower-case type-name)
+                          :syntax/literal nil
+                          :syntax/multiplier (case multiplier "+" :plus "#" :hash nil)})
+
+                       ;; a literal identifier -- `auto | <length>`. It
+                       ;; carries no multiplier of its own in practice, and
+                       ;; the spec forbids one.
+                       (some? (re-matches #"(?i)^-?[a-z_][-a-z0-9_]*$" alt))
+                       {:syntax/name nil :syntax/literal alt :syntax/multiplier nil}
+
+                       :else nil)))
+                 (str/split s #"\|"))]
+        (when (and (seq alternatives) (every? some? alternatives))
+          (vec alternatives))))))
+
+(defn- split-value-components
+  "`s` split on `sep` (a character, or `\\space` for \"any whitespace\") at
+   paren depth zero, trimmed, blanks dropped -- what a `<syntax>`
+   multiplier needs to slice a value into its repetitions.
+   `calc(1px + 2px) 3px` is two `<length>`s and not four tokens, which is
+   the whole reason this is not `str/split`. `split-top-level` below does
+   the comma half of this for media queries and is defined too late in the
+   file to be the one used here (and does not do whitespace at all)."
+  [s sep]
+  (let [s (str s)
+        n (count s)]
+    (loop [idx 0 start 0 depth 0 out []]
+      (if (= idx n)
+        (into [] (remove str/blank?) (conj out (str/trim (subs s start idx))))
+        (let [ch (nth s idx)]
+          (cond
+            (= ch \() (recur (inc idx) start (inc depth) out)
+            (= ch \)) (recur (inc idx) start (max 0 (dec depth)) out)
+            (and (zero? depth) (if (= sep \space) (str/blank? (str ch)) (= ch sep)))
+            (recur (inc idx) (inc idx) depth (conj out (str/trim (subs s start idx))))
+            :else (recur (inc idx) start depth out)))))))
+
+(defn- syntax-alternative-support
+  "Three-valued support of `value` against ONE alternative of a parsed
+   `<syntax>`, applying its `+`/`#` multiplier by slicing the value into
+   repetitions first. Every repetition has to hold; one `:no` is `:no`."
+  [{:syntax/keys [name literal multiplier] :as _alternative} value]
+  (let [items (case multiplier
+                :plus (split-value-components value \space)
+                :hash (split-value-components value \,)
+                ;; the un-multiplied value passes through UNTOUCHED --
+                ;; stringifying it here would throw away the fact that
+                ;; `parse-style-value` already turned `200px` into the
+                ;; number 200, which is the only thing that tells a length
+                ;; from a typo at use time (see `syntax-component-support`)
+                [value])
+        per-item (map #(syntax-component-support name literal %) items)]
+    (cond
+      (empty? items) :no
+      (some #{:no} per-item) :no
+      (some #{:unknown} per-item) :unknown
+      :else :yes)))
+
 (defn- registered-value-valid?
   "Whether `value` is admissible for a registered property declared with
-   `syntax`.
+   `syntax`. Three-valued underneath and two-valued at the edge: an
+   alternative that says `:yes` makes it valid, an alternative this engine
+   cannot check leaves it valid, and it takes EVERY alternative saying
+   `:no` to make it invalid.
 
-   SCOPE, and it is deliberately narrow in the fail-OPEN direction: only
-   `<length>`, `<number>` and `<integer>` are really checked, against
-   exactly the subset `parse-style-value` can carry (a plain number, an
-   `<n>px` length, or a constant `calc()`/`min()`/`max()`/`clamp()` that
-   resolves to one). Every other syntax -- `<color>`, `<image>`,
-   `<custom-ident>`, a `|` alternation, and `*` -- accepts anything,
-   because this engine has no grammar for them and rejecting a value it
-   cannot check would silently drop declarations that work today. What
-   that costs, measured: `@property --c { syntax: \"<color>\";
-   initial-value: red }` with `--c: 7` set on an element is `red` in Brave
-   (the 7 is invalid for the syntax) and `7` here."
+   That fail-OPEN combination is the same posture `@media`'s unknown
+   feature and `@supports`'s unenumerated property take, and for the same
+   reason: rejecting a value this engine cannot check is how a declaration
+   that works today disappears. What it now DOES reject is the case the
+   previous scope cut named and measured -- `@property --c { syntax:
+   \"<color>\"; initial-value: red }` with `--c: 7` is `red` in Brave and
+   was `7` here."
   [syntax value]
-  (case (str/trim (str syntax))
-    ("<length>" "<number>" "<integer>") (number? (parse-style-value value))
+  (if-let [alternatives (parse-property-syntax syntax)]
+    (if (empty? alternatives)
+      true                                        ; `*`
+      (let [answers (map #(syntax-alternative-support % value) alternatives)]
+        (boolean (or (some #{:yes} answers) (some #{:unknown} answers)))))
+    ;; not a well-formed <syntax> at all. The caller
+    ;; (`parse-property-registrations`) drops the registration outright,
+    ;; and this arm is only reached from `registered-custom-value` for a
+    ;; registration that already passed that check.
     true))
+
+(defn- computationally-independent?
+  "Whether `initial` may be an `initial-value` for `syntax` -- a second,
+   NARROWER gate than `registered-value-valid?`, applied only at
+   registration time.
+
+   CSS Properties and Values 1 requires an `initial-value` to be
+   computationally independent, and Brave enforces it: `@property --x {
+   syntax: \"<length>\"; initial-value: 2em }` is rejected outright
+   (756x30, and `getComputedStyle` reports the empty string for the
+   property), while `32px` registers. `em` resolves against the element's
+   own font size, so it is not a value a registry can hold -- and it is
+   exactly the set of values this engine cannot carry anyway, which is why
+   the check is `parse-style-value` giving an absolute number rather than a
+   second unit table.
+
+   Only the length-shaped components have relative forms to exclude, and
+   the test is applied PER REPETITION rather than to the whole value: an
+   `initial-value: 1px 2px` for `syntax: \"<length>+\"` is two absolute
+   lengths and registers in Brave, which a whole-value
+   `parse-style-value` reads as one unparseable string."
+  [syntax initial]
+  (let [alternatives (parse-property-syntax syntax)
+        relative? #{"length" "length-percentage"}
+        independent?
+        (fn [{:syntax/keys [name multiplier] :as alternative}]
+          (and (not= :no (syntax-alternative-support alternative initial))
+               (or (not (relative? name))
+                   (every? #(number? (parse-style-value %))
+                           (case multiplier
+                             :plus (split-value-components initial \space)
+                             :hash (split-value-components initial \,)
+                             [initial])))))]
+    (boolean (or (empty? alternatives) (some independent? alternatives)))))
 
 (defn- parse-property-registrations
   "Every valid `@property --name { ... }` registration in `css`, as
@@ -3445,14 +3902,20 @@
    A registration is DROPPED (not partially honoured) when it is invalid,
    matching what Brave does with the whole at-rule:
    - no `syntax` descriptor;
+   - a `syntax` that is not a well-formed `<syntax>` -- which INCLUDES one
+     naming a component type that does not exist. Measured:
+     `syntax: \"<flurb>\"` and `syntax: \"<length>|<flurb>\"` both leave an
+     unset element reporting the EMPTY STRING, i.e. unregistered, where a
+     merely-unenforced syntax would report its initial value. One unknown
+     alternative poisons a list whose other alternative is fine;
    - a non-`*` syntax with no `initial-value` (CSS Properties and Values 1
      requires one, and `syntax: \"<length>\"` alone leaves nothing to
      report for an unset element);
-   - an `initial-value` that is not admissible for its own syntax, which
-     for `<length>` means anything this engine cannot resolve to absolute
-     pixels -- `initial-value: 2em` is rejected in Brave too (756x30, and
-     `getComputedStyle` reports the empty string for the property), since
-     an initial value has to be computationally independent.
+   - an `initial-value` that is not admissible for its own syntax
+     (`registered-value-valid?`), or that is admissible but not
+     COMPUTATIONALLY INDEPENDENT (`computationally-independent?`) --
+     `initial-value: 2em` is rejected in Brave too (756x30, and
+     `getComputedStyle` reports the empty string for the property).
 
    `inherits` defaults to FALSE when the descriptor is absent, which is
    also the spec's default and the opposite of an unregistered custom
@@ -3469,8 +3932,11 @@
                             initial (get decls "initial-value")]
                         (when (and (str/starts-with? name "--")
                                    (seq syntax)
+                                   (some? (parse-property-syntax syntax))
                                    (or (= "*" (str/trim syntax)) (some? initial))
-                                   (or (nil? initial) (registered-value-valid? syntax initial)))
+                                   (or (nil? initial)
+                                       (and (registered-value-valid? syntax initial)
+                                            (computationally-independent? syntax initial))))
                           [(keyword name)
                            {:registration/syntax (str/trim syntax)
                             :registration/inherits? (= "true" (str/lower-case (str inherits)))
@@ -5012,6 +5478,96 @@
        (map unquote-lang-range)
        (remove str/blank?)))
 
+;; ---- `:read-only`/`:read-write` and `:required`/`:optional`: measured in
+;; full, deliberately NOT changed, and this is where a fix starts.
+;;
+;; The four clauses in `matches-pseudo?` below are two lists where real CSS
+;; has one predicate and its complement, and the overlap is where they and a
+;; real browser part company. Measured in Brave 151 over CDP on 2026-08-06,
+;; one probe page per probe, in the conformance corpus's own frame:
+;;
+;;   | markup                                     | Brave      | here    |
+;;   |--------------------------------------------|------------|---------|
+;;   | `<p>text</p>`                              | read-only  | same    |
+;;   | `<input>` / `<textarea>`                   | read-write | same    |
+;;   | `<input readonly>` / `<textarea readonly>` | read-only  | same    |
+;;   | `<button>`/`<select>`/a checkbox           | read-only  | same    |
+;;   | `<input type=file>` / `<input type=hidden>`| read-only  | same    |
+;;   | `<input disabled>`                         | read-only  | NEITHER |
+;;   | `<p contenteditable="true">`               | read-write | NEITHER |
+;;   | a plain `<p>` inside that one              | read-write | NEITHER |
+;;   | `<p contenteditable="false">` inside it    | read-only  | read-only |
+;;   | `<input required disabled>`                | :required  | NEITHER |
+;;   | `<input disabled>`                         | :optional  | NEITHER |
+;;
+;; The rule the last six rows want is one predicate -- an editable form
+;; control that is neither `readonly` nor `disabled`, OR any element in a
+;; `contenteditable` subtree -- with `:read-only` as its complement, and
+;; `:required`/`:optional` deciding on the attribute alone (disabling a
+;; control takes it out of constraint validation, which is why
+;; `:valid`/`:invalid`/`:in-range`/`:out-of-range` all keep their disabled
+;; test and Brave agrees that they should).
+;;
+;; It was written, and reverted, and the reason is not doubt about the
+;; measurement. `:read-only` and `:optional` are consumed by
+;; `kotoba-lang/browser`'s `query-selector`, whose own suite asserts the
+;; answers this file gives TODAY: `dom_bridge_test`'s
+;; `query-selector-supports-form-state-pseudo-classes` requires
+;; `input:read-only` to skip a disabled input and return the `readonly` one,
+;; and `input:optional` to skip it too, and
+;; `quickjs_execution_test`'s `quickjs-dom-query-uses-shared-form-state-
+;; pseudo-classes` pins the same node ids. Three assertions, all of them
+;; encoding a browser answer that does not exist. Closing this is therefore
+;; a CROSS-REPO change and belongs in a round that can land both halves.
+;;
+;; Four corpus cases carry it in the meantime, red, with these numbers:
+;; `:form/read-only-matches-a-disabled-input`,
+;; `:form/read-write-matches-a-contenteditable`,
+;; `:form/required-still-matches-a-disabled-control`, and its control
+;; `:form/read-only-matches-a-non-editable-element`, which already agrees.
+
+(defn- checked-control?
+  "Whether `node` is CHECKED, in the sense `:checked` means for the control
+   it is on -- which is not one attribute:
+
+   - a checkbox or radio `<input>` is checked when it carries the `checked`
+     attribute;
+   - an `<option>` is checked when it carries `selected`.
+
+   Measured in Brave 151 on 2026-08-06: `<option selected>` matches
+   `option:checked` and `<option checked>` does NOT, which is the pair in
+   the corpus as `:form/checked-matches-a-selected-option` and
+   `:form/a-checked-attribute-on-an-option-is-not-selectedness`. Before
+   this, `:checked` read the `checked` attribute off ANY element, so both
+   cases came out exactly inverted -- and a `<div checked>` matched too.
+
+   Not covered, and named rather than guessed: an `<option>` that is
+   selected because it is the first option of a single-select `<select>`
+   with nothing explicitly selected. That is a rendering-time default this
+   file does not compute; Brave reports the first option of
+   `<select><option>a</option><option>b</option></select>` as `:checked`."
+  [node]
+  (case (:tag node)
+    :input (and (contains? #{"checkbox" "radio"} (input-type node))
+                (truthy-attr? (get-in node [:attrs :checked])))
+    :option (truthy-attr? (get-in node [:attrs :selected]))
+    false))
+
+(defn- link-control?
+  "Whether `node` is a LINK -- `:link`/`:any-link`'s subject. Real HTML: an
+   `<a>` or `<area>` with an `href` ATTRIBUTE, however empty its value.
+   Measured in Brave 151 on 2026-08-06: `<a href=\"/x\">` and `<a href=\"\">`
+   both match `a:any-link` and `a:link`; a bare `<a>` matches neither.
+
+   `:visited` is deliberately NOT implemented, and the reason is not that
+   it is hard: this engine has no history, so answering it at all would be
+   inventing a fact about the user. The oracle agrees by accident (nothing
+   is visited in a fresh headless profile), which is exactly why there is
+   no corpus case for it -- it would pass for the wrong reason."
+  [node]
+  (and (contains? #{:a :area} (:tag node))
+       (some? (get-in node [:attrs :href]))))
+
 (defn- lang-pseudo-matches?
   "Whether `node` matches `:lang(arg)` -- real CSS: `node`'s computed
    language (`computed-lang`) matches AT LEAST ONE comma-separated range in
@@ -5032,9 +5588,13 @@
    `parse-simple-selector`'s `:selector/nth-args` / `:selector/lang-args`).
 
    `:first-child`/`:last-child`/`:only-child` and `:first-of-type`/
-   `:last-of-type` need no argument -- they test `node`'s position
-   (`structural-siblings`/`sibling-position`) against a fixed constant
-   (1st, last, or 'only one at all'); `:nth-child`/`:nth-of-type`/
+   `:last-of-type`/`:only-of-type` need no argument -- they test `node`'s
+   position (`structural-siblings`/`sibling-position`) against a fixed
+   constant (1st, last, or 'only one at all'). `:only-of-type` is
+   `:only-child` asked of the same-tag sibling set, which is the one
+   difference that matters: measured in Brave 151 on 2026-08-06, the lone
+   `<span>` of `<p>1</p><p>2</p><span>s</span>` matches it while neither
+   `<p>` does, so it is emphatically not `:only-child`; `:nth-child`/`:nth-of-type`/
    `:nth-last-child`/`:nth-last-of-type` all delegate to
    `nth-pseudo-matches?`, which additionally parses+evaluates `arg`'s An+B
    micro-syntax -- the `:nth-last-*` pair simply passes `from-end?` true,
@@ -5067,13 +5627,37 @@
    `nth-pseudo-matches?` can evaluate an `:nth-child(... of <selector>)`
    clause -- the same explicit higher-order-function argument the `:has()`
    family below uses, and for the same reason: `matches-simple?` calls this
-   function, so this function cannot name it."
+   function, so this function cannot name it.
+
+   Four clauses delegate rather than decide, each to a predicate whose own
+   docstring carries the browser measurements behind it: `:checked` to
+   `checked-control?` (which control's state the word names -- `checked`
+   on a checkbox, `selected` on an `<option>`), `:read-only`/`:read-write`
+   to `user-alterable?` (ONE predicate and its complement, which is what
+   the two of them are), and `:link`/`:any-link` to `link-control?`.
+
+   `:enabled` asks `disabled-capable-control?`, not `form-control?`: the
+   two pseudo-classes are complements over the set of elements that CAN be
+   disabled, which is wider than the set of form controls. Measured in
+   Brave 151 on 2026-08-06 with a bare `:enabled { padding-left: 30px }`:
+   `<fieldset>`, `<select>`, `<optgroup>` and `<option>` all take the 30px
+   and a `<legend>` does not. `:disabled` already used the wider set, so
+   the pair used to disagree with itself -- a bare `<option>` was neither
+   `:enabled` nor `:disabled`.
+
+   One more scope cut in the same family, with its number: `:required`/
+   `:optional` decline a `type=\"file\"` input via
+   `validation-barred-control?`, where Brave reports
+   `<input type=\"file\" required>` as BOTH `:required` and `:invalid` --
+   only `type=\"hidden\"` is really barred from constraint validation. No
+   corpus case covers it, and narrowing that set would silently change
+   `:valid`/`:invalid` for file inputs as well, which is not measured."
   [document node selector-pseudo arg match-fn]
   (case selector-pseudo
     :disabled (disabled-control? document node)
-    :enabled (and (form-control? node)
+    :enabled (and (disabled-capable-control? node)
                   (not (disabled-control? document node)))
-    :checked (truthy-attr? (get-in node [:attrs :checked]))
+    :checked (checked-control? node)
     :required (and (form-control? node)
                    (not (disabled-control? document node))
                    (not (validation-barred-control? node))
@@ -5088,6 +5672,8 @@
     :read-write (and (editable-form-control? node)
                      (not (truthy-attr? (get-in node [:attrs :readonly])))
                      (not (disabled-control? document node)))
+    :link (link-control? node)
+    :any-link (link-control? node)
     :invalid (and (form-control? node)
                   (not (disabled-control? document node))
                   (not (constraint-validation-barred-control? node))
@@ -5103,6 +5689,7 @@
                   (and (seq siblings)
                        (= (count siblings) (sibling-position siblings (:node/id node)))))
     :only-child (= 1 (count (structural-siblings document node false)))
+    :only-of-type (= 1 (count (structural-siblings document node true)))
     :first-of-type (= 1 (sibling-position (structural-siblings document node true) (:node/id node)))
     :last-of-type (let [siblings (structural-siblings document node true)]
                     (and (seq siblings)
@@ -5259,6 +5846,81 @@
                (has-arg-descendant-match? document node selector match-fn)))
            group))))
 
+(defn- parent-index
+  [document]
+  (reduce-kv
+   (fn [parents parent-id node]
+     (reduce (fn [parents child-id]
+               (assoc parents child-id parent-id))
+             parents
+             (:children node)))
+   {}
+   (:nodes document)))
+
+(defn- sibling-index
+  [children node-id]
+  (first (keep-indexed (fn [idx id] (when (= id node-id) idx)) children)))
+
+(defn- preceding-element-siblings
+  "Element-type siblings before `node-id` under `parent-id`, in document
+   order (nearest-last). Text nodes are ignored, matching CSS sibling
+   combinator semantics."
+  [document parent-id node-id]
+  (let [children (vec (get-in document [:nodes parent-id :children] []))
+        idx (sibling-index children node-id)]
+    (if idx
+      (->> (subvec children 0 idx)
+           (filter #(= :element (get-in document [:nodes % :node/type]))))
+      [])))
+
+(defn- parts-match?
+  "Whether the element `node-id` is the SUBJECT of an already-parsed
+   complex selector's `parts` (see `selector-parts`) -- the combinator walk
+   itself, right-to-left, with `parents` supplying the upward edges
+   `document` alone does not carry.
+
+   `match-fn` is `matches-simple?` in both callers, passed in for the same
+   reason `has-group-matches?` takes it: this function is defined BEFORE
+   `matches-simple?`, because `matches-simple?` needs it for a COMPLEX
+   `:is()`/`:not()`/`:where()` argument, and this namespace deliberately
+   avoids `declare`-based forward references."
+  [document parents node-id parts match-fn]
+  (let [parts (vec parts)]
+    (letfn [(match-at [node-id idx]
+              (let [simple (nth parts idx)
+                    node (get-in document [:nodes node-id])]
+                (and (match-fn document node simple)
+                     (if (zero? idx)
+                       true
+                       (case (:selector/combinator simple)
+                         :child
+                         (when-let [parent-id (get parents node-id)]
+                           (match-at parent-id (dec idx)))
+
+                         :descendant
+                         (loop [ancestor-id (get parents node-id)]
+                           (when ancestor-id
+                             (if (match-at ancestor-id (dec idx))
+                               true
+                               (recur (get parents ancestor-id)))))
+
+                         :next-sibling
+                         (when-let [parent-id (get parents node-id)]
+                           (when-let [sibling-id (last (preceding-element-siblings
+                                                         document parent-id node-id))]
+                             (match-at sibling-id (dec idx))))
+
+                         :subsequent-sibling
+                         (when-let [parent-id (get parents node-id)]
+                           (boolean
+                            (some #(match-at % (dec idx))
+                                  (preceding-element-siblings document parent-id node-id))))
+
+                         false)))))]
+      (if (seq parts)
+        (match-at node-id (dec (count parts)))
+        false))))
+
 (defn- matches-simple?
   "Whether `node` matches one compound/simple selector map (see
    `parse-simple-selector`) -- tag/id/classes/attrs/pseudos as before, plus
@@ -5347,79 +6009,37 @@
                                        (get (:selector/lang-args selector) pseudo))
                                    matches-simple?))
                 (:selector/pseudos selector))
-        (every? (fn [group] (not-any? #(matches-simple? document node %) group))
-                (:selector/not selector))
-        (every? (fn [group] (some #(matches-simple? document node %) group))
-                (:selector/is selector))
-        (every? (fn [group] (some #(matches-simple? document node %) group))
-                (:selector/where selector))
+        (let [;; a group ARM is either a compound-selector map (the shape
+              ;; this function has always taken) or, since complex
+              ;; arguments landed, a `:selector/parts` map -- which needs
+              ;; the combinator walk and therefore the upward edges
+              ;; `parent-index` builds. That index is computed HERE, and
+              ;; only when a complex arm is actually present: `matches?`
+              ;; already rebuilds it on every call, so a stylesheet with no
+              ;; complex argument pays nothing and one with them pays what
+              ;; the rest of this engine already pays. Without `document`
+              ;; there are no ancestors to walk, so a complex arm cannot
+              ;; match -- the same documentless restriction `:has()` and
+              ;; the structural pseudo-classes already carry.
+              arm-matches?
+              (fn [arm]
+                (if-let [parts (:selector/parts arm)]
+                  (boolean (when document
+                             (parts-match? document (parent-index document)
+                                           (:node/id node) parts matches-simple?)))
+                  (matches-simple? document node arm)))]
+          (and (every? (fn [group] (not-any? arm-matches? group))
+                       (:selector/not selector))
+               (every? (fn [group] (some arm-matches? group))
+                       (:selector/is selector))
+               (every? (fn [group] (some arm-matches? group))
+                       (:selector/where selector))))
         (every? (fn [group] (has-group-matches? document node group matches-simple?))
                 (:selector/has selector)))))
 
-(defn- parent-index
-  [document]
-  (reduce-kv
-   (fn [parents parent-id node]
-     (reduce (fn [parents child-id]
-               (assoc parents child-id parent-id))
-             parents
-             (:children node)))
-   {}
-   (:nodes document)))
-
-(defn- sibling-index
-  [children node-id]
-  (first (keep-indexed (fn [idx id] (when (= id node-id) idx)) children)))
-
-(defn- preceding-element-siblings
-  "Element-type siblings before `node-id` under `parent-id`, in document
-   order (nearest-last). Text nodes are ignored, matching CSS sibling
-   combinator semantics."
-  [document parent-id node-id]
-  (let [children (vec (get-in document [:nodes parent-id :children] []))
-        idx (sibling-index children node-id)]
-    (if idx
-      (->> (subvec children 0 idx)
-           (filter #(= :element (get-in document [:nodes % :node/type]))))
-      [])))
-
 (defn- matches-parts?
   [document parents node-id parts]
-  (let [parts (vec parts)]
-    (letfn [(match-at [node-id idx]
-              (let [simple (nth parts idx)
-                    node (get-in document [:nodes node-id])]
-                (and (matches-simple? document node simple)
-                     (if (zero? idx)
-                       true
-                       (case (:selector/combinator simple)
-                         :child
-                         (when-let [parent-id (get parents node-id)]
-                           (match-at parent-id (dec idx)))
-
-                         :descendant
-                         (loop [ancestor-id (get parents node-id)]
-                           (when ancestor-id
-                             (if (match-at ancestor-id (dec idx))
-                               true
-                               (recur (get parents ancestor-id)))))
-
-                         :next-sibling
-                         (when-let [parent-id (get parents node-id)]
-                           (when-let [sibling-id (last (preceding-element-siblings
-                                                         document parent-id node-id))]
-                             (match-at sibling-id (dec idx))))
-
-                         :subsequent-sibling
-                         (when-let [parent-id (get parents node-id)]
-                           (boolean
-                            (some #(match-at % (dec idx))
-                                  (preceding-element-siblings document parent-id node-id))))
-
-                         false)))))]
-      (if (seq parts)
-        (match-at node-id (dec (count parts)))
-        false))))
+  (parts-match? document parents node-id parts matches-simple?))
 
 (defn matches?
   ([node selector]
@@ -7325,22 +7945,59 @@
 ;;   condition and cannot rescue an unparseable one, which is why
 ;;   `supports-condition-matches?` below returns a third value for it.
 ;;
-;; What this engine still gets wrong, measured, and why it is a scope cut
-;; rather than a bug: the value half of the oracle only speaks for the
-;; properties whose value space this engine writes down (see
-;; `property-value-keywords`, `length-valued-properties` and the shorthand
-;; expanders). Measured on the same page and NOT fixed:
+;; The two rows this section used to name as a scope cut were
+;; `(color: #zzz)` and `(text-decoration: flurb)`, both black in Brave and
+;; both true here, and the reason given was that "the colour grammar and
+;; the text-decoration grammar live in `cssom.layout`", which requires
+;; `cssom.core` and so cannot be asked. THAT PREMISE WAS WRONG, and finding
+;; out where those grammars actually live is what closed both rows:
 ;;
-;; | condition | Brave | this engine |
-;; |---|---|---|
-;; | `(color: #zzz)` | black | true -- this namespace has no colour parser to ask; `cssom.layout` does the colour reading |
-;; | `(text-decoration: flurb)` | black | true -- nothing here enumerates what a `text-decoration` may be |
+;;   * `cssom.layout` does not parse a colour ANYWHERE. It threads the
+;;     author's string straight onto the draw-op. The only colour parser
+;;     this engine has is `kotoba.wasm.host.color/parse-color`, one layer
+;;     BELOW this namespace -- in the same dependency `kotoba.wasm.dom`
+;;     comes from. So the colour half needed a `require`, not a move, not a
+;;     mirror and not a gate: see the `ns` form and `color-value-support`.
 ;;
-;; The fail direction is deliberate and is the same one `@media`'s
-;; unknown-feature default takes: a real declaration is never called
-;; unsupported. Closing either row means moving a value grammar this engine
-;; keeps in `cssom.layout` up into this namespace, which is a bigger change
-;; than the at-rule this section exists to evaluate.
+;;   * `cssom.layout` does not enumerate `text-decoration` either. The
+;;     three line keywords it draws live in dom-gpu's `.cljs` RENDERERS
+;;     (`kotoba.wasm.host.webgpu/draw-text-decoration!` and its webgl
+;;     twin), which a `.cljc` namespace cannot require without breaking the
+;;     JVM path. That one is a real copy -- `text-decoration-line-keywords`
+;;     below -- and it carries the gate the copy needs.
+;;
+;; 115 conditions were read out of Brave on 2026-08-06, one probe page per
+;; probe, and 35 of them are the colour and text-decoration rows above,
+;; which now agree exactly. THIRTY are left, every one of them fail-OPEN
+;; (black in Brave, true here) and every one of them written down so the
+;; next round starts from the browser rather than from the spec:
+;;
+;;   opacity: flurb | 7px          ...and 0.5, 1, 50% are red
+;;   z-index: flurb | 1.5 | 3px    ...and 3, auto are red
+;;   flex-grow: flurb | auto | 2px ...and 2 is red -- `auto` is NOT a
+;;                                    flex-grow, which is the row that says
+;;                                    each of these needs its own keyword
+;;                                    set and not one numeric rule
+;;   order: flurb | 1.5            ...and 2 is red
+;;   column-count: flurb | 3.5     ...and 3, auto are red
+;;   font-weight: flurb | 1001     ...and bold, 700, 1000 are red
+;;   align-items justify-content grid-auto-flow mix-blend-mode hyphens
+;;   pointer-events text-overflow isolation contain break-inside cursor
+;;   transform content aspect-ratio grid-template-columns tab-size
+;;                                 ...each with `flurb`, each with a real
+;;                                    value beside it that is red on both
+;;                                    sides
+;;
+;; and THREE where the fail-open default is RIGHT, and an enumeration would
+;; have broken them -- Brave says these ARE supported, because their value
+;; space genuinely admits an arbitrary identifier:
+;;
+;;   (font-family: flurb)  (list-style-type: flurb)  (will-change: flurb)
+;;
+;; That last group is the reason closing the other thirty means writing a
+;; vocabulary per property rather than one rule, and why this round stopped
+;; at the two rows it was asked about plus the colour family they
+;; generalise to.
 
 (def ^:private layout-read-properties
   "Every property `cssom.layout` reads off a resolved element, i.e. every
@@ -7527,6 +8184,47 @@
    needs a unit on a non-zero value."
   #{:line-height :flex-basis})
 
+(def ^:private color-valued-properties
+  "The properties whose value this engine reads as a COLOUR. DERIVED from
+   `engine-properties` rather than listed, because the naming convention is
+   the fact -- `background-color`, the four `border-*-color`s,
+   `column-rule-color`, `outline-color`, `box-shadow-color`,
+   `text-shadow-color` -- and `color` itself is the one exception the
+   convention cannot express. A list here would be a second thing to keep
+   in step with the property registry; a derivation cannot fall behind it.
+
+   A `delay` for the same reason `engine-properties` is one."
+  (delay
+    (into #{:color}
+          (filter #(str/ends-with? (name %) "-color"))
+          @engine-properties)))
+
+(def ^:private text-decoration-line-keywords
+  "The `text-decoration-line` keywords this engine actually DRAWS.
+
+   This one IS a copy, and it is the only value table in this file that is:
+   the branch that paints them lives in dom-gpu's `.cljs` renderers
+   (`kotoba.wasm.host.webgpu/draw-text-decoration!` and its webgl twin), so
+   a `.cljc` namespace cannot require it the way it requires
+   `kotoba.wasm.host.color`. `cssom.core-test`'s
+   `text-decoration-line-keywords-matches-what-the-renderer-draws` is the
+   gate that keeps the copy honest, in exactly the shape
+   `layout-read-properties`'s own gate has.
+
+   `none` is here and not there because a renderer draws nothing for it --
+   absence is how it is implemented, so it cannot appear in a `case`."
+  #{"none" "underline" "overline" "line-through"})
+
+(def ^:private text-decoration-style-keywords
+  "The `text-decoration-style` keywords. Nothing in this engine draws a
+   decoration style -- every line is solid -- but `@supports
+   (text-decoration: underline dotted red)` is RED in Brave, and answering
+   `false` for a declaration whose LINE this engine really does paint would
+   be the fail-CLOSED direction this oracle exists to avoid. Listed so the
+   component walk in `supports-value?` can recognise them rather than
+   claiming they are unsupported."
+  #{"solid" "double" "dotted" "dashed" "wavy"})
+
 (def ^:private supports-value-function-pattern
   "A whole value that is one function call this engine resolves --
    `var()`, `calc()` and the math family, plus the colour functions. Used
@@ -7557,6 +8255,37 @@
       ;; nothing, leaving only the shorthand key the `dissoc` removes.
       (contains? shorthand-properties property)
       (boolean (seq (dissoc (parse-declarations (str (name property) ": " v)) property)))
+
+      ;; A COLOUR, answered by the grammar itself rather than by a table:
+      ;; `parse-color` is the only colour parser this engine has, and it is
+      ;; one layer below this namespace. Measured in Brave 151 on
+      ;; 2026-08-06, and the `:unknown` arm is why this is not a boolean
+      ;; call: `(color: #zzz)` `(color: flurb)` `(color: 7)` `(color: 0)`
+      ;; are black, while `(color: oklch(...))` `(color: lab(...))`
+      ;; `(color: color-mix(...))` `(color: light-dark(...))` are all red --
+      ;; a function this engine does not implement is one the browser
+      ;; does, and calling it unsupported is the failure this oracle exists
+      ;; to avoid.
+      (contains? @color-valued-properties property)
+      (not= :no (color-value-support v))
+
+      ;; `text-decoration` is a shorthand-shaped value this engine reads as
+      ;; one string, so its check is per COMPONENT: every space-separated
+      ;; token has to be a line keyword, a style keyword, a length
+      ;; (thickness) or a colour. Measured in Brave: `underline`,
+      ;; `line-through`, `overline`, `none` and `underline dotted red` are
+      ;; red; `flurb` and `7` are black.
+      (= :text-decoration property)
+      (let [tokens (split-value-components v \space)]
+        (boolean
+         (and (seq tokens)
+              (every? (fn [token]
+                        (let [t (str/lower-case token)]
+                          (or (contains? text-decoration-line-keywords t)
+                              (contains? text-decoration-style-keywords t)
+                              (not= :no (color-value-support token))
+                              (some? (re-matches #"(?i)^[-+]?(?:\d+\.?\d*|\.\d+)(px|em|rem|%|vw|vh|vmin|vmax|ch|ex|pt|pc|in|cm|mm|q)$" token)))))
+                      tokens))))
 
       (contains? property-value-keywords property)
       (contains? (get property-value-keywords property) lower)
@@ -7608,12 +8337,15 @@
    Measured in Brave 151 on 2026-08-06: `@supports selector(p:has(b))` is
    red and `@supports selector(:frobnicate)` is black, which is the pair
    this set exists to tell apart. What it gets wrong, in the safe
-   direction: `:hover`/`:link`/`:visited`/`:active` are real pseudo-classes
-   this engine does not implement, so `@supports selector(:hover)` is red
-   in Brave and false here."
+   direction: `:hover`/`:visited`/`:active` are real pseudo-classes this
+   engine does not implement, so `@supports selector(:hover)` is red in
+   Brave and false here. `:link`/`:any-link` left that list on 2026-08-06;
+   `:visited` stays off it deliberately, because this engine has no
+   history and answering it would be inventing a fact about the user."
   #{:disabled :enabled :checked :required :optional :read-only :read-write
     :invalid :valid :in-range :out-of-range :focus :focus-within
     :first-child :last-child :only-child :first-of-type :last-of-type
+    :only-of-type :link :any-link
     :nth-child :nth-of-type :nth-last-child :nth-last-of-type
     :root :empty :lang :scope
     :not :is :where :has})
