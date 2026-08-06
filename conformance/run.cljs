@@ -555,6 +555,46 @@
       (= \} (nth s i)) (if (= 1 depth) i (recur (inc i) (dec depth)))
       :else (recur (inc i) depth))))
 
+(defn- split-selector-list
+  "Splits a selector PRELUDE on its top-level commas -- the ones that
+   separate one selector from the next -- and on no others.
+
+   A plain `split` on `,` is wrong, and the way it is wrong is silent:
+   `div:has(b, i)` came out as two selectors, so `scope-css` prefixed the
+   SECOND ARGUMENT of the `:has()` and produced
+   `#case-N div:has(b, #case-N i)`. That is still valid CSS and still
+   matches something, so nothing anywhere reported an error -- it simply
+   answered a different question. Measured in Brave 151 on 2026-08-06 on
+   `<div><i>i</i></div><div><b>b</b></div><div><u>u</u></div>`: the correct
+   rule paints the first two divs red, and the mis-scoped one paints only
+   the second, because `:scope #case-N i` needs a `#case-N` INSIDE the div.
+   Every functional pseudo-class that takes a list is affected --
+   `:is()`, `:where()`, `:not()`, `:has()`, `:lang()`, `:nth-child(... of
+   a, b)`.
+
+   The corpus contained exactly one such prelude before this round
+   (`p:not(.x, .y)`), and it survived by luck: `#case-N .y` still matches
+   the same element, so the answer happened to be the same. Measured both
+   ways, both red -- which is why this went unnoticed rather than why it is
+   harmless.
+
+   Parenthesis depth is enough here; a comma inside an attribute selector's
+   quoted value would need string tracking, and no case has one. Brackets
+   are tracked anyway because they are one line of code and `[a=\"x,y\"]`
+   is a shape a future case could plausibly want."
+  [prelude]
+  (let [s (str prelude)
+        n (count s)]
+    (loop [i 0 start 0 depth 0 out []]
+      (if (>= i n)
+        (conj out (subs s start))
+        (let [c (nth s i)]
+          (cond
+            (or (= \( c) (= \[ c)) (recur (inc i) start (inc depth) out)
+            (or (= \) c) (= \] c)) (recur (inc i) start (max 0 (dec depth)) out)
+            (and (= \, c) (zero? depth)) (recur (inc i) (inc i) depth (conj out (subs s start i)))
+            :else (recur (inc i) start depth out)))))))
+
 (defn- scope-css
   "Prefixes every STYLE RULE selector in a case's CSS with that case's
    container id, so all cases can share one page without one case's
@@ -583,7 +623,11 @@
      verbatim. The body is verbatim on purpose: a NESTED rule
      (`p { & span { ... } }`) is relative to its parent and already
      scoped by it -- prefixing it again would make it `#case-0 & span`,
-     which matches nothing."
+     which matches nothing.
+
+   The selector list is split by `split-selector-list`, which respects
+   parentheses -- see its docstring for the mis-scoping a plain `split`
+   on `,` produced inside a `:has()`/`:is()`/`:lang()` argument."
   [css scope]
   (when-not (str/blank? (str css))
     (let [s (str css)
@@ -619,7 +663,7 @@
                                    at-name (str prelude " {" body "}")
 
                                    :else
-                                   (str (->> (str/split prelude #",")
+                                   (str (->> (split-selector-list prelude)
                                              (map str/trim)
                                              (remove str/blank?)
                                              (map #(str scope " " %))
@@ -914,11 +958,32 @@
    apply-cascade runs even with no author CSS: it is also what folds a
    `style=\"...\"` attribute's :style-inline into the :style/* attrs
    cssom.layout actually reads, so skipping it would silently drop every
-   inline style in the corpus."
+   inline style in the corpus.
+
+   The CSS is scoped by the wrapper's own id, for the same reason the
+   browser page scopes it by `#case-N`, and this is the change that makes
+   the two sides ask the SAME QUESTION. The browser scopes because 808
+   cases share one document; this side does not need to, because each case
+   is its own document -- but the wrapper is an ELEMENT either way, and an
+   unscoped selector can match it on this side while the `#case-N ` prefix
+   holds the browser's wrapper out of reach. Measured on
+   `:selector/has-takes-a-selector-list`: the browser evaluates
+   `#case-N div:has(b, i)`, which cannot match its own container, while
+   this side evaluated a bare `div:has(b, i)`, which matched
+   `<div id=\"root\">` -- and the red it declared there INHERITED into the
+   one div the rule is supposed to miss. Four such cases were written
+   before this was noticed, and all four looked like engine bugs.
+
+   It also removes a specificity asymmetry that has been latent since the
+   wrapper existed: the browser has been scoring `#case-N p` at (1,0,1)
+   while this side scored `p` at (0,0,1). No corpus case turned on it,
+   because every case compares rules against each other and both sides
+   added the id to all of them or to none -- but the two sides were not
+   evaluating the same selector."
   [{:keys [html css]}]
   (-> (html/parse-into-document
        (str "<div id=\"root\" style=\"font-size: 14px; line-height: 20px\">" html "</div>"))
-      (css/apply-cascade (css/parse-rules (or css ""))
+      (css/apply-cascade (css/parse-rules (or (scope-css css "#root") ""))
                          (cond-> {}
                            *oracle-viewport-width*
                            (assoc :viewport-width *oracle-viewport-width*)

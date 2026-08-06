@@ -5099,3 +5099,164 @@
                               "<div><p id=\"a\">Alpha beta</p></div>" "a")]
     (is (= 40 (:style/font-size attrs)))
     (is (nil? (:pseudo/first-letter attrs)))))
+
+;; ---- Round fifty: selector state, and the box-alignment shorthands ----
+;;
+;; Every expected value below was read out of a real headless Brave
+;; 151.1.93.129 over CDP on 2026-08-06, one probe page per probe, in the
+;; conformance corpus's own frame. Each behavioural group carries a CONTROL
+;; that passes on both sides of this commit, so a group going green is not
+;; the whole group being rewritten.
+
+;; :checked names the state of the control it is on, and that is not one
+;; attribute. Brave: `<option selected>` matches `option:checked`;
+;; `<option checked>` does not.
+
+(deftest checked-matches-a-selected-option-and-not-a-checked-one
+  (is (= "red" (:style/color (cascaded-attrs "option:checked { color: red }"
+                                             "<select><option id=\"a\" selected>a</option></select>" "a")))
+      "an <option> is :checked when it is SELECTED")
+  (is (nil? (:style/color (cascaded-attrs "option:checked { color: red }"
+                                          "<select><option id=\"a\" checked>a</option><option selected>b</option></select>" "a")))
+      "...and a `checked` attribute on an <option> is not its selectedness"))
+
+(deftest checked-still-matches-a-checked-checkbox
+  ;; The control. Reading the state per control must not stop the ordinary
+  ;; case working, and it is the same rule that used to answer everything.
+  (is (= "red" (:style/color (cascaded-attrs "input:checked { color: red }"
+                                             "<input id=\"a\" type=\"checkbox\" checked>" "a"))))
+  (is (nil? (:style/color (cascaded-attrs "input:checked { color: red }"
+                                          "<input id=\"a\" type=\"checkbox\">" "a")))))
+
+(deftest checked-does-not-match-an-arbitrary-element-carrying-the-attribute
+  ;; The old rule read the `checked` attribute off any node at all.
+  (is (nil? (:style/color (cascaded-attrs ":checked { color: red }"
+                                          "<div id=\"a\" checked>x</div>" "a")))))
+
+;; :read-only/:read-write and :required/:optional are measured in full and
+;; deliberately unchanged -- see the comment block above `matches-pseudo?` in
+;; src/cssom/core.cljc for the table and for why closing them is a cross-repo
+;; change (kotoba-lang/browser's query-selector suite pins the current
+;; answers in three assertions). What is asserted here is the part that
+;; already agrees with Brave, so that a future fix has a control to keep.
+
+(deftest read-only-still-matches-a-plain-paragraph-and-a-readonly-field
+  ;; The control: the two answers the old pair already got right.
+  (let [css "p:read-only { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<p id=\"a\">x</p>" "a")))))
+  (let [css "input:read-only { color: red } input:read-write { color: green }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<input id=\"a\" readonly>" "a")))))
+  (let [css "textarea:read-only { color: red } textarea:read-write { color: green }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<textarea id=\"a\" readonly></textarea>" "a"))))
+    (is (= "green" (:style/color (cascaded-attrs css "<textarea id=\"a\"></textarea>" "a"))))))
+
+(deftest the-range-pseudo-classes-do-depend-on-disabledness
+  ;; The control that a fix to the block above must keep: Brave DOES take a
+  ;; disabled control out of :in-range, where it does NOT take it out of
+  ;; :required. `font-style` rather than `color`, because the UA sheet writes
+  ;; `input:disabled { color: #545454 }` and a colour therefore cannot say
+  ;; whether the AUTHOR rule matched.
+  (let [css "input:in-range { font-style: italic }"]
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"number\" min=\"1\" max=\"10\" value=\"5\" disabled>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"number\" min=\"1\" max=\"10\" value=\"5\">" "a"))))))
+
+;; :enabled is the complement of :disabled over what CAN be disabled.
+
+(deftest enabled-reaches-every-element-that-can-be-disabled
+  (let [css ":enabled { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<select><option id=\"a\">o</option></select>" "a")))
+        "Brave: a bare <option> is :enabled")
+    (is (= "red" (:style/color (cascaded-attrs css "<fieldset id=\"a\"><input></fieldset>" "a")))
+        "...and so is a <fieldset>")))
+
+(deftest enabled-does-not-reach-an-element-that-cannot-be-disabled
+  ;; The control, on both sides of the widening: a <span> is not :enabled,
+  ;; and a <legend> -- measured at 2px, i.e. its UA padding and nothing
+  ;; else -- is not either.
+  (let [css ":enabled { color: red }"]
+    (is (nil? (:style/color (cascaded-attrs css "<span id=\"a\">x</span>" "a"))))
+    (is (nil? (:style/color (cascaded-attrs css "<fieldset><legend id=\"a\">l</legend></fieldset>" "a"))))))
+
+;; :only-of-type
+
+(deftest only-of-type-counts-the-same-tag-and-not-the-siblings
+  (let [css ":only-of-type { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<div><p id=\"a\">p</p><span>s</span><span>s</span></div>" "a")))
+        "the lone <p> is only-of-type although it has two siblings")
+    (is (= "red" (:style/color (cascaded-attrs css "<div><p>1</p><p>2</p><span id=\"a\">s</span></div>" "a")))
+        "and so is the lone <span> among two paragraphs")
+    (is (nil? (:style/color (cascaded-attrs css "<div><p id=\"a\">1</p><p>2</p></div>" "a")))
+        "while neither of two paragraphs is")))
+
+(deftest only-child-is-still-only-child
+  ;; The control: the pseudo-class :only-of-type is most easily confused
+  ;; with. Brave: the same lone <p> matches both, and the <span> above
+  ;; matches only-of-type alone.
+  (let [css ":only-child { color: red }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<div><p id=\"a\">p</p></div>" "a"))))
+    (is (nil? (:style/color (cascaded-attrs css "<div><p>1</p><p>2</p><span id=\"a\">s</span></div>" "a"))))))
+
+;; :link / :any-link
+
+(deftest link-and-any-link-need-an-href
+  (let [css "a:any-link { color: red } a:link { font-style: italic }"]
+    (is (= "red" (:style/color (cascaded-attrs css "<a id=\"a\" href=\"/x\">l</a>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<a id=\"a\" href=\"/x\">l</a>" "a"))))
+    (is (= "red" (:style/color (cascaded-attrs css "<a id=\"a\" href=\"\">l</a>" "a")))
+        "Brave: an empty href is still a link")
+    (is (nil? (:style/color (cascaded-attrs css "<a id=\"a\">n</a>" "a")))
+        "...and a bare <a> is not")))
+
+(deftest visited-is-deliberately-not-implemented
+  ;; The control that says the gap is a choice: this engine has no history,
+  ;; so it declines rather than inventing one.
+  ;; `font-style` again: the UA sheet already colours a link `#0000EE`.
+  (is (nil? (:style/font-style (cascaded-attrs "a:visited { font-style: italic }"
+                                               "<a id=\"a\" href=\"/x\">l</a>" "a")))))
+
+;; The three box-alignment shorthands: ALIGN first, then JUSTIFY.
+
+(deftest place-items-expands-align-then-justify
+  (let [attrs (cascaded-attrs "#a { place-items: end start }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-items attrs)))
+    (is (= "start" (:style/justify-items attrs)))))
+
+(deftest place-content-expands-align-then-justify
+  (let [attrs (cascaded-attrs "#a { place-content: end center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-content attrs)))
+    (is (= "center" (:style/justify-content attrs)))))
+
+(deftest place-self-expands-align-then-justify
+  (let [attrs (cascaded-attrs "#a { place-self: end center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-self attrs)))
+    (is (= "center" (:style/justify-self attrs)))))
+
+(deftest a-single-place-value-sets-both-longhands
+  (let [attrs (cascaded-attrs "#a { place-self: center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "center" (:style/align-self attrs)))
+    (is (= "center" (:style/justify-self attrs)))))
+
+(deftest a-longhand-after-a-place-shorthand-still-wins
+  ;; The shorthand takes part in the cascade as its longhands, so ordinary
+  ;; declaration order decides -- the same property the box shorthands have.
+  (let [attrs (cascaded-attrs "#a { place-items: center; align-items: end }" "<div id=\"a\">x</div>" "a")]
+    (is (= "end" (:style/align-items attrs)))
+    (is (= "center" (:style/justify-items attrs))))
+  (let [attrs (cascaded-attrs "#a { align-items: end; place-items: center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "center" (:style/align-items attrs)))))
+
+(deftest a-place-shorthand-with-three-values-is-left-unexpanded
+  ;; The control on the parser's boundary: a value outside the grammar must
+  ;; reach the generic path raw rather than being guessed at, which is the
+  ;; posture every other expander in this file takes.
+  (let [attrs (cascaded-attrs "#a { place-items: a b c }" "<div id=\"a\">x</div>" "a")]
+    (is (nil? (:style/align-items attrs)))
+    (is (nil? (:style/justify-items attrs)))))
+
+(deftest the-longhands-a-place-shorthand-does-not-name-are-untouched
+  ;; The other control: `place-items` must not reach `*-self` or
+  ;; `*-content`, which is the mistake a single shared expander would make.
+  (let [attrs (cascaded-attrs "#a { place-items: center }" "<div id=\"a\">x</div>" "a")]
+    (is (= "center" (:style/align-items attrs)))
+    (is (nil? (:style/align-self attrs)))
+    (is (nil? (:style/align-content attrs)))))

@@ -1859,6 +1859,58 @@
   [tok]
   (boolean (re-matches #"\d+(\.\d+)?" (str tok))))
 
+(def ^:private place-shorthands
+  "The three CSS Box Alignment shorthands, and the two longhands each one
+   sets. The ALIGN longhand is first in every pair, and that is the whole
+   content of this table: `place-items: end start` is `align-items: end`
+   and `justify-items: start`, not the other way round.
+
+   Measured in Brave 151 over CDP on 2026-08-06, one probe page per probe,
+   reading `getComputedStyle` back beside the box it produces: in a
+   120x60 grid track, `place-items: end start` reports `align-items: end`
+   / `justify-items: start` and puts the item at (0, 40); reading the two
+   values the other way round would put it at (113, 0). `place-content:
+   end center` reports `align-content: end` / `justify-content: center`
+   and lands its tracks at (90, 80). One value sets both longhands
+   (`place-self: end` reports `justify-self: end` and `align-self: end`).
+
+   Block axis before inline axis, which is the same order `grid-area` and
+   `gap` use and the opposite of the `x y` order the two-value forms of
+   `background-position` and `translate()` use -- which is why it was
+   measured rather than assumed."
+  {"place-items"   [:align-items :justify-items]
+   "place-content" [:align-content :justify-content]
+   "place-self"    [:align-self :justify-self]})
+
+(defn- expand-place-shorthand
+  "Expands one of `place-shorthands` into its two longhands: one value sets
+   both, two values are align then justify. Returns nil for a name that is
+   not one of the three, or for a value with no tokens or more than two, so
+   the generic path stores it raw rather than this guessing.
+
+   The tokens are NOT validated against an alignment vocabulary. That is
+   deliberate and it is the same posture `expand-border-box-shorthand`
+   takes: `cssom.layout` is the file that knows which alignment keywords it
+   can act on, and a value this cannot check must reach it unchanged rather
+   than being dropped here. `place-items: flurb` therefore expands to two
+   `flurb` longhands, which `cssom.layout` then ignores exactly as it
+   ignores a `justify-items: flurb` written by hand -- one wrong answer
+   instead of two different ones.
+
+   Not expanded, and named: `place-*` accepts a `<baseline-position>` whose
+   two words (`first baseline`) are ONE value, so `place-items: first
+   baseline` would be read here as align `first` / justify `baseline`.
+   Nothing in this repo reads `baseline` on the justify axis, so the cost
+   is confined to that keyword; recognising it means a real
+   `<self-position>` grammar, which is a larger change than this table."
+  [k v]
+  (when-let [[align justify] (get place-shorthands (str/lower-case (str k)))]
+    (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
+      (case (count tokens)
+        1 {align (first tokens) justify (first tokens)}
+        2 {align (first tokens) justify (second tokens)}
+        nil))))
+
 (defn- expand-flex-shorthand
   "Expands the `flex` shorthand into `:flex-grow`/`:flex-shrink`/
    `:flex-basis`, per CSS Flexible Box Layout §7.1
@@ -2110,6 +2162,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-flex-shorthand value))
+
+                         (some? (expand-place-shorthand k value))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand {:value longhand-value :important? important?}])
+                              (expand-place-shorthand k value))
 
                          :else
                          (let [parsed (parse-property-value k value)]
@@ -4833,6 +4890,96 @@
        (map unquote-lang-range)
        (remove str/blank?)))
 
+;; ---- `:read-only`/`:read-write` and `:required`/`:optional`: measured in
+;; full, deliberately NOT changed, and this is where a fix starts.
+;;
+;; The four clauses in `matches-pseudo?` below are two lists where real CSS
+;; has one predicate and its complement, and the overlap is where they and a
+;; real browser part company. Measured in Brave 151 over CDP on 2026-08-06,
+;; one probe page per probe, in the conformance corpus's own frame:
+;;
+;;   | markup                                     | Brave      | here    |
+;;   |--------------------------------------------|------------|---------|
+;;   | `<p>text</p>`                              | read-only  | same    |
+;;   | `<input>` / `<textarea>`                   | read-write | same    |
+;;   | `<input readonly>` / `<textarea readonly>` | read-only  | same    |
+;;   | `<button>`/`<select>`/a checkbox           | read-only  | same    |
+;;   | `<input type=file>` / `<input type=hidden>`| read-only  | same    |
+;;   | `<input disabled>`                         | read-only  | NEITHER |
+;;   | `<p contenteditable="true">`               | read-write | NEITHER |
+;;   | a plain `<p>` inside that one              | read-write | NEITHER |
+;;   | `<p contenteditable="false">` inside it    | read-only  | read-only |
+;;   | `<input required disabled>`                | :required  | NEITHER |
+;;   | `<input disabled>`                         | :optional  | NEITHER |
+;;
+;; The rule the last six rows want is one predicate -- an editable form
+;; control that is neither `readonly` nor `disabled`, OR any element in a
+;; `contenteditable` subtree -- with `:read-only` as its complement, and
+;; `:required`/`:optional` deciding on the attribute alone (disabling a
+;; control takes it out of constraint validation, which is why
+;; `:valid`/`:invalid`/`:in-range`/`:out-of-range` all keep their disabled
+;; test and Brave agrees that they should).
+;;
+;; It was written, and reverted, and the reason is not doubt about the
+;; measurement. `:read-only` and `:optional` are consumed by
+;; `kotoba-lang/browser`'s `query-selector`, whose own suite asserts the
+;; answers this file gives TODAY: `dom_bridge_test`'s
+;; `query-selector-supports-form-state-pseudo-classes` requires
+;; `input:read-only` to skip a disabled input and return the `readonly` one,
+;; and `input:optional` to skip it too, and
+;; `quickjs_execution_test`'s `quickjs-dom-query-uses-shared-form-state-
+;; pseudo-classes` pins the same node ids. Three assertions, all of them
+;; encoding a browser answer that does not exist. Closing this is therefore
+;; a CROSS-REPO change and belongs in a round that can land both halves.
+;;
+;; Four corpus cases carry it in the meantime, red, with these numbers:
+;; `:form/read-only-matches-a-disabled-input`,
+;; `:form/read-write-matches-a-contenteditable`,
+;; `:form/required-still-matches-a-disabled-control`, and its control
+;; `:form/read-only-matches-a-non-editable-element`, which already agrees.
+
+(defn- checked-control?
+  "Whether `node` is CHECKED, in the sense `:checked` means for the control
+   it is on -- which is not one attribute:
+
+   - a checkbox or radio `<input>` is checked when it carries the `checked`
+     attribute;
+   - an `<option>` is checked when it carries `selected`.
+
+   Measured in Brave 151 on 2026-08-06: `<option selected>` matches
+   `option:checked` and `<option checked>` does NOT, which is the pair in
+   the corpus as `:form/checked-matches-a-selected-option` and
+   `:form/a-checked-attribute-on-an-option-is-not-selectedness`. Before
+   this, `:checked` read the `checked` attribute off ANY element, so both
+   cases came out exactly inverted -- and a `<div checked>` matched too.
+
+   Not covered, and named rather than guessed: an `<option>` that is
+   selected because it is the first option of a single-select `<select>`
+   with nothing explicitly selected. That is a rendering-time default this
+   file does not compute; Brave reports the first option of
+   `<select><option>a</option><option>b</option></select>` as `:checked`."
+  [node]
+  (case (:tag node)
+    :input (and (contains? #{"checkbox" "radio"} (input-type node))
+                (truthy-attr? (get-in node [:attrs :checked])))
+    :option (truthy-attr? (get-in node [:attrs :selected]))
+    false))
+
+(defn- link-control?
+  "Whether `node` is a LINK -- `:link`/`:any-link`'s subject. Real HTML: an
+   `<a>` or `<area>` with an `href` ATTRIBUTE, however empty its value.
+   Measured in Brave 151 on 2026-08-06: `<a href=\"/x\">` and `<a href=\"\">`
+   both match `a:any-link` and `a:link`; a bare `<a>` matches neither.
+
+   `:visited` is deliberately NOT implemented, and the reason is not that
+   it is hard: this engine has no history, so answering it at all would be
+   inventing a fact about the user. The oracle agrees by accident (nothing
+   is visited in a fresh headless profile), which is exactly why there is
+   no corpus case for it -- it would pass for the wrong reason."
+  [node]
+  (and (contains? #{:a :area} (:tag node))
+       (some? (get-in node [:attrs :href]))))
+
 (defn- lang-pseudo-matches?
   "Whether `node` matches `:lang(arg)` -- real CSS: `node`'s computed
    language (`computed-lang`) matches AT LEAST ONE comma-separated range in
@@ -4853,9 +5000,13 @@
    `parse-simple-selector`'s `:selector/nth-args` / `:selector/lang-args`).
 
    `:first-child`/`:last-child`/`:only-child` and `:first-of-type`/
-   `:last-of-type` need no argument -- they test `node`'s position
-   (`structural-siblings`/`sibling-position`) against a fixed constant
-   (1st, last, or 'only one at all'); `:nth-child`/`:nth-of-type`/
+   `:last-of-type`/`:only-of-type` need no argument -- they test `node`'s
+   position (`structural-siblings`/`sibling-position`) against a fixed
+   constant (1st, last, or 'only one at all'). `:only-of-type` is
+   `:only-child` asked of the same-tag sibling set, which is the one
+   difference that matters: measured in Brave 151 on 2026-08-06, the lone
+   `<span>` of `<p>1</p><p>2</p><span>s</span>` matches it while neither
+   `<p>` does, so it is emphatically not `:only-child`; `:nth-child`/`:nth-of-type`/
    `:nth-last-child`/`:nth-last-of-type` all delegate to
    `nth-pseudo-matches?`, which additionally parses+evaluates `arg`'s An+B
    micro-syntax -- the `:nth-last-*` pair simply passes `from-end?` true,
@@ -4888,13 +5039,37 @@
    `nth-pseudo-matches?` can evaluate an `:nth-child(... of <selector>)`
    clause -- the same explicit higher-order-function argument the `:has()`
    family below uses, and for the same reason: `matches-simple?` calls this
-   function, so this function cannot name it."
+   function, so this function cannot name it.
+
+   Four clauses delegate rather than decide, each to a predicate whose own
+   docstring carries the browser measurements behind it: `:checked` to
+   `checked-control?` (which control's state the word names -- `checked`
+   on a checkbox, `selected` on an `<option>`), `:read-only`/`:read-write`
+   to `user-alterable?` (ONE predicate and its complement, which is what
+   the two of them are), and `:link`/`:any-link` to `link-control?`.
+
+   `:enabled` asks `disabled-capable-control?`, not `form-control?`: the
+   two pseudo-classes are complements over the set of elements that CAN be
+   disabled, which is wider than the set of form controls. Measured in
+   Brave 151 on 2026-08-06 with a bare `:enabled { padding-left: 30px }`:
+   `<fieldset>`, `<select>`, `<optgroup>` and `<option>` all take the 30px
+   and a `<legend>` does not. `:disabled` already used the wider set, so
+   the pair used to disagree with itself -- a bare `<option>` was neither
+   `:enabled` nor `:disabled`.
+
+   One more scope cut in the same family, with its number: `:required`/
+   `:optional` decline a `type=\"file\"` input via
+   `validation-barred-control?`, where Brave reports
+   `<input type=\"file\" required>` as BOTH `:required` and `:invalid` --
+   only `type=\"hidden\"` is really barred from constraint validation. No
+   corpus case covers it, and narrowing that set would silently change
+   `:valid`/`:invalid` for file inputs as well, which is not measured."
   [document node selector-pseudo arg match-fn]
   (case selector-pseudo
     :disabled (disabled-control? document node)
-    :enabled (and (form-control? node)
+    :enabled (and (disabled-capable-control? node)
                   (not (disabled-control? document node)))
-    :checked (truthy-attr? (get-in node [:attrs :checked]))
+    :checked (checked-control? node)
     :required (and (form-control? node)
                    (not (disabled-control? document node))
                    (not (validation-barred-control? node))
@@ -4909,6 +5084,8 @@
     :read-write (and (editable-form-control? node)
                      (not (truthy-attr? (get-in node [:attrs :readonly])))
                      (not (disabled-control? document node)))
+    :link (link-control? node)
+    :any-link (link-control? node)
     :invalid (and (form-control? node)
                   (not (disabled-control? document node))
                   (not (constraint-validation-barred-control? node))
@@ -4924,6 +5101,7 @@
                   (and (seq siblings)
                        (= (count siblings) (sibling-position siblings (:node/id node)))))
     :only-child (= 1 (count (structural-siblings document node false)))
+    :only-of-type (= 1 (count (structural-siblings document node true)))
     :first-of-type (= 1 (sibling-position (structural-siblings document node true) (:node/id node)))
     :last-of-type (let [siblings (structural-siblings document node true)]
                     (and (seq siblings)
@@ -7248,12 +7426,15 @@
    Measured in Brave 151 on 2026-08-06: `@supports selector(p:has(b))` is
    red and `@supports selector(:frobnicate)` is black, which is the pair
    this set exists to tell apart. What it gets wrong, in the safe
-   direction: `:hover`/`:link`/`:visited`/`:active` are real pseudo-classes
-   this engine does not implement, so `@supports selector(:hover)` is red
-   in Brave and false here."
+   direction: `:hover`/`:visited`/`:active` are real pseudo-classes this
+   engine does not implement, so `@supports selector(:hover)` is red in
+   Brave and false here. `:link`/`:any-link` left that list on 2026-08-06;
+   `:visited` stays off it deliberately, because this engine has no
+   history and answering it would be inventing a fact about the user."
   #{:disabled :enabled :checked :required :optional :read-only :read-write
     :invalid :valid :in-range :out-of-range :focus :focus-within
     :first-child :last-child :only-child :first-of-type :last-of-type
+    :only-of-type :link :any-link
     :nth-child :nth-of-type :nth-last-child :nth-last-of-type
     :root :empty :lang
     :not :is :where :has})
