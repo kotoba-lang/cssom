@@ -1084,6 +1084,38 @@ that passes for the wrong reason:
 Neither is a limitation of the engine, and both are recorded rather than
 worked around.
 
+#### Re-measured after the merge, which is the number that counts
+
+Round fifty (the value grammars) landed on `main` while this was in flight,
+so the three columns above are pre-merge. Everything was re-run against
+`main` AS MERGED (`2a33209`), on the merged 817-case corpus, and the middle
+column is that commit's own engine — so column two to column three is
+attributable to this round and nothing else.
+
+| axis | 735, base engine | 817, `main` as merged | 817, after |
+|---|---|---|---|
+| line structure | 704/707 | 782/787 | **782/787** |
+| geometry (boxes) | 2376/2384 | 2583/2631 | **2593/2631** |
+| geometry (clean cases) | 728/735 | 787/817 | **794/817** |
+| paint order (points) | 18343/18362 | 20322/20392 | **20322/20392** |
+| paint order (clean cases) | 724/735 | 798/816 | **798/816** |
+| computed style (values) | 33480/33487 | 36994/37029 | **37002/37029** |
+| computed style (cases clean) | 730/735 | 792/817 | **798/817** |
+| cascade-attributed residual | 6 | 30 | **22** |
+
+`--dump-ops` diffed across the merge as well: **the same seven cases changed
+and no others**, which is what says the two rounds do not overlap. They touch
+different parts of `cssom.core` — round fifty's grammars sit in the
+declaration parser, this round's in `matches-pseudo?` and one new shorthand
+expander — and the merge needed no resolution in `src/` at all. Line
+structure and paint order are byte-identical across the last two columns,
+which is what a change confined to the cascade and to two alignment
+longhands should look like.
+
+Downstream, re-run after the merge and all against this branch's cssom:
+`browser` **754/0**, `dom-gpu` **130/0**, `htmldom` **180/0**. 1048 unit
+tests / 2808 assertions, 0 failures; lint 0 errors, 23 pre-existing warnings.
+
 #### The new divergences that are NOT closed, with their numbers
 
 Ranked by how cheaply a fix would follow from what is already here.
