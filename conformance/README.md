@@ -815,6 +815,388 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-nine: CSS nesting, which is a desugaring and not a splitter fix
+
+Round forty-four measured six nesting shapes, found the failure was
+DESTRUCTIVE rather than absent, and named the trap in the same breath:
+
+> **Not fixed:** making the brace splitter depth-aware without
+> implementing nesting would trade one wrong answer for another — the
+> outer declaration would survive and the nested rule would stop applying
+> at all, and the control above would go red. The honest fix is
+> desugaring (`& span` → `:is(#nc1) span`), which is a feature and not a
+> bug fix.
+
+That is the fix this round landed, plus three of the five value functions
+that round left measured and unimplemented.
+
+Three columns, because the corpus growing and the engine changing are two
+different things and a single before/after would let one pay for the
+other. This round has a confound the earlier ones did not: **two other
+rounds landed on `main` while it was in flight** — forty-seven (`all` /
+`::first-letter`) and forty-eight (the at-rules) — so the middle column is
+`main` AS MERGED (`c17735c`), the engine including both of them, on this
+round's finished 735-case corpus. Column one to column two therefore
+mixes coverage with two other agents' work, and **only column two to
+column three is attributable to this round**. Everything below was
+re-measured after the second merge; no pre-merge number is reported.
+
+| axis | 711 cases, `aa18bab` | 735, `main` (`c17735c`) | 735, after |
+|---|---|---|---|
+| line structure | 679/683 | 704/707 | **704/707** |
+| geometry (boxes) | 2315/2331 | 2368/2384 | **2376/2384** |
+| geometry (clean cases) | 697/711 | 720/735 | **728/735** |
+| paint order | 17713/17762 | 18343/18362 | **18343/18362** |
+| paint order (clean cases) | 699/711 | 724/735 | **724/735** |
+| computed style (values) | 32713/32745 | 33465/33487 | **33481/33487** |
+| computed style (cases clean) | 688/711 | 722/735 | **731/735** |
+| cascade-attributed residual | 31 | 21 | **5** |
+
+`src/` was NOT touched by the corpus half of this round. The residual's
+21 → 5 is the whole of what this round moved on that axis, and it accounts
+for itself exactly: eight values from the six original nesting cases, and
+eight from the four new nesting cases that carry a colour divergence
+(2 + 2 + 1 + 3). The two `&`-specificity cases contribute none, for a
+reason given below.
+
+**What is left in that residual is five values in three causes**, and
+`@scope` is two of them — see the last section here for its full
+measurement. Line structure and paint order are byte-identical across the
+last two columns, which is what a change confined to the cascade should
+look like.
+
+**`--dump-ops` was diffed per case, corpus-wide, in BOTH directions,
+against `main` as merged and on the same 735 cases.** Exactly eight cases'
+box lists changed, every one of them TO the browser's number and none away
+from it; **the other 727 are byte-identical**:
+
+| case | `main` | after | Brave |
+|---|---|---|---|
+| `:cascade/a-registered-custom-property-has-an-initial-value` | 800×20 | **60×20** | 60×20 |
+| `:cascade/an-invalid-value-for-a-registered-property-becomes-its-initial` | 800×20 | **70×20** | 70×20 |
+| `:cascade/a-registered-property-with-inherits-false-does-not-inherit` | 200×20 | **80×20** | 80×20 |
+| `:cascade/env-resolves-a-known-variable-rather-than-its-fallback` | 800×20 | **0×20** | 0×20 |
+| `:cascade/env-with-an-unknown-name-uses-its-fallback` | 800×20 | **130×20** | 130×20 |
+| `:cascade/attr-in-a-length` | 800×20 | **55×20** | 55×20 |
+| `:cascade/attr-falls-back-when-the-attribute-is-unusable` | 800×20 | **30×20** | 30×20 |
+| `:cascade/attr-resolves-inside-calc` | 800×20 | **65×20** | 65×20 |
+
+The same diff was run against the 711-case baseline this round started
+from, where three of those eight exist and all three changed, and the
+other 708 did not.
+
+That the six nesting cases are not in either list is the point of running
+both dumps: their divergence is a colour, which the ops dump cannot see.
+The ops diff proves the rule splitter — which every case's CSS goes
+through — moved nothing; the computed-style axis proves the nesting cases
+actually changed.
+
+**Three of the new cases, and two more, agree on BOTH sides, and the
+round says so rather than counting them.** `a-registration-with-a-relative-initial-value-is-invalid`,
+`env-with-no-fallback-invalidates-the-whole-declaration` and
+`the-legacy-string-attr-is-not-valid-in-a-length` all report 800 on an
+engine that has none of these features, because "kept the raw string" and
+"correctly declined" both read as `auto`. Each is paired with a case that
+DOES move (800→60, 800→130, 800→55), and only the pair is evidence.
+The two `&`-specificity cases are the same shape for a different reason:
+the old splitter recovered `& span { color: red }` as a rule of its own
+and ignored the stray `&`, which lands on the same two colours by
+coincidence — they are regression guards on the desugaring's own choice,
+not divergences, and the residual arithmetic above accounts for zero of
+their values.
+
+1018 unit tests / 2692 assertions, 0 failures after both merges (966/2475
+at `aa18bab`, 983/2521 for this round alone); linter 0 errors, 23
+pre-existing warnings, all in `test/`. **34 of this round's new
+assertions fail on `aa18bab`'s `src/` and pass after**, and every
+control beside them passes on both sides — the nested-rule-in-its-own-block
+case, the one-parent specificity case, the unregistered-custom-property
+case, the whole-value `var()` case, and both `attr()` invalidity cases. Downstream: `browser`
+754/0, `dom-gpu` 130/0, `htmldom` 180/0, all run against this checkout of
+`cssom` — htmldom delegates its style parsing to `cssom.core`, and a
+cascade change has turned its suite red twice before.
+
+#### One probe page per probe, because a shared page leaks
+
+The first version of this round's measurement put sixteen nesting probes
+on ONE page and got four wrong answers out of it. A single
+
+```css
+p span { color: rgb(0,0,255) }
+```
+
+written for probe F reached the `<span>` of probes A, B, C and D — and
+because those four were the `@layer` probes, and an unlayered declaration
+beats every layered one, it read as "a nested rule does not keep its
+layer", which is a real and plausible bug. It is the same hazard the top
+of `cases.edn` names for the corpus page, and it bites a probe harness
+harder: the corpus prefixes every selector with its case's own id, and a
+throwaway probe page has no such thing.
+
+Every measurement below is one page per probe, launched into headless
+Brave 151.1.93.129 over CDP one at a time. It costs ~1.3s per probe and
+removes the whole class of error.
+
+#### What `&` actually is, and it is not textual substitution
+
+The forms are the easy half, and all of them were measured:
+
+| written | Brave |
+|---|---|
+| `#x { color: blue; span { color: red } }` | paragraph blue, span red |
+| `#x { span { color: red } color: blue }` | the same — a declaration AFTER a nested rule still applies |
+| `#x { color: blue; span {…} color: green }` | **green** — the parent's own declarations cascade among themselves in source order |
+| `#x { b {…} & i {…} }` | both match — a nested selector with no `&` gets an implicit DESCENDANT one |
+| `#x { > b {…} }` | `& > b` — a leading combinator is the relative form |
+| `#x { @media (min-width: 1px) { color: red } }` | red; and blue when the query does not match |
+| `& span {…}` at TOP level | matches — `&` there is `:scope`, i.e. `:root` |
+
+The hard half is specificity, and it is the one place a textual `&`
+gives the wrong answer:
+
+```css
+#zz, .c { & span { color: red } }
+div.c span { color: blue }        /* Brave: RED */
+```
+
+`#zz` matches nothing on the page. `.c span` alone is (0,1,1) and would
+lose to `div.c span`'s (0,1,2). It wins because `&` is
+`:is(#zz, .c)` — **the MAXIMUM over the parent list, including an arm
+that did not match**. The control that places the same rule from the
+other side, and which a careless desugaring turns red:
+
+```css
+.c { & span { color: red } }
+div.c span { color: blue }        /* Brave: BLUE */
+```
+
+Both are in the corpus, as
+`:nesting/an-ampersand-carries-the-parent-lists-maximum-specificity` and
+`:nesting/one-parent-does-not-raise-a-nested-rules-specificity`. Neither
+means anything without the other.
+
+This engine already implements `:is()` and its max-of-arguments
+specificity exactly, so the desugaring reuses it rather than inventing a
+specificity concept. `expand-nested-selector` therefore has three cases,
+and only the third gives anything up:
+
+- **one parent** — plain textual substitution, and it is EXACT: `:is(X)`
+  and `X` have identical specificity and identical matching for every X,
+  complex ones included, so there is nothing for the `:is()` form to buy.
+- **several parents, all compound** — `:is(p1, p2, …)`, which this engine
+  parses and scores correctly. This is the case the measurement above
+  pins.
+- **several parents, at least one COMPLEX** — one expansion per parent.
+  Matching is still exact (`.a .b span` selects what `:is(.a .b) span`
+  selects); each expansion carries its own specificity instead of the
+  list's maximum. Measured cost: `#zz, .a .b { & span { color: red } }`
+  against `div.a .b span { color: blue }` is RED in Brave and would be
+  BLUE here. Closing it means letting this engine's `:is()` hold a
+  COMPLEX selector, which is a change to `parse-simple-selector`/
+  `matches-simple?` and not to nesting.
+
+#### Why the desugaring rewrites TEXT, and above every splitter
+
+Two reasons, and the second is the safety argument.
+
+A nested conditional at-rule has to come out as a top-level one *before*
+`split-media-segments`/`split-layer-segments`/`split-container-segments`
+run. `parse-rules` `assoc`s `:rule/media` onto whatever `parse-rules-raw`
+returns, so an inner condition would be CLOBBERED rather than composed
+with. Desugaring to text lets nesting compose with all three at-rules in
+both directions with no new code in any of them — which is why
+`:nesting/a-media-block-nested-in-a-style-rule`,
+`:nesting/a-nested-rule-inside-media-keeps-the-condition` and
+`:nesting/a-nested-rule-keeps-the-layer-it-was-written-in` all went green
+without any of them being handled specially.
+
+That last one is the guard worth naming: a nested rule is an ordinary
+member of its enclosing layer, and Brave confirms it (nested rule in the
+earlier layer, plain rule in the later one, later wins). The failure mode
+it protects against is the one round forty-four measured on the
+`@media`-inside-`@layer` cut — losing a layer tag does not merely forget
+the layer, it promotes the rule to **unlayered**, which is the strongest
+normal position there is.
+
+And: `desugar-nesting` returns its input **unchanged** unless a nested
+rule is actually present. `parse-rules` is on the path of every
+stylesheet this engine has ever parsed, and a rewrite that only fires on
+the shape it was written for cannot move a stylesheet that does not have
+that shape. That guard is what the empty ops diff on 705 untouched cases
+is measuring, and it has a unit test of its own asserting byte-identical
+output.
+
+The scanner is string- and comment-aware (`css-scan-skip`), so a
+`content: "}"` or a commented-out block cannot end a rule early;
+`@keyframes` is deliberately NOT recursed into, because its `0% { … }`
+steps would read as nested style rules.
+
+**One ordering cut, named where it is made.** All of a block's
+declaration runs are folded into ONE rule emitted before its nested
+rules, which is what makes `#x { color: blue; span {…} color: green }`
+come out green. What it costs is a nested `& { … }` block competing with
+a declaration written after it in the same block: both land on the same
+selector at the same specificity, and here the parent's declaration is
+emitted first and loses, where a browser would let source order decide.
+No corpus case has that shape.
+
+#### `@property`, `env()` and `attr()` — three of round forty-four's five
+
+Each one is a value function, each was measured before it was written,
+and each has a control in the corpus that must NOT move.
+
+**`@property`.** The registration is threaded out of `parse-rules` as one
+selector-less pseudo-rule, so no caller — `apply-cascade`, this harness,
+`htmldom` — had to learn about a value it did not previously pass. What
+the browser said:
+
+| probe | Brave |
+|---|---|
+| registered `<length>`, `initial-value: 60px`, nothing declares it | 60×20, `getComputedStyle` reports `"60px"` |
+| the same reference with NO registration | 800×20, `getComputedStyle` reports `""` |
+| parent `--pv: 200px`, element `--pv: notalength`, registered initial 70px | **70×20** |
+| `inherits: false`, parent declares 200px | 80×20 (the initial) |
+| `inherits: true`, parent declares 200px | 200×20 |
+| `syntax: "*"` with no `initial-value`, read as `var(--ps, 90px)` | 90×20 (the fallback) |
+| `syntax: "<length>"; initial-value: 2em` | 800×20, `getComputedStyle` `""` |
+
+Two of those are rules that had to be measured rather than assumed. The
+third row is the one the task asked about: **an invalid value for a
+registered property falls back to the registered INITIAL VALUE**, not to
+the inherited 200px and not to `unset`. An *unregistered* custom property
+with the same shape is invalid-at-computed-value-time and does inherit —
+two different rules, and registering the property is what switches
+between them.
+
+The last row is the boundary, and a convenient one: an `initial-value`
+has to be computationally independent, so Brave rejects the WHOLE
+at-rule for `2em` and reports the property as if it had never been
+registered. That is exactly the set of values this engine can carry
+anyway. Its control, in the unit tests, is the identical registration
+with `32px`, which must still work.
+
+**Scope cut, in `registered-value-valid?`:** only `<length>`,
+`<number>` and `<integer>` are really checked; every other syntax
+(`<color>`, `<image>`, `<custom-ident>`, an alternation, `*`) accepts
+anything, because this engine has no grammar for them and rejecting a
+value it cannot check would silently drop declarations that work today.
+Measured cost: `@property --c { syntax: "<color>"; initial-value: red }`
+with `--c: 7` is `red` in Brave and `7` here.
+
+**`env()`.** The table is a measurement, not a placeholder:
+
+| probe | Brave |
+|---|---|
+| all four `safe-area-inset-*`, fallback 120px | **0** — defined, so the fallback is not used |
+| `keyboard-inset-height`, `safe-area-max-inset-bottom` | 0 — defined |
+| `titlebar-area-width`, fallback 131px | **131** — the fallback, so NOT defined here |
+| `env(unknown-name, 130px)` | 130 |
+| `width: 140px; width: env(unknown-name)` | **800** |
+| `calc(env(safe-area-inset-left, 120px) + 50px)` | 50 |
+
+The fifth row is the one that pins the failure mode: an unresolvable
+`env()` with no fallback makes the DECLARATION invalid at
+computed-value time, and it does **not** fall back to the `140px`
+written before it in the same block — it becomes `unset`, and
+`width: unset` is `auto`. `titlebar-area-*` is deliberately absent from
+this engine's table rather than zero, because defining it would answer 0
+where the browser answers the author's fallback.
+
+**`attr()`, and only the TYPED form.** The legacy string form and the
+CSS Values 5 typed form behave differently and only one of them is
+supported per property — that had to be measured separately, and it was:
+
+| probe | Brave |
+|---|---|
+| `attr(data-w px, 30px)`, `data-w="55"` | 55 |
+| ...attribute absent | 30 (fallback) |
+| ...`data-w="abc"` | 30 (fallback) |
+| `attr(data-w px)`, `data-w="65"` | 65 |
+| ...attribute absent | 800 (invalid) |
+| `attr(data-w type(<length>), 35px)`, `data-w="85px"` | 85 |
+| `calc(attr(data-w px, 30px) + 10px)`, `data-w="55"` | 65 |
+| `width: 150px; width: attr(data-w)`, `data-w="75px"` | **800** |
+| `#x::after { content: attr(data-label) }` | `"HELLO"` |
+
+The last two are one control read from both sides: the LEGACY string
+form is invalid in a `width` even though the attribute holds a perfectly
+good length, and it works in `content`. So `resolve-attr-values` handles
+the typed form only and never touches `:content`, whose older,
+differently-shaped `attr()` support is left exactly as it was. Custom
+properties are skipped too — `--x: attr(data-w px)` is legal CSS and
+unsupported here, an honest gap rather than a silent one.
+
+`attr()` is also the only one of the three that runs in `style-element`
+rather than in `resolve-value`: `env()` and a `@property` registry are
+document-global, an attribute is not.
+
+#### A `var()` gap the `@property` cases exposed
+
+`@property --pn { syntax: "<number>"; initial-value: 3 }` with
+`width: calc(var(--pn) * 20px)` is 60px in Brave and came out of this
+engine as the literal string `calc(3 * 20px)`, which `cssom.layout`
+reads as `auto`. The cause was not `@property`: `resolve-value`
+substituted an EMBEDDED `var()` — one that is part of a value rather
+than the whole of it — textually, and did not re-parse the result. The
+whole-value form has always re-parsed, which is why the gap survived
+this long: **every `var()` in the corpus before this round was a whole
+value**, so the branch was reachable and untested at the same time.
+
+It now re-parses, and that is corpus-neutral by construction rather than
+by luck. `parse-style-value` returns a multi-token value (`"10px 20px"`
+from a two-`var()` `padding`) unchanged, so the box-shorthand re-slice
+below it still sees the string it expects.
+
+#### Measured and deliberately NOT added
+
+**An embedded `var()` in a `calc()`.** The unit test for it is real and
+fails on the base commit — `:style/width` is the literal string
+`calc(3 * 20px)` there and the number 60 here. A corpus case for it is
+not, and it was written and then removed: `cssom.layout` re-parses a
+`calc()` string downstream, so the box is 60×20 on BOTH sides, and
+`width` is not one of the fourteen properties the computed-style axis
+compares. It would have been a case that passes for precisely the wrong
+reason — the same test `revert-layer` on an unlayered declaration failed
+in round forty-four. The fix stays, because a cascade that hands
+`cssom.layout` a string it happens to recover is not the same as one that
+hands it a number, and `cssom.core/computed-style` and a live page's
+`getComputedStyle` read the cascade directly.
+
+#### `@scope` — measured in full, deliberately not implemented
+
+The fourth value function of round forty-four's five, and the reason it
+is not in this round is a specific one rather than "ran out of time":
+one of its rules is a **new dimension in the cascade sort tuple**, not a
+parse or a value change. Measured, so the next round starts from the
+browser rather than from the spec:
+
+| probe | Brave |
+|---|---|
+| `@scope (#r) { .x { … } }` | inside red, outside black |
+| `@scope (#r) { div { … } }` | the scope ROOT ITSELF does not match — a scoped rule carries an implicit `:scope ` DESCENDANT prefix |
+| `@scope (#r) { :scope { … } }` | ...and `:scope` is how you reach the root |
+| `@scope (#r) to (.lim)` | donut hole: `<p>` before `.lim` red, `<p>` inside `.lim` black, `<p>` outside `#r` black |
+| the limit element `.lim` itself | **black** — the limit is excluded |
+| `@scope (#r) { p }` vs `div p` | **blue** — the scope root contributes NO specificity; `p` stays (0,0,1) |
+| `@scope (#r) { :scope p }` vs `div p` | **red** — `:scope` is a pseudo-class, so `:scope p` is (0,1,1) |
+| `.o1 > .o2 > p`; `@scope (.o1)` red FIRST, `@scope (.o2)` blue SECOND | blue |
+| `.o3 > .o4 > p`; `@scope (.o4)` blue FIRST, `@scope (.o3)` red SECOND | **blue** |
+| `@scope { p { … } }` (no prelude, in a `<head>` `<style>`) | no match |
+
+The last pair is the one that costs. Reversing the source order does not
+reverse the answer, so **PROXIMITY — the nearer scope root — beats
+source order**, and it sits between specificity and order in the cascade.
+`resolve-style-and-flow` sorts on
+`(juxt :important? :origin :inline? :layer :specificity :order)`; scope
+needs a seventh key computed per (rule, element) pair from the ancestor
+distance to the matched root, which is a different kind of change from
+anything in this round. The two specificity rows are the other half of
+why it is not a parser change: the prelude contributes nothing, but
+`:scope` written explicitly contributes a pseudo-class, so the two cannot
+share one implementation shortcut.
+
+`:cascade/a-scope-rule-does-not-reach-outside-its-root` stays in the
+corpus, still red, still carrying the browser's numbers.
 ### Round forty-eight: the at-rules stop being decoration
 
 Round forty-four put seventy-one at-rule cases into the corpus and found
@@ -2094,11 +2476,18 @@ brace splitter depth-aware without implementing nesting would trade one
 wrong answer for another — the outer declaration would survive and the
 nested rule would stop applying at all, and the control above would go
 red. The honest fix is desugaring (`& span` → `:is(#nc1) span`), which is
-a feature and not a bug fix.
+a feature and not a bug fix. **Landed in round forty-nine, as exactly
+that desugaring — see it above for what `&` turned out to be, which is
+not textual substitution.**
 
 **`all`, `@property`, `env()`, `attr()`, `@scope`** — five separate
-features, five measured divergences, none of them fixed and all of them
-now carrying the browser's numbers:
+features, five measured divergences, none of them fixed *in this round*
+and all of them carrying the browser's numbers. **`@property`, `env()`
+and `attr()` landed in round forty-nine; `all` landed in round
+forty-seven; `@scope` is still open, and round forty-nine's entry carries
+a full `@scope` measurement
+including the proximity rule that makes it a cascade change rather than a
+parser one.**
 
 | case | Brave | this engine |
 |---|---|---|

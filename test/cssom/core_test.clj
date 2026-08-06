@@ -4322,6 +4322,268 @@
   (is (= {:margin-inline-start "20%" :margin-inline-end "20%"}
          (:rule/declarations (first (css/parse-rules "#f { margin-inline: 20% }"))))))
 
+;; ---------------------------------------------------------------------
+;; CSS Nesting. Every expected value below was read out of headless Brave
+;; 151.1.93.129 over CDP, one probe page per probe, before the assertion
+;; was written -- a shared page leaks a bare type selector from one probe
+;; into another and the first version of this measurement did exactly
+;; that. See `desugar-nesting`'s own block comment in `cssom.core`.
+;; ---------------------------------------------------------------------
+
+(deftest a-declaration-beside-a-nested-rule-survives-it
+  ;; The bug this whole feature started from: the brace splitter was a
+  ;; regex over `([^{}]+)\{([^{}]+)\}`, so a block holding BOTH a
+  ;; declaration and a nested rule matched only the INNER pair and the
+  ;; outer `color` was dropped on the floor. Brave: paragraph blue, span
+  ;; red.
+  (is (= "#0000ff" (:style/color (cascaded-style
+                                  "#nc1 { color: #0000ff; span { color: #ff0000 } }"
+                                  "<div><p id=\"nc1\">n <span id=\"s\">d</span></p></div>" "nc1"))))
+  (is (= "#ff0000" (:style/color (cascaded-style
+                                  "#nc1 { color: #0000ff; span { color: #ff0000 } }"
+                                  "<div><p id=\"nc1\">n <span id=\"s\">d</span></p></div>" "s")))))
+
+(deftest a-nested-rule-in-a-block-of-its-own-still-works
+  ;; The control from the corpus, which must not flip: with the nested rule
+  ;; alone in its block the old splitter happened to recover it, and it has
+  ;; to keep working now that `& span` is really resolved rather than
+  ;; ignored. Brave: blue/red.
+  (let [css "#na1 { color: #0000ff } #na1 { & span { color: #ff0000 } }"
+        html "<div><p id=\"na1\">n <span id=\"s\">d</span></p></div>"]
+    (is (= "#0000ff" (:style/color (cascaded-style css html "na1"))))
+    (is (= "#ff0000" (:style/color (cascaded-style css html "s"))))))
+
+(deftest nested-combinator-forms-all-resolve-against-the-parent
+  ;; `& > b`, `&.class`, `& + p`, and the RELATIVE form `> b` (an implicit
+  ;; leading `&`). Brave, in order: blue/red, red, blue then red, blue/red.
+  (is (= "#ff0000" (:style/color (cascaded-style
+                                  "#nb1 { color: #0000ff; & > b { color: #ff0000 } }"
+                                  "<div><p id=\"nb1\">n <b id=\"b\">c</b></p></div>" "b"))))
+  (is (= "#ff0000" (:style/color (cascaded-style
+                                  "#nd1 { color: #0000ff; &.nd-on { color: #ff0000 } }"
+                                  "<div><p id=\"nd1\" class=\"nd-on\">t</p></div>" "nd1"))))
+  (let [css "#ne1 { color: #0000ff; & + p { color: #ff0000 } }"
+        html "<div><p id=\"ne1\">first</p><p id=\"p2\">second</p></div>"]
+    (is (= "#0000ff" (:style/color (cascaded-style css html "ne1"))))
+    (is (= "#ff0000" (:style/color (cascaded-style css html "p2")))))
+  (is (= "#ff0000" (:style/color (cascaded-style
+                                  "#q8 { color: #0000ff; > b { color: #ff0000 } }"
+                                  "<div><p id=\"q8\">n <b id=\"b\">c</b></p></div>" "b")))))
+
+(deftest an-ampersand-carries-the-parent-lists-MAXIMUM-specificity
+  ;; The measurement that says `&` is `:is(<parent list>)` and not textual
+  ;; substitution. `#q4zz` matches nothing on the page; `.q4c span` alone
+  ;; is (0,1,1) and would lose to `div.q4c span`'s (0,1,2). Brave paints it
+  ;; RED, because `:is(#q4zz, .q4c)` is (1,0,0).
+  (is (= "#ff0000"
+         (:style/color (cascaded-style
+                        "#q4zz, .q4c { & span { color: #ff0000 } } div.q4c span { color: #0000ff }"
+                        "<div class=\"q4c\"><span id=\"s\">s</span></div>" "s"))))
+  ;; The control that places the same rule from the other side and must NOT
+  ;; flip: one parent, and a class one. `:is(.q5c) span` is (0,1,1) and
+  ;; `div.q5c span` is (0,1,2). Brave: BLUE.
+  (is (= "#0000ff"
+         (:style/color (cascaded-style
+                        ".q5c { & span { color: #ff0000 } } div.q5c span { color: #0000ff }"
+                        "<div class=\"q5c\"><span id=\"s\">s</span></div>" "s")))))
+
+(deftest a-declaration-after-a-nested-rule-still-cascades-in-source-order
+  ;; Brave: GREEN. The parent's own declarations compete among themselves
+  ;; by source order regardless of where a nested rule sits between them.
+  (is (= "#008000"
+         (:style/color (cascaded-style
+                        "#a8 { color: #0000ff; span { color: #ff0000 } color: #008000 }"
+                        "<div><p id=\"a8\">n <span>d</span></p></div>" "a8")))))
+
+(deftest nesting-composes-with-media-in-both-directions
+  ;; A `@media` block NESTED in a style rule applies to that rule's own
+  ;; subject (Brave: red when the query matches, blue when it does not),
+  ;; and a nested rule INSIDE a `@media` block keeps the condition.
+  (is (= "#ff0000" (:style/color (cascaded-style
+                                  "#nf1 { color: #0000ff; @media (min-width: 1px) { color: #ff0000 } }"
+                                  "<div><p id=\"nf1\">t</p></div>" "nf1"))))
+  (is (= "#0000ff" (:style/color (cascaded-style
+                                  "#q10 { color: #0000ff; @media (min-width: 99999px) { color: #ff0000 } }"
+                                  "<div><p id=\"q10\">t</p></div>" "q10"))))
+  (let [css "@media (min-width: 1px) { #q11 { color: #0000ff; span { color: #ff0000 } } }"
+        html "<div><p id=\"q11\">n <span id=\"s\">d</span></p></div>"]
+    (is (= "#0000ff" (:style/color (cascaded-style css html "q11"))))
+    (is (= "#ff0000" (:style/color (cascaded-style css html "s"))))))
+
+(deftest a-nested-rule-keeps-the-layer-it-was-written-in
+  ;; Brave: GREEN. The nested rule is in the EARLIER layer, so the plain
+  ;; rule in the later one wins -- a nested rule is an ordinary member of
+  ;; its enclosing layer, not a promotion out of it. (The engine's
+  ;; documented `@media`-inside-`@layer` cut is the failure mode this
+  ;; guards against: losing a layer tag promotes a rule to UNLAYERED,
+  ;; which is the strongest normal position there is.)
+  (is (= "#008000"
+         (:style/color (cascaded-style
+                        "@layer za { #a1 { span { color: #ff0000 } } } @layer zb { #a1 span { color: #008000 } }"
+                        "<div><p id=\"a1\">n <span id=\"s\">d</span></p></div>" "s")))))
+
+(deftest nesting-nests
+  ;; Brave: blue / red / green.
+  (let [css "#q13 { color: #0000ff; span { color: #ff0000; b { color: #008000 } } }"
+        html "<div><p id=\"q13\">n <span id=\"s\">d <b id=\"b\">x</b></span></p></div>"]
+    (is (= "#0000ff" (:style/color (cascaded-style css html "q13"))))
+    (is (= "#ff0000" (:style/color (cascaded-style css html "s"))))
+    (is (= "#008000" (:style/color (cascaded-style css html "b"))))))
+
+(deftest a-stylesheet-with-no-nested-rule-is-not-rewritten-at-all
+  ;; The guard that keeps this pass off every case in the conformance
+  ;; corpus that does not use nesting: `parse-rules` is on the path of
+  ;; every stylesheet this engine parses, and the desugaring returns its
+  ;; input byte-identical unless a nested rule is actually present.
+  (let [flat "p { color: red } @media (min-width: 1px) { div { margin: 0 } } @keyframes k { 0% { opacity: 0 } }"]
+    (is (= flat (#'css/desugar-nesting flat))))
+  ;; ...and a `@keyframes` step is not a nested rule even when the sheet
+  ;; DOES have one elsewhere: its body is emitted verbatim.
+  (is (= "#x {color: red}\n#x b {color: blue}\n @keyframes k { 0% { opacity: 0 } }\n"
+         (#'css/desugar-nesting "#x { color: red; b { color: blue } } @keyframes k { 0% { opacity: 0 } }"))))
+
+;; ---------------------------------------------------------------------
+;; `@property`, `env()` and `attr()`. Every expected value was read out of
+;; headless Brave 151.1.93.129 over CDP before the assertion was written;
+;; the block comments beside each feature in `cssom.core` carry the whole
+;; probe table, including the shapes that are NOT implemented.
+;; ---------------------------------------------------------------------
+
+(deftest a-registered-custom-property-resolves-to-its-initial-value
+  ;; Brave: 60px. Without the registration the same reference is invalid
+  ;; and the width is auto -- that control is the second assertion, and it
+  ;; is what makes the first one mean "read the registration" rather than
+  ;; "failed twice".
+  (is (= 60 (:style/width
+             (cascaded-style
+              "@property --pw { syntax: \"<length>\"; inherits: false; initial-value: 60px } #a { width: var(--pw) }"
+              "<div><div id=\"a\">w</div></div>" "a"))))
+  (is (= "" (:style/width
+             (cascaded-style "#a { width: var(--unregistered) }"
+                             "<div><div id=\"a\">w</div></div>" "a")))))
+
+(deftest an-invalid-value-for-a-registered-property-falls-back-to-the-INITIAL
+  ;; The measurement this rule had to come from, because it is NOT what an
+  ;; unregistered custom property does. The wrapper declares 200px and the
+  ;; element declares an unparseable value; Brave reports **70px**, the
+  ;; registered initial -- not the inherited 200, and not `unset`.
+  (is (= 70 (:style/width
+             (cascaded-style
+              (str "@property --pv { syntax: \"<length>\"; inherits: false; initial-value: 70px }"
+                   " #w { --pv: 200px } #a { --pv: notalength; width: var(--pv) }")
+              "<div id=\"w\"><div id=\"a\">w</div></div>" "a")))))
+
+(deftest inherits-false-resets-a-registered-property-for-every-descendant
+  ;; Brave: 80 (the initial) with `inherits: false`, 200 (the parent's own
+  ;; declaration) with `inherits: true`. One declaration's worth of
+  ;; difference in the registration, and it is the whole of what
+  ;; registering a property changes about INHERITANCE.
+  (let [w (fn [inherits]
+            (:style/width
+             (cascaded-style
+              (str "@property --pi { syntax: \"<length>\"; inherits: " inherits "; initial-value: 80px }"
+                   " #w { --pi: 200px } #a { width: var(--pi) }")
+              "<div id=\"w\"><div id=\"a\">w</div></div>" "a")))]
+    (is (= 80 (w "false")))
+    (is (= 200 (w "true")))))
+
+(deftest a-registration-with-a-non-absolute-initial-value-is-dropped-whole
+  ;; `initial-value` has to be computationally independent. Brave rejects
+  ;; the whole at-rule for `2em` -- the box is auto and `getComputedStyle`
+  ;; reports the empty string for the property, exactly as if it had never
+  ;; been registered. The control beside it is the same registration with
+  ;; an absolute initial, which must still work.
+  (is (= "" (:style/width
+             (cascaded-style
+              "@property --pe { syntax: \"<length>\"; inherits: false; initial-value: 2em } #a { width: var(--pe) }"
+              "<div><div id=\"a\">w</div></div>" "a"))))
+  (is (= 32 (:style/width
+             (cascaded-style
+              "@property --pe { syntax: \"<length>\"; inherits: false; initial-value: 32px } #a { width: var(--pe) }"
+              "<div><div id=\"a\">w</div></div>" "a")))))
+
+(deftest a-star-registration-may-omit-its-initial-value
+  ;; Brave: 90 -- the `var()`'s own fallback, because a `syntax: "*"`
+  ;; registration with no `initial-value` leaves the property
+  ;; guaranteed-invalid until something sets it.
+  (is (= 90 (:style/width
+             (cascaded-style
+              "@property --ps { syntax: \"*\"; inherits: false } #a { width: var(--ps, 90px) }"
+              "<div><div id=\"a\">w</div></div>" "a")))))
+
+(deftest env-resolves-a-defined-variable-rather-than-its-fallback
+  ;; Every `safe-area-inset-*` IS defined in this headless build and every
+  ;; one of them is 0, so the fallback is not used: Brave reports a 0px
+  ;; box, not the 120px fallback and not the 800px container. The three
+  ;; answers are deliberately three different numbers.
+  (is (= 0 (:style/width (cascaded-style "#a { width: env(safe-area-inset-left, 120px) }"
+                                         "<div><div id=\"a\">w</div></div>" "a"))))
+  ;; An unknown name uses the fallback...
+  (is (= 130 (:style/width (cascaded-style "#a { width: env(kotoba-not-a-thing, 130px) }"
+                                           "<div><div id=\"a\">w</div></div>" "a"))))
+  ;; ...and with no fallback the DECLARATION is invalid. Note what Brave
+  ;; says this does NOT do: it does not fall back to the 140px written
+  ;; before it in the same block. 756px, i.e. auto.
+  (is (= "" (:style/width (cascaded-style "#a { width: 140px; width: env(kotoba-not-a-thing) }"
+                                          "<div><div id=\"a\">w</div></div>" "a"))))
+  ;; `titlebar-area-*` is the control on the table itself: Brave used the
+  ;; FALLBACK for it, so it is not defined there and must not be here.
+  (is (= 131 (:style/width (cascaded-style "#a { width: env(titlebar-area-width, 131px) }"
+                                           "<div><div id=\"a\">w</div></div>" "a"))))
+  ;; ...and an env() inside calc() is arithmetic, not text. Brave: 50.
+  (is (= 50 (:style/width (cascaded-style "#a { width: calc(env(safe-area-inset-left, 120px) + 50px) }"
+                                          "<div><div id=\"a\">w</div></div>" "a")))))
+
+(deftest attr-resolves-a-typed-length-from-the-elements-own-attribute
+  ;; Brave, with data-w="55": 55px. The fallback is 30 and the container is
+  ;; 800, so "read the attribute", "used the fallback" and "read neither"
+  ;; are three distinguishable answers.
+  (is (= 55 (:style/width (cascaded-style "#a { width: attr(data-w px, 30px) }"
+                                          "<div><div id=\"a\" data-w=\"55\">w</div></div>" "a"))))
+  ;; absent attribute, and a present-but-unusable one, both take the
+  ;; fallback (Brave: 30 for each)
+  (is (= 30 (:style/width (cascaded-style "#a { width: attr(data-w px, 30px) }"
+                                          "<div><div id=\"a\">w</div></div>" "a"))))
+  (is (= 30 (:style/width (cascaded-style "#a { width: attr(data-w px, 30px) }"
+                                          "<div><div id=\"a\" data-w=\"abc\">w</div></div>" "a"))))
+  ;; no fallback: the attribute, or an invalid declaration (Brave: 65, then
+  ;; 756 = auto, again NOT the 145px written before it)
+  (is (= 65 (:style/width (cascaded-style "#a { width: attr(data-w px) }"
+                                          "<div><div id=\"a\" data-w=\"65\">w</div></div>" "a"))))
+  (is (= "" (:style/width (cascaded-style "#a { width: 145px; width: attr(data-w px) }"
+                                          "<div><div id=\"a\">w</div></div>" "a"))))
+  ;; the `type(<...>)` spelling, and attr() inside calc() (Brave: 85, 65)
+  (is (= 85 (:style/width (cascaded-style "#a { width: attr(data-w type(<length>), 35px) }"
+                                          "<div><div id=\"a\" data-w=\"85px\">w</div></div>" "a"))))
+  (is (= 65 (:style/width (cascaded-style "#a { width: calc(attr(data-w px, 30px) + 10px) }"
+                                          "<div><div id=\"a\" data-w=\"55\">w</div></div>" "a"))))
+  ;; The control that separates the TYPED form from the LEGACY string one:
+  ;; `attr(data-w)` in a `width` is invalid in Brave (756) even though the
+  ;; attribute holds a perfectly good length, and the legacy form works in
+  ;; `content`. They are not interchangeable, and `content`'s own support
+  ;; is untouched.
+  (is (= "" (:style/width (cascaded-style "#a { width: 150px; width: attr(data-w) }"
+                                          "<div><div id=\"a\" data-w=\"75px\">w</div></div>" "a"))))
+  (is (= {:content "HELLO"}
+         (let [doc (-> (html/parse-into-document
+                        "<div><span id=\"a\" data-label=\"HELLO\">x</span></div>")
+                       (css/apply-cascade (css/parse-rules "#a::after { content: attr(data-label) }")))]
+           (some (fn [[_ n]] (when (= "a" (get-in n [:attrs :id]))
+                               (get-in n [:attrs :pseudo/after])))
+                 (:nodes doc))))))
+
+(deftest an-embedded-var-is-re-parsed-after-substitution
+  ;; A `var()` that is part of a larger value, rather than the whole of it,
+  ;; used to be substituted textually and left as a string --
+  ;; `calc(var(--n) * 20px)` reached cssom.layout as literal text and was
+  ;; read as `auto`. Brave: 60px. The whole-value form beside it is the
+  ;; control, and has always worked.
+  (is (= 60 (:style/width
+             (cascaded-style
+              "@property --pn { syntax: \"<number>\"; inherits: false; initial-value: 3 } #a { width: calc(var(--pn) * 20px) }"
+              "<div><div id=\"a\">w</div></div>" "a"))))
+  (is (= 12 (:style/width (cascaded-style "#w { --n: 12px } #a { width: var(--n) }"
+                                          "<div id=\"w\"><div id=\"a\">w</div></div>" "a")))))
 ;; ---- @media is a grammar, not a feature list ----
 ;;
 ;; Every expectation below was read out of a real headless Brave

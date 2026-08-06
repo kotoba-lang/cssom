@@ -4748,55 +4748,70 @@
 
  ;; ---- CSS nesting ----
  ;;
- ;; Not implemented, and the failure mode is not "the nested rule does not
- ;; apply". `parse-rules` splits on braces without tracking depth, so a
- ;; block holding BOTH declarations and a nested rule loses the
- ;; declarations -- the outer rule is destroyed by the presence of the
- ;; inner one. The first case below is the control that isolates that:
- ;; with the nested rule in a block of its OWN, both sides agree.
+ ;; IMPLEMENTED 2026-08-06 (round forty-nine) by a real desugaring pass
+ ;; over the raw text -- `cssom.core/desugar-nesting`, which rewrites a
+ ;; nested rule into a flat one BEFORE any at-rule splitter runs, and
+ ;; returns its input unchanged on a stylesheet that has no nested rule.
+ ;;
+ ;; Round forty-four measured these six as divergences and named the trap:
+ ;; `parse-rules` split on braces without tracking depth, so a block
+ ;; holding BOTH declarations and a nested rule lost the declarations --
+ ;; the outer rule was destroyed by the presence of the inner one -- and
+ ;; making the splitter depth-aware WITHOUT desugaring would have traded
+ ;; one wrong answer for another (the outer declaration would survive and
+ ;; the nested rule would stop applying, turning the control below red).
+ ;; The first case is still that control, and it still has to stay green.
+ ;;
+ ;; `&`'s SPECIFICITY is the one part that is not textual substitution --
+ ;; it is `:is(<parent selector list>)`'s, the maximum over the list. The
+ ;; two cases at the end of this group are the pair that pins it in both
+ ;; directions.
 
  {:id :nesting/an-ampersand-descendant-rule-in-its-own-block
   :group :nesting
   ;; Control. `#na1 { & span { ... } }` with nothing else in the block:
-  ;; Brave paints the paragraph blue and the span red, and so does this
-  ;; engine -- the brace splitter happens to recover `& span { color: red }`
-  ;; as a rule of its own, and `& span` matches the span for the wrong
-  ;; reason (a stray `&` in a compound selector is ignored rather than
-  ;; resolved against a parent). Kept because it is what makes the four
-  ;; cases below findings rather than "nesting is unsupported".
+  ;; Brave paints the paragraph blue and the span red. It agreed BEFORE
+  ;; nesting was implemented too, for the wrong reason -- the brace
+  ;; splitter happened to recover `& span { color: red }` as a rule of its
+  ;; own and a stray `&` in a compound selector was ignored rather than
+  ;; resolved. It is kept precisely because a desugaring that got `&`
+  ;; wrong would turn it red, which is the failure mode a depth-aware
+  ;; splitter alone would have caused.
   :html "<div><p id=\"na1\">n <span>d</span></p></div>"
   :css "#na1 { color: #0000ff } #na1 { & span { color: #ff0000 } }"}
 
  {:id :nesting/a-declaration-beside-a-nested-rule
   :group :nesting
   ;; One block, one declaration, one nested rule. Brave: paragraph blue,
-  ;; span red. This engine: the span is red and the paragraph has NO
-  ;; colour at all -- `color: #0000ff` was dropped on the floor because a
-  ;; nested rule shared its block. A declaration silently vanishing is a
-  ;; worse failure than a nested rule not applying, and it is the reason
-  ;; this group is five cases rather than one.
+  ;; span red, and so does this engine since 2026-08-06. Before that the
+  ;; span was red and the paragraph had NO colour at all -- `color:
+  ;; #0000ff` was dropped on the floor because a nested rule shared its
+  ;; block. A declaration silently vanishing is a worse failure than a
+  ;; nested rule not applying, and it is why this group is six cases
+  ;; rather than one.
   :html "<div><p id=\"nc1\">n <span>d</span></p></div>"
   :css "#nc1 { color: #0000ff; span { color: #ff0000 } }"}
 
  {:id :nesting/a-nested-child-combinator
   :group :nesting
-  ;; `& > b` -- Brave: paragraph blue, bold red. This engine: neither.
+  ;; `& > b` -- Brave: paragraph blue, bold red. Agreed since 2026-08-06.
   :html "<div><p id=\"nb1\">n <b>c</b></p></div>"
   :css "#nb1 { color: #0000ff; & > b { color: #ff0000 } }"}
 
  {:id :nesting/a-nested-compound-on-the-ampersand
   :group :nesting
   ;; `&.on` is the element itself when it also has the class -- the one
-  ;; nesting form with no descendant in it. Brave: red. This engine: no
-  ;; colour, so not even the `#0000ff` beside it survives.
+  ;; nesting form with no descendant in it. Brave: red. Before 2026-08-06
+  ;; this engine reported no colour at all, so not even the `#0000ff`
+  ;; beside it survived.
   :html "<div><p id=\"nd1\" class=\"nd-on\">text</p></div>"
   :css "#nd1 { color: #0000ff; &.nd-on { color: #ff0000 } }"}
 
  {:id :nesting/a-nested-sibling-combinator
   :group :nesting
   ;; `& + p` reaches the NEXT paragraph, not this one. Brave: the first
-  ;; paragraph is blue and the second red. This engine: neither is
-  ;; coloured.
+  ;; paragraph is blue and the second red. Agreed since 2026-08-06; before
+  ;; that neither was coloured.
   :html "<div><p id=\"ne1\">first</p><p>second</p></div>"
   :css "#ne1 { color: #0000ff; & + p { color: #ff0000 } }"}
 
@@ -4804,8 +4819,11 @@
   :group :nesting
   ;; Nesting is not only selectors: a conditional at-rule can be nested in
   ;; a style rule and its declarations apply to that rule's own subject.
-  ;; Brave: red. This engine: no colour -- and note the `@media` here
-  ;; MATCHES, so the divergence is the nesting and not the query.
+  ;; Brave: red, and so does this engine since 2026-08-06 -- the
+  ;; desugaring hoists it to a top-level `@media (...) { #nf1 { ... } }`
+  ;; before `split-media-segments` runs, which is why the condition
+  ;; survives at all. Note the `@media` here MATCHES, so what this case
+  ;; measures is the nesting and not the query.
   :html "<div><p id=\"nf1\">text</p></div>"
   :css "#nf1 { color: #0000ff; @media (min-width: 1px) { color: #ff0000 } }"}
 
@@ -4939,9 +4957,11 @@
  {:id :cascade/a-registered-custom-property-has-an-initial-value
   :group :cascade
   ;; `@property` with an `initial-value` makes `var(--casc-pw)` resolve
-  ;; even where nothing declared it: Brave reports 60x20. This engine has
-  ;; no `@property`, so the reference is invalid at computed-value time,
-  ;; the width is the empty string and the box is auto: 800x20.
+  ;; even where nothing declared it: Brave reports 60x20, and so does this
+  ;; engine since 2026-08-06. Before that it had no `@property`, the
+  ;; reference was invalid at computed-value time, and the box was auto
+  ;; (800x20). The registration is threaded as a selector-less pseudo-rule
+  ;; out of `parse-rules` -- see `parse-property-registrations`.
   :html "<div><div id=\"pa1\">w</div></div>"
   :css "@property --casc-pw { syntax: \"<length>\"; inherits: false; initial-value: 60px } #pa1 { width: var(--casc-pw) }"}
 
@@ -4972,20 +4992,24 @@
  {:id :cascade/env-resolves-a-known-variable-rather-than-its-fallback
   :group :cascade
   ;; `env(safe-area-inset-left, 120px)` is DEFINED in Brave and its value
-  ;; is 0, so the fallback is not used and the box is 0x20. This engine
-  ;; keeps the raw string and reports 800x20. The fallback is deliberately
-  ;; a value neither 0 nor 800, so "used the fallback", "resolved the
-  ;; variable" and "read neither" are three different answers.
+  ;; is 0, so the fallback is not used and the box is 0x20. Agreed since
+  ;; 2026-08-06; before that this engine kept the raw string and reported
+  ;; 800x20. The fallback is deliberately a value neither 0 nor 800, so
+  ;; "used the fallback", "resolved the variable" and "read neither" are
+  ;; three different answers -- and all four `safe-area-inset-*` were
+  ;; measured, all four are 0 in this headless build.
   :html "<div><div id=\"pe1\">w</div></div>"
   :css "#pe1 { width: env(safe-area-inset-left, 120px) }"}
 
  {:id :cascade/attr-in-a-length
   :group :cascade
   ;; CSS Values 5 `attr()` outside `content`: Brave 151 resolves
-  ;; `attr(data-w px, 30px)` to 55px from the attribute. This engine
-  ;; supports `attr()` in `content` only, so the width is a raw string and
-  ;; the box is 800x20. Three-way again: 55 from the attribute, 30 from
-  ;; the fallback, 800 from neither.
+  ;; `attr(data-w px, 30px)` to 55px from the attribute, and so does this
+  ;; engine since 2026-08-06. Before that only `content` had `attr()`
+  ;; support, the width stayed a raw string and the box was 800x20.
+  ;; Three-way again: 55 from the attribute, 30 from the fallback, 800
+  ;; from neither. The TYPED form only -- the legacy string form is
+  ;; invalid in a `width` in Brave too, which is the case just below.
   :html "<div><div id=\"ie1\" data-w=\"55\">w</div></div>"
   :css "#ie1 { width: attr(data-w px, 30px) }"}
 
@@ -4997,6 +5021,33 @@
   ;; transparent and BOTH are red. Both paragraphs are in the case on
   ;; purpose: the inner one agrees, and an agreement beside the
   ;; disagreement is what says the rule was found rather than lost.
+  ;;
+  ;; STILL OPEN, and now measured in full (2026-08-06) so the next round
+  ;; does not have to start from the browser. Everything below is Brave
+  ;; 151, one probe page per probe:
+  ;;   @scope (#r) { .x { ... } }        inside red, outside black
+  ;;   @scope (#r) { div { ... } }       the ROOT ITSELF does not match --
+  ;;                                     a scoped rule carries an implicit
+  ;;                                     `:scope ` DESCENDANT prefix
+  ;;   @scope (#r) { :scope { ... } }    ...and `:scope` is how you reach it
+  ;;   @scope (#r) to (.lim)             donut hole: `<p>` before `.lim`
+  ;;                                     red, `<p>` inside `.lim` black,
+  ;;                                     `<p>` outside `#r` black
+  ;;   ...and `.lim` ITSELF is OUT (black)
+  ;;   @scope (#r) { p } vs div p        BLUE -- the scope root contributes
+  ;;                                     NO specificity; `p` stays (0,0,1)
+  ;;   @scope (#r) { :scope p } vs div p RED -- `:scope` is a pseudo-class,
+  ;;                                     so `:scope p` is (0,1,1)
+  ;;   .o1 > .o2 > p, @scope (.o1) red FIRST, @scope (.o2) blue SECOND
+  ;;                                     BLUE
+  ;;   .o3 > .o4 > p, @scope (.o4) blue FIRST, @scope (.o3) red SECOND
+  ;;                                     BLUE -- so PROXIMITY (the nearer
+  ;;                                     scope root) beats SOURCE ORDER,
+  ;;                                     which is a new dimension in the
+  ;;                                     cascade sort tuple and not a
+  ;;                                     parser change. That is why this
+  ;;                                     one was left for its own round.
+  ;;   @scope { p { ... } }  (no prelude, in a <head> <style>)  no match
   :html "<div><div id=\"casc-sc\"><p class=\"casc-sp\">in</p></div><p class=\"casc-sp\">out</p></div>"
   :css "@scope (#casc-sc) { .casc-sp { color: #ff0000 } }"}
 
@@ -5022,6 +5073,199 @@
   :html "<div id=\"ua1\"><p>text</p></div>"
   :css "#ua1 * { color: #ff0000 } #ua1 p { color: #0000ff }"}
 
+ ;; ==================================================================
+ ;; Round forty-nine: CSS nesting, and three value functions.
+ ;;
+ ;; Every expected value below was read out of headless Brave
+ ;; 151.1.93.129 over CDP before the case was written, ONE PROBE PAGE PER
+ ;; PROBE. That last part is a finding of its own: the first version of
+ ;; this measurement put sixteen probes on one page, and a single bare
+ ;; `p span { color: blue }` written for one probe reached the spans of
+ ;; three others and made a layered rule look like it had lost. It is the
+ ;; same hazard the top of this file names for the corpus page, and it
+ ;; bites a probe harness harder because a probe has no id prefixing.
+
+ ;; ---- nesting: the specificity pair ----
+ ;;
+ ;; `&` is NOT textual substitution. Its specificity is
+ ;; `:is(<parent selector list>)`'s -- the MAXIMUM over the list -- so a
+ ;; parent arm that matches nothing still raises the nested rule. These
+ ;; two cases are one rule read from both sides, and neither means
+ ;; anything without the other.
+
+ {:id :nesting/an-ampersand-carries-the-parent-lists-maximum-specificity
+  :group :nesting
+  ;; `#nz1` matches nothing on the page. `.nz-c span` alone would be
+  ;; (0,1,1) and lose to `div.nz-c span`'s (0,1,2) -- but `&` is
+  ;; `:is(#nz1, .nz-c)`, which is (1,0,0). Brave: RED.
+  ;;
+  ;; HONESTLY: this case and the one below AGREED BEFORE nesting was
+  ;; implemented too, and they were measured to. The old brace splitter
+  ;; recovered `& span { color: red }` as a rule of its own and ignored
+  ;; the stray `&`, which lands on the same two colours by coincidence.
+  ;; They are here as REGRESSION GUARDS on the desugaring rather than as
+  ;; divergences: plain textual expansion of a multi-arm parent turns THIS
+  ;; one blue, and an `:is()` wrapped around a one-arm parent would be
+  ;; harmless -- so the pair pins `expand-nested-selector`'s choice from
+  ;; both sides. Round forty-nine's residual arithmetic names them: the
+  ;; other four new nesting cases account for all 8 of the cascade values
+  ;; that changed, and these two for none.
+  :html "<div class=\"nz-c\"><span>s</span></div>"
+  :css "#nz1, .nz-c { & span { color: #ff0000 } } div.nz-c span { color: #0000ff }"}
+
+ {:id :nesting/one-parent-does-not-raise-a-nested-rules-specificity
+  :group :nesting
+  ;; The control that places the same rule from the other side, and the
+  ;; one an over-eager desugaring would break: with ONE parent, and a
+  ;; class one, `:is(.ny-c) span` is (0,1,1) and `div.ny-c span` is
+  ;; (0,1,2). Brave: BLUE.
+  :html "<div class=\"ny-c\"><span>s</span></div>"
+  :css ".ny-c { & span { color: #ff0000 } } div.ny-c span { color: #0000ff }"}
+
+ {:id :nesting/a-declaration-after-a-nested-rule-still-applies
+  :group :nesting
+  ;; The other half of "a block holding both loses the declarations":
+  ;; declarations on BOTH sides of a nested rule, competing with each
+  ;; other. Brave: GREEN -- the parent's own declarations cascade among
+  ;; themselves in source order, and the nested rule between them is not
+  ;; a boundary.
+  :html "<div><p id=\"nx1\">n <span>d</span></p></div>"
+  :css "#nx1 { color: #0000ff; span { color: #ff0000 } color: #008000 }"}
+
+ {:id :nesting/a-nested-rule-inside-media-keeps-the-condition
+  :group :nesting
+  ;; The other nesting order from `:nesting/a-media-block-nested-in-a-style-rule`:
+  ;; a nested rule INSIDE a `@media` block. Brave: paragraph blue, span
+  ;; red. The query matches, so what this measures is that the
+  ;; desugaring's output is still inside the at-rule.
+  :html "<div><p id=\"nw1\">n <span>d</span></p></div>"
+  :css "@media (min-width: 1px) { #nw1 { color: #0000ff; span { color: #ff0000 } } }"}
+
+ {:id :nesting/a-nested-rule-keeps-the-layer-it-was-written-in
+  :group :nesting
+  ;; A nested rule is an ordinary member of its enclosing layer, not a
+  ;; promotion out of it. The nested rule is in the EARLIER layer, so the
+  ;; plain rule in the later one wins. Brave: GREEN.
+  ;;
+  ;; This is the case that guards against the failure mode the `@media`-
+  ;; inside-`@layer` cut already has, measured in round forty-four:
+  ;; losing a layer tag does not merely forget the layer, it promotes the
+  ;; rule to UNLAYERED, which is the strongest normal position there is.
+  :html "<div><p id=\"nv1\">n <span>d</span></p></div>"
+  :css "@layer nv-a { #nv1 { span { color: #ff0000 } } } @layer nv-b { #nv1 span { color: #008000 } }"}
+
+ {:id :nesting/a-relative-selector-gets-an-implicit-ampersand
+  :group :nesting
+  ;; Two shapes in one: `> b` with no `&` at all is the RELATIVE form and
+  ;; means `& > b`, and a nested rule two levels deep resolves against the
+  ;; selector its own parent resolved to. Brave: paragraph blue, bold red,
+  ;; italic green.
+  :html "<div><p id=\"nu1\">n <b>c <i>d</i></b></p></div>"
+  :css "#nu1 { color: #0000ff; > b { color: #ff0000; i { color: #008000 } } }"}
+
+ ;; ---- @property, env(), attr(): the shapes the round-forty-four cases
+ ;; ---- could not distinguish
+
+ {:id :cascade/an-invalid-value-for-a-registered-property-becomes-its-initial
+  :group :cascade
+  ;; The measurement that says a registered property follows a DIFFERENT
+  ;; rule from an unregistered one. The wrapper declares 200px, the
+  ;; element declares an unparseable value; Brave reports **70x20** -- the
+  ;; registered initial. Not the inherited 200 (which is what an
+  ;; unregistered custom property's invalid-at-computed-value-time
+  ;; behaviour would give) and not auto.
+  :html "<div id=\"pv-w\" style=\"--casc-pv: 200px\"><div id=\"pv1\">w</div></div>"
+  :css "@property --casc-pv { syntax: \"<length>\"; inherits: false; initial-value: 70px } #pv1 { --casc-pv: notalength; width: var(--casc-pv) }"}
+
+ {:id :cascade/a-registered-property-with-inherits-false-does-not-inherit
+  :group :cascade
+  ;; `inherits: false` is the default and it is observable: the wrapper
+  ;; declares 200px and the child reads the INITIAL, 80px. Brave: 80x20.
+  :html "<div id=\"pi-w\" style=\"--casc-pi: 200px\"><div id=\"pi1\">w</div></div>"
+  :css "@property --casc-pi { syntax: \"<length>\"; inherits: false; initial-value: 80px } #pi1 { width: var(--casc-pi) }"}
+
+ {:id :cascade/a-registered-property-with-inherits-true-does-inherit
+  :group :cascade
+  ;; The control beside it -- one descriptor different, and the child now
+  ;; reads the wrapper's own 200px rather than the 80px initial. Brave:
+  ;; 200x20. Without this pair, "80" would only say the engine read an
+  ;; initial value from somewhere.
+  :html "<div id=\"pt-w\" style=\"--casc-pt: 200px\"><div id=\"pt1\">w</div></div>"
+  :css "@property --casc-pt { syntax: \"<length>\"; inherits: true; initial-value: 80px } #pt1 { width: var(--casc-pt) }"}
+
+ {:id :cascade/a-registration-with-a-relative-initial-value-is-invalid
+  :group :cascade
+  ;; An `initial-value` has to be computationally independent, and Brave
+  ;; rejects the WHOLE at-rule when it is not: 800x20 (auto), and
+  ;; `getComputedStyle` reports the empty string for the property, exactly
+  ;; as if it had never been registered. A convenient boundary -- it is
+  ;; the same set of values this engine can carry anyway.
+  ;;
+  ;; CONTROL, and it agrees on an engine with no `@property` at all (which
+  ;; also reports 800): it is only evidence read BESIDE
+  ;; `:cascade/a-registered-custom-property-has-an-initial-value`, which
+  ;; is the same shape with an absolute initial and goes 800 -> 60. The
+  ;; pair says "the registration was read AND its initial value was
+  ;; checked"; either alone says neither.
+  :html "<div><div id=\"pq1\">w</div></div>"
+  :css "@property --casc-pq { syntax: \"<length>\"; inherits: false; initial-value: 2em } #pq1 { width: var(--casc-pq) }"}
+
+ {:id :cascade/env-with-an-unknown-name-uses-its-fallback
+  :group :cascade
+  ;; The half `:cascade/env-resolves-a-known-variable-rather-than-its-fallback`
+  ;; cannot show: an env() name nothing defines DOES fall back. Brave:
+  ;; 130x20. Read against that one, the two together say the engine has a
+  ;; table rather than a single answer.
+  :html "<div><div id=\"eu1\">w</div></div>"
+  :css "#eu1 { width: env(kotoba-not-a-thing, 130px) }"}
+
+ {:id :cascade/env-with-no-fallback-invalidates-the-whole-declaration
+  :group :cascade
+  ;; And with no fallback it is invalid at computed-value time. Brave:
+  ;; 800x20 -- note what that rules out, since the SAME BLOCK declares
+  ;; `width: 140px` first: the declaration does not fall back to the
+  ;; earlier one, it becomes `unset`, and `width: unset` is `auto`.
+  ;;
+  ;; CONTROL: an engine that does not resolve `env()` at all also reports
+  ;; 800 here (it keeps the raw string, which reads as auto). It is
+  ;; evidence only beside the case above, which goes 800 -> 130.
+  :html "<div><div id=\"en1\">w</div></div>"
+  :css "#en1 { width: 140px; width: env(kotoba-not-a-thing) }"}
+
+ {:id :cascade/attr-falls-back-when-the-attribute-is-unusable
+  :group :cascade
+  ;; `attr(data-w px, 30px)` against `data-w="abc"`, which is present and
+  ;; not a number. Brave: 30x20, the fallback -- the same answer an absent
+  ;; attribute gives, and a different one from the 55 the usable
+  ;; attribute gives in `:cascade/attr-in-a-length`.
+  :html "<div><div id=\"ia1\" data-w=\"abc\">w</div></div>"
+  :css "#ia1 { width: attr(data-w px, 30px) }"}
+
+ {:id :cascade/the-legacy-string-attr-is-not-valid-in-a-length
+  :group :cascade
+  ;; The control that separates CSS Values 5's TYPED `attr()` from the
+  ;; legacy string one. `data-w` holds `75px`, a perfectly good length,
+  ;; and Brave still reports 800x20: the legacy form is invalid outside
+  ;; `content`, and the earlier `width: 150px` in the same block does not
+  ;; survive it either. Only one of the two forms is widely supported per
+  ;; property and they are not interchangeable.
+  ;;
+  ;; Like the two controls above it agrees on an engine with no `attr()`
+  ;; outside `content` -- it is what stops the TYPED cases from being read
+  ;; as "this engine resolves any attr()", and it is the assertion that
+  ;; would fail if `resolve-attr-values` were widened to the legacy
+  ;; form.
+  :html "<div><div id=\"il1\" data-w=\"75px\">w</div></div>"
+  :css "#il1 { width: 150px; width: attr(data-w) }"}
+
+ {:id :cascade/attr-resolves-inside-calc
+  :group :cascade
+  ;; `calc(attr(data-w px, 30px) + 10px)` with `data-w="55"`. Brave: 65x20
+  ;; -- the reference is a term in the arithmetic, not text wrapped around
+  ;; it, which is what says the substitution happens before the value is
+  ;; parsed rather than after.
+  :html "<div><div id=\"ic1\" data-w=\"55\">w</div></div>"
+  :css "#ic1 { width: calc(attr(data-w px, 30px) + 10px) }"}
  ;; ---- round forty-seven: the at-rules, actually evaluated ----
  ;;
  ;; Every expected value below was read out of a real headless Brave

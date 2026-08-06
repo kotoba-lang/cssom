@@ -2886,6 +2886,597 @@
                              (when (seq path) [path])))]
     (into {} (map-indexed (fn [idx path] [path idx]) (post-order [])))))
 
+;; ---------------------------------------------------------------------
+;; CSS Nesting (CSS Nesting Module Level 1), as a DESUGARING over the raw
+;; text, above every splitter below.
+;;
+;; It sits here, and rewrites text rather than rule maps, for two reasons
+;; that are the whole design:
+;;
+;; 1. A nested conditional at-rule (`#x { color: blue; @media (...) {
+;;    color: red } }`) has to come OUT as a top-level `@media (...) { #x {
+;;    color: red } }` before `split-media-segments`/`split-layer-segments`/
+;;    `split-container-segments` ever run, or the media condition has
+;;    nowhere to be recorded -- `parse-rules` `assoc`s :rule/media onto
+;;    whatever `parse-rules-raw` returns, which would CLOBBER an inner
+;;    condition rather than compose with it. Desugaring to text lets all
+;;    three at-rules compose with nesting for free, in both directions,
+;;    with no new code in any of them.
+;;
+;; 2. It is bounded by a guard: `desugar-nesting` returns its input
+;;    UNCHANGED unless a nested rule is actually present. Every splitter
+;;    below is on the path of every stylesheet this engine has ever
+;;    parsed, and a rewrite that only fires on the shape it was written
+;;    for cannot move a stylesheet that does not have that shape.
+;;
+;; What `&` means, MEASURED in headless Brave 151.1.93.129 rather than
+;; read off the spec (probe pages, one page per probe so a bare type
+;; selector in one cannot reach another):
+;;
+;;   #q1 { color: blue; span { color: red } }     p blue, span red
+;;   #q2 { span { color: red } color: blue }      p blue, span red
+;;                                                (a declaration AFTER a
+;;                                                nested rule still applies
+;;                                                to the parent)
+;;   #a8 { color: blue; span {...} color: green } p GREEN -- the parent's
+;;                                                own declarations cascade
+;;                                                among themselves in
+;;                                                source order
+;;   #q3 { b { ... } & i { ... } }                both match: a nested
+;;                                                selector with no `&` gets
+;;                                                an IMPLICIT descendant one
+;;   #q8 { > b { ... } }                          `> b` is `& > b`
+;;   #q9 { @media (min-width: 1px) { color: red } }   red
+;;   #q10 { @media (min-width: 99999px) { ... } }     not applied
+;;
+;; And the one that is NOT textual substitution -- `&`'s SPECIFICITY is
+;; `:is(<parent selector list>)`'s, i.e. the MOST SPECIFIC arm of the
+;; parent list, even when the arm that actually matched is a weaker one:
+;;
+;;   #q4zz, .q4c { & span { color: red } }
+;;   div.q4c span { color: blue }        Brave: RED
+;;
+;; `#q4zz` matches nothing on the page, and `.q4c span` alone would be
+;; (0,1,1) and lose to `div.q4c span`'s (0,1,2). It wins because `&` is
+;; `:is(#q4zz, .q4c)` = (1,0,0). The control that places that from the
+;; other side, and which must NOT flip:
+;;
+;;   .q5c { & span { color: red } }
+;;   div.q5c span { color: blue }        Brave: BLUE
+;;
+;; This engine already implements `:is()` and its max-of-arguments
+;; specificity exactly (see `simple-selector-specificity`), so the
+;; desugaring reuses it rather than adding a specificity concept:
+;; `expand-nested-selector` emits `:is(...)` when the parent list needs it
+;; and can be represented, and plain text otherwise. See that function for
+;; the one shape that degrades and what it costs.
+
+(defn- css-scan-skip
+  "Index just past a string literal or a `/* */` comment starting at `idx`
+   in `s`, or nil when `idx` starts neither. Every brace/semicolon walk in
+   the desugaring goes through this, so a `content: \"}\"` or a
+   commented-out block cannot end a rule early."
+  [s idx n]
+  (let [ch (nth s idx)]
+    (cond
+      (or (= ch \") (= ch \'))
+      (loop [i (inc idx)]
+        (cond
+          (>= i n) n
+          (= (nth s i) \\) (recur (+ i 2))
+          (= (nth s i) ch) (inc i)
+          :else (recur (inc i))))
+
+      (and (= ch \/) (< (inc idx) n) (= (nth s (inc idx)) \*))
+      (if-let [close (str/index-of s "*/" (+ idx 2))]
+        (+ close 2)
+        n)
+
+      :else nil)))
+
+(defn- css-matching-brace
+  "`find-matching-brace`, string- and comment-aware. Kept separate rather
+   than tightening `find-matching-brace` itself: that one is on the path of
+   every at-rule split in this file, and widening what it skips would move
+   stylesheets that have nothing to do with nesting."
+  [s open-idx n]
+  (loop [idx (inc open-idx) depth 1]
+    (when (< idx n)
+      (if-let [skip (css-scan-skip s idx n)]
+        (recur skip depth)
+        (case (nth s idx)
+          \{ (recur (inc idx) (inc depth))
+          \} (if (= depth 1) idx (recur (inc idx) (dec depth)))
+          (recur (inc idx) depth))))))
+
+(defn- css-chunks
+  "Splits one CSS rule-list -- a whole stylesheet, or one rule's body --
+   into its top-level chunks in source order: `{:chunk/text \"...\"}` for a
+   `;`-terminated (or trailing) run of declaration or at-STATEMENT text,
+   and `{:chunk/prelude \"...\" :chunk/body \"...\"}` for a
+   `prelude { body }` block.
+
+   This is the one place the desugaring reads CSS structure, and it makes
+   no distinction between a declaration block and a rule list -- because
+   with nesting there IS none: `#x { color: blue; span { color: red } }`
+   is both."
+  [text]
+  (let [s (str (or text "")) n (count s)]
+    (loop [idx 0 start 0 chunks []]
+      (if (>= idx n)
+        (cond-> chunks
+          (not (str/blank? (subs s (min start n))))
+          (conj {:chunk/text (subs s (min start n))}))
+        (if-let [skip (css-scan-skip s idx n)]
+          (recur skip start chunks)
+          (case (nth s idx)
+            \; (recur (inc idx) (inc idx)
+                      (cond-> chunks
+                        (not (str/blank? (subs s start idx)))
+                        (conj {:chunk/text (subs s start idx)})))
+            \{ (let [close (css-matching-brace s idx n)
+                     body-end (or close n)
+                     next-idx (if close (inc close) n)]
+                 (recur next-idx next-idx
+                        (conj chunks {:chunk/prelude (subs s start idx)
+                                      :chunk/body (subs s (inc idx) body-end)})))
+            (recur (inc idx) start chunks)))))))
+
+(def ^:private conditional-group-at-rules
+  "The at-rules whose body is a RULE LIST, so nesting recurses into it and
+   the at-rule itself is re-emitted around the flattened result. Everything
+   else (`@font-face`, `@property`, `@keyframes`) holds declarations or
+   keyframe blocks and is emitted verbatim -- recursing into `@keyframes`
+   would read its `0% { ... }` steps as nested style rules.
+
+   `@supports`/`@scope` are here even though this engine does not evaluate
+   either: they are still rule lists, and a nested rule inside one has to
+   come out flat. Whether the wrapper then applies is unchanged from
+   before -- see the namespace docstring."
+  #{"media" "supports" "layer" "container" "scope"})
+
+(defn- at-rule-name
+  [prelude]
+  (some-> (re-find #"^\s*@([A-Za-z-]+)" (str prelude)) second str/lower-case))
+
+(defn- amp-positions
+  "Indexes of every `&` in `sel` that is not inside a string literal or a
+   comment. Both the 'does this selector reference its parent' test and the
+   substitution read this, so they can never disagree about which `&`
+   counts."
+  [sel]
+  (let [s (str sel) n (count s)]
+    (loop [idx 0 acc []]
+      (if (>= idx n)
+        acc
+        (if-let [skip (css-scan-skip s idx n)]
+          (recur skip acc)
+          (recur (inc idx) (if (= \& (nth s idx)) (conj acc idx) acc)))))))
+
+(defn- replace-amps
+  "Every `&` in `sel` replaced by `replacement`. Hand-rolled rather than
+   `str/replace`: a parent selector may legitimately hold a `$` (the
+   `[data-x$=\"y\"]` attribute operator), and ClojureScript's `str/replace`
+   routes a string match through JS `String.replace`, which reads `$&`/`$1`
+   in the REPLACEMENT as capture-group references."
+  [sel replacement]
+  (let [s (str sel)]
+    (loop [positions (amp-positions s) prev 0 out ""]
+      (if-let [p (first positions)]
+        (recur (rest positions) (inc p) (str out (subs s prev p) replacement))
+        (str out (subs s prev))))))
+
+(defn- compound-selector?
+  "True when `sel` is a single compound selector -- no combinator and no
+   descendant whitespace -- which is exactly the shape this engine's
+   `:is()` argument parser accepts (see `parse-simple-selector`: each
+   comma-separated argument is parsed by `parse-simple-selector` itself,
+   which is compound-only)."
+  [sel]
+  (boolean (re-matches #"[^\s>+~,]+" (str/trim (str sel)))))
+
+(defn- expand-nested-selector
+  "One nested selector, resolved against `parent` (the enclosing rule's own
+   already-flat selector list) into a vector of flat selectors.
+
+   Two normalisations first, both measured in Brave (see the block comment
+   above): a selector starting with a combinator is the relative form and
+   means `& > b` / `& + p` / `& ~ p`; a selector with no `&` anywhere gets
+   an IMPLICIT descendant `&`, so `#x { span { ... } }` is `#x span`.
+
+   Then `&` is substituted, and WHICH substitution is the only place the
+   parent list's arity matters:
+
+   - ONE parent. Plain textual substitution, and it is exact -- `:is(X)`
+     and `X` have identical specificity and identical matching for every
+     X, including a complex one, so there is nothing for the `:is()` form
+     to buy here.
+
+   - SEVERAL parents, all compound. `:is(p1, p2, ...)`, which this engine
+     parses and gives the max-of-arguments specificity real CSS gives it.
+     This is the case the `#q4zz, .q4c` measurement above pins.
+
+   - SEVERAL parents, at least one COMPLEX. Falls back to one expansion
+     per parent. MATCHING is still exact -- `.a .b span` selects the same
+     elements `:is(.a .b) span` does -- but each expansion then carries its
+     OWN specificity instead of the list's maximum. Measured cost, in
+     Brave: `#zz, .a .b { & span { color: red } }` against `div.a .b span
+     { color: blue }` is RED there (`&` is (1,0,0)) and would be BLUE
+     here (`.a .b span` is (0,1,2) against (0,1,3)). Closing it means
+     letting this engine's `:is()` hold a COMPLEX selector, which is a
+     change to `parse-simple-selector`/`matches-simple?` and not to
+     nesting."
+  [sel parent]
+  (let [sel (str/trim (str sel))
+        sel (if (re-find #"^[>+~]" sel) (str "& " sel) sel)
+        sel (if (seq (amp-positions sel)) sel (str "& " sel))]
+    (if (and (> (count parent) 1) (every? compound-selector? parent))
+      [(replace-amps sel (str ":is(" (str/join ", " parent) ")"))]
+      (mapv #(replace-amps sel %) parent))))
+
+(defn- desugar-level
+  "Flattens one rule list into plain, un-nested CSS text. `parent` is the
+   enclosing style rule's own (already flat) selector list, or nil at the
+   top level of a stylesheet.
+
+   Every declaration run in a block belongs to that block's own subject and
+   is folded into ONE rule emitted first, in source order -- which is what
+   makes `#a8 { color: blue; span { ... } color: green }` come out green,
+   as Brave does, since `parse-declarations` keeps the last write of a
+   property. The one thing that ordering costs is a nested `& { ... }`
+   block competing with a declaration written AFTER it in the same block:
+   both end up on the same selector at the same specificity, and here the
+   parent's own declaration is emitted first and so loses, where in a
+   browser source order would decide. No corpus case has that shape, and
+   naming it is cheaper than a second emission pass that carries positions."
+  [text parent]
+  (let [chunks (css-chunks text)
+        decl-text (->> chunks
+                       (keep :chunk/text)
+                       (map str/trim)
+                       (remove str/blank?)
+                       (remove #(str/starts-with? % "@"))
+                       (str/join ";"))]
+    (str
+     (when (and (seq parent) (seq decl-text))
+       (str (str/join ", " parent) " {" decl-text "}\n"))
+     (apply str
+            (for [{:chunk/keys [text prelude body]} chunks]
+              (cond
+                ;; an at-STATEMENT (`@layer a, b;`) -- verbatim, in place,
+                ;; because `layer-declaration-order` reads its position.
+                (and text (str/starts-with? (str/trim text) "@"))
+                (str (str/trim text) ";\n")
+
+                ;; a declaration run: already folded into the block above.
+                text ""
+
+                :else
+                (let [at (at-rule-name prelude)]
+                  (cond
+                    (and at (contains? conditional-group-at-rules at))
+                    (str prelude "{\n" (desugar-level body parent) "}\n")
+
+                    at
+                    (str prelude "{" body "}\n")
+
+                    :else
+                    (desugar-level body
+                                   (if (seq parent)
+                                     (vec (mapcat #(expand-nested-selector % parent)
+                                                  (split-selector-list prelude)))
+                                     (split-selector-list prelude)))))))))))
+
+(defn- nested-rule-present?
+  "True when `text` holds a style rule whose body contains a block of its
+   own -- a nested style rule, or a nested at-rule. This is the guard that
+   keeps `desugar-nesting` off every stylesheet that does not use nesting:
+   `parse-rules` is on the path of every case in the conformance corpus,
+   and a rewrite that never fires cannot move one."
+  [text]
+  (boolean
+   (some (fn [{:chunk/keys [prelude body]}]
+           (when prelude
+             (let [at (at-rule-name prelude)]
+               (cond
+                 (and at (contains? conditional-group-at-rules at))
+                 (nested-rule-present? body)
+
+                 at false
+
+                 :else (boolean (some :chunk/prelude (css-chunks body)))))))
+         (css-chunks text))))
+
+(defn- desugar-nesting
+  "CSS with every nested rule flattened to a top-level one, or the input
+   string UNCHANGED when it holds no nested rule at all. See the block
+   comment above for what `&` resolves to and how that was measured."
+  [css]
+  (let [css (str (or css ""))]
+    (if (nested-rule-present? css)
+      (desugar-level css nil)
+      css)))
+
+;; ---------------------------------------------------------------------
+;; `@property` -- a REGISTERED custom property.
+;;
+;; Measured in headless Brave 151.1.93.129, one probe page per probe.
+;; Every number below is what the browser answered, not what the spec
+;; says:
+;;
+;;   @property --pw { syntax: "<length>"; inherits: false;
+;;                    initial-value: 60px }
+;;   #v1 { width: var(--pw) }                        60x21, gCS --pw "60px"
+;;   #v2 { width: var(--unreg) }                     756x21, gCS --unreg ""
+;;
+;; So `getComputedStyle` DOES distinguish the two: an unset REGISTERED
+;; property reports its initial value, an unregistered one reports the
+;; empty string. That is what makes the registration observable at all.
+;;
+;;   #v3w { --pv: 200px }
+;;   #v3  { --pv: notalength; width: var(--pv) }     70x21  <- the INITIAL
+;;
+;; An invalid value for a registered property falls back to the REGISTERED
+;; INITIAL VALUE, not to the inherited 200px and not to `unset`. (For an
+;; UNregistered custom property the same shape is invalid-at-computed-
+;; value-time and does inherit -- two different rules, which is why this
+;; one had to be measured rather than assumed.)
+;;
+;;   inherits: false, parent --pi: 200px, child var(--pi)     80  (initial)
+;;   inherits: true,  parent --pt: 200px, child var(--pt)    200  (parent's)
+;;   syntax "<number>" initial 3, calc(var(--pn) * 20px)      60
+;;   syntax "*", NO initial-value, var(--ps, 90px)            90  (fallback)
+;;   syntax "<length>", initial-value: 2em                   756, gCS ""
+;;
+;; That last one is the boundary and it is a convenient one: an
+;; `initial-value` has to be computationally independent, and Brave
+;; rejects the WHOLE registration when it is not -- which is exactly the
+;; set of values this engine can carry anyway.
+
+(defn- parse-at-property-body
+  "The three declarations an `@property` body may hold, as raw trimmed
+   strings. Deliberately NOT `parse-declarations`: `syntax`/`inherits`/
+   `initial-value` are not CSS properties, and running them through the
+   shorthand expanders and `parse-style-value` would mangle
+   `syntax: \"<length>\"` into something unrecognisable."
+  [body]
+  (into {}
+        (keep (fn [decl]
+                (let [[k v] (map str/trim (str/split decl #":" 2))]
+                  (when (and (seq k) (seq v))
+                    [(str/lower-case k) (str/replace (str/trim v) #"^[\"']|[\"']$" "")]))))
+        (str/split (str body) #";")))
+
+(defn- registered-value-valid?
+  "Whether `value` is admissible for a registered property declared with
+   `syntax`.
+
+   SCOPE, and it is deliberately narrow in the fail-OPEN direction: only
+   `<length>`, `<number>` and `<integer>` are really checked, against
+   exactly the subset `parse-style-value` can carry (a plain number, an
+   `<n>px` length, or a constant `calc()`/`min()`/`max()`/`clamp()` that
+   resolves to one). Every other syntax -- `<color>`, `<image>`,
+   `<custom-ident>`, a `|` alternation, and `*` -- accepts anything,
+   because this engine has no grammar for them and rejecting a value it
+   cannot check would silently drop declarations that work today. What
+   that costs, measured: `@property --c { syntax: \"<color>\";
+   initial-value: red }` with `--c: 7` set on an element is `red` in Brave
+   (the 7 is invalid for the syntax) and `7` here."
+  [syntax value]
+  (case (str/trim (str syntax))
+    ("<length>" "<number>" "<integer>") (number? (parse-style-value value))
+    true))
+
+(defn- parse-property-registrations
+  "Every valid `@property --name { ... }` registration in `css`, as
+   `{:--name {:registration/syntax \"<length>\" :registration/inherits? bool
+              :registration/initial \"60px\"}}`.
+
+   A registration is DROPPED (not partially honoured) when it is invalid,
+   matching what Brave does with the whole at-rule:
+   - no `syntax` descriptor;
+   - a non-`*` syntax with no `initial-value` (CSS Properties and Values 1
+     requires one, and `syntax: \"<length>\"` alone leaves nothing to
+     report for an unset element);
+   - an `initial-value` that is not admissible for its own syntax, which
+     for `<length>` means anything this engine cannot resolve to absolute
+     pixels -- `initial-value: 2em` is rejected in Brave too (756x30, and
+     `getComputedStyle` reports the empty string for the property), since
+     an initial value has to be computationally independent.
+
+   `inherits` defaults to FALSE when the descriptor is absent, which is
+   also the spec's default and the opposite of an unregistered custom
+   property's behaviour."
+  [css]
+  (let [s (str (or css ""))]
+    (if-not (str/includes? s "@property")
+      {}
+      (into {}
+            (keep (fn [{:chunk/keys [prelude body]}]
+                    (when (and prelude (= "property" (at-rule-name prelude)))
+                      (let [name (str/trim (subs (str/trim prelude) (count "@property")))
+                            {:strs [syntax inherits] :as decls} (parse-at-property-body body)
+                            initial (get decls "initial-value")]
+                        (when (and (str/starts-with? name "--")
+                                   (seq syntax)
+                                   (or (= "*" (str/trim syntax)) (some? initial))
+                                   (or (nil? initial) (registered-value-valid? syntax initial)))
+                          [(keyword name)
+                           {:registration/syntax (str/trim syntax)
+                            :registration/inherits? (= "true" (str/lower-case (str inherits)))
+                            :registration/initial initial}])))))
+            (css-chunks s)))))
+
+(defn- rules-property-registry
+  "The merged `@property` registry carried by `rules` (see `parse-rules`,
+   which emits it as one selector-less pseudo-rule so no caller has to pass
+   a second value alongside the rules it already passes)."
+  [rules]
+  (reduce merge {} (keep :rule/property-registry rules)))
+
+(defn- registered-initial-env
+  "The custom-property environment a document STARTS from: every registered
+   property that has an initial value, bound to it. This is what makes
+   `var(--pw)` resolve on an element where nothing declared `--pw` --
+   `var-lookup` needs no new argument, because the value really is in
+   scope everywhere, which is also what `getComputedStyle` reports."
+  [registry]
+  (into {}
+        (keep (fn [[k reg]]
+                (when-let [initial (:registration/initial reg)]
+                  [k initial])))
+        registry))
+
+;; ---------------------------------------------------------------------
+;; `env()` -- User-Agent-defined environment variables.
+;;
+;; Measured in Brave 151, headless, on this machine:
+;;
+;;   env(safe-area-inset-left|top|right|bottom, 120px)     0  x4
+;;   env(safe-area-inset-left)      no fallback            0
+;;   env(keyboard-inset-height, 132px)                     0
+;;   env(safe-area-max-inset-bottom, 133px)                0
+;;   env(titlebar-area-width, 131px)                     131  <- FALLBACK,
+;;                                                             i.e. not
+;;                                                             defined here
+;;   env(kotoba-not-a-thing, 130px)                      130  (fallback)
+;;   width: 140px; width: env(kotoba-not-a-thing)        756  <- the whole
+;;                                                             declaration
+;;                                                             is invalid,
+;;                                                             and it does
+;;                                                             NOT fall
+;;                                                             back to the
+;;                                                             140px before
+;;                                                             it
+;;   calc(env(safe-area-inset-left, 120px) + 50px)        50
+;;
+;; The fallbacks were chosen to be neither the resolved answer nor the
+;; container width, so "used the fallback", "resolved the variable" and
+;; "read neither" are three distinguishable numbers.
+
+(def ^:private env-variables
+  "The `env()` names this engine defines, and their values.
+
+   Every one of these is ZERO, and that is a measurement rather than a
+   placeholder: headless Brave 151 on this machine answers 0 for all four
+   `safe-area-inset-*`, for `keyboard-inset-height` and for
+   `safe-area-max-inset-bottom`. A browser on a notched phone would answer
+   otherwise, and a host that knows better should be able to say so --
+   there is no such host hook yet, and this table is where one would go.
+
+   `titlebar-area-*` is deliberately ABSENT rather than 0: Brave used the
+   FALLBACK for `env(titlebar-area-width, 131px)`, so it is not defined
+   there either, and defining it here would answer 0 where the browser
+   answers the author's fallback."
+  {"safe-area-inset-top" "0px"
+   "safe-area-inset-right" "0px"
+   "safe-area-inset-bottom" "0px"
+   "safe-area-inset-left" "0px"
+   "safe-area-max-inset-top" "0px"
+   "safe-area-max-inset-right" "0px"
+   "safe-area-max-inset-bottom" "0px"
+   "safe-area-max-inset-left" "0px"
+   "keyboard-inset-top" "0px"
+   "keyboard-inset-right" "0px"
+   "keyboard-inset-bottom" "0px"
+   "keyboard-inset-left" "0px"
+   "keyboard-inset-width" "0px"
+   "keyboard-inset-height" "0px"})
+
+(def ^:private env-ref-pattern
+  "`env(<name>[, <fallback>])`. The fallback capture allows one level of
+   balanced parens, for the same reason and with the same bounded scope
+   `var-ref-pattern` documents.
+
+   A name may carry integer INDICES (`env(viewport-segment-width 0 0)`) --
+   matched here so the reference is recognised and resolved to its
+   fallback, rather than left as literal text that a downstream length
+   parser would silently read as `auto`."
+  #"(?i)env\(\s*([A-Za-z-][A-Za-z0-9-]*(?:\s+\d+)*)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)")
+
+(defn- resolve-env-refs
+  "Every `env()` reference in `value` replaced by the variable's value, or
+   by its fallback when this engine defines no such variable, or by the
+   empty string when there is neither.
+
+   That last case is the whole reason this returns text rather than a
+   number: an unresolvable `env()` with no fallback makes the DECLARATION
+   invalid at computed-value time, and the empty string is how this
+   namespace already spells that for `var()` -- a `width` of `\"\"` is
+   `auto`, which is exactly the 756px Brave reports for `width: 140px;
+   width: env(kotoba-not-a-thing)`. Note what that measurement rules out:
+   the declaration does not fall back to the `140px` written before it.
+
+   Returns the input string IDENTICALLY when it holds no `env(` at all, so
+   `resolve-value` can tell whether anything happened without comparing."
+  [value]
+  (if-not (and (string? value) (re-find #"(?i)env\(" value))
+    value
+    (str/replace value env-ref-pattern
+                 (fn [[_ name fallback]]
+                   (or (get env-variables (str/lower-case (str/trim (str name))))
+                       (some-> fallback str/trim not-empty)
+                       "")))))
+
+;; ---------------------------------------------------------------------
+;; `attr()` outside `content` -- CSS Values 5's TYPED form.
+;;
+;; Measured in Brave 151, with `data-w="55"` unless stated:
+;;
+;;   width: attr(data-w px, 30px)                      55
+;;   ...with the attribute ABSENT                      30   (fallback)
+;;   ...with data-w="abc"                              30   (fallback)
+;;   width: attr(data-w px)          no fallback       65   (data-w="65")
+;;   ...with the attribute ABSENT                     756   (invalid)
+;;   width: attr(data-w type(<length>), 35px)          85   (data-w="85px")
+;;   width: calc(attr(data-w px, 30px) + 10px)         65
+;;
+;; And the one that separates the typed form from the legacy one:
+;;
+;;   width: 150px; width: attr(data-w)   data-w="75px"    756
+;;   #t7::after { content: attr(data-label) }             "HELLO"
+;;
+;; The LEGACY string form is invalid in a `width` even when the attribute
+;; holds a perfectly good length, and works in `content`. Only one of the
+;; two forms is widely supported per property, and they are not
+;; interchangeable -- which is why `content`'s existing `attr()` support
+;; (see `parse-content-attr-ref`) is left exactly as it was and this path
+;; never touches `:content`.
+
+(def ^:private attr-ref-pattern
+  "`attr(<name> [<unit>|type(<syntax>)] [, <fallback>])`. One level of
+   balanced parens in the fallback, as `var-ref-pattern` documents; the
+   `type(...)` form is matched separately from the bare-unit one because
+   its argument carries its own angle brackets."
+  #"(?i)attr\(\s*([A-Za-z_][-A-Za-z0-9_]*)\s*(?:type\(\s*<([a-z-]+)>\s*\)|([A-Za-z%]+))?\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)")
+
+(defn- attr-typed-value
+  "One `attr()` reference resolved against `attrs`, or nil when it is
+   invalid and has no fallback (the caller then spells that as the empty
+   string, exactly as it does for an unresolvable `env()`).
+
+   `unit` present means the DIMENSION form (`attr(data-w px)`): the
+   attribute's text must be a bare number, and the unit is appended to it.
+   `syntax` present means the `type(<...>)` form: the attribute's text is
+   taken as a whole value of that type. Neither present is the LEGACY
+   string form, which real CSS only honours inside `content` -- measured
+   invalid in a `width` in Brave even with `data-w=\"75px\"` -- so it is
+   declined here and left to `resolve-content-value`."
+  [attrs name unit syntax fallback]
+  (let [raw (some-> (get attrs (keyword name)) str str/trim)
+        resolved (cond
+                   (and (seq unit) raw (re-matches #"[+-]?(?:\d+\.?\d*|\.\d+)" raw))
+                   (str raw unit)
+
+                   (and (seq syntax) raw (seq raw)
+                        (case syntax
+                          ("length" "number" "integer" "percentage") (number? (parse-style-value raw))
+                          true))
+                   raw
+
+                   :else nil)]
+    (or resolved (some-> fallback str/trim not-empty))))
+
 (defn- parse-rules-raw
   "Parses `selector { decls }` pairs with no at-rule awareness. Returns rule
    maps without :rule/order or any at-rule context (callers attach those)."
@@ -2925,20 +3516,35 @@
    CSS: unlayered author styles beat every layered one of the same
    importance, and for `!important` lose to every one of them.
 
-   Known simplifications, both measured rather than assumed:
+   CSS NESTING is handled BEFORE this walk, by `desugar-nesting` rewriting
+   the raw text into flat rules -- so a nested rule, and a conditional
+   at-rule nested inside a STYLE rule, both reach
+   `scan-conditional-at-rules` as ordinary top-level ones. That is what
+   lets nesting compose with `@media`/`@supports`/`@layer`/`@container` in
+   both directions with no code in any of them, and it is why the
+   at-rule-inside-a-style-rule simplification this docstring used to name
+   is gone. The pass is a no-op on a stylesheet with no nested rule.
+
+   Known simplification, measured rather than assumed:
    - Nested `@container` blocks keep only the INNERMOST condition. This
      engine's `@container` support is bounded to one queryable ancestor
      anyway (see `container-rule-matches?`), so a second condition would
-     have nothing left to be evaluated against.
-   - An at-rule written inside a STYLE rule's body (CSS nesting) is not
-     recognised as nested; see the namespace docstring's nesting
-     paragraph."
+     have nothing left to be evaluated against."
   [css]
-  (let [css (str (or css ""))
+  (let [css (desugar-nesting css)
         {:keys [segments layer-paths]} (scan-conditional-at-rules css)
         priority-of (layer-priority-map layer-paths)
         unlayered-priority (count priority-of)
-        one-or-many (fn [v] (case (count v) 0 nil 1 (first v) (vec v)))]
+        one-or-many (fn [v] (case (count v) 0 nil 1 (first v) (vec v)))
+        ;; The `@property` registry rides out of here as ONE selector-less
+        ;; pseudo-rule rather than as a second return value, so no caller
+        ;; -- `apply-cascade`, the conformance harness, htmldom -- has to
+        ;; learn about a value it did not previously pass. An empty
+        ;; :rule/selectors means it contributes no declaration to any
+        ;; element (see `resolve-style-and-flow`, which iterates them), and
+        ;; a nil :rule/media/:rule/supports means every condition filter
+        ;; keeps it. It is emitted only when there is a registration.
+        registry (parse-property-registrations css)]
     (->> segments
          (mapcat (fn [{:segment/keys [text ctx]}]
                    (let [layer-path (:layer ctx)]
@@ -2953,7 +3559,19 @@
                                                          unlayered-priority))
                           (parse-rules-raw text)))))
          (map-indexed (fn [idx rule] (assoc rule :rule/order idx)))
-         vec)))
+         (#(cond-> (vec %)
+             (seq registry)
+             (conj {:rule/selectors []
+                    :rule/declarations {}
+                    :rule/declaration-meta {}
+                    :rule/media nil
+                    :rule/supports nil
+                    :rule/container nil
+                    :rule/container-name nil
+                    :rule/layer nil
+                    :rule/layer-priority unlayered-priority
+                    :rule/order (count %)
+                    :rule/property-registry registry}))))))
 
 (defn- parse-media-width
   [s]
@@ -7309,6 +7927,79 @@
     (get env (keyword var-name))
     (or (some-> fallback str/trim not-empty) "")))
 
+(defn- registered-custom-value
+  "One custom property's resolved value, corrected against its `@property`
+   registration if it has one.
+
+   Measured in Brave, and it is NOT the rule an unregistered custom
+   property follows: `@property --pv { syntax: \"<length>\";
+   initial-value: 70px }` with a parent declaring `--pv: 200px` and the
+   element declaring `--pv: notalength` reports **70px** -- the
+   REGISTERED INITIAL VALUE. An invalid value for a registered property
+   does not become invalid-at-computed-value-time and does not inherit;
+   it becomes the initial. (An unregistered `--x: whatever` has no
+   grammar to be invalid against at all, so nothing here touches it.)"
+  [registry k value]
+  (if-let [reg (get registry k)]
+    (if (registered-value-valid? (:registration/syntax reg) value)
+      value
+      (or (:registration/initial reg) value))
+    value))
+
+(defn- non-inheriting-child-env
+  "`env` as CHILDREN should see it: every registered property declared
+   `inherits: false` reset to its own initial value (or dropped, when the
+   registration has none -- a `syntax: \"*\"` registration may legally omit
+   `initial-value`, and Brave then uses a `var()`'s own fallback).
+
+   This is the only place registration affects INHERITANCE, and it is a
+   reset rather than a removal because the initial value is in scope
+   everywhere -- see `registered-initial-env`, which seeds the document
+   root with exactly the same bindings."
+  [registry env]
+  (reduce-kv (fn [env k reg]
+               (if (:registration/inherits? reg)
+                 env
+                 (if-let [initial (:registration/initial reg)]
+                   (assoc env k initial)
+                   (dissoc env k))))
+             env
+             registry))
+
+(defn- resolve-attr-values
+  "`attr()` references in `style` resolved against `node`'s own attributes.
+
+   Runs in `style-element` rather than in `resolve-value` because this is
+   the only one of the three value functions that needs an ELEMENT: `env()`
+   and `var()`'s registry are document-global, an attribute is not. It runs
+   BEFORE custom-property substitution so `calc(attr(data-w px) + 10px)`
+   reaches `parse-style-value` as arithmetic rather than as text, and it
+   re-parses what it substituted for the same reason.
+
+   `:content` is skipped outright -- it has its own, older and differently
+   shaped `attr()` support (a marker resolved per element in
+   `resolve-content-value`), and the two forms are not interchangeable.
+   Custom properties are skipped too: `--x: attr(data-w px)` is legal CSS
+   and unsupported here, an honest gap rather than a silent one."
+  [node style]
+  (if-not (some (fn [[k v]] (and (string? v)
+                                 (not= :content k)
+                                 (not (custom-property? k))
+                                 (re-find #"(?i)attr\(" v)))
+                style)
+    style
+    (let [attrs (:attrs node)]
+      (into {}
+            (map (fn [[k v]]
+                   (if (and (string? v) (not= :content k) (not (custom-property? k))
+                            (re-find #"(?i)attr\(" v))
+                     [k (parse-style-value
+                         (str/replace v attr-ref-pattern
+                                      (fn [[_ name syntax unit fallback]]
+                                        (or (attr-typed-value attrs name unit syntax fallback) ""))))]
+                     [k v])))
+            style))))
+
 (defn- resolve-value
   "Resolves `var(--name[, fallback])` references in `value` against the
    custom-property environment `env` (name -> already-resolved value,
@@ -7317,24 +8008,53 @@
    resolving to the number 8 stays a number); a var() reference embedded in
    a larger string is substituted textually. Unresolvable references with no
    fallback resolve to \"\". Recursion is depth-capped to tolerate (but not
-   usefully support) cyclic custom properties."
+   usefully support) cyclic custom properties.
+
+   `env()` is resolved FIRST, here, because it is the one value function
+   with no dependence on anything this walk carries -- a UA environment
+   variable is document-global, so `var(--x, env(safe-area-inset-left))`
+   and `--x: env(...)` both work out of resolving it before the var pass
+   rather than after. When (and only when) an `env()` was actually
+   substituted, the result is re-parsed: `calc(env(safe-area-inset-left,
+   120px) + 50px)` has to reach `parse-style-value` as arithmetic, and
+   Brave reports 50px for it. A value with no `env(` in it is not touched,
+   so the var() paths below behave exactly as they did."
   ([env value] (resolve-value env value 0))
   ([env value depth]
    (cond
      (not (string? value)) value
      (> depth 8) value
      :else
-     (let [trimmed (str/trim value)]
+     (let [substituted (resolve-env-refs value)
+           env-resolved? (not (identical? substituted value))
+           value substituted
+           trimmed (str/trim value)]
        (if-let [[_ var-name fallback] (re-matches var-ref-pattern trimmed)]
          (let [resolved (var-lookup env var-name fallback)]
            (if (string? resolved)
              (parse-style-value (resolve-value env resolved (inc depth)))
              resolved))
          (if (re-find #"var\(" value)
-           (str/replace value var-ref-pattern
-                        (fn [[_ var-name fallback]]
-                          (str (var-lookup env var-name fallback))))
-           value))))))
+           ;; An EMBEDDED var() -- one that is part of a larger value
+           ;; rather than the whole of it -- is substituted textually and
+           ;; then re-parsed, for the same reason the `env()` branch below
+           ;; is: `calc(var(--n) * 20px)` with `--n` bound to 3 is a
+           ;; resolvable constant `calc()` once the substitution has
+           ;; happened, and Brave reports 60px for it. Before this it was
+           ;; left as the literal string `calc(3 * 20px)`, which
+           ;; cssom.layout reads as `auto`.
+           ;;
+           ;; Corpus-neutral by construction: every `var()` in the
+           ;; conformance corpus is a WHOLE value and takes the exact-match
+           ;; branch above, which has always re-parsed. `parse-style-value`
+           ;; returns a multi-token value (`"10px 20px"` from a
+           ;; two-var `padding`) unchanged, so the box-shorthand re-slice
+           ;; below still sees the string it expects.
+           (parse-style-value
+            (str/replace value var-ref-pattern
+                         (fn [[_ var-name fallback]]
+                           (str (var-lookup env var-name fallback)))))
+           (if env-resolved? (parse-style-value value) value)))))))
 
 (def ^:private box-side-key-pattern
   #"(?:margin|padding)(?:-(top|right|bottom|left))?")
@@ -7667,7 +8387,8 @@
    written-back `:style/direction` (which would be wrong for an element
    that declares none, since this map holds no inherited values)."
   [document rules node-id inherited-env inherited-counters container-ctx
-   parent-font-size root-font-size parent-display parent-quote-depth parent-flow]
+   parent-font-size root-font-size parent-display parent-quote-depth parent-flow
+   registry]
   (let [node (get-in document [:nodes node-id])
         [style node-counters node-flow]
         (style-with-counters document rules node inherited-counters container-ctx parent-flow)
@@ -7675,9 +8396,20 @@
         regular (into {} (remove (fn [[k _]] (contains? pseudo-keys k))) style)
         pseudo (select-keys style pseudo-keys)
         custom (into {} (filter (fn [[k _]] (custom-property? k))) regular)
-        normal (into {} (remove (fn [[k _]] (custom-property? k))) regular)
-        resolved-custom (into {} (map (fn [[k v]] [k (resolve-value inherited-env v)])) custom)
+        normal (resolve-attr-values node (into {} (remove (fn [[k _]] (custom-property? k))) regular))
+        resolved-custom (into {}
+                              (map (fn [[k v]]
+                                     [k (registered-custom-value registry k
+                                                                 (resolve-value inherited-env v))]))
+                              custom)
         node-env (merge inherited-env resolved-custom)
+        ;; What CHILDREN inherit is not the same map: a registered property
+        ;; declared `inherits: false` is reset to its own initial value on
+        ;; the way down, so a child sees the initial rather than the
+        ;; parent's declaration. Measured in Brave: parent `--pi: 200px`
+        ;; with `inherits: false` gives the child 80px (the initial), and
+        ;; the identical shape with `inherits: true` gives it 200px.
+        child-env (non-inheriting-child-env registry node-env)
         [resolved-normal node-font-size]
         (resolve-relative-lengths (resolve-style-map node-env normal)
                                   parent-font-size root-font-size)
@@ -7700,7 +8432,7 @@
                       (dom/set-attribute d node-id (keyword "style" (name k)) v)))
                   (clear-style-attrs document node-id)
                   final-style)]
-    [document node-env node-counters node-font-size
+    [document child-env node-counters node-font-size
      (children-container-display final-style parent-display)
      child-quote-depth node-flow]))
 
@@ -7731,7 +8463,9 @@
    the empty inherited environment above it already makes: a detached node
    has no ancestor chain to read either number off."
   [document rules container-ctx base-font-size]
-  (letfn [(walk [document node-id inherited-env inherited-counters visited
+  (let [registry (rules-property-registry rules)
+        initial-env (registered-initial-env registry)]
+   (letfn [(walk [document node-id inherited-env inherited-counters visited
                  parent-font-size root-font-size parent-display quote-depth parent-flow]
             (let [node (get-in document [:nodes node-id])
                   element? (= :element (:node/type node))
@@ -7740,7 +8474,7 @@
                   (if element?
                     (style-element document rules node-id inherited-env inherited-counters
                                    container-ctx parent-font-size root-font-size
-                                   parent-display quote-depth parent-flow)
+                                   parent-display quote-depth parent-flow registry)
                     ;; a text node establishes no formatting context of its
                     ;; own, so its (impossible) children would still be
                     ;; blockified against this node's parent -- and it
@@ -7758,7 +8492,7 @@
                       [document visited node-counters]
                       (:children node))))]
     (let [[document visited] (if-let [root (:root document)]
-                                (walk document root {} {} #{} base-font-size nil nil 0 initial-flow)
+                                (walk document root initial-env {} #{} base-font-size nil nil 0 initial-flow)
                                 [document #{}])]
       (reduce-kv
        (fn [document node-id node]
@@ -7771,11 +8505,11 @@
            ;; simplification as the two above
            ;; a detached subtree has no ancestor chain to read a FLOW off
            ;; either -- it starts in `initial-flow`, same simplification
-           (first (style-element document rules node-id {} {} container-ctx
-                                 base-font-size base-font-size nil 0 initial-flow))
+           (first (style-element document rules node-id initial-env {} container-ctx
+                                 base-font-size base-font-size nil 0 initial-flow registry))
            document))
        document
-       (:nodes document)))))
+       (:nodes document))))))
 
 (defn apply-cascade
   "Applies the cascade over `document`, writing each element's resolved
