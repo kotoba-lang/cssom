@@ -103,6 +103,19 @@
      (only the `container-type`/`container-name` longhands are parsed), and
      `or`/range syntax/`style()`/`scroll-state()` container queries (same
      narrow feature/combinator subset `@media` already has).
+   - `@scope (<root>) [to (<limit>)] { ... }` -- a RANGE in the tree, plus
+     the cascade's PROXIMITY key. A rule inside one applies only to
+     elements at or below a matching root and strictly above every matching
+     limit, its selector carries an implicit `:scope ` descendant prefix
+     (which contributes no specificity, unlike a `:scope` the author
+     writes), and among declarations that tie on importance, origin,
+     element-attachment, layer and specificity, the one whose scope root is
+     NEARER wins -- which is the one dimension of the cascade that is per
+     (rule, element) rather than per rule. See the `@scope` section above
+     `scope-proximity` for the browser measurements that place it, and
+     `scope-root-ids` for the one scope cut: a PRELUDE-LESS `@scope { ... }`
+     scopes to the element that owns the stylesheet, and `parse-rules` is
+     handed CSS text with no owner attached, so it applies to nothing.
    - `:not(<selector>)` / `:is(<selector-list>)` / `:where(<selector-list>)`
      selector-FUNCTION pseudo-classes -- not to be confused with a bare
      pseudo-CLASS like `:hover`/`:disabled` (see `pseudo-class-pattern` vs
@@ -174,9 +187,13 @@
      or `has-arg-descendant-match?` (the full subtree). The two sibling
      forms are forward-only, which is what real CSS's `~`/`+` mean.
      Deliberately OUT of scope, and unsupported (never crashes, just
-     never matches that form specially): the `:scope` pseudo-class itself,
-     and -- same as `:not()`/`:is()`/`:where()` -- any combinator chain or
-     nested functional pseudo-class inside one compound-selector argument.
+     never matches that form specially): same as
+     `:not()`/`:is()`/`:where()`, any combinator chain or nested
+     functional pseudo-class inside one compound-selector argument.
+     (`:scope` was in this list until 2026-08-06 and is now implemented --
+     see the `@scope` section above `scope-proximity`, and
+     `matches-pseudo?`'s own `:scope` branch for what it means outside an
+     `@scope` block.)
      Like `:root`/`:lang()`/the structural pseudo-classes, matching an
      element against its own subtree obviously needs `document` (`node`'s
      `:children` are only ids -- resolving them to real nodes needs
@@ -2632,9 +2649,21 @@
    own :has/selector before reusing `groups-specificity` unchanged -- the
    `>` combinator recorded alongside it is irrelevant here, matching real
    CSS's general rule that combinators themselves never contribute
-   specificity."
+   specificity.
+
+   `:selector/scope-implicit?` (see `implicit-scope-part`) contributes
+   NOTHING: it is the `:scope ` prefix a `@scope` block adds to a selector
+   that did not name `:scope` itself, and a `@scope` prelude has no
+   specificity. Measured in Brave 151 on 2026-08-06:
+   `@scope (#r) { p { ... } }` against `div p` is BLUE (so `p` is still
+   (0,0,1)) while `@scope (#r) { :scope p { ... } }` against the same
+   `div p` is RED (so an EXPLICIT `:scope` is an ordinary (0,1,0)
+   pseudo-class). Those two numbers are why the flag exists rather than a
+   shared representation."
   [simple]
-  (let [most-specific-in-group
+  (if (:selector/scope-implicit? simple)
+    [0 0 0]
+    (let [most-specific-in-group
         (fn [group]
           (reduce (fn [best arg]
                     (let [candidate (simple-selector-specificity arg)]
@@ -2659,7 +2688,7 @@
         nb ib hb)
      (+ (if (:selector/tag simple) 1 0)
         (if (:selector/pseudo-element simple) 1 0)
-        nc ic hc)]))
+        nc ic hc)])))
 
 (defn specificity
   [selector]
@@ -2710,11 +2739,11 @@
    `selector { decls }` reader below picks their body up as if the wrapper
    were not there, which is the behavior they had before this scanner
    existed and is out of scope here."
-  ["media" "container" "layer" "supports"])
+  ["media" "container" "layer" "supports" "scope"])
 
 (defn- next-conditional-at-rule
-  "The first `@media`/`@container`/`@layer`/`@supports` at or after `idx` in
-   `s`, as `[index name]`, or nil.
+  "The first `@media`/`@container`/`@layer`/`@supports`/`@scope` at or after
+   `idx` in `s`, as `[index name]`, or nil.
 
    Deliberately a plain substring search rather than a tokenizer, which is
    the same bounded reader every at-rule scan in this file has always used:
@@ -2773,6 +2802,138 @@
    declarations outrank its sublayer's."
   [path]
   (map #(vec (take % path)) (range 1 (inc (count path)))))
+
+(def ^:dynamic *scope-roots*
+  "The element ids `:scope` currently stands for, or nil for 'no `@scope`
+   is being matched right now', in which case `:scope` is the document root
+   (measured -- see `matches-pseudo?`'s `:scope` branch).
+
+   Bound to exactly ONE root at a time by `scope-proximity`, never to the
+   whole candidate set: proximity is the distance to the root the selector
+   actually matched against, and binding the set would let a selector match
+   through a far root while being scored against a near one it never used.
+   Measured shape that separates them: `.rA > .rB > p` with
+   `@scope (.r) { :scope .rB p }` can only match with `:scope` = `.rA`."
+  nil)
+
+(defn- balanced-paren-group
+  "`[<inner text> <index just past the `)`>]` for the parenthesised group
+   opening at the first `(` at or after `idx` in `s`, or nil when there is
+   none or it is unbalanced. Depth-aware, because a scope root is a
+   SELECTOR and a selector may hold parens of its own (`:is(.a, .b)`)."
+  [s idx]
+  (let [n (count s)]
+    (when-let [open (str/index-of s "(" idx)]
+      (loop [i (inc open) depth 1]
+        (cond
+          (>= i n) nil
+          (= \( (nth s i)) (recur (inc i) (inc depth))
+          (= \) (nth s i)) (if (= 1 depth)
+                             [(subs s (inc open) i) (inc i)]
+                             (recur (inc i) (dec depth)))
+          :else (recur (inc i) depth))))))
+
+(defn- parse-scope-prelude
+  "One `@scope` prelude -- everything between `@scope` and its `{` -- as
+   `{:scope/root <selector vector or nil> :scope/limit <same>}`.
+
+   The three forms, all of them measured in Brave 151.1.93.129 over CDP on
+   2026-08-06, one probe page per probe:
+
+   | prelude | measured |
+   |---|---|
+   | `(#r)` | the subtree under `#r`, root itself excluded from a bare descendant rule |
+   | `(#r) to (.lim)` | the same, minus every element at or below a `.lim` |
+   | `to (.lim)` | the OWNING element's subtree, minus the same |
+   | (empty) | the owning element's subtree |
+
+   Both halves are selector LISTS: `(.ra, .rb)` roots two scopes and
+   `to (.l1, .l2)` cuts at either. Both were measured.
+
+   A nil `:scope/root` is the prelude-less form, and it is where this
+   engine stops -- see `scope-root-ids`, which owns that cut and carries
+   the browser numbers for it."
+  [header]
+  (let [h (str/trim (str header))
+        to-first? (boolean (re-find #"(?i)^to\s*\(" h))
+        [root-text after] (if to-first?
+                            [nil 0]
+                            (or (balanced-paren-group h 0) [nil 0]))
+        rest-text (subs h (min after (count h)))
+        limit-text (when (re-find #"(?i)^\s*to\s*\(" rest-text)
+                     (first (balanced-paren-group rest-text 0)))]
+    {:scope/root (when (and root-text (not (str/blank? root-text)))
+                   (mapv parse-selector (split-selector-list root-text)))
+     :scope/limit (when (and limit-text (not (str/blank? limit-text)))
+                    (mapv parse-selector (split-selector-list limit-text)))}))
+
+(def ^:private implicit-scope-part
+  "The `:scope ` DESCENDANT prefix every scoped selector that does not name
+   `:scope` itself carries. Measured in Brave 151 on 2026-08-06:
+
+   - `@scope (#r) { div { ... } }` leaves the ROOT ITSELF unmatched even
+     though the root is a `div`, so the prefix is a real ancestor
+     constraint and not `:is(:scope, :scope *)`.
+   - `@scope (#r) { div > p { ... } }` leaves a `<p>` whose parent IS the
+     root unmatched, and reddens one whose parent is a `<div>` inside it --
+     so the prefix attaches to the WHOLE complex selector (`:scope div > p`)
+     rather than to each compound.
+
+   `:selector/scope-implicit?` is what keeps it out of `specificity`: the
+   prelude contributes nothing (`@scope (#r) { p }` loses to `div p`,
+   measured BLUE) while an explicitly written `:scope` is an ordinary
+   pseudo-class (`:scope p` beats `div p`, measured RED). The two cannot
+   share one representation, and this flag is the whole of the difference."
+  {:selector/raw ":scope"
+   :selector/tag nil
+   :selector/id nil
+   :selector/classes []
+   :selector/attrs []
+   :selector/pseudos [:scope]
+   :selector/pseudo-element nil
+   :selector/not []
+   :selector/is []
+   :selector/where []
+   :selector/has []
+   :selector/nth-args {}
+   :selector/lang-args {}
+   :selector/combinator nil
+   :selector/scope-implicit? true})
+
+(defn- names-scope?
+  "Whether an already-parsed selector writes `:scope` anywhere in itself --
+   including inside `:is()`/`:where()`/`:not()`, which is why this reads
+   the raw text rather than walking `:selector/pseudos`. Measured: all three
+   of `div:scope`, `.r :scope` and `:is(:scope) p` suppress the implicit
+   prefix, and the last one keeps `:scope` out of `:selector/pseudos`
+   entirely (it lands in a `:selector/is` group).
+
+   Bounded reader, the same one every at-rule scan in this file uses: a
+   literal `:scope` inside an attribute selector's quoted value
+   (`[data-x=\":scope\"]`) would be mistaken for the pseudo-class. No
+   stylesheet this engine parses does that."
+  [selector]
+  (boolean (re-find #"(?i):scope\b" (str (:selector/raw selector)))))
+
+(defn- scope-selector
+  "`selector` as it must be MATCHED inside a `@scope` block: unchanged when
+   it names `:scope` itself, otherwise with `implicit-scope-part` prepended
+   and the original first compound demoted to a descendant of it.
+
+   Done at parse time rather than at match time so that `specificity`,
+   `pseudo-element-of` and `matches?` all read one selector value and can
+   never disagree about which one they got."
+  [selector]
+  (if (names-scope? selector)
+    selector
+    (let [parts (vec (:selector/parts selector))]
+      (if (empty? parts)
+        selector
+        (assoc selector
+               :selector/parts
+               (into [implicit-scope-part
+                      (assoc (first parts) :selector/combinator :descendant)]
+                     (rest parts)))))))
 
 (defn- scan-conditional-at-rules
   "One recursive walk of `css`. Returns
@@ -2842,7 +3003,13 @@
                             "layer"
                             (let [path (layer-name-path (:layer ctx) header (vswap! anon inc))]
                               (note-layer! path)
-                              (assoc ctx :layer path)))]
+                              (assoc ctx :layer path))
+                            ;; Outermost first, like :media/:supports, so a
+                            ;; `@scope` inside a `@scope` composes rather
+                            ;; than clobbering -- measured: an element must
+                            ;; be inside BOTH to match.
+                            "scope"
+                            (update ctx :scope (fnil conj []) (parse-scope-prelude header)))]
                       (recur (inc close) (into (into out (or before [])) (walk body inner-ctx))))
                     ;; Unbalanced braces: emit the remainder as plain text
                     ;; rather than dropping it -- the same "degrade, don't
@@ -3029,10 +3196,13 @@
    keyframe blocks and is emitted verbatim -- recursing into `@keyframes`
    would read its `0% { ... }` steps as nested style rules.
 
-   `@supports`/`@scope` are here even though this engine does not evaluate
-   either: they are still rule lists, and a nested rule inside one has to
-   come out flat. Whether the wrapper then applies is unchanged from
-   before -- see the namespace docstring."
+   `@supports` is here even though this engine does not evaluate it: it is
+   still a rule list, and a nested rule inside one has to come out flat.
+   Whether the wrapper then applies is unchanged from before -- see the
+   namespace docstring. `@scope` is here for the same structural reason and
+   IS evaluated as of 2026-08-06 (see `parse-scope-prelude` /
+   `scope-proximity`); a nested rule inside one still has to come out flat
+   before `scan-conditional-at-rules` can record its prelude."
   #{"media" "supports" "layer" "container" "scope"})
 
 (defn- at-rule-name
@@ -3547,8 +3717,16 @@
         registry (parse-property-registrations css)]
     (->> segments
          (mapcat (fn [{:segment/keys [text ctx]}]
-                   (let [layer-path (:layer ctx)]
+                   (let [layer-path (:layer ctx)
+                         scope (:scope ctx)]
                      (map #(assoc %
+                                  ;; The `:scope ` prefix is applied HERE,
+                                  ;; once per rule at parse time, so
+                                  ;; `specificity`/`pseudo-element-of`/
+                                  ;; `matches?` all read one selector value.
+                                  :rule/selectors (cond-> (:rule/selectors %)
+                                                    scope (->> (mapv scope-selector)))
+                                  :rule/scope scope
                                   :rule/media (one-or-many (:media ctx))
                                   :rule/supports (one-or-many (:supports ctx))
                                   :rule/container (:container ctx)
@@ -3564,6 +3742,7 @@
              (conj {:rule/selectors []
                     :rule/declarations {}
                     :rule/declaration-meta {}
+                    :rule/scope nil
                     :rule/media nil
                     :rule/supports nil
                     :rule/container nil
@@ -4933,6 +5112,24 @@
     :nth-last-child (nth-pseudo-matches? document node false true arg match-fn)
     :nth-last-of-type (nth-pseudo-matches? document node true true arg match-fn)
     :root (and document (= (:node/id node) (:root document)))
+
+    ;; `:scope` -- the scope roots currently in play, or the document root
+    ;; when there are none. Both halves measured in Brave 151 on
+    ;; 2026-08-06: inside `@scope (#r)`, `:scope` reddens `#r` itself and
+    ;; nothing else; OUTSIDE any `@scope`, `:scope p { color: red }`
+    ;; reddens a `<p>` in a plain document and `:scope { outline-color:
+    ;; red }` lands the outline on `<html>` and on no other element -- so
+    ;; an unscoped `:scope` is `:root`.
+    ;;
+    ;; `*scope-roots*` rather than an argument because this predicate is
+    ;; reached through `matches-simple?` -> `matches-parts?` -> the
+    ;; combinator walk, and threading a value the other eighteen
+    ;; pseudo-classes have no use for through all of it would be a wider
+    ;; change than the feature. `scope-proximity` is the only binder, it
+    ;; binds one root at a time, and matching is synchronous.
+    :scope (if *scope-roots*
+             (contains? *scope-roots* (:node/id node))
+             (and document (= (:node/id node) (:root document))))
     :empty (empty-pseudo-matches? document node)
     :lang (lang-pseudo-matches? document node arg)
     false))
@@ -5263,6 +5460,169 @@
 (defn- pseudo-element-of
   [selector]
   (:selector/pseudo-element (last (:selector/parts selector))))
+
+;; ---- @scope: a range in the tree, and PROXIMITY in the cascade ----
+;;
+;; Everything in this section was read out of a real headless Brave
+;; 151.1.93.129 over CDP on 2026-08-06, ONE PROBE PAGE PER PROBE. (A
+;; shared probe page leaks: round forty-nine put sixteen nesting probes on
+;; one page and a single `p span { }` written for one of them reached four
+;; others, producing a wrong answer that shaped its first design.)
+;;
+;; `@scope` is two features wearing one at-rule, and only the first is a
+;; matching change:
+;;
+;; 1. A RANGE. `@scope (root) to (limit)` restricts a rule to the elements
+;;    at or below a matching root and strictly above every matching limit.
+;;    Selector-shaped, so `matches-parts?` does all of the work.
+;;
+;; 2. PROXIMITY, which is a new dimension in the cascade sort. Where it
+;;    sits was measured rather than read off the spec, with a shape for
+;;    each neighbour -- `.far > .near > p` throughout, both source orders:
+;;
+;;    | probe | Brave |
+;;    |---|---|
+;;    | `@scope (.near) { p }` red vs `@scope (.far) { p }` blue | RED -- the nearer root wins |
+;;    | ...the same two with their source order reversed | RED -- so proximity beats ORDER |
+;;    | `@scope (.near) { p }` red vs `@scope (.far) { div p }` blue | BLUE -- so SPECIFICITY beats proximity |
+;;    | ...reversed source order | BLUE |
+;;    | `@layer la, lb; @layer lb { @scope (.far) { p } }` blue, `@layer la { @scope (.near) { p } }` red | BLUE -- so LAYER beats proximity |
+;;    | ...both scopes in layer `lb` instead (the control) | RED |
+;;    | both declarations `!important` | RED both source orders -- importance does NOT reverse proximity the way it reverses layers |
+;;    | `<p style="color:blue">` against `@scope (#r) { p }` red | BLUE -- element-attached beats proximity |
+;;
+;;    So the order is
+;;    `importance -> origin -> inline -> layer -> specificity -> PROXIMITY
+;;    -> source order`, and the seventh key goes between the fifth and the
+;;    sixth. It is per (rule, ELEMENT), not per rule, which is what makes
+;;    it a different kind of key from the six above it.
+;;
+;;    An UNSCOPED declaration has INFINITE proximity, and that is a real
+;;    measurement rather than a definition: `@scope (#r) { p { red } }`
+;;    followed by a plain `p { blue }` -- same specificity, same layer, the
+;;    unscoped rule written LATER -- is RED. Reversed, it is red too. Put
+;;    both in one `@layer za`, still red. Put the unscoped rule in a LATER
+;;    layer and it is BLUE, which is the control that says the layer key
+;;    above still decides first.
+;;
+;; What proximity COUNTS, measured: the hop count from the ELEMENT up to
+;; the root, not the root's own depth. `.o1 > div > .o2 > div > div > p` is
+;; blue (`.o2` at 3 hops beats `.o1` at 5) and
+;; `.o2 > div > div > div > .o1 > p` is red (`.o1` at 1 beats `.o2` at 5).
+;; When one root selector matches several ancestors it is the NEAREST that
+;; counts: `.r > .m > .r > p` with `@scope (.r)` red and `@scope (.m)` blue
+;; is RED, and the control `.r > .m > p` is BLUE.
+
+(defn- ancestors-or-self
+  "`node-id` then each ancestor, NEAREST FIRST -- the order proximity is
+   counted in, so the index into this sequence is the hop count."
+  [parents node-id]
+  (take-while some? (iterate #(get parents %) node-id)))
+
+(defn- scope-limited?
+  "Whether a `to (...)` limit cuts `node-id` out of the scope rooted at
+   `root-id`: whether any element on the path from `node-id` up to, but NOT
+   including, `root-id` matches one of `limits`.
+
+   Three measurements fix the boundaries, all Brave 151:
+
+   - The limit element ITSELF is out. `@scope (#r) to (.lim) { div }` over
+     `#r > .lim > div` reddens neither `.lim` nor what is under it, and
+     reddens a `div` beside them.
+   - A limit selector is relative to the SCOPE ROOT, not absolute:
+     `to (:scope > .lim)` cuts a `.lim` that is a direct child of `#r` and
+     does NOT cut one further down. That is why `*scope-roots*` is bound
+     around this test as well as around the rule's own selector.
+   - A limit matching the ROOT does not cut the root:
+     `@scope (.r) to (.r)` over `.r > p` is red. This loop stops before
+     `root-id`, which is what makes that true.
+
+   A limit LIST is allowed and was measured: `to (.l1, .l2)` cuts at
+   either."
+  [document parents limits root-id node-id]
+  (loop [id node-id]
+    (cond
+      (nil? id) false
+      (= id root-id) false
+      (some #(matches-parts? document parents id (:selector/parts %)) limits) true
+      :else (recur (get parents id)))))
+
+(defn- scope-root-ids
+  "`[hops root-id]` for every element that roots a live scope over
+   `node-id`, NEAREST FIRST: an ancestor-or-self matching one of the
+   prelude's root selectors, from which `node-id` is not cut off by the
+   prelude's limit.
+
+   Every matching ancestor roots its OWN scope, and a cut one does not
+   suppress the others -- measured: `.r > .lim > .r > p` under
+   `@scope (.r) to (.lim)` reddens the `<p>`, because the inner `.r` roots
+   a scope the `.lim` is above rather than inside. The control beside it,
+   `.r > .r > .lim > p`, is black.
+
+   SCOPE CUT, and it is the whole of the prelude-less form. `@scope { ...
+   }` with no prelude scopes to the element that OWNS the stylesheet -- the
+   `<style>` element's own parent -- and this engine is handed CSS text
+   with no owner attached, so it has nothing to root the scope at and the
+   rule applies to NOTHING. Measured in Brave 151 on 2026-08-06, both
+   directions, so the cost is on the record:
+
+   | probe | Brave | here |
+   |---|---|---|
+   | `<style>@scope { p { red } }</style>` inside `<div id=w>`, `<p>` inside the same div | RED | black |
+   | ...the `<p>` OUTSIDE that div | black | black |
+   | the same `@scope { p }` in a `<head>` `<style>` | black | black |
+   | two `<style>@scope {...}</style>`, one per div | each div's own `<p>` takes its own colour | both black |
+
+   So this fails CLOSED, which is the safe direction and is one of the two
+   answers already right. Closing it means carrying the owning element id
+   from the `<style>` element through `parse-rules`, which every caller --
+   `apply-cascade`, the conformance harness, `htmldom` -- would have to
+   learn to pass. That is a signature change to the whole stylesheet
+   pipeline, not a scope change, which is why it is named here rather than
+   guessed at."
+  [document parents spec node-id]
+  (let [roots (:scope/root spec)
+        limits (:scope/limit spec)]
+    (when (seq roots)
+      (->> (ancestors-or-self parents node-id)
+           (map-indexed (fn [hops id] [hops id]))
+           (filter (fn [[_ id]]
+                     (and (= :element (get-in document [:nodes id :node/type]))
+                          (some #(matches-parts? document parents id (:selector/parts %)) roots))))
+           (remove (fn [[_ id]]
+                     (and (seq limits)
+                          (binding [*scope-roots* #{id}]
+                            (scope-limited? document parents limits id node-id)))))))))
+
+(defn- scope-proximity
+  "The hop count `node-id` sits at from the nearest scope root the scoped
+   `selector` actually matches against, or nil when it matches in no scope
+   at all (which is what makes the rule not apply).
+
+   `specs` is `:rule/scope` -- one entry per enclosing `@scope`, outermost
+   first. Measured: an element must be inside EVERY one of them
+   (`@scope (#a) { @scope (.b) { p } }` reddens a `<p>` only where `#a` and
+   `.b` are both ancestors, and neither `#a`-only nor `.b`-only). Proximity
+   is counted from the INNERMOST, which is also the scope `:scope` stands
+   for. No probe discriminates the outer scopes' own proximity, and none is
+   claimed here.
+
+   Roots are tried nearest first and the FIRST that matches wins, so the
+   answer is the nearest root the selector could actually use. That
+   distinction is measurable: a nearer scope that a `to (...)` limit has
+   cut has to hand the decision to a farther one, and it does --
+   `.far > .near > .lim > p` with `@scope (.near) to (.lim)` red and
+   `@scope (.far)` blue is BLUE, and the control without the `.lim`
+   wrapper is RED."
+  [document parents specs selector node-id]
+  (let [inner (peek (vec specs))
+        outer (pop (vec specs))]
+    (when (every? #(seq (scope-root-ids document parents % node-id)) outer)
+      (some (fn [[hops root-id]]
+              (binding [*scope-roots* #{root-id}]
+                (when (matches-parts? document parents node-id (:selector/parts selector))
+                  hops)))
+            (scope-root-ids document parents inner node-id)))))
 
 ;; ---- @container containers / matching ----
 ;;
@@ -7255,7 +7615,7 @@
     :invalid :valid :in-range :out-of-range :focus :focus-within
     :first-child :last-child :only-child :first-of-type :last-of-type
     :nth-child :nth-of-type :nth-last-child :nth-last-of-type
-    :root :empty :lang
+    :root :empty :lang :scope
     :not :is :where :has})
 
 (def ^:private implemented-pseudo-elements
@@ -7624,13 +7984,39 @@
    is what every caller that does not walk a tree uses."
   ([document rules node pseudo-element counters container-ctx inherited-flow]
    (let [max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
+         ;; Built at most ONCE per element, and only when some rule is
+         ;; actually scoped: `@scope` is the only thing here that needs an
+         ;; ancestor chain of its own (`matches?` builds its own index per
+         ;; selector test, which is the existing cost profile and is not
+         ;; changed by this). A stylesheet with no `@scope` in it never
+         ;; forces this delay, so it pays nothing.
+         scope-parents (delay (parent-index document))
          declarations (for [rule rules
-                            :let [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rule]
+                            :let [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rule
+                                  scope (:rule/scope rule)]
                             selector selectors
                             :when (= pseudo-element (pseudo-element-of selector))
-                            :when (if document
-                                    (matches? document node selector)
-                                    (matches? node selector))
+                            ;; `hops` is BOTH the match test and the
+                            ;; proximity: nil means "matched in no scope",
+                            ;; which for a scoped rule is exactly "does not
+                            ;; apply". An unscoped rule is at infinite
+                            ;; proximity -- measured, see the `@scope`
+                            ;; block above `scope-proximity`.
+                            :let [hops (if scope
+                                         ;; A scoped rule needs an ancestor
+                                         ;; chain, so the document-less
+                                         ;; `computed-style` arity honestly
+                                         ;; declines it -- the same
+                                         ;; restriction that arity already
+                                         ;; has for `ul ul` and `:root`.
+                                         (when document
+                                           (scope-proximity document @scope-parents scope
+                                                            selector (:node/id node)))
+                                         (when (if document
+                                                 (matches? document node selector)
+                                                 (matches? node selector))
+                                           ##Inf))]
+                            :when (some? hops)
                             :when (container-rule-matches? rule (:node/id node) container-ctx)
                             ;; `@supports` is filtered HERE rather than in
                             ;; `apply-cascade` beside `@media`, because
@@ -7651,6 +8037,20 @@
                            :origin author-origin
                            :specificity (specificity selector)
                            :inline? false
+                           ;; NEGATED, because the sort is ascending and
+                           ;; the last entry wins: nearer must sort LAST,
+                           ;; and nearer is the SMALLER hop count. An
+                           ;; unscoped declaration is `##Inf` hops away and
+                           ;; therefore `##-Inf` here, which sorts first and
+                           ;; loses to every scoped declaration it ties with
+                           ;; on the five keys above -- measured.
+                           ;;
+                           ;; NOT negated by `:important?` the way `:layer`
+                           ;; is: measured, `!important` reverses layer
+                           ;; order and does not reverse proximity (both
+                           ;; source orders of two `!important` scoped
+                           ;; declarations report the NEARER one).
+                           :proximity (- (double hops))
                            :layer (if important? (- raw-layer) raw-layer)
                            ;; The same value WITHOUT the `!important`
                            ;; negation, which :layer above needs and
@@ -7709,6 +8109,12 @@
                               :origin ua-origin
                               :specificity (specificity selector)
                               :inline? false
+                              ;; The UA sheet has no `@scope`, so every one
+                              ;; of its declarations is at infinite
+                              ;; proximity -- the same value every unscoped
+                              ;; author declaration carries, which is what
+                              ;; keeps this key a pure tie among them.
+                              :proximity ##-Inf
                               :layer 0
                               :layer-key 0
                               :order (:rule/order rule)
@@ -7727,6 +8133,15 @@
                                                 :origin author-origin
                                                 :specificity [1 0 0]
                                                 :inline? true
+                                                ;; An inline declaration is
+                                                ;; not in a scope, and does
+                                                ;; not need to be: `:inline?`
+                                                ;; is compared FOUR keys
+                                                ;; above `:proximity`.
+                                                ;; Measured: `<p style=
+                                                ;; "color:blue">` beats
+                                                ;; `@scope (#r) { p { red } }`.
+                                                :proximity ##-Inf
                                                 :layer max-layer-priority
                                                 ;; Inline declarations have
                                                 ;; no layer in real CSS; the
@@ -7753,7 +8168,7 @@
                                                 ;; parses the attribute.
                                                 :decl-index idx})
                                              (inline-style node)))
-         sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order :decl-index)
+         sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :proximity :order :decl-index)
                          (concat ua-declarations declarations inline-declarations))
          ;; `all` expands HERE -- above the flow resolution, because it
          ;; reaches `writing-mode` (see `all-shorthand-exempt`), and above

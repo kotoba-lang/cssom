@@ -5015,39 +5015,26 @@
 
  {:id :cascade/a-scope-rule-does-not-reach-outside-its-root
   :group :cascade
-  ;; `@scope (#casc-sc) { ... }` limits its rules to that subtree. Brave:
-  ;; the paragraph inside is red and the one outside is black. This engine
-  ;; has no `@scope`, so -- exactly like `@supports` -- the wrapper is
-  ;; transparent and BOTH are red. Both paragraphs are in the case on
-  ;; purpose: the inner one agrees, and an agreement beside the
-  ;; disagreement is what says the rule was found rather than lost.
+  ;; The case round forty-four opened and round forty-nine measured in
+  ;; full. `@scope (#casc-sc) { ... }` limits its rules to that subtree:
+  ;; Brave reddens the paragraph inside and leaves the one outside black.
+  ;; Both are here on purpose -- the inner one agrees, and an agreement
+  ;; beside the disagreement is what says the rule was found rather than
+  ;; lost.
   ;;
-  ;; STILL OPEN, and now measured in full (2026-08-06) so the next round
-  ;; does not have to start from the browser. Everything below is Brave
-  ;; 151, one probe page per probe:
-  ;;   @scope (#r) { .x { ... } }        inside red, outside black
-  ;;   @scope (#r) { div { ... } }       the ROOT ITSELF does not match --
-  ;;                                     a scoped rule carries an implicit
-  ;;                                     `:scope ` DESCENDANT prefix
-  ;;   @scope (#r) { :scope { ... } }    ...and `:scope` is how you reach it
-  ;;   @scope (#r) to (.lim)             donut hole: `<p>` before `.lim`
-  ;;                                     red, `<p>` inside `.lim` black,
-  ;;                                     `<p>` outside `#r` black
-  ;;   ...and `.lim` ITSELF is OUT (black)
-  ;;   @scope (#r) { p } vs div p        BLUE -- the scope root contributes
-  ;;                                     NO specificity; `p` stays (0,0,1)
-  ;;   @scope (#r) { :scope p } vs div p RED -- `:scope` is a pseudo-class,
-  ;;                                     so `:scope p` is (0,1,1)
-  ;;   .o1 > .o2 > p, @scope (.o1) red FIRST, @scope (.o2) blue SECOND
-  ;;                                     BLUE
-  ;;   .o3 > .o4 > p, @scope (.o4) blue FIRST, @scope (.o3) red SECOND
-  ;;                                     BLUE -- so PROXIMITY (the nearer
-  ;;                                     scope root) beats SOURCE ORDER,
-  ;;                                     which is a new dimension in the
-  ;;                                     cascade sort tuple and not a
-  ;;                                     parser change. That is why this
-  ;;                                     one was left for its own round.
-  ;;   @scope { p { ... } }  (no prelude, in a <head> <style>)  no match
+  ;; THIS CASE WAS MEASURING SOMETHING ELSE UNTIL 2026-08-06. `scope-css`
+  ;; prefixed the body with the case container's id, and a scoped selector
+  ;; carries an implicit `:scope ` DESCENDANT prefix, so the rule reaching
+  ;; the browser was `:scope #case-N .casc-sp` -- and `#case-N` is an
+  ;; ANCESTOR of `#casc-sc`, never a descendant of it. Measured: Brave read
+  ;; BOTH paragraphs as black, so the case's two mismatches were "the
+  ;; engine reddens two paragraphs the browser reddens neither of",
+  ;; which is a true divergence for a false reason. `scope-css` now leaves a
+  ;; rooted `@scope` body unprefixed and the case measures what it says.
+  ;;
+  ;; The full `@scope` measurement round forty-nine recorded here has moved
+  ;; into the `:scope` group below, where each row is its own case with its
+  ;; own control.
   :html "<div><div id=\"casc-sc\"><p class=\"casc-sp\">in</p></div><p class=\"casc-sp\">out</p></div>"
   :css "@scope (#casc-sc) { .casc-sp { color: #ff0000 } }"}
 
@@ -5361,4 +5348,230 @@
   ;; "dropped".
   :html "<div><p id=\"tr1\">text</p></div>"
   :css "@media (400px <= width <= 900px) { #tr1 { color: #ff0000 } }"}
+
+ ;; ---- @scope: a range in the tree, and PROXIMITY in the cascade ----
+ ;;
+ ;; Round forty-four measured `@scope` and left it; round forty-nine
+ ;; measured it in full and named exactly why it was still open -- one of
+ ;; its rules is a new dimension in the cascade sort tuple, not a parse or
+ ;; a value change. This is that round.
+ ;;
+ ;; Every value below was read out of a real headless Brave 151.1.93.129
+ ;; over CDP on 2026-08-06, ONE PROBE PAGE PER PROBE, and each probe page
+ ;; carried the case's CSS ALREADY PUT THROUGH `scope-css` and wrapped in a
+ ;; `#case-0` container -- so the numbers are the numbers this corpus page
+ ;; produces, not the numbers a bare probe would.
+ ;;
+ ;; A FOURTH HAZARD OF THE SHARED PAGE, on top of the three above: a scoped
+ ;; selector carries an implicit `:scope ` DESCENDANT prefix, and the case
+ ;; container is an ANCESTOR of the scope root -- so prefixing the body of a
+ ;; rooted `@scope` with `#case-N` makes the rule `:scope #case-N .x`, which
+ ;; matches nothing. Measured: the case that existed before this round read
+ ;; BOTH its paragraphs as black in Brave, for that reason and not for the
+ ;; one its comment gave. `scope-css` now leaves a rooted `@scope` body
+ ;; unprefixed (the prelude already confines it), which is what lets the
+ ;; cases below say what they mean -- and it is why every scope root here is
+ ;; an id or class nothing else on the page uses.
+ ;;
+ ;; The cost of that fix, named where it bites: the two sides of this
+ ;; harness now receive different CSS in one respect. Every UNSCOPED
+ ;; selector still gains `#case-N` on the browser side and does not on the
+ ;; engine side, and a rooted `@scope` body gains nothing on either. That
+ ;; is invisible while both competing selectors are unscoped -- they both
+ ;; gain one id -- and it INVERTS a specificity comparison the moment a
+ ;; scoped rule competes with an unscoped one. So every case below puts its
+ ;; competing rules inside `@scope` blocks, or lets a key ABOVE specificity
+ ;; (layer order) decide. See the note above
+ ;; `a-limit-cuts-the-limit-element-and-everything-under-it` for the one
+ ;; measurement this makes inexpressible here.
+
+ {:id :scope/the-scope-root-itself-does-not-match-a-bare-descendant-rule
+  :group :scope
+  ;; A scoped selector is `:scope <selector>`, so the ROOT is out even when
+  ;; it matches the selector. Brave: the outer `div` is black and the one
+  ;; inside it is red. Before this round the wrapper was transparent and
+  ;; both were red.
+  :html "<div><div id=\"sc-r1\"><div>inner</div></div></div>"
+  :css "@scope (#sc-r1) { div { color: #ff0000 } }"}
+
+ {:id :scope/the-scope-pseudo-class-reaches-the-root
+  :group :scope
+  ;; The other half of the row above, and the control for it: `:scope` is
+  ;; how a scoped rule reaches its own root. Brave: the root is red.
+  :html "<div><div id=\"sc-r2\"><p>child</p></div></div>"
+  :css "@scope (#sc-r2) { :scope { color: #ff0000 } }"}
+
+ {:id :scope/a-scope-prelude-contributes-no-specificity
+  :group :scope
+  ;; Two rules in the SAME scope, so proximity ties and specificity alone
+  ;; decides. `p` is (0,0,1) and `div p` is (0,0,2) -- the prelude adds
+  ;; nothing to either. Brave: blue.
+  :html "<div><div id=\"sc-r3\"><div><p>text</p></div></div></div>"
+  :css "@scope (#sc-r3) { p { color: #ff0000 } } @scope (#sc-r3) { div p { color: #0000ff } }"}
+
+ {:id :scope/an-explicit-scope-pseudo-class-does-add-specificity
+  :group :scope
+  ;; The same shape with `:scope` written out: `:scope p` is (0,1,1) and
+  ;; beats the same `div p` the case above loses to. Brave: RED. The pair
+  ;; is the measurement -- it says the implicit prefix and the written
+  ;; pseudo-class cannot share one representation.
+  :html "<div><div id=\"sc-r4\"><div><p>text</p></div></div></div>"
+  :css "@scope (#sc-r4) { :scope p { color: #ff0000 } } @scope (#sc-r4) { div p { color: #0000ff } }"}
+
+ {:id :scope/proximity-beats-source-order
+  :group :scope
+  ;; The row that makes this a cascade change. The blue rule is written
+  ;; FIRST and its scope root is NEARER, and blue wins -- so reversing the
+  ;; source order does not reverse the answer. Brave: blue. An engine with
+  ;; no proximity key reports red (source order).
+  :html "<div><div class=\"sc-o3\"><div class=\"sc-o4\"><p>text</p></div></div></div>"
+  :css "@scope (.sc-o4) { p { color: #0000ff } } @scope (.sc-o3) { p { color: #ff0000 } }"}
+
+ {:id :scope/proximity-and-source-order-pointing-the-same-way
+  :group :scope
+  ;; The control beside it: the same two scopes with the nearer one written
+  ;; SECOND, where proximity and source order agree. Brave: blue, and an
+  ;; engine with no proximity key also reports blue. Only the pair is
+  ;; evidence.
+  :html "<div><div class=\"sc-o1\"><div class=\"sc-o2\"><p>text</p></div></div></div>"
+  :css "@scope (.sc-o1) { p { color: #ff0000 } } @scope (.sc-o2) { p { color: #0000ff } }"}
+
+ {:id :scope/specificity-beats-proximity
+  :group :scope
+  ;; Where the seventh sort key sits, from above. The FARTHER scope carries
+  ;; `div p` (0,0,2) and the NEARER one carries `p` (0,0,1), and the
+  ;; farther one wins. Brave: blue. Beside
+  ;; `proximity-beats-source-order`, which has the same shape at EQUAL
+  ;; specificity and answers the other way, this places proximity BELOW
+  ;; specificity and ABOVE order.
+  :html "<div><div class=\"sc-far2\"><div class=\"sc-near2\"><p>text</p></div></div></div>"
+  :css "@scope (.sc-far2) { div p { color: #0000ff } } @scope (.sc-near2) { p { color: #ff0000 } }"}
+
+ {:id :scope/layer-order-beats-proximity
+  :group :scope
+  ;; ...and from above on the other side. The farther scope is in the LATER
+  ;; layer and wins. Brave: blue. If proximity had been put above the layer
+  ;; key this reads red, which is what makes it a measurement rather than a
+  ;; decoration.
+  :html "<div><div class=\"sc-far3\"><div class=\"sc-near3\"><p>text</p></div></div></div>"
+  :css "@layer sc-la, sc-lb; @layer sc-lb { @scope (.sc-far3) { p { color: #0000ff } } } @layer sc-la { @scope (.sc-near3) { p { color: #ff0000 } } }"}
+
+ ;; MEASURED AND DELIBERATELY NOT ADDED: "an unscoped declaration is at
+ ;; INFINITE proximity". It is a real rule and a real divergence -- Brave
+ ;; reports RED for `@scope (#r) { p { red } } p { blue }`, same
+ ;; specificity, same layer, with the unscoped rule written LATER, and it
+ ;; is still red inside one explicit `@layer` -- but it cannot be expressed
+ ;; on the SHARED PAGE, and the reason is worth having written down.
+ ;;
+ ;; The two sides of this harness get DIFFERENT CSS. `cascaded-document`
+ ;; hands the engine the case's raw `:css`; the browser gets it through
+ ;; `scope-css`, which prefixes every UNSCOPED selector with `#case-N` and
+ ;; -- since 2026-08-06 -- leaves a rooted `@scope` body alone. That is
+ ;; harmless whenever both competing selectors are prefixed, which was true
+ ;; of every case in this corpus before the `:scope` group: they both gain
+ ;; one id and their relative order is unchanged. It stops being harmless
+ ;; the moment a SCOPED selector competes with an UNSCOPED one, because
+ ;; then only one of the two gains that id.
+ ;;
+ ;; The case that was written and removed made it concrete. `@scope (#r5)
+ ;; { #w1 #p1 { red } } #p1 { blue }` is (2,0,0) against (2,0,0) in the
+ ;; browser and (2,0,0) against (1,0,0) in the engine -- so both sides say
+ ;; RED, the case passes, and the engine's red comes from specificity while
+ ;; the browser's comes from proximity. It agreed on the base commit too,
+ ;; which is how it was caught. There is no rewrite that fixes it: equal
+ ;; specificity on one side is unequal on the other, by construction.
+ ;;
+ ;; The measurement lives in `cssom.core-test`'s
+ ;; `an-unscoped-declaration-is-at-infinite-proximity`, which calls
+ ;; `apply-cascade` directly and therefore has one CSS text rather than
+ ;; two. It fails on the base commit and passes here, with both controls
+ ;; (specificity still decides first, and so does layer order) passing on
+ ;; both sides.
+
+ {:id :scope/a-limit-cuts-the-limit-element-and-everything-under-it
+  :group :scope
+  ;; The donut hole, all four positions in one case. Brave: the paragraph
+  ;; before the limit is red, the one inside it is black, the one after it
+  ;; is red again, and the one outside the root is black. An engine with no
+  ;; `@scope` reports red for all four.
+  :html "<div><div id=\"sc-r6\"><p>before</p><div class=\"sc-lim\"><p>inside limit</p></div><p>after</p></div><p>outside</p></div>"
+  :css "@scope (#sc-r6) to (.sc-lim) { p { color: #ff0000 } }"}
+
+ {:id :scope/the-limit-element-itself-is-out
+  :group :scope
+  ;; The case above cannot see this, because its limit is a `div` and its
+  ;; rule selects `p`. Here the rule selects `div`, so the limit element is
+  ;; itself a candidate. Brave: black -- the limit is excluded, not merely
+  ;; its descendants.
+  :html "<div><div id=\"sc-r6b\"><div>before</div><div class=\"sc-lim2\"><div>inside limit</div></div></div></div>"
+  :css "@scope (#sc-r6b) to (.sc-lim2) { div { color: #ff0000 } }"}
+
+ {:id :scope/a-limit-selector-is-relative-to-the-scope-root
+  :group :scope
+  ;; `to (:scope > .sc-lim3)` cuts only a `.sc-lim3` that is a DIRECT CHILD
+  ;; of the root. Brave: the first `.sc-lim3` and what is under it are
+  ;; black; the wrapper beside it, the second `.sc-lim3` and what is under
+  ;; THAT are red. So the limit is a selector evaluated against the scope,
+  ;; not a bare class test.
+  :html "<div><div id=\"sc-r11\"><div class=\"sc-lim3\"><div>under direct</div></div><div><div class=\"sc-lim3\"><div>under deep</div></div></div></div></div>"
+  :css "@scope (#sc-r11) to (:scope > .sc-lim3) { div { color: #ff0000 } }"}
+
+ {:id :scope/a-cut-root-does-not-suppress-a-nearer-uncut-one
+  :group :scope
+  ;; One root SELECTOR, two matching ancestors, and a limit between them.
+  ;; Every match roots its own scope: the paragraph under the inner root is
+  ;; red (the limit is ABOVE that scope, not inside it) and the paragraph
+  ;; beside it, still inside the limit, is black. Brave: red, black.
+  :html "<div><div class=\"sc-r12\"><div class=\"sc-lim4\"><div class=\"sc-r12\"><p>inner</p></div><p>cut</p></div></div></div>"
+  :css "@scope (.sc-r12) to (.sc-lim4) { p { color: #ff0000 } }"}
+
+ {:id :scope/a-scoped-rule-keeps-the-layer-it-was-written-in
+  :group :scope
+  ;; The guard round forty-four's `@media`-inside-`@layer` cut named:
+  ;; losing a layer tag does not merely forget the layer, it promotes the
+  ;; rule to UNLAYERED, the strongest normal position in the author origin.
+  ;; The scoped rule is in the EARLIER layer and must lose. Brave: blue.
+  :html "<div><div id=\"sc-r7\"><p>text</p></div></div>"
+  :css "@layer sc-ka, sc-kb; @layer sc-ka { @scope (#sc-r7) { p { color: #ff0000 } } } @layer sc-kb { p { color: #0000ff } }"}
+
+ {:id :scope/a-scoped-rule-keeps-the-media-condition-it-was-written-in
+  :group :scope
+  ;; `@media` INSIDE `@scope`, both directions of the condition in one
+  ;; case. Brave: the paragraph is red (the query holds) and the span is
+  ;; black (it does not). A wrapper that swallowed the condition would
+  ;; report the span red.
+  :html "<div><div id=\"sc-r8\"><p>text</p><span>span</span></div></div>"
+  :css "@scope (#sc-r8) { @media (min-width: 1px) { p { color: #ff0000 } } } @scope (#sc-r8) { @media (min-width: 99999px) { span { color: #008000 } } }"}
+
+ {:id :scope/nested-scopes-both-have-to-contain-the-element
+  :group :scope
+  ;; Four positions, one case. Brave: red only where BOTH roots are
+  ;; ancestors; black under each root alone and black under neither.
+  :html "<div><div id=\"sc-a\"><div class=\"sc-b\"><p>both</p></div><p>only a</p></div><div class=\"sc-b\"><p>only b</p></div><p>neither</p></div>"
+  :css "@scope (#sc-a) { @scope (.sc-b) { p { color: #ff0000 } } }"}
+
+ {:id :scope/proximity-is-measured-to-the-nearest-matching-root
+  :group :scope
+  ;; One root selector matching two ancestors: `.sc-r9` counts at ONE hop
+  ;; (the inner match), not three. Brave: red.
+  :html "<div><div class=\"sc-r9\"><div class=\"sc-m9\"><div class=\"sc-r9\"><p>text</p></div></div></div></div>"
+  :css "@scope (.sc-r9) { p { color: #ff0000 } } @scope (.sc-m9) { p { color: #0000ff } }"}
+
+ {:id :scope/proximity-with-only-one-matching-root-per-scope
+  :group :scope
+  ;; The control: drop the inner root and `.sc-m10` is the nearer scope.
+  ;; Brave: blue. Without this, the red above is equally consistent with
+  ;; "the FIRST matching ancestor wins" and with source order.
+  :html "<div><div class=\"sc-r10\"><div class=\"sc-m10\"><p>text</p></div></div></div>"
+  :css "@scope (.sc-r10) { p { color: #ff0000 } } @scope (.sc-m10) { p { color: #0000ff } }"}
+
+ {:id :scope/important-does-not-reverse-proximity
+  :group :scope
+  ;; This engine encodes the `!important` layer-order REVERSAL by negating
+  ;; the layer key, and the measurement says proximity must not ride along.
+  ;; Both declarations are `!important` and the nearer one is written
+  ;; FIRST; if importance reversed proximity the later, farther one would
+  ;; win. Brave: red.
+  :html "<div><div class=\"sc-far5\"><div class=\"sc-near5\"><p>text</p></div></div></div>"
+  :css "@scope (.sc-near5) { p { color: #ff0000 !important } } @scope (.sc-far5) { p { color: #0000ff !important } }"}
 ]

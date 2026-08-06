@@ -5099,3 +5099,326 @@
                               "<div><p id=\"a\">Alpha beta</p></div>" "a")]
     (is (= 40 (:style/font-size attrs)))
     (is (nil? (:pseudo/first-letter attrs)))))
+
+;; ---- `@scope`: a range in the tree, and PROXIMITY in the cascade ----
+;;
+;; Every value below was read out of a real headless Brave 151.1.93.129
+;; over CDP on 2026-08-06, ONE PROBE PAGE PER PROBE, before any of the code
+;; under test was written. See `cssom.core`'s own `@scope` block for the
+;; measurement tables these assertions are the executable half of.
+
+(defn- scope-color
+  "The colour `apply-cascade` resolves for `id`, or nil. `color` inherits,
+   and every one of these cases declares it directly on the element it
+   asks about, so a nil here really is 'no declaration reached this
+   element' rather than 'it inherited one'."
+  [css html id]
+  (:style/color (cascaded-style css html id)))
+
+(deftest a-scoped-rule-does-not-reach-outside-its-root
+  ;; Brave: the `.x` inside `#r` is red, the one outside is black.
+  (let [css "@scope (#r) { .x { color: red } }"
+        html "<div><div id=\"r\"><p id=\"in\" class=\"x\">in</p></div><p id=\"out\" class=\"x\">out</p></div>"]
+    (is (= "red" (scope-color css html "in")))
+    (is (nil? (scope-color css html "out"))
+        "the wrapper is a range, not decoration -- before this it was transparent
+         and BOTH were red"))
+  ;; The control that must not move: the identical rule with no wrapper
+  ;; reaches both, on either side of this change.
+  (let [css ".x { color: red }"
+        html "<div><div id=\"r\"><p id=\"in\" class=\"x\">in</p></div><p id=\"out\" class=\"x\">out</p></div>"]
+    (is (= "red" (scope-color css html "in")))
+    (is (= "red" (scope-color css html "out")))))
+
+(deftest a-scoped-selector-carries-an-implicit-scope-descendant-prefix
+  ;; Brave: `@scope (#r) { div { ... } }` leaves the ROOT ITSELF black even
+  ;; though the root is a `div`, and reddens the `div` inside it.
+  (let [css "@scope (#r) { div { color: red } }"
+        html "<div><div id=\"r\"><div id=\"inner\">i</div></div></div>"]
+    (is (nil? (scope-color css html "r")))
+    (is (= "red" (scope-color css html "inner"))))
+  ;; ...and the prefix attaches to the WHOLE complex selector, not to each
+  ;; compound: Brave leaves a `<p>` whose parent IS the root black, because
+  ;; `:scope div > p` needs the `div` to be BELOW the root.
+  (let [css "@scope (#r) { div > p { color: red } }"
+        html "<div><div id=\"r\"><p id=\"direct\">t</p><div><p id=\"deep\">t</p></div></div></div>"]
+    (is (nil? (scope-color css html "direct")))
+    (is (= "red" (scope-color css html "deep")))))
+
+(deftest the-scope-pseudo-class-is-how-a-scoped-rule-reaches-its-root
+  ;; Brave: `:scope` reddens `#r` itself.
+  (let [css "@scope (#r) { :scope { color: red } }"
+        html "<div><div id=\"r\"><p id=\"child\">c</p></div></div>"]
+    (is (= "red" (scope-color css html "r"))))
+  ;; ...and writing it explicitly suppresses the implicit prefix wherever
+  ;; in the compound it appears. Brave reddens the root here too.
+  (let [css "@scope (.r) { div:scope { color: red } }"
+        html "<div><div id=\"r\" class=\"r\"><div id=\"inner\">i</div></div></div>"]
+    (is (= "red" (scope-color css html "r"))))
+  ;; ...including inside `:is()`, where `:scope` never reaches
+  ;; `:selector/pseudos` at all. Brave: red.
+  (let [css "@scope (#r) { :is(:scope) p { color: red } }"
+        html "<div><div id=\"r\"><p id=\"p\">t</p></div></div>"]
+    (is (= "red" (scope-color css html "p")))))
+
+(deftest a-scope-prelude-contributes-no-specificity-and-an-explicit-scope-does
+  ;; The two rows that say the prelude and the pseudo-class cannot share
+  ;; one representation. Brave: BLUE for the first, RED for the second.
+  (let [html "<div><div id=\"r\"><p id=\"p\">t</p></div></div>"]
+    (is (= "blue" (scope-color "@scope (#r) { p { color: red } } div p { color: blue }" html "p"))
+        "`p` inside a scope is still (0,0,1) and loses to `div p`")
+    (is (= "red" (scope-color "@scope (#r) { :scope p { color: red } } div p { color: blue }" html "p"))
+        "`:scope p` is (0,1,1) and beats `div p`")))
+
+(deftest a-scope-limit-cuts-the-limit-element-and-everything-under-it
+  ;; Brave: the `<p>` before `.lim` is red, the one inside it is black, the
+  ;; one after it is red again, and the one outside `#r` is black.
+  (let [css "@scope (#r) to (.lim) { p { color: red } }"
+        html (str "<div><div id=\"r\"><p id=\"before\">b</p>"
+                  "<div class=\"lim\"><p id=\"inlimit\">x</p></div>"
+                  "<p id=\"after\">a</p></div><p id=\"outside\">o</p></div>")]
+    (is (= "red" (scope-color css html "before")))
+    (is (nil? (scope-color css html "inlimit")))
+    (is (= "red" (scope-color css html "after")))
+    (is (nil? (scope-color css html "outside"))))
+  ;; The limit element ITSELF is out. Brave: black.
+  (let [css "@scope (#r) to (.lim) { div { color: red } }"
+        html (str "<div><div id=\"r\"><div id=\"before\">b</div>"
+                  "<div id=\"limitel\" class=\"lim\"><div id=\"inlimit\">x</div></div></div></div>")]
+    (is (= "red" (scope-color css html "before")))
+    (is (nil? (scope-color css html "limitel")))
+    (is (nil? (scope-color css html "inlimit"))))
+  ;; A limit matching the ROOT does not cut the root's own scope. Brave: red.
+  (is (= "red" (scope-color "@scope (.r) to (.r) { p { color: red } }"
+                            "<div><div class=\"r\"><p id=\"p\">t</p></div></div>" "p"))))
+
+(deftest a-scope-limit-selector-is-relative-to-the-scope-root
+  ;; Brave: `to (:scope > .lim)` cuts a `.lim` that is a DIRECT CHILD of
+  ;; `#r` and does not cut one further down.
+  (let [css "@scope (#r) to (:scope > .lim) { div { color: red } }"
+        html (str "<div><div id=\"r\"><div id=\"directlim\" class=\"lim\">"
+                  "<div id=\"underdirect\">u</div></div>"
+                  "<div id=\"mid\"><div id=\"deeplim\" class=\"lim\">"
+                  "<div id=\"underdeep\">d</div></div></div></div></div>")]
+    (is (nil? (scope-color css html "directlim")))
+    (is (nil? (scope-color css html "underdirect")))
+    (is (= "red" (scope-color css html "mid")))
+    (is (= "red" (scope-color css html "deeplim")) "not a direct child, so not a limit")
+    (is (= "red" (scope-color css html "underdeep")))))
+
+(deftest proximity-beats-source-order
+  ;; The measurement that makes this a cascade change rather than a parser
+  ;; one: reversing the source order does NOT reverse the answer. Brave
+  ;; reports BLUE both ways, i.e. the nearer root wins either way.
+  (let [html "<div><div class=\"o1\"><div class=\"o2\"><p id=\"p\">t</p></div></div></div>"]
+    (is (= "blue" (scope-color "@scope (.o1) { p { color: red } } @scope (.o2) { p { color: blue } }"
+                               html "p")))
+    (is (= "blue" (scope-color "@scope (.o2) { p { color: blue } } @scope (.o1) { p { color: red } }"
+                               html "p"))
+        "source order reversed, same answer -- so this is not source order")))
+
+(deftest specificity-beats-proximity
+  ;; Where the seventh key sits, from ABOVE. `.far > .near > p`: the
+  ;; FARTHER scope carrying `div p` (0,0,2) beats the NEARER one carrying
+  ;; `p` (0,0,1). Brave: BLUE, in both source orders.
+  (let [html "<div><div class=\"far\"><div class=\"near\"><p id=\"p\">t</p></div></div></div>"]
+    (is (= "blue" (scope-color "@scope (.near) { p { color: red } } @scope (.far) { div p { color: blue } }"
+                               html "p")))
+    (is (= "blue" (scope-color "@scope (.far) { div p { color: blue } } @scope (.near) { p { color: red } }"
+                               html "p")))
+    ;; The control that makes the pair a measurement: at EQUAL specificity
+    ;; the nearer root wins. Without this, "blue" above would be consistent
+    ;; with proximity not existing at all.
+    (is (= "red" (scope-color "@scope (.near) { p { color: red } } @scope (.far) { p { color: blue } }"
+                              html "p")))))
+
+(deftest layer-order-beats-proximity
+  ;; ...and from above on the other side. The FARTHER scope in the LATER
+  ;; layer beats the NEARER one in the earlier layer. Brave: BLUE.
+  (let [html "<div><div class=\"far\"><div class=\"near\"><p id=\"p\">t</p></div></div></div>"]
+    (is (= "blue" (scope-color (str "@layer la, lb;"
+                                    " @layer lb { @scope (.far) { p { color: blue } } }"
+                                    " @layer la { @scope (.near) { p { color: red } } }")
+                               html "p")))
+    ;; The control: put both scopes in the SAME layer and proximity decides.
+    (is (= "red" (scope-color (str "@layer la, lb;"
+                                   " @layer lb { @scope (.far) { p { color: blue } } }"
+                                   " @layer lb { @scope (.near) { p { color: red } } }")
+                              html "p")))))
+
+(deftest an-unscoped-declaration-is-at-infinite-proximity
+  ;; Not a definition -- a measurement. A scoped rule beats a LATER
+  ;; unscoped one of the same specificity in the same layer. Brave: RED.
+  (let [html "<div><div id=\"r\"><p id=\"p\">t</p></div></div>"]
+    (is (= "red" (scope-color "@scope (#r) { p { color: red } } p { color: blue }" html "p"))
+        "the unscoped rule is written LATER and still loses")
+    (is (= "red" (scope-color "@layer za { @scope (#r) { p { color: red } } p { color: blue } }"
+                              html "p"))
+        "...and inside one explicit layer, so no unlayered-beats-layered rule is doing it")
+    ;; Two controls, both of which pass on either side of this change.
+    (is (= "blue" (scope-color "@scope (#r) { p { color: red } } div p { color: blue }" html "p"))
+        "specificity still decides first")
+    (is (= "blue" (scope-color (str "@layer zc, zd; @layer zc { @scope (#r) { p { color: red } } }"
+                                    " @layer zd { p { color: blue } }")
+                               html "p"))
+        "and so does layer order")))
+
+(deftest important-reverses-layer-order-and-does-not-reverse-proximity
+  ;; `!important` flips the layer key's sign in this engine, and the
+  ;; measurement says proximity must not ride along. Brave reports the
+  ;; NEARER root in both source orders with both declarations `!important`.
+  (let [html "<div><div class=\"far\"><div class=\"near\"><p id=\"p\">t</p></div></div></div>"]
+    (is (= "red" (scope-color (str "@scope (.far) { p { color: blue !important } }"
+                                   " @scope (.near) { p { color: red !important } }")
+                              html "p")))
+    (is (= "red" (scope-color (str "@scope (.near) { p { color: red !important } }"
+                                   " @scope (.far) { p { color: blue !important } }")
+                              html "p")))))
+
+(deftest proximity-counts-hops-from-the-element-not-the-roots-own-depth
+  ;; Brave: blue for the first (`.o2` at 3 hops beats `.o1` at 5) and red
+  ;; for the second (`.o1` at 1 beats `.o2` at 5). The two shapes have the
+  ;; same two rules and opposite answers.
+  (let [css "@scope (.o1) { p { color: red } } @scope (.o2) { p { color: blue } }"]
+    (is (= "blue" (scope-color css
+                               (str "<div><div class=\"o1\"><div><div class=\"o2\"><div><div>"
+                                    "<p id=\"p\">t</p></div></div></div></div></div></div>")
+                               "p")))
+    (is (= "red" (scope-color css
+                              (str "<div><div class=\"o2\"><div><div><div><div class=\"o1\">"
+                                   "<p id=\"p\">t</p></div></div></div></div></div></div>")
+                              "p")))))
+
+(deftest proximity-is-measured-to-the-nearest-matching-root
+  ;; One root SELECTOR, several matching ancestors. Brave: RED, so `.r`
+  ;; counts at 1 hop (the inner one) rather than 3 (the outer one).
+  (let [css "@scope (.r) { p { color: red } } @scope (.m) { p { color: blue } }"]
+    (is (= "red" (scope-color css
+                              (str "<div><div class=\"r\"><div class=\"m\"><div class=\"r\">"
+                                   "<p id=\"p\">t</p></div></div></div></div>")
+                              "p")))
+    ;; The control: remove the inner `.r` and `.m` is nearer. Brave: BLUE.
+    (is (= "blue" (scope-color css
+                               (str "<div><div class=\"r\"><div class=\"m\">"
+                                    "<p id=\"p\">t</p></div></div></div>")
+                               "p")))))
+
+(deftest a-cut-root-does-not-suppress-another-root-of-the-same-scope
+  ;; Every matching ancestor roots its OWN scope. Brave: the `<p>` under
+  ;; the inner `.r` is red, because that scope's range does not contain the
+  ;; `.lim` above it; the `<p>` beside it, still inside the `.lim`, is black.
+  (let [css "@scope (.r) to (.lim) { p { color: red } }"
+        html (str "<div><div class=\"r\"><div class=\"lim\"><div class=\"r\">"
+                  "<p id=\"inner\">t</p></div><p id=\"cut\">t</p></div></div></div>")]
+    (is (= "red" (scope-color css html "inner")))
+    (is (nil? (scope-color css html "cut"))))
+  ;; ...and when the NEARER scope is cut, a farther scope decides. Brave:
+  ;; BLUE, against a control without the `.lim` wrapper that is RED.
+  (let [css (str "@scope (.far) { p { color: blue } }"
+                 " @scope (.near) to (.lim) { p { color: red } }")]
+    (is (= "blue" (scope-color css
+                               (str "<div><div class=\"far\"><div class=\"near\"><div class=\"lim\">"
+                                    "<p id=\"p\">t</p></div></div></div></div>")
+                               "p")))
+    (is (= "red" (scope-color css
+                              (str "<div><div class=\"far\"><div class=\"near\"><div>"
+                                   "<p id=\"p\">t</p></div></div></div></div>")
+                              "p")))))
+
+(deftest a-scoped-rule-keeps-the-layer-and-the-media-condition-it-was-written-in
+  ;; The failure mode this guards is the one round forty-four measured on
+  ;; the `@media`-inside-`@layer` cut: losing a layer tag does not merely
+  ;; forget the layer, it promotes the rule to UNLAYERED, the strongest
+  ;; normal position there is. Brave reports BLUE for both nestings.
+  (let [html "<div><div id=\"r\"><p id=\"p\">t</p></div></div>"]
+    (is (= "blue" (scope-color (str "@layer ka, kb; @layer kb { p { color: blue } }"
+                                    " @layer ka { @scope (#r) { p { color: red } } }")
+                               html "p")))
+    (is (= "blue" (scope-color (str "@layer ma, mb; @layer mb { p { color: blue } }"
+                                    " @scope (#r) { @layer ma { p { color: red } } }")
+                               html "p"))))
+  ;; `@media` in both nestings, matching and not. Brave: red for the
+  ;; matching condition and black for the other.
+  (let [html "<div><div id=\"r\"><p id=\"p\">t</p><span id=\"s\">s</span></div></div>"
+        css (str "@scope (#r) { @media (min-width: 1px) { p { color: red } }"
+                 " @media (min-width: 99999px) { span { color: green } } }")]
+    (is (= "red" (scope-color css html "p")))
+    (is (nil? (scope-color css html "s")))))
+
+(deftest nested-scopes-both-have-to-contain-the-element
+  ;; Brave: red only where BOTH `#a` and `.b` are ancestors.
+  (let [css "@scope (#a) { @scope (.b) { p { color: red } } }"
+        html (str "<div><div id=\"a\"><div class=\"b\"><p id=\"both\">t</p></div>"
+                  "<p id=\"onlya\">t</p></div>"
+                  "<div class=\"b\"><p id=\"onlyb\">t</p></div><p id=\"neither\">t</p></div>")]
+    (is (= "red" (scope-color css html "both")))
+    (is (nil? (scope-color css html "onlya")))
+    (is (nil? (scope-color css html "onlyb")))
+    (is (nil? (scope-color css html "neither")))))
+
+(deftest a-scope-root-and-limit-may-each-be-a-selector-LIST
+  ;; Brave: both roots redden their own subtree; neither limit's subtree
+  ;; survives.
+  (let [css "@scope (.ra, .rb) { p { color: red } }"
+        html (str "<div><div class=\"ra\"><p id=\"a\">t</p></div>"
+                  "<div class=\"rb\"><p id=\"b\">t</p></div><p id=\"none\">t</p></div>")]
+    (is (= "red" (scope-color css html "a")))
+    (is (= "red" (scope-color css html "b")))
+    (is (nil? (scope-color css html "none"))))
+  (let [css "@scope (#r) to (.l1, .l2) { p { color: red } }"
+        html (str "<div><div id=\"r\"><p id=\"free\">t</p>"
+                  "<div class=\"l1\"><p id=\"in1\">t</p></div>"
+                  "<div class=\"l2\"><p id=\"in2\">t</p></div></div></div>")]
+    (is (= "red" (scope-color css html "free")))
+    (is (nil? (scope-color css html "in1")))
+    (is (nil? (scope-color css html "in2")))))
+
+(deftest a-scope-root-may-be-a-complex-selector
+  ;; Brave: only the `.r` that is a direct child of a `div` roots a scope.
+  (let [css "@scope (div > .r) { p { color: red } }"
+        html (str "<div><div><div class=\"r\"><p id=\"underdirect\">t</p></div></div>"
+                  "<section><div class=\"r\"><p id=\"undersection\">t</p></div></section></div>")]
+    (is (= "red" (scope-color css html "underdirect")))
+    (is (nil? (scope-color css html "undersection")))))
+
+(deftest a-scope-with-no-prelude-applies-to-nothing-here
+  ;; The scope cut, with the browser numbers a future fix will need. A
+  ;; prelude-less `@scope` scopes to the element that OWNS the stylesheet,
+  ;; and `parse-rules` is handed CSS text with no owner attached. Measured
+  ;; in Brave 151 on 2026-08-06:
+  ;;
+  ;;   <div id=w><style>@scope { p { color: red } }</style><p>in</p></div>
+  ;;   <p>out</p>
+  ;;                       in: RED here: black    out: black here: black
+  ;;
+  ;;   the same @scope in a <head> <style>:  black    here: black
+  ;;
+  ;; So this fails CLOSED -- one of the two shapes is already right, and
+  ;; the other errs towards applying too little rather than too much.
+  ;; Before this round the wrapper was transparent and BOTH were red.
+  (let [html "<div><div id=\"w\"><p id=\"in\">in</p></div><p id=\"out\">out</p></div>"]
+    (is (nil? (scope-color "@scope { p { color: red } }" html "in")))
+    (is (nil? (scope-color "@scope { p { color: red } }" html "out")))
+    (is (nil? (scope-color "@scope to (.lim) { p { color: red } }" html "in"))))
+  ;; The control beside it: give the same `@scope` a prelude and it works.
+  (is (= "red" (scope-color "@scope (#w) { p { color: red } }"
+                            "<div><div id=\"w\"><p id=\"in\">in</p></div><p id=\"out\">out</p></div>"
+                            "in"))))
+
+(deftest scope-outside-any-scope-block-is-the-document-root
+  ;; Measured in Brave 151 on 2026-08-06: `:scope { outline-color: red }`
+  ;; in a plain document lands the outline on `<html>` and on nothing else,
+  ;; and `:scope p { color: red }` reddens a `<p>`. Before this round
+  ;; `matches-pseudo?` returned false for `:scope`, so neither matched.
+  (is (= "red" (scope-color ":scope p { color: red }" "<div><p id=\"p\">t</p></div>" "p")))
+  (is (nil? (scope-color ":scope p { color: red }" "<div><p id=\"p\">t</p></div>" "nope"))))
+
+(deftest a-stylesheet-with-no-scope-in-it-parses-exactly-as-before
+  ;; The guard that keeps this round off the other 734 corpus cases:
+  ;; `:rule/scope` is nil and the selector is untouched, so `specificity`,
+  ;; `pseudo-element-of` and `matches?` all see the value they always saw.
+  (let [rules (css/parse-rules "div p { color: red } @media (min-width: 1px) { .x { color: blue } }")]
+    (is (every? #(nil? (:rule/scope %)) rules))
+    (is (= 2 (count (:selector/parts (first (:rule/selectors (first rules))))))
+        "no implicit `:scope` part was prepended")
+    (is (= [0 0 2] (css/specificity (first (:rule/selectors (first rules))))))))
