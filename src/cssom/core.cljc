@@ -2001,7 +2001,27 @@
    value (see `parse-declarations` for the simpler bare-value form).
    `important?` is true iff that declaration's raw value ended in a
    trailing `!important` (case-insensitive), which is stripped from
-   `:value` either way."
+   `:value` either way.
+
+   `:index` is the declaration's 0-based position in the block AFTER
+   shorthand expansion, and it exists because the returned map cannot
+   carry that order itself. A Clojure map literal is an array-map up to 8
+   entries and a hash-map beyond, so a block of nine or more declarations
+   -- which one `border` shorthand plus one `margin` already reaches --
+   iterates in an order that has nothing to do with the source. Everything
+   downstream of this used to depend on that accident: `resolve-style-for`
+   sorts rule-based entries by :rule/order, which is the RULE's position in
+   the sheet and identical for every declaration in one block, so the tie
+   was broken by the map's own iteration order. CSS's rule is that the
+   later declaration wins, and this is what lets that be said. It is the
+   `all` shorthand that made it load-bearing rather than merely tidy --
+   `width: 120px; all: initial` and `all: initial; width: 120px` are two
+   different answers (measured in Brave 151, 2026-08-06: an auto-width
+   inline box and a 120px one) and both are one block.
+
+   When a property is declared twice in one block the later `:index` wins,
+   because `into {}` keeps the last pair -- which is the same answer the
+   `:value` already gave."
   [text]
   (->> (str/split (or text "") #";")
        (mapcat (fn [decl]
@@ -2085,6 +2105,7 @@
                              [[(keyword k) {:value parsed :important? important?}]]
                              []))))
                      []))))
+       (map-indexed (fn [idx [property meta]] [property (assoc meta :index idx)]))
        (into {})))
 
 (defn parse-declarations
@@ -2133,10 +2154,18 @@
   #":([A-Za-z_][-A-Za-z0-9_]*)")
 
 (def pseudo-element-pattern
-  "Matches `::before`/`::after` and the legacy single-colon `:before`/`:after`
-   spelling. Deliberately narrower than a generic `::foo` pattern -- this
-   subset only supports before/after generated content (see namespace doc)."
-  #"(?i)::?(before|after)\b")
+  "Matches `::before`/`::after`/`::first-letter` and their legacy
+   single-colon spellings. Deliberately narrower than a generic `::foo`
+   pattern -- these are the three this engine resolves. `::first-line`,
+   `::marker`, `::selection` and the rest are deliberately absent, so a
+   rule naming one still resolves to a nil pseudo-element and therefore
+   never applies to the real element by accident.
+
+   `::first-letter` is not generated content like the other two -- it
+   restyles a slice of the element's OWN first text (see
+   `cssom.layout/with-first-letter`) -- but it reaches the cascade the same
+   way, as a pseudo-element the resolution is asked for separately."
+  #"(?i)::?(before|after|first-letter)\b")
 
 (def functional-pseudo-class-pattern
   "Matches a single `:not(...)` / `:is(...)` / `:where(...)` / `:has(...)`
@@ -4615,10 +4644,37 @@
      four longhands (see `expand-box-side-shorthand`). They are not CSS
      properties, and absence is exactly what they should say when no
      uniform value survives -- their readers already fall back.
+   - `quotes` and `list-style-image`. Both inherit, so both would qualify
+     under the rule below -- but nothing reads either as a style property.
+     `quotes` is hardcoded at its `auto` behaviour (see `quote-marks`, and
+     Brave reports `auto` for `quotes: initial`), and `list-style-image`'s
+     initial value is `none`, which is what its absence already means.
+   - `font-variant` (`normal`) and `font-stretch` (`100%`), measured in
+     Brave 151 on 2026-08-06 alongside the rows that ARE here. Neither has
+     a reader anywhere in this repo, so an entry would only add a
+     `:style/*` attr nobody consumes.
    - Anything else. A property with no entry drops, which is CSS's initial
      value for every non-inherited property that the UA sheet does not
      declare. Adding an entry is only ever needed to beat the UA sheet or
-     to stop an inherited property inheriting."
+     to stop an inherited property inheriting.
+
+   The last seven rows below are the second reason, and they arrived with
+   the `all` shorthand: `all: initial` on an element inside a
+   `writing-mode: vertical-rl` parent reports `horizontal-tb` in Brave 151
+   (2026-08-06), which only an entry here can say -- dropping the
+   declaration leaves an inherited property inheriting. Measured on the one
+   page, each property set to a non-initial value on the parent and to
+   `initial` on the child, with an `unset` sibling beside it that reports
+   the parent's value in every row and so separates the two keywords:
+
+   | property              | parent        | `initial` | `unset`     |
+   |-----------------------|---------------|-----------|-------------|
+   | `writing-mode`        | `vertical-rl` | `horizontal-tb` | `vertical-rl` |
+   | `text-orientation`    | `upright`     | `mixed`   | `upright`   |
+   | `list-style-position` | `inside`      | `outside` | `inside`    |
+   | `hyphens`             | `auto`        | `manual`  | `auto`      |
+   | `orphans`             | `5`           | `2`       | `5`         |
+   | `widows`              | `5`           | `2`       | `5`         |"
   {:color "#000000"
    :font-weight "normal"
    :font-style "normal"
@@ -4644,7 +4700,13 @@
    :cursor "auto"
    :text-shadow "none"
    :margin-top 0 :margin-right 0 :margin-bottom 0 :margin-left 0
-   :padding-top 0 :padding-right 0 :padding-bottom 0 :padding-left 0})
+   :padding-top 0 :padding-right 0 :padding-bottom 0 :padding-left 0
+   :writing-mode "horizontal-tb"
+   :text-orientation "mixed"
+   :list-style-position "outside"
+   :hyphens "manual"
+   :orphans 2
+   :widows 2})
 
 (def ^:private drop-declaration
   "The sentinel `resolve-css-wide-keyword` returns for 'this property has
@@ -4709,6 +4771,196 @@
                                           nil)
                 value)
               (resolve-css-wide-keyword document node property :unset nil))))
+
+;; ---- `all`, the shorthand for every property ----
+
+(defn- custom-property?
+  "A `--name` custom property rather than a real CSS property. Defined here
+   rather than beside its var()-substitution callers further down because
+   `all-shorthand-universe` needs it: custom properties are the one part of
+   `all`'s exemption list that is not a fixed set of names."
+  [k]
+  (str/starts-with? (name k) "--"))
+
+(def ^:private all-shorthand-exempt
+  "The properties `all` does NOT reach. Measured in Brave 151 on
+   2026-08-06, on a `<div>` inside a parent declaring
+   `direction: rtl; unicode-bidi: bidi-override; --mycustom: 42px`:
+
+   | property       | under `all: initial` | a sibling with no `all` |
+   |----------------|----------------------|-------------------------|
+   | `direction`    | `rtl`                | `rtl`                   |
+   | `unicode-bidi` | `isolate`            | `isolate`               |
+   | `--mycustom`   | `42px`               | `42px`                  |
+
+   i.e. all three survive an `all: initial` that reset the other 44
+   properties on the same element. `direction` and `unicode-bidi` are named
+   here; custom properties are excluded by `custom-property?` at the point
+   of use, because they are not a fixed set.
+
+   `writing-mode` is deliberately NOT here, and that was measured too
+   rather than reasoned from the pair above: inside a `writing-mode:
+   vertical-rl` parent, `all: initial` reports `horizontal-tb` while
+   `all: unset` and `all: revert` both report `vertical-rl`. `all` reaches
+   it like any other property, and the flow this element hands its children
+   is therefore resolved AFTER the expansion below."
+  #{:direction :unicode-bidi})
+
+(def ^:private all-initial-font-size
+  "The pixel size `font-size` computes to under `all: initial` -- 16, where
+   `initial-values` deliberately holds no `font-size` entry at all.
+
+   The two are not in conflict; they are two different questions.
+   `font-size: initial` is `medium`, and `medium` is keyed on the DEFAULT
+   SIZE OF THE FAMILY IN USE (see `resolve-font-size`'s measured table:
+   13 on a monospace page, 16 on a proportional one), so a cascade with no
+   font-family model cannot answer it -- and does not. `all: initial`
+   resets `font-family` in the same operation, so the family is known to be
+   the initial one and `medium` has exactly one value.
+
+   Measured in Brave 151 on 2026-08-06, all four on the same
+   `font-family: monospace; font-size: 14px` page:
+
+   | declaration                              | computed font-size |
+   |------------------------------------------|--------------------|
+   | `font-size: initial`                     | 13px               |
+   | `font-size: initial; font-family: initial` | 16px             |
+   | `all: initial`                           | 16px               |
+   | `all: initial` under a 30px parent       | 16px               |
+
+   The last row is the one that says this is an absolute answer rather than
+   an inherited one. `all: unset` and `all: revert` are NOT this number --
+   `font-size` inherits, so both report the parent's 14px and 30px
+   respectively, which the ordinary keyword resolution already gives.
+
+   What is still missing is `font-family` itself: this cascade has no
+   family model, so `all: initial` cannot write the initial family and the
+   element keeps whatever family it was drawn in. That is the whole of what
+   `:cascade/all-initial-resets-every-property` still diverges by, and it
+   is NOT the font size -- both sides say 16. It is the two things the
+   FAMILY decides, measured in Brave 151 on 2026-08-06 on that same page:
+
+   | quantity                          | initial family | monospace |
+   |-----------------------------------|----------------|-----------|
+   | `line-height: normal` at 16px     | **24**         | 17        |
+   | advance of `a` at 16px            | 9.2            | 9.6 (est) |
+
+   so the case reports an 800x21 line box against Brave's 800x24, and the
+   letter at y=1.3 against y=4. The width is inside the geometry axis's 2px
+   tolerance; the line box is not. Closing it needs a font-family model in
+   the cascade, which is the same missing piece `resolve-font-size`'s
+   absolute-keyword table has been waiting on."
+  16)
+
+(defn- all-shorthand-universe
+  "The properties one `all: <css-wide-keyword>` declaration expands into,
+   for `node` in `document`, given the cascade entries `sorted` already
+   holds for this element.
+
+   `all` is the shorthand for every longhand there is, and a shorthand is
+   expanded into its longhands -- so the only question is which longhands
+   are worth writing. The answer is different per keyword, and each part is
+   here for a reason rather than for completeness:
+
+   - **Everything anyone declared for this element** (`declared`). This is
+     what makes `all` beat the author's own earlier `width: 120px` and the
+     UA sheet's `p { margin: 1em 0 }`; without it `all` would only ever
+     touch properties it happened to know the name of. `sorted` already
+     holds the UA, author and inline entries together, which is exactly the
+     set of properties `all` has something to override.
+
+   - **`initial-values`**, because those are precisely the properties whose
+     initial value is NOT the same as absence in this engine's
+     representation. A property outside that map computes its initial value
+     by having no entry at all, so expanding into it would write nothing.
+
+   - **`inherited-properties`**, because for those, absence means *inherit*
+     -- so `all: initial` has to be present to stop the inheritance even
+     when nobody declared the property anywhere.
+
+   - **The parent's own resolved properties**, and ONLY for `inherit`.
+     `all: inherit` copies the parent's whole computed style, including
+     properties this element has never heard of: measured in Brave 151,
+     2026-08-06, a `<div>` with `all: inherit` inside a
+     `color: purple; width: 300px` parent reports width 300px and purple.
+     The other three keywords do not need this -- they resolve from this
+     element's own cascade -- and reading the parent for them would be a
+     larger working set for no answer.
+
+   For `initial` and `unset` that list is provably complete: a property
+   outside all three sets is one that nothing declared and whose initial
+   value is absence, which is already what it computes. For `revert` it is
+   complete for a different reason -- `revert` rolls back to the UA origin,
+   and every UA declaration for this element is in `sorted`."
+  [document node sorted keyword-kind]
+  (cond-> (into (into #{} (map :property) sorted)
+                (concat (keys initial-values) inherited-properties))
+    (= :inherit keyword-kind)
+    (into (when document
+            (when-let [parent-id (parent-node-id document (:node/id node))]
+              (keep (fn [k]
+                      (when (= "style" (namespace k)) (keyword (name k))))
+                    (keys (get-in document [:nodes parent-id :attrs]))))))
+
+    :always
+    (->> (remove #(or (= :all %)
+                      (contains? all-shorthand-exempt %)
+                      (custom-property? %)))
+         (into #{}))))
+
+(defn- expand-all-shorthand
+  "Replaces every `all` entry in the already-sorted cascade entry list with
+   one clone per property in `all-shorthand-universe`, each carrying the
+   `all` entry's own origin, specificity, layer, importance and position.
+
+   Expanding HERE rather than in `parse-declarations-with-importance`, where
+   every other shorthand is expanded, is the whole design: `all`'s longhand
+   set is not a property of the declaration, it is a property of the
+   element's finished cascade (see `all-shorthand-universe`), and a
+   declaration parser sees one block. Expanding into the sorted list gets
+   the cascade semantics for free rather than by restating them -- each
+   clone sorts exactly where `all` sorted, so `group-by` hands the winner
+   of each property the same entry it would have handed a hand-written
+   longhand in `all`'s place. All four of these were measured in Brave 151
+   on 2026-08-06 and all four fall out of that with no code of their own:
+
+   | shape                                                      | width |
+   |------------------------------------------------------------|-------|
+   | `#a { width: 120px; all: initial }`                        | auto  |
+   | `#a { all: initial; width: 120px }`                        | 120px |
+   | `#a { all: initial } #a { width: 120px }`                  | 120px |
+   | `div#a { width: 120px } #a { all: initial }`                | 120px |
+   | `#a { all: initial !important } #a { width: 120px }`       | auto  |
+   | `#a { all: initial } #a { width: 120px !important }`       | 120px |
+
+   The fourth is the one that would have been wrong under any 'reset then
+   re-apply' reading: the higher-specificity `width` wins even though it is
+   written first, because `all` is a normal declaration and not a phase.
+
+   A value that is not a CSS-wide keyword makes the whole declaration
+   invalid and it is dropped (`#s { all: 5px }` leaves an 800x20 block in
+   Brave), which is why the non-keyword branch emits nothing rather than
+   passing the entry through -- letting it through would write
+   `:style/all` onto the element for nobody to read."
+  [document node sorted]
+  (if-not (some #(= :all (:property %)) sorted)
+    sorted
+    (vec
+     (mapcat
+      (fn [entry]
+        (if-not (= :all (:property entry))
+          [entry]
+          (when-let [kind (css-wide-keyword (:value entry))]
+            (for [property (all-shorthand-universe document node sorted kind)]
+              (assoc entry
+                     :property property
+                     ;; `medium` is answerable here and nowhere else,
+                     ;; because `all` resets the family too -- see
+                     ;; `all-initial-font-size`.
+                     :value (if (and (= :initial kind) (= :font-size property))
+                              all-initial-font-size
+                              (:value entry)))))))
+      sorted))))
 
 ;; ---- the user-agent stylesheet ----
 ;;
@@ -5914,7 +6166,7 @@
                                     (matches? node selector))
                             :when (container-rule-matches? rule (:node/id node) container-ctx)
                             [property value] declarations]
-                        (let [{:keys [important?]} (get declaration-meta property)
+                        (let [{:keys [important? index]} (get declaration-meta property)
                               important? (boolean important?)
                               raw-layer (if (nil? layer) (inc max-layer-priority) (or layer-priority 0))]
                           {:property property
@@ -5924,7 +6176,12 @@
                            :specificity (specificity selector)
                            :inline? false
                            :layer (if important? (- raw-layer) raw-layer)
-                           :order order}))
+                           :order order
+                           ;; Position WITHIN the block, which :order cannot
+                           ;; say -- every declaration of one rule shares a
+                           ;; :rule/order. See
+                           ;; `parse-declarations-with-importance`.
+                           :decl-index (or index 0)}))
          ;; The USER-AGENT origin, at the bottom of the cascade: every
          ;; author declaration of the same importance beats it, which is
          ;; the whole of what "UA stylesheet" means and is why :origin sits
@@ -5967,7 +6224,13 @@
                               :specificity (specificity selector)
                               :inline? false
                               :layer 0
-                              :order (:rule/order rule)})
+                              :order (:rule/order rule)
+                              ;; This sheet's rules are small enough that
+                              ;; their own within-block order has never
+                              ;; mattered, and `ua-rules` holds bare
+                              ;; `:rule/declarations` maps with no
+                              ;; `:index` on them to read.
+                              :decl-index 0})
          node-inline-importance (inline-style-importance node)
          inline-declarations (when (nil? pseudo-element)
                                 (map-indexed (fn [idx [property value]]
@@ -5978,10 +6241,30 @@
                                                 :specificity [1 0 0]
                                                 :inline? true
                                                 :layer max-layer-priority
-                                                :order idx})
+                                                :order idx
+                                                ;; An inline block is one
+                                                ;; "rule", so :order is
+                                                ;; already per-declaration
+                                                ;; here -- but it comes
+                                                ;; from iterating a MAP
+                                                ;; (`inline-style`), so
+                                                ;; past eight declarations
+                                                ;; it is arbitrary. The
+                                                ;; fix belongs upstream in
+                                                ;; htmldom, which is what
+                                                ;; parses the attribute.
+                                                :decl-index idx})
                                              (inline-style node)))
-         sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order)
+         sorted (sort-by (juxt :important? :origin :inline? :layer :specificity :order :decl-index)
                          (concat ua-declarations declarations inline-declarations))
+         ;; `all` expands HERE -- above the flow resolution, because it
+         ;; reaches `writing-mode` (see `all-shorthand-exempt`), and above
+         ;; the logical->physical rename, so a clone written for
+         ;; `margin-inline-start` is renamed alongside the declaration it
+         ;; beats. Measured in Brave 151, 2026-08-06:
+         ;; `p { margin-inline-start: 40px; all: initial }` reports
+         ;; margin-left 0 and the reverse order reports 40.
+         sorted (expand-all-shorthand document node sorted)
          ;; ---- logical -> physical ----
          ;; This element's OWN flow, resolved from this same cascade: the
          ;; last-sorted `writing-mode`/`direction` declaration is that
@@ -6068,10 +6351,12 @@
   ([document rules node]
    (let [base (resolve-style-for document rules node nil)
          before (resolve-style-for document rules node :before)
-         after (resolve-style-for document rules node :after)]
+         after (resolve-style-for document rules node :after)
+         first-letter (resolve-style-for document rules node :first-letter)]
      (cond-> base
        (seq before) (assoc :pseudo/before before)
-       (seq after) (assoc :pseudo/after after)))))
+       (seq after) (assoc :pseudo/after after)
+       (seq first-letter) (assoc :pseudo/first-letter first-letter)))))
 
 (defn pseudo-element-style-for
   "Cascade-resolved style map for `node`'s `pseudo-element` (:before or
@@ -6116,9 +6401,10 @@
   ([document rules node pseudo-element]
    (resolve-style-for document rules node pseudo-element)))
 
-(defn- custom-property?
-  [k]
-  (str/starts-with? (name k) "--"))
+;; `custom-property?` used to be defined here, beside its var()-substitution
+;; callers. It moved up next to `all-shorthand-exempt`, which needs it to
+;; exclude custom properties from the `all` shorthand's reach and is defined
+;; earlier in the file.
 
 ;; `var-ref-pattern` (the `var(--name[, fallback])` regex the three
 ;; functions below read) is defined much higher up, next to the shorthand
@@ -6288,9 +6574,16 @@
         ;; declared the direction itself.
         before (resolve-style-for document rules node :before node-counters container-ctx node-flow)
         after (resolve-style-for document rules node :after node-counters container-ctx node-flow)
+        ;; `::first-letter` takes no counters and generates no content --
+        ;; it restyles text the element already has -- but it resolves
+        ;; through the identical path, and in this element's own flow for
+        ;; the same reason the other two do.
+        first-letter (resolve-style-for document rules node :first-letter
+                                        node-counters container-ctx node-flow)
         style (cond-> base
                 (seq before) (assoc :pseudo/before before)
-                (seq after) (assoc :pseudo/after after))]
+                (seq after) (assoc :pseudo/after after)
+                (seq first-letter) (assoc :pseudo/first-letter first-letter))]
     [style node-counters node-flow])))
 
 (def ^:private current-color-keys
@@ -6487,7 +6780,7 @@
   (let [node (get-in document [:nodes node-id])
         [style node-counters node-flow]
         (style-with-counters document rules node inherited-counters container-ctx parent-flow)
-        pseudo-keys #{:pseudo/before :pseudo/after}
+        pseudo-keys #{:pseudo/before :pseudo/after :pseudo/first-letter}
         regular (into {} (remove (fn [[k _]] (contains? pseudo-keys k))) style)
         pseudo (select-keys style pseudo-keys)
         custom (into {} (filter (fn [[k _]] (custom-property? k))) regular)
