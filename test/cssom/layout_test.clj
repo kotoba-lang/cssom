@@ -13212,6 +13212,69 @@
              "pre-existing divergence (a file input's height does not take its own padding "
              "here) that this round did not touch."))))
 
+(deftest a-bounded-number-input-is-as-wide-as-the-longest-number-it-can-hold
+  ;; Brave 151, 2026-08-06, in the conformance corpus's own frame: an
+  ;; `<input type="number">` with BOTH a `min` and a `max` is
+  ;; `7n + 28` wide, where `n` is the character count of the longest of its
+  ;; bounds and the 28 is the box (8) plus one glyph's slack (5) plus the
+  ;; spin buttons (15). See `number-input-preferred-chars` for the eighteen
+  ;; shapes behind `n`, and the browser's own number is beside each
+  ;; assertion.
+  ;;
+  ;; Asserted RELATIVE to `<input type=text size=n>` rather than as
+  ;; absolute pixels, and that is not a hedge: the browser's 7px-per-
+  ;; character comes from the oracle-measured advance table the conformance
+  ;; frame carries, and a unit test's stub `measure-text` is a different
+  ;; number (157 where Brave says 153). The RULE is "the bounds' character
+  ;; count instead of `size`, plus the spin buttons", and that is exactly
+  ;; what a comparison against the same count of text-field characters
+  ;; states -- in any font. The absolute 42 is pinned by the two `:in-range`
+  ;; corpus cases against the real oracle.
+  (let [control-theme {:padding 0 :gap 0
+                       :measure-text (fn [text font-size _w _s _f]
+                                       (* (/ (or font-size 13.3333) 13.3333)
+                                          7.4136 (count (str text))))}
+        w (fn [html]
+            (let [doc (-> (html/parse-into-document
+                           (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">"
+                                "<div style=\"width:400px\">" html "</div></div>"))
+                          (css/apply-cascade (css/parse-rules "")))
+                  [_ doc] (dom/consume-ops doc)]
+              (->> (layout/draw-ops (dom/tree doc) {:width 800 :theme control-theme})
+                   (filter #(and (= :node (:draw/op %)) (= :input (:tag %))))
+                   first :w tm-n)))
+        ;; n characters of a text field, which is the term the bounds
+        ;; replace. `+ 15` is number-input-spin-width.
+        chars (fn [n] (+ 15 (w (str "<input type=\"text\" size=\"" n "\">"))))]
+    (is (= (chars 2) (w "<input type=\"number\" min=\"1\" max=\"10\">"))
+        "two characters -- Brave 42, and this is the pair the two :in-range corpus cases carry")
+    (is (= (chars 1) (w "<input type=\"number\" min=\"1\" max=\"9\">")) "Brave 35")
+    (is (= (chars 4) (w "<input type=\"number\" min=\"-999\" max=\"999\">"))
+        "the sign is a character: `-999` is four -- Brave 56")
+    (is (= (chars 13) (w "<input type=\"number\" min=\"1\" max=\"1000000000000\">")) "Brave 119")
+    (is (= (chars 3) (w "<input type=\"number\" min=\"0.5\" max=\"1.5\">"))
+        "the fraction comes from the BOUNDS when there is no step -- Brave 49")
+    (is (= (chars 5) (w "<input type=\"number\" min=\"1\" max=\"10\" step=\"0.01\">"))
+        "...and from the step when it is wider: `10.00` is five -- Brave 63")
+    (is (= (chars 5) (w "<input type=\"number\" min=\"0\" max=\"100\" step=\"1.0\">"))
+        "a step written `1.0` widens it too, which is why this reads the LITERAL -- Brave 63")
+    (is (= (chars 7) (w "<input type=\"number\" min=\"-100.25\" max=\"0\">")) "Brave 77")
+    ;; The controls, every one of them measured at 153 in Brave: a number
+    ;; field that cannot size itself from its bounds is exactly a text
+    ;; field, and `size` never reaches it.
+    (is (= (w "<input type=\"text\">") (w "<input type=\"number\">"))
+        "CONTROL: no bounds, so no spin decoration either -- Brave 153 for both")
+    (is (= (w "<input type=\"text\">") (w "<input type=\"number\" max=\"100\">"))
+        "CONTROL: one bound is not enough -- Brave 153")
+    (is (= (w "<input type=\"text\">") (w "<input type=\"number\" min=\"1\" max=\"10\" step=\"any\">"))
+        "CONTROL: `step=any` opts out entirely -- Brave 153")
+    (is (= (chars 2) (w "<input type=\"number\" min=\"1\" max=\"10\" size=\"2\">"))
+        "CONTROL: `size` does not apply to a number input -- Brave 42, not a text field's 27")
+    (is (= (w "<input type=\"text\">") (w "<input type=\"number\" min=\" 1 \" max=\"10\">"))
+        "CONTROL: a bound with whitespace does not parse -- Brave 153")
+    (is (= (w "<input type=\"text\">") (w "<input type=\"number\" min=\"0\" max=\"+50\">"))
+        "CONTROL: nor does a leading `+` -- Brave 153, and it agrees for the same reason")))
+
 ;; ---- `visibility: collapse` on a table COLUMN ----------------------------
 ;;
 ;; The column half of the property, measured in Brave 151 over CDP on
