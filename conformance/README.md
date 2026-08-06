@@ -815,7 +815,7 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
-### Round forty-seven: the at-rules stop being decoration
+### Round forty-eight: the at-rules stop being decoration
 
 Round forty-four put seventy-one at-rule cases into the corpus and found
 eleven divergences it did not fix, in three clusters: `@supports` was not
@@ -831,16 +831,25 @@ forty-six's published numbers to the value, which is what says the two
 right-hand columns are comparable. The third is this round's engine on the
 same 711 cases; the fourth adds this round's nine new cases.
 
-| axis | 711, base engine | 711, after | 720, after |
-|---|---|---|---|
-| line structure | 679/683 | **679/683** | 688/692 |
-| geometry (boxes) | 2315/2331 | **2316/2331** | 2334/2349 |
-| geometry (clean cases) | 697/711 | **698/711** | 707/720 |
-| paint order | 17713/17762 | **17713/17762** | 17938/17987 |
-| paint order (clean cases) | 699/711 | **699/711** | 708/720 |
-| computed style (values) | 32713/32745 | **32724/32745** | 32976/32997 |
-| computed style (cases clean) | 688/711 | **699/711** | 708/720 |
-| cascade-attributed residual | 31 | **20** | 20 |
+| axis | 711, base engine | 711, after | 720, after | 720, merged |
+|---|---|---|---|---|
+| line structure | 679/683 | **679/683** | 688/692 | 689/692 |
+| geometry (boxes) | 2315/2331 | **2316/2331** | 2334/2349 | 2338/2349 |
+| geometry (clean cases) | 697/711 | **698/711** | 707/720 | 710/720 |
+| paint order | 17713/17762 | **17713/17762** | 17938/17987 | 17968/17987 |
+| paint order (clean cases) | 699/711 | **699/711** | 708/720 | 709/720 |
+| computed style (values) | 32713/32745 | **32724/32745** | 32976/32997 | 32983/32997 |
+| computed style (cases clean) | 688/711 | **699/711** | 708/720 | 711/720 |
+| cascade-attributed residual | 31 | **20** | 20 | 13 |
+
+The fourth column is after merging round forty-seven (`all` and
+`::first-letter`), and the gain in it is theirs, not this round's:
+`--dump-ops` diffed across the merge changes exactly four cases, and all
+four are `:cascade/all-*` and `:selector/first-letter-changes-the-line-box`.
+The two rounds touch the same three declaration-entry constructors in
+`resolve-style-and-flow` and nothing else — `all`'s `:decl-index` and this
+round's `:layer-key` answer different questions and neither reads the
+other.
 
 `--dump-ops` was diffed corpus-wide between the first two columns.
 **Exactly one case's box list changed, in one direction, and it is the
