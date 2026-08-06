@@ -2625,6 +2625,14 @@
       (-> st
           (permute-side-family perm "margin-" "")
           (permute-side-family perm "margin/raw-" "")
+          ;; the bare `:top`/`:right`/`:bottom`/`:left` POSITION insets --
+          ;; an empty prefix and an empty suffix is that family's name.
+          ;; They belong here rather than in rotate-box-style because they
+          ;; are offsets from the CONTAINING BLOCK's edges: measured in
+          ;; Brave, `position: absolute; top: 5px; left: 9px` inside an
+          ;; 80x100 `vertical-rl` box lands at physical (9, 5), which in
+          ;; that box's canonical frame is `left: 5` and `bottom: 9` --
+          ;; exactly this permutation.
           (permute-side-family perm "" "")))))
 
 (defn- rotate-node-style

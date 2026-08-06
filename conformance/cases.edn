@@ -4130,6 +4130,23 @@
   ;; 20x70 box `:text/writing-mode-vertical-rl` already measures.
   :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; text-orientation: sideways\">alpha beta</div></div>"}
 
+ {:id :writing-mode/a-relative-offset-is-read-in-the-parents-frame
+  :group :writing-mode
+  ;; `position: relative`'s `left`/`top` are physical, and a vertical box's
+  ;; own offsets are read by the horizontal parent that places it: Brave
+  ;; moves it to (7, 11), the numbers as written.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; position: relative; left: 7px; top: 11px\">alpha</div></div>"}
+
+ {:id :writing-mode/an-absolute-inset-is-read-in-the-containing-blocks-frame
+  :group :writing-mode
+  ;; ...and one level in, the same two properties are read in the VERTICAL
+  ;; containing block's frame. They are still physical -- Brave lands the
+  ;; child at (9, 5) -- which in that box's own canonical frame is
+  ;; `left: 5` and `bottom: 9`, i.e. exactly the side permutation the
+  ;; margins take. Same pair of properties as the case above, opposite
+  ;; frame, and the mode that decides is the containing block's both times.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; width: 80px; height: 100px; position: relative\"><div style=\"position: absolute; top: 5px; left: 9px; width: 10px; height: 10px\"></div></div></div>"}
+
  {:id :writing-mode/aspect-ratio-is-not-rotated
   :group :writing-mode
   ;; KNOWN GAP, recorded rather than chased. `aspect-ratio`'s two terms are
