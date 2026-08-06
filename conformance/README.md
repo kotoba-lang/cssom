@@ -832,41 +832,43 @@ that round left measured and unimplemented.
 
 Three columns, because the corpus growing and the engine changing are two
 different things and a single before/after would let one pay for the
-other. This round has a third confound the earlier ones did not:
-**another round (`all` / `::first-letter`, commit `3770934`) landed on
-`main` while this one was in flight**, so the middle column is `main` AS
-MERGED — the engine including that round, on this round's finished
-726-case corpus. Column one to column two therefore mixes coverage with
-somebody else's work, and **only column two to column three is
-attributable to this round**. Everything below was re-measured after the
-merge; the pre-merge numbers are not reported.
+other. This round has a confound the earlier ones did not: **two other
+rounds landed on `main` while it was in flight** — forty-seven (`all` /
+`::first-letter`) and forty-eight (the at-rules) — so the middle column is
+`main` AS MERGED (`c17735c`), the engine including both of them, on this
+round's finished 735-case corpus. Column one to column two therefore
+mixes coverage with two other agents' work, and **only column two to
+column three is attributable to this round**. Everything below was
+re-measured after the second merge; no pre-merge number is reported.
 
-| axis | 711 cases, `aa18bab` | 726, `main` (`3770934`) | 726, after |
+| axis | 711 cases, `aa18bab` | 735, `main` (`c17735c`) | 735, after |
 |---|---|---|---|
-| line structure | 679/683 | 695/698 | **695/698** |
-| geometry (boxes) | 2315/2331 | 2349/2366 | **2357/2366** |
-| geometry (clean cases) | 697/711 | 710/726 | **718/726** |
-| paint order | 17713/17762 | 18103/18122 | **18103/18122** |
-| paint order (clean cases) | 699/711 | 715/726 | **715/726** |
-| computed style (values) | 32713/32745 | 33202/33235 | **33218/33235** |
-| computed style (cases clean) | 688/711 | 702/726 | **711/726** |
-| cascade-attributed residual | 31 | 32 | **16** |
+| line structure | 679/683 | 704/707 | **704/707** |
+| geometry (boxes) | 2315/2331 | 2368/2384 | **2376/2384** |
+| geometry (clean cases) | 697/711 | 720/735 | **728/735** |
+| paint order | 17713/17762 | 18343/18362 | **18343/18362** |
+| paint order (clean cases) | 699/711 | 724/735 | **724/735** |
+| computed style (values) | 32713/32745 | 33465/33487 | **33481/33487** |
+| computed style (cases clean) | 688/711 | 722/735 | **731/735** |
+| cascade-attributed residual | 31 | 21 | **5** |
 
 `src/` was NOT touched by the corpus half of this round. The residual's
-32 → 16 is the whole of what this round moved on that axis, and it
-accounts for itself exactly: eight values from the six original nesting
-cases, and eight from the four new nesting cases that carry a colour
-divergence (2 + 2 + 1 + 3). The two `&`-specificity cases contribute
-none, for a reason given below.
+21 → 5 is the whole of what this round moved on that axis, and it accounts
+for itself exactly: eight values from the six original nesting cases, and
+eight from the four new nesting cases that carry a colour divergence
+(2 + 2 + 1 + 3). The two `&`-specificity cases contribute none, for a
+reason given below.
 
-Line structure and paint order are byte-identical across the last two
-columns, which is what a change confined to the cascade should look
-like.
+**What is left in that residual is five values in three causes**, and
+`@scope` is two of them — see the last section here for its full
+measurement. Line structure and paint order are byte-identical across the
+last two columns, which is what a change confined to the cascade should
+look like.
 
 **`--dump-ops` was diffed per case, corpus-wide, in BOTH directions,
-against `main` as merged and on the same 726 cases.** Exactly eight
-cases' box lists changed, every one of them TO the browser's number and
-none away from it; **the other 718 are byte-identical**:
+against `main` as merged and on the same 735 cases.** Exactly eight cases'
+box lists changed, every one of them TO the browser's number and none away
+from it; **the other 727 are byte-identical**:
 
 | case | `main` | after | Brave |
 |---|---|---|---|
@@ -903,8 +905,8 @@ coincidence — they are regression guards on the desugaring's own choice,
 not divergences, and the residual arithmetic above accounts for zero of
 their values.
 
-998 unit tests / 2583 assertions, 0 failures after the merge (966/2475 at
-`aa18bab`, 983/2521 for this round alone); linter 0 errors, 25
+1018 unit tests / 2692 assertions, 0 failures after both merges (966/2475
+at `aa18bab`, 983/2521 for this round alone); linter 0 errors, 23
 pre-existing warnings, all in `test/`. **34 of this round's new
 assertions fail on `aa18bab`'s `src/` and pass after**, and every
 control beside them passes on both sides — the nested-rule-in-its-own-block
