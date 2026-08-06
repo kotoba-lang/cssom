@@ -345,6 +345,19 @@
      `+`/`-` precedence, left-to-right same-precedence associativity, so
      `calc(10px - 5px - 2px)` -> `3`, not `10 - (5 - 2)`) -> evaluate
      pipeline, and real CSS's own arithmetic-validity rules this honors:
+     `min()` / `max()` / `clamp()` are evaluated over the SAME constant
+     subset and by the same parser -- a math function is a primary in the
+     expression grammar, so they nest in both directions
+     (`calc(min(100px, 50px) + 10px)` -> `60`,
+     `min(calc(10px + 5px), 20px)` -> `15`) and `clamp(lo, v, hi)` is
+     literally `max(lo, min(v, hi))` (so `clamp(90px, 5px, 300px)` -> `90`,
+     not `5`). Every argument of a comparison function must carry the same
+     unit, real CSS's own rule; a percentage or any other relative unit
+     inside one puts the whole value outside the subset exactly as it does
+     inside `calc()`, so `min(50%, 300px)` degrades to a raw string rather
+     than being guessed at against a containing block this pass does not
+     have. See `math-function-names` for the authority on which functions
+     are in, and why `round()`/`mod()`/the trigonometric family are not.
      `+`/`-` require both sides to be the SAME kind (both plain numbers or
      both px lengths); `*` requires AT LEAST ONE side to be a plain
      unitless number (you can't multiply two lengths together); `/`'s
@@ -415,22 +428,43 @@
 ;; precedence/associativity/negative-number handling right needs real
 ;; parsing.
 
+(def ^:private math-function-names
+  "The CSS math functions this namespace evaluates, over exactly the
+   constant px-or-number subset `calc()` is bounded to (see the namespace
+   docstring). `calc` is one of them rather than a separate case, because
+   `min(calc(10px + 5px), 20px)` and `calc(min(100px, 50px) + 10px)` are
+   both ordinary nesting once the parser has a function primary at all.
+
+   THE authority for the set: `calc-pattern` is built from it and
+   `calc-function-at` tests membership against it, so adding a function
+   here is the only edit adding a function needs (`eval-calc-node` then
+   decides what it MEANS).
+
+   Not here, and out of scope for the same reason a percentage inside
+   `calc()` is: `round()`/`mod()`/`rem()`/the trigonometric and
+   exponential functions are either not layout-independent in the way
+   this pipeline needs or rare enough that guessing would cost more than
+   declining. A name outside this set is an unrecognized token, and the
+   whole value degrades to a raw string unchanged."
+  #{"calc" "min" "max" "clamp"})
+
 (def ^:private calc-pattern
-  "Matches a whole-value `calc(...)` declaration -- the ENTIRE value is one
-   calc() call, case-insensitively (real CSS's `calc` keyword is
-   case-insensitive), with the parenthesized contents captured (group 1)
-   for `parse-calc-ast`. A value with anything besides the call itself
-   (leading/trailing text, `calc(1px) calc(2px)`, math mixed with a
-   keyword) does not match -- multiple/composed calc() terms in one
-   declaration are out of scope, matching parse-style-value's existing
-   'ENTIRE-value' coercion approach (a bare number or px length also only
-   ever coerces when it is the WHOLE value). The greedy `(.*)` capture
-   between the outer `calc(` and the final `)` is safe for NESTED parens
-   (`calc((10px + 6px) * 2)`) precisely because `re-matches` anchors both
-   ends: greedy matching grabs everything up to the LAST `)` in the string,
-   which for a well-formed whole-value calc() is exactly the call's own
-   closing paren."
-  #"(?is)calc\((.*)\)")
+  "Matches a whole-value MATH FUNCTION declaration -- the ENTIRE value is
+   one `math-function-names` call, case-insensitively (real CSS's function
+   names are case-insensitive), with the function NAME captured (group 1)
+   and its parenthesized contents captured (group 2) for `parse-calc-ast`.
+   A value with anything besides the call itself (leading/trailing text,
+   `calc(1px) calc(2px)`, math mixed with a keyword) does not match --
+   multiple/composed math terms in one declaration are out of scope,
+   matching parse-style-value's existing 'ENTIRE-value' coercion approach
+   (a bare number or px length also only ever coerces when it is the WHOLE
+   value). The greedy `(.*)` capture between the opening paren and the
+   final `)` is safe for NESTED parens (`calc((10px + 6px) * 2)`,
+   `calc(min(100px, 50px) + 10px)`) precisely because `re-matches` anchors
+   both ends: greedy matching grabs everything up to the LAST `)` in the
+   string, which for a well-formed whole-value call is exactly that call's
+   own closing paren."
+  (re-pattern (str "(?is)(" (str/join "|" (sort math-function-names)) ")\\((.*)\\)")))
 
 (defn- calc-number-at
   "Attempts to match a numeric literal -- optionally decimal, optionally
@@ -450,17 +484,78 @@
           value #?(:clj (Double/parseDouble num-str) :cljs (js/parseFloat num-str))]
       [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value value} end])))
 
+(defn- calc-matching-paren
+  "Index of the `)` closing the `(` at `open` in `s`, or nil if unbalanced.
+   Used to lift a nested math function's whole argument list out as one
+   token (see `calc-function-at`) rather than trying to model commas in
+   the flat operator/operand token stream."
+  [s open]
+  (loop [i (inc open) depth 1]
+    (cond
+      (>= i (count s)) nil
+      (= \( (nth s i)) (recur (inc i) (inc depth))
+      (= \) (nth s i)) (if (= 1 depth) i (recur (inc i) (dec depth)))
+      :else (recur (inc i) depth))))
+
+(defn- calc-split-arguments
+  "Splits a math function's argument text at TOP-LEVEL commas -- commas
+   inside a nested call (`min(10px, max(2px, 3px))`) belong to that call,
+   not to this one. Returns a vector of trimmed argument strings; a
+   trailing or doubled comma yields a blank argument, which the caller
+   rejects when it fails to parse."
+  [s]
+  (let [n (count s)]
+    (loop [i 0 depth 0 start 0 out []]
+      (cond
+        (= i n) (conj out (str/trim (subs s start)))
+        (= \( (nth s i)) (recur (inc i) (inc depth) start out)
+        (= \) (nth s i)) (recur (inc i) (dec depth) start out)
+        (and (= \, (nth s i)) (zero? depth))
+        (recur (inc i) depth (inc i) (conj out (str/trim (subs s start i))))
+        :else (recur (inc i) depth start out)))))
+
+(defn- calc-function-at
+  "Attempts to match a nested math function CALL -- one of
+   `math-function-names` immediately followed by a parenthesized
+   argument list -- starting at index `idx` of tokenizer input `s`.
+   Returns `[token next-idx]` carrying the function name and the RAW
+   argument text, or nil if `idx` isn't the start of one.
+
+   The argument text is carried raw rather than tokenized here because a
+   comma is not an operator in the expression grammar: it separates whole
+   sub-expressions, each of which is parsed on its own (see
+   `parse-calc-level`'s `:fncall` branch). Keeping the flat token stream
+   comma-free is what lets `min()`/`max()`/`clamp()` be added without
+   touching the precedence-climbing parser that handles `+`/`-`/`*`/`/`."
+  [s idx]
+  (when-let [name (re-find #"^[A-Za-z-]+" (subs s idx))]
+    (when (contains? math-function-names (str/lower-case name))
+      (let [after (+ idx (count name))]
+        (when (and (< after (count s)) (= \( (nth s after)))
+          (when-let [close (calc-matching-paren s after)]
+            [{:calc/type :fncall
+              :calc/name (str/lower-case name)
+              :calc/text (subs s (inc after) close)}
+             (inc close)]))))))
+
 (defn- tokenize-calc-expr
-  "Tokenizes the inside of a `calc(...)` call (see calc-pattern) into a flat
-   token vector -- bare operator/paren tokens (`:calc/type` one of `:plus`/
-   `:minus`/`:star`/`:slash`/`:lparen`/`:rparen`) plus number-or-px-length
-   operand tokens (`calc-number-at`) -- for `parse-calc-level`, skipping
-   whitespace. Returns nil if any character isn't part of one of those
-   recognized tokens (e.g. a `%`/`em`/other unit anywhere in the
-   expression, or any other unrecognized character) -- signalling 'not this
-   engine's constant-calc() subset' all the way up to `parse-calc`, which
-   then degrades the whole calc() exactly like any other unparseable value
-   in this namespace degrades (see parse-style-value)."
+  "Tokenizes the inside of a math function call (see calc-pattern) into a
+   flat token vector -- bare operator/paren tokens (`:calc/type` one of
+   `:plus`/`:minus`/`:star`/`:slash`/`:lparen`/`:rparen`), number-or-px
+   operand tokens (`calc-number-at`) and nested function-call tokens
+   (`calc-function-at`) -- for `parse-calc-level`, skipping whitespace.
+   Returns nil if any character isn't part of one of those recognized
+   tokens (e.g. a `%`/`em`/other unit anywhere in the expression, an
+   unsupported function name, or any other unrecognized character) --
+   signalling 'not this engine's constant subset' all the way up to
+   `parse-calc`, which then degrades the whole value exactly like any
+   other unparseable value in this namespace degrades (see
+   parse-style-value).
+
+   A function call is tried BEFORE a number, which matters for no input
+   this engine accepts today but keeps the two matchers unambiguous: a
+   function name never starts with a digit and a number never starts with
+   a letter, so the order is documentation rather than a tie-break."
   [s]
   (let [n (count s)]
     (loop [idx 0 tokens []]
@@ -475,9 +570,11 @@
           \/ (recur (inc idx) (conj tokens {:calc/type :slash}))
           \( (recur (inc idx) (conj tokens {:calc/type :lparen}))
           \) (recur (inc idx) (conj tokens {:calc/type :rparen}))
-          (if-let [[operand next-idx] (calc-number-at s idx)]
-            (recur next-idx (conj tokens operand))
-            nil))))))
+          (if-let [[call next-idx] (calc-function-at s idx)]
+            (recur next-idx (conj tokens call))
+            (if-let [[operand next-idx] (calc-number-at s idx)]
+              (recur next-idx (conj tokens operand))
+              nil)))))))
 
 (defn- parse-calc-level
   "Parses a calc() token vector (see tokenize-calc-expr) into an AST node
@@ -516,6 +613,21 @@
           :plus (parse-calc-level (rest tokens) 2)
           :operand [{:calc/op :num :calc/unit (:calc/unit t) :calc/value (:calc/value t)}
                     (rest tokens)]
+          ;; A nested `calc()`/`min()`/`max()`/`clamp()`: each top-level
+          ;; comma-separated argument is a WHOLE expression of its own, so
+          ;; each is tokenized and parsed at level 0 from scratch. nil from
+          ;; any argument (an unsupported unit, a malformed sub-expression,
+          ;; a blank argument from a doubled comma) makes the whole call
+          ;; nil, which is this pipeline's one and only 'not our subset'
+          ;; signal.
+          :fncall (let [args (mapv (fn [arg]
+                                     (when-let [toks (tokenize-calc-expr arg)]
+                                       (when-let [[node rest-toks] (parse-calc-level toks 0)]
+                                         (when (empty? rest-toks) node))))
+                                   (calc-split-arguments (:calc/text t)))]
+                    (when (and (seq args) (every? some? args))
+                      [{:calc/op :fn :calc/name (:calc/name t) :calc/args args}
+                       (rest tokens)]))
           :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
                     (when (and (seq toks) (= :rparen (:calc/type (first toks))))
                       [node (rest toks)]))
@@ -559,10 +671,33 @@
        `:number`, and non-zero -- the result's unit is the left operand's
        (dividend's) own unit. Division by the number zero is rejected
        (nil) rather than producing Infinity/NaN, matching real CSS
-       (division by zero is invalid calc())."
+       (division by zero is invalid calc()).
+     - `:fn` (a `calc()`/`min()`/`max()`/`clamp()` call) requires every
+       argument to evaluate AND to carry the SAME unit -- real CSS's own
+       rule for the comparison functions, and the same same-type
+       requirement `+`/`-` already enforce (`min(10px, 2)` is invalid, not
+       2). `calc()` takes exactly one argument and passes it through;
+       `clamp(min, val, max)` takes exactly three and is `max(min,
+       min(val, max))`, which is the spec's own definition and is what
+       makes `clamp(90px, 5px, 300px)` come out 90 rather than 5.
+       A wrong argument count is rejected rather than tolerated."
   [node]
   (case (:calc/op node)
     :num [(:calc/value node) (:calc/unit node)]
+
+    :fn (let [vals (mapv eval-calc-node (:calc/args node))]
+          (when (and (seq vals) (every? some? vals)
+                     (apply = (map second vals)))
+            (let [unit (second (first vals))
+                  ns' (mapv first vals)]
+              (case (:calc/name node)
+                "calc" (when (= 1 (count ns')) [(first ns') unit])
+                "min" [(reduce min ns') unit]
+                "max" [(reduce max ns') unit]
+                "clamp" (when (= 3 (count ns'))
+                          (let [[lo v hi] ns']
+                            [(max lo (min v hi)) unit]))
+                nil))))
 
     :neg (when-let [[v u] (eval-calc-node (:calc/arg node))]
            [(- v) u])
@@ -642,8 +777,16 @@
       (re-matches #"-?\d+px" v) #?(:clj (Long/parseLong (subs v 0 (- (count v) 2)))
                                    :cljs (js/parseInt v 10))
       :else
-      (if-let [[_ inner] (re-matches calc-pattern v)]
-        (or (parse-calc inner) v)
+      (if-let [[_ fname inner] (re-matches calc-pattern v)]
+        (or (parse-calc (if (= "calc" (str/lower-case fname))
+                          inner
+                          ;; A whole-value `min(...)`/`max(...)`/`clamp(...)`
+                          ;; is re-wrapped as the argument of an outer
+                          ;; expression so ONE parser handles both the
+                          ;; top-level call and a nested one, rather than a
+                          ;; second entry point that would drift from it.
+                          (str fname "(" inner ")")))
+            v)
         v))))
 
 (def ^:private content-literal-pattern
