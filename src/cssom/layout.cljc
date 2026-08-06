@@ -470,7 +470,36 @@
    `:measure-text` when the theme supplies one, else this file's
    `(long (* 0.6 font-size))` per-character approximation -- the same two
    answers, in the same order, every measurement site in this file has
-   always used."
+   always used.
+
+   ...with one exception, and it is the whole of `text-orientation` this
+   engine implements. Under `text-orientation: upright` in a vertical
+   writing mode, every character is set UPRIGHT, so what it advances along
+   the inline axis is not its horizontal advance at all -- it is the em.
+   Measured in Brave 151 on 2026-08-06, `alpha` in the corpus's 14px
+   monospace inside `writing-mode: vertical-rl`:
+
+     text-orientation: mixed      35px of inline extent (5 x the 7px advance)
+     text-orientation: sideways   35px  -- identical, and its control
+     text-orientation: upright    70px  (5 x the 14px em)
+
+   and `alpha beta` under upright is 140, i.e. the SPACE is an em too. That
+   makes the rule exact without a Unicode table, which is why it is here
+   and `mixed`'s is not: `mixed` sets the em advance per CHARACTER, for the
+   scripts that are upright in it. Measured, `あいう えお` inside
+   `vertical-rl` is 77px under `mixed` (three ems, a 7px sideways space,
+   two ems) and 84 under `upright` (six ems) -- so this file is right for
+   `mixed` on latin and digits, which is what the corpus holds, and 7px per
+   CJK character short otherwise.
+
+   That rule is applied by SUBSTITUTING `:measure-text` (see layout-node's
+   `:cssom/upright?` binding) rather than by a branch here, because this
+   function is not the only measurement site: `layout-text`, the flex base
+   size, the table caption's intrinsic width and the text-selection caret
+   all read `(:measure-text theme)` directly. Substituting reaches all of
+   them; a branch here reached one, and the difference was visible --
+   `alpha beta` under `upright` stayed on ONE 140px line inside a 120px
+   parent instead of wrapping onto two."
   [theme st text]
   (let [text (str text)]
     (if-let [mt (:measure-text theme)]
@@ -2365,6 +2394,252 @@
   [st]
   (and (= "visible" (:overflow/x st)) (= "visible" (:overflow/y st))))
 
+;; ---- writing modes: one algorithm, four bases ---------------------------
+;;
+;; Everything below this line lays boxes out with `x` running along the
+;; INLINE axis and `y` along the BLOCK axis. That is not a horizontal-tb
+;; assumption baked into 17,000 lines -- it is a CHOICE OF BASIS, and a
+;; vertical writing mode is the same algorithm in a rotated one. Measured in
+;; Brave 151 on 2026-08-06 across four modes, and every number came out as
+;; the transpose of the horizontal answer:
+;;
+;;   <div style="width:300px;height:120px">
+;;     <div style="writing-mode:vertical-rl">alpha beta</div></div>
+;;
+;;   inner box            20 wide x 70 tall     (canonical: 70 x 20)
+;;   `alpha`              (3, 0)  15 x 35       lines run DOWN the page
+;;   `beta`               (3, 42) 15 x 28       and stack right-to-left
+;;   parent height 60     40 x 60, two lines    -- it wrapped at 60
+;;   parent height 400    20 x 70               -- it did NOT stretch to 400
+;;
+;; So this section is a change of basis and nothing else. Three tables do
+;; all of it:
+;;
+;;   `writing-mode-basis`  canonical -> physical, as a 2x2 linear map
+;;   `writing-mode-sides`  physical side name -> canonical side name
+;;   `vertical-writing-mode?`  which modes swap the two axes at all
+;;
+;; and two rewrites apply them: `rotate-box-style` (this element's own
+;; width/height/padding/border, permuted by the element's OWN mode) and
+;; `rotate-outer-style` (its margins and its position insets, permuted by
+;; the mode of whatever is LAYING IT OUT -- see rotate-outer-style for why
+;; those two are not the same mode).
+;;
+;; `horizontal-tb` maps to the identity in all three, and both rewrites
+;; return their argument unchanged for it, so nothing outside a vertical
+;; subtree can move.
+
+(def ^:private writing-mode-values
+  "The five `writing-mode` values, normalised. `lr`/`rl`/`tb` (the SVG 1.1
+   spellings, still accepted by Blink) are not here: they are aliases this
+   engine has never carried and no corpus case uses."
+  #{"horizontal-tb" "vertical-rl" "vertical-lr" "sideways-rl" "sideways-lr"})
+
+(defn- writing-mode-of
+  "Normalises a cascaded `writing-mode` value, defaulting to
+   `horizontal-tb` for nil and for anything unrecognised."
+  [v]
+  (let [s (some-> v str str/trim str/lower-case)]
+    (if (contains? writing-mode-values s) s "horizontal-tb")))
+
+(defn- vertical-writing-mode?
+  "Does this mode put the INLINE axis down the page? True for all four
+   vertical modes -- the block-axis direction (`-rl` vs `-lr`) and the
+   glyph orientation (`vertical-` vs `sideways-`) do not change the answer."
+  [mode]
+  (and (some? mode) (not= "horizontal-tb" mode)))
+
+(def ^:private writing-mode-basis
+  "This mode's canonical basis, as the LINEAR part of CSS's
+   `matrix(a, b, c, d, e, f)`: a canonical point `(u = inline offset,
+   v = block offset)` becomes the physical `(a*u + c*v, b*u + d*v)`.
+
+   Read off the same four probes the section header quotes: which physical
+   direction the text runs in, and which physical direction successive
+   block-level children stack in.
+
+     vertical-rl   inline DOWN,  block LEFT   (u,v) -> (-v,  u)
+     sideways-rl   identical to vertical-rl in every measured box
+     vertical-lr   inline DOWN,  block RIGHT  (u,v) -> ( v,  u)
+     sideways-lr   inline UP,    block RIGHT  (u,v) -> ( v, -u)
+
+   The sideways-lr row is the one that is not a rotation of the others:
+   measured, `inline-size: 70px` puts its single word at y=63 in a 70-tall
+   box, i.e. against the BOTTOM, where all three other modes put it at
+   y=0. Every matrix here is a signed permutation, so its determinant is
+   +-1 and `transform-ops`' font-size scale factor (sqrt |det|) is exactly
+   1 -- a rotated box's glyphs keep their size."
+  {"horizontal-tb" [1 0 0 1]
+   "vertical-rl"   [0 1 -1 0]
+   "sideways-rl"   [0 1 -1 0]
+   "vertical-lr"   [0 1 1 0]
+   "sideways-lr"   [0 -1 1 0]})
+
+(def ^:private writing-mode-sides
+  "PHYSICAL side -> the side that side becomes in this mode's own canonical
+   frame. The inverse of `writing-mode-basis`, spelled as side names because
+   that is what a style map is keyed by.
+
+   DIRECTION IS NOT A PARAMETER HERE, and that is measured rather than
+   assumed: `direction: rtl` swaps inline-start and inline-end on BOTH
+   sides of the mapping (the mode's inline-start and the canonical frame's),
+   so it cancels. Brave 151, 2026-08-06, `margin-inline-start: 40px`:
+
+     vertical-rl  ltr -> margin-TOP      vertical-rl  rtl -> margin-BOTTOM
+     sideways-lr  ltr -> margin-BOTTOM   sideways-lr  rtl -> margin-TOP
+
+   -- and in the canonical frame `margin-inline-start` is margin-left under
+   ltr and margin-right under rtl, so `top -> left` holds for vertical-rl in
+   both. The rtl half of the inline axis is `direction`'s job and stays
+   entirely inside the horizontal algorithm, which already implements it."
+  {"horizontal-tb" {:top :top :right :right :bottom :bottom :left :left}
+   "vertical-rl"   {:top :left :bottom :right :right :top :left :bottom}
+   "sideways-rl"   {:top :left :bottom :right :right :top :left :bottom}
+   "vertical-lr"   {:top :left :bottom :right :left :top :right :bottom}
+   "sideways-lr"   {:bottom :left :top :right :left :top :right :bottom}})
+
+(defn- permute-side-family
+  "Rewrites one family of per-side keys -- `(prefix)(side)(suffix)` -- by
+   `perm`, a physical-side -> canonical-side map. A key absent on the
+   physical side stays absent on the canonical one, so a style map that
+   never mentioned `padding-left` does not gain a nil `padding-top`."
+  [st perm prefix suffix]
+  (let [k (fn [side] (keyword (str prefix (name side) suffix)))
+        present (keep (fn [[from to]]
+                        (when (contains? st (k from)) [from to]))
+                      perm)]
+    (if (empty? present)
+      st
+      (let [vals (into {} (map (fn [[from to]] [(k to) (get st (k from))])) present)]
+        (merge (apply dissoc st (map (comp k first) present)) vals)))))
+
+(defn- rotate-box-style
+  "This element's OWN box, permuted into its own mode's canonical frame:
+   the two axis sizes and their clamps swap, and the four per-side paddings
+   and borders move round.
+
+   Measured in Brave 151, 2026-08-06, all inside `writing-mode: vertical-rl`
+   in a 300x200 parent:
+
+     inline-size:70px; block-size:20px   -> 20 WIDE x 70 TALL
+     min-height:120px; max-width:15px    -> 15 WIDE x 120 TALL
+     padding-inline-start: 7px           -> padding-TOP
+     padding-block-end: 11px             -> padding-LEFT
+     border-top:5px; border-right:9px    -> a 29 x 40 box (5 on the inline
+                                            start edge, 9 on the block one)
+
+   WHAT IS DELIBERATELY NOT PERMUTED, each because it is not physical in
+   the first place:
+
+   - `float: left|right` and `text-align: left|right` are LINE-relative.
+     Measured: `float: left` inside a vertical-rl box puts the float at the
+     TOP (canonical left) and starts the text 30px below it, not at the
+     physical left edge.
+   - `direction`, which is the inline axis's own business and already
+     works inside the horizontal algorithm.
+
+   AND WHAT IS A SCOPE CUT, with the number a fix will need:
+
+   - `aspect-ratio`, whose two terms are the PHYSICAL width and height even
+     inside a vertical mode. Not permuted, so it is applied to the
+     canonical axes instead and comes out inverted. Measured: `<div
+     style=\"writing-mode:vertical-rl; inline-size:60px; aspect-ratio:2\">`
+     is 120 wide x 60 tall in Brave and 30 x 60 here.
+   - `overflow-x`/`overflow-y` and `scroll-left`/`scroll-top`, which name
+     physical axes in the DOM (`element.scrollTop` is physical even in a
+     vertical mode) and would need the rotation applied on the way OUT of
+     the engine as well as on the way in."
+  [st mode]
+  (if-not (vertical-writing-mode? mode)
+    st
+    (let [perm (writing-mode-sides mode)
+          swap2 (fn [m a b]
+                  (if (or (contains? m a) (contains? m b))
+                    (assoc m a (get m b) b (get m a))
+                    m))]
+      (-> st
+          (swap2 :width :height)
+          (swap2 :min-width :min-height)
+          (swap2 :max-width :max-height)
+          (permute-side-family perm "padding-" "")
+          (permute-side-family perm "padding/raw-" "")
+          (permute-side-family perm "border-" "-width")
+          (permute-side-family perm "border-" "-color")))))
+
+(defn- rotate-outer-style
+  "This element's MARGINS and its position insets, permuted into the
+   canonical frame of the box that is laying it out -- which is its PARENT's
+   writing mode, not its own.
+
+   Those two modes are different at exactly one place, the orthogonal-flow
+   boundary, and there the distinction is the whole answer. Measured in
+   Brave 151, 2026-08-06:
+
+     <div style=\"width:300px;height:200px\">
+       <div>before</div>
+       <div style=\"writing-mode:vertical-rl; margin:10px 20px 30px 40px\">
+         alpha</div>
+       <div>after</div></div>
+
+   puts the vertical box at x=40 (its physical margin-LEFT) and y=30 (20
+   for `before` plus its physical margin-TOP), and `after` at y=95. Its
+   margins are read, unrotated, by a horizontal parent -- they never enter
+   its own rotated frame. One level in, the opposite holds:
+
+     <div style=\"width:300px;height:120px; writing-mode:vertical-rl\">
+       <div style=\"margin-top: 10%\">v</div></div>
+
+   is 12px of margin (10% of the containing block's INLINE size, which here
+   is its 120px height) applied down the page, i.e. along the inline axis --
+   canonical margin-LEFT. Same property, same spelling, opposite axis, and
+   the mode that decides is the parent's both times.
+
+   Hence the ambient mode travels on `theme` (`:cssom/flow`) rather than on
+   the inherited style map: `node-style` is called by a box's PARENT as
+   often as by the box itself (layout-children-block reads a child's
+   margins to place it, measure-child reads them to size it), and `theme`
+   is the one argument all of those calls share."
+  [st mode]
+  (if-not (vertical-writing-mode? mode)
+    st
+    (let [perm (writing-mode-sides mode)]
+      (-> st
+          (permute-side-family perm "margin-" "")
+          (permute-side-family perm "margin/raw-" "")
+          (permute-side-family perm "" "")))))
+
+(defn- rotate-node-style
+  "Both rewrites, applied to a freshly built style map: this box's own
+   properties by its OWN mode, its margins and insets by the AMBIENT one.
+
+   Doing it here rather than in `layout-node` is not a convenience. Every
+   intrinsic-size reader in this file -- `measure-child`,
+   `block-max-content-width`, the flex base size, a grid track's
+   intrinsics, a table column's -- reads a CHILD's style map through this
+   function and never through `layout-node`, so a rotation applied one
+   level up would leave all of them measuring a vertical box against its
+   physical width. Measured before it moved here: two `width: 30px` /
+   `width: 50px` children of a `vertical-rl` box gave that box a canonical
+   width of 50 (their unrotated `width`) instead of 21 (the max-content of
+   their text), i.e. an 80x50 box where Brave says 80x21.
+
+   `writing-mode` inherits, so `nil` here means the ambient mode, and both
+   rewrites are the identity under `horizontal-tb`.
+
+   SCOPE CUT this placement makes visible: an intrinsic-size reader now
+   gets an ORTHOGONAL child's canonical sizes, which are in the child's
+   frame and not the reader's. Measured, `<div style=\"width:max-content\">
+   <div style=\"writing-mode:vertical-rl\">alpha beta</div></div>` is 20
+   wide in Brave (the vertical child's block size); this engine measures
+   the child's canonical max-content instead. The general fix is that an
+   orthogonal child's contribution to its parent's intrinsic size is its
+   BLOCK size, which needs the child laid out before the parent is sized --
+   a second pass this file's single-pass intrinsic readers do not have."
+  [theme st]
+  (-> st
+      (rotate-box-style (writing-mode-of (or (:writing-mode st) (:cssom/flow theme))))
+      (rotate-outer-style (writing-mode-of (:cssom/flow theme)))))
+
 (declare font-metrics)
 
 (defn- node-style [node theme]
@@ -2491,8 +2766,21 @@
                   (border-px (get ua :border-width))
                   (when (pos? ua-border) ua-border)
                   medium-border-width))))]
-  {:display (style node :display)
+  (rotate-node-style
+   theme
+   {:display (style node :display)
    :position (or (style node :position) "static")
+   ;; This element's own `writing-mode`, NOT resolved against its parent's
+   ;; here: the property inherits, and layout-node does the inheriting (it
+   ;; is the one place that holds both this map and the ambient mode). What
+   ;; this key carries is "did this element declare one", which is exactly
+   ;; the question that decides whether an orthogonal-flow boundary starts
+   ;; here.
+   :writing-mode (some-> (style node :writing-mode) str str/trim str/lower-case)
+   ;; Read for one value only -- `upright`, which changes what a character
+   ;; advances along the inline axis. See glyph-advance for the
+   ;; measurements, and for why `mixed` and `sideways` need nothing here.
+   :text-orientation (some-> (style node :text-orientation) str str/trim str/lower-case)
    :left (style node :left)
    :top (style node :top)
    :right (style node :right)
@@ -2972,7 +3260,7 @@
                                           (style node :overflow-x)
                                           (style node :overflow-y)))
    :scroll-top (parse-int (attr node :scroll-top) 0)
-   :scroll-left (parse-int (attr node :scroll-left) 0)}))
+   :scroll-left (parse-int (attr node :scroll-left) 0)})))
 
 (defn- style-passthrough [st]
   {:display (:display st)
@@ -16451,6 +16739,214 @@
             (update laid :draw #(transform-ops about %))))
         laid))))
 
+;; ---- the orthogonal-flow boundary ---------------------------------------
+;;
+;; The other half of "a vertical writing mode is a change of basis" (see the
+;; writing-modes section above node-style). The style rewrites up there put
+;; a box's OWN properties into its canonical frame; these three functions
+;; put the RESULT back into its parent's.
+;;
+;; It reuses `transform-ops` deliberately rather than writing a second
+;; op-walker: a quarter turn is exactly the case that walker documents as
+;; EXACT for a `:node` op (the axis-aligned bounding box of a rotated
+;; axis-aligned rectangle IS the rotated rectangle), its `:hit` regions ride
+;; along by the same rule, and every matrix here has |det| = 1 so its
+;; font-size scaling is the identity. The one thing it says it does not do
+;; -- rotate glyphs -- is the one thing a host cannot do here either, and is
+;; recorded as this round's paint-side scope cut in `flow-rotation`.
+
+(defn- flow-rotation
+  "The change of basis from `child`'s canonical frame to `parent`'s, as the
+   linear part of a CSS matrix, or nil when the two modes share a frame
+   (which is every element outside a vertical subtree, and most elements
+   inside one).
+
+   `inverse(parent) x child`, and every operand is a signed permutation, so
+   the result is one of eight matrices and the arithmetic is exact in
+   integers. The three shapes it produces, all measured:
+
+   - a QUARTER TURN, when the two modes' axes differ. `writing-mode:
+     vertical-rl` in a horizontal parent, and equally `horizontal-tb`
+     inside a vertical one: measured, `<div style=\"writing-mode:
+     vertical-rl; height:120px\"><div style=\"writing-mode:horizontal-tb\">
+     alpha beta</div><div>x y</div></div>` gives a 70x20 horizontal box at
+     x=20 and a 20x120 vertical sibling at x=0 inside a 90x120 parent --
+     the horizontal child consumes 70 of the parent's block axis, which
+     runs right-to-left.
+   - a BLOCK-AXIS MIRROR, when both modes are vertical but stack the
+     opposite way. Measured, a `vertical-lr` box inside a `vertical-rl` one
+     stacks ITS OWN children left-to-right (`p` at x=0, `q` at x=20) inside
+     a parent whose own children stack right-to-left.
+   - nil.
+
+   SCOPE CUT, with its number: an element's own CSS `transform` is applied
+   INSIDE this rotation (apply-element-transform runs first), so a
+   `translateX(10px)` in a vertical-rl box moves its content 10px DOWN the
+   page where Brave moves it 10px right. Every one of the corpus's ten
+   transform cases is horizontal-tb, where the two orders are the same
+   matrix."
+  [child parent]
+  (let [[a b c d] (writing-mode-basis child)
+        [pa pb pc pd] (writing-mode-basis parent)
+        det (- (* pa pd) (* pb pc))
+        inv [(/ pd det) (/ (- pb) det) (/ (- pc) det) (/ pa det) 0 0]
+        [ma mb mc md] (matrix* inv [a b c d 0 0])]
+    (when-not (and (== 1 ma) (zero? mb) (zero? mc) (== 1 md))
+      [ma mb mc md 0 0])))
+
+(defn- split-text-ops-per-word
+  "Every `:text` op in `ops` becomes one op per whitespace-separated word,
+   each at its own advanced origin.
+
+   A `:text` op is a string at an origin laid out along +x, and there is no
+   rotated-glyph primitive here or in this engine's hosts. Under a quarter
+   turn the words of one line are at DIFFERENT physical y's, so a single op
+   cannot express the line at all: `alpha beta` in the corpus's vertical
+   case is `alpha` at y=0 and `beta` at y=42 in Brave, 42px apart down the
+   page. Splitting first and rotating the pieces puts every word at its own
+   true origin; what is still not modelled is the shaping, exactly as
+   `transform-ops` already says for `rotate()`.
+
+   The split uses the engine's own `text-advance`, the same measurement
+   that placed the run, so the pieces reassemble to the byte-identical
+   original when the rotation is the identity."
+  [theme ops]
+  (into []
+        (mapcat
+         (fn [op]
+           (if-not (= :text (:draw/op op))
+             [op]
+             (let [pieces (str/split (str (:text op)) #"(?=\s)|(?<=\s)")]
+               (if (< (count pieces) 2)
+                 [op]
+                 (:out (reduce (fn [{:keys [dx out]} piece]
+                                 {:dx (+ dx (text-advance theme op piece))
+                                  :out (if (str/blank? piece)
+                                         out
+                                         (conj out (assoc op :text piece
+                                                          :x (+ (:x op 0) dx))))})
+                               {:dx 0 :out []}
+                               pieces))))))
+         ops)))
+
+(def ^:private orthogonal-fallback-inline-size
+  "The available inline size an orthogonal flow gets when its containing
+   block's block size is INDEFINITE, i.e. `no constraint` -- which makes
+   `fit-content` resolve to `max-content` and nothing ever wrap.
+
+   SCOPE CUT, and the number a fix needs. Brave falls back to the nearest
+   SCROLLPORT's block size, and both halves of that are measured (Brave 151,
+   2026-08-06): inside `<div style=\"width:300px; height:150px;
+   overflow:auto\">` a long vertical-rl run is 150 tall, and with no scroll
+   container anywhere it is 419 -- exactly `window.innerHeight` for this
+   headless window, confirmed by reading it back in the same probe, and
+   unchanged by pushing the box 300px down the page.
+
+   This engine has no viewport block size to fall back to: `draw-ops` takes
+   a `:width` and nothing else, and the harness's page is one tall document
+   with no scrollport at all. Inventing a height here would be inventing the
+   answer, so an unconstrained orthogonal flow simply does not wrap."
+  1e7)
+
+(defn- orthogonal-available-inline
+  "The available inline size for a box whose flow is orthogonal to its
+   containing block's: that containing block's BLOCK size, which is the one
+   `layout-block` already threads down for percentage heights.
+
+   Measured, the same box in three parents: 120px tall -> the box is 70
+   (fit-content, it fits); 400px tall -> still 70; 60px tall -> 60, wrapped
+   onto two lines. `max-height` counts as definite too (90 in a
+   `max-height: 90px` parent), which `definite-content-height` does not
+   currently answer -- so such a parent takes the fallback."
+  [inherited]
+  (or (:block/containing-height inherited) orthogonal-fallback-inline-size))
+
+(defn- reanchor-text-ops
+  "Moves each `:text` op from its TRANSFORMED ORIGIN to the top-left corner
+   of its transformed em box.
+
+   `transform-ops` maps a text op's origin point and says so: `the position
+   is the true transformed position of the text's origin, the shaping is
+   not`. That is the right answer for a `transform`, where the caller asked
+   for a rotation and gets one. It is the wrong answer here, because every
+   consumer of a `:text` op -- dom-gpu's painters, the conformance
+   harness's word extractor, this file's own `:line/dy` -- reads `:x`/`:y`
+   as the TOP-LEFT of the em box, and under a quarter turn the origin is no
+   longer that corner: it is the top-RIGHT under vertical-rl and the
+   BOTTOM-left under sideways-lr.
+
+   Measured, and this is the mode that makes it matter: `writing-mode:
+   sideways-lr` on `alpha beta` in a 40px-tall parent puts `alpha`'s ink at
+   y=5..40 in Brave -- packed against the BOTTOM, because sideways-lr is the
+   one mode whose inline axis runs up the page. Left at the transformed
+   origin the op reports y=40, one whole advance below its own glyphs, and
+   the harness's `baseline = y + font-size` lands outside the box entirely.
+   Re-anchored it reports 5, which is where the ink is.
+
+   What it does NOT fix, and cannot: the string is still set along +x. A
+   host paints `alpha` running rightwards out of a 20px-wide column."
+  [theme m ops]
+  (let [[a b c d] m]
+    (mapv (fn [op]
+            (if-not (= :text (:draw/op op))
+              op
+              (let [adv (text-advance theme op (:text op))
+                    fs (:font-size op 14)
+                    xs (for [u [0 adv] v [0 fs]] (+ (* a u) (* c v)))
+                    ys (for [u [0 adv] v [0 fs]] (+ (* b u) (* d v)))]
+                (assoc op
+                       :x (round-4 (+ (:x op 0) (apply min xs)))
+                       :y (round-4 (+ (:y op 0) (apply min ys)))))))
+          ops)))
+
+(defn- apply-flow-rotation
+  "Maps a box laid out in ITS OWN canonical frame at the origin into its
+   parent's frame at `(x, y)`.
+
+   `:box` is rewritten here, unlike `apply-element-transform`'s deliberate
+   refusal to touch it -- and that difference is the whole distinction
+   between a transform and a writing mode. A transform is a paint-time
+   operation the parent's flow must not see; a writing mode changes what the
+   box IS. Measured: the vertical box in `<div style=\"width:300px;
+   height:200px\"><div>before</div><div style=\"writing-mode:vertical-rl\">
+   alpha</div><div>after</div></div>` is 20 wide and 35 tall, and `after`
+   sits at y=55 -- the parent's flow advanced by the ROTATED height.
+
+   The two layout-facing keys are cleared rather than carried, because a box
+   that establishes an orthogonal flow establishes a block formatting
+   context, and both were measured rather than taken from the spec:
+
+     margin  <div w:300 h:200><div wm:vertical-rl><div margin-right:25px>a
+             -- the vertical box is 45 WIDE (25 + 20), i.e. the child's
+             block-start margin stayed inside it. The horizontal control
+             (`<div><div margin-top:25px>a`) collapses its 25px straight
+             out to the page.
+     float   a `float:left; width:40px; height:30px` alone inside a
+             vertical-rl box leaves that box 40x30 and puts the following
+             sibling at y=30 -- the float was contained, not escaped."
+  [theme m x y laid]
+  (let [{bw :w bh :h} (:box laid)
+        [a b c d] m
+        corner (fn [u v] [(+ (* a u) (* c v)) (+ (* b u) (* d v))])
+        pts [(corner 0 0) (corner bw 0) (corner 0 bh) (corner bw bh)]
+        xs (map first pts) ys (map second pts)
+        mx (apply min xs) my (apply min ys)
+        full [a b c d (- x mx) (- y my)]
+        ;; a quarter turn is the only rotation that moves the words of one
+        ;; line apart in the physical block axis; a pure block-axis mirror
+        ;; leaves every run running the same way it was laid out.
+        quarter? (zero? a)]
+    (assoc laid
+           :box {:x x :y y
+                 :w (round-4 (- (apply max xs) mx))
+                 :h (round-4 (- (apply max ys) my))}
+           :draw (cond->> (transform-ops full (cond->> (:draw laid)
+                                                quarter? (split-text-ops-per-word theme)))
+                   quarter? (reanchor-text-ops theme m))
+           :margin/collapsed-top 0
+           :margin/collapsed-bottom 0
+           :float/escaped [])))
+
 (defn layout-node
   "`intruding` (optional, 8th argument) is the float band of the formatting
    context this node takes part in, in absolute coordinates -- see
@@ -16540,6 +17036,115 @@
      ;; maps against their own content width -- see `resolve-box-percentages`.
      (let [st (resolve-box-percentages (node-style node theme)
                                        (:block/containing-inline inherited))
+           ;; ---- writing mode: this box's basis, and whether it turns ----
+           ;;
+           ;; Six bindings, and then NOTHING below this point knows a
+           ;; vertical mode exists: `st` is in this box's canonical frame,
+           ;; `avail-width` is its available INLINE size, and the whole
+           ;; dispatch lays out at the origin so `apply-flow-rotation` can
+           ;; put the result back. See the writing-modes section above
+           ;; node-style for the measurements.
+           ;;
+           ;; `flow` INHERITS -- `writing-mode` is an inherited property --
+           ;; so a box with no declaration of its own is in its parent's
+           ;; mode and `rot` is nil, which is every element in a
+           ;; horizontal-tb document.
+           parent-flow (writing-mode-of (:cssom/flow theme))
+           flow (writing-mode-of (or (:writing-mode st) parent-flow))
+           rot (flow-rotation flow parent-flow)
+           ;; A QUARTER turn (the two modes' axes differ) is what makes this
+           ;; box an ORTHOGONAL FLOW; a pure block-axis mirror
+           ;; (vertical-lr inside vertical-rl) is not one, and its sizing is
+           ;; unchanged -- measured, such a child still fills its parent's
+           ;; 120px inline size where an orthogonal one shrink-wraps.
+           axis-turn? (boolean (and rot (zero? (first rot))))
+           ;; `st` is ALREADY in this box's canonical frame -- node-style
+           ;; rotated it (see rotate-node-style for why it has to be there
+           ;; and not here).
+           ;; ---- an orthogonal flow's two percentage bases SWAP ----
+           ;;
+           ;; This box's canonical block axis is its parent's inline axis
+           ;; and vice versa, so a percentage that resolved against one now
+           ;; resolves against the other. `:block/containing-inline` is NOT
+           ;; swapped: a percentage margin or padding resolves against the
+           ;; CONTAINING BLOCK's inline size on all four sides no matter
+           ;; what mode the box itself is in -- measured, `padding-top: 10%`
+           ;; on a vertical-rl box inside a 200x400 horizontal parent is
+           ;; 20px, i.e. 10% of the parent's 200px WIDTH, while the same
+           ;; declaration inside a 300x120 VERTICAL parent is 12px, 10% of
+           ;; that parent's 120px height. Both are the parent's inline size.
+           ;; Read BEFORE the swap below overwrites it -- these two lines
+           ;; exchange the two bases, and taking the second from the
+           ;; already-rewritten map would hand this box its parent's inline
+           ;; size as its own available inline size (measured while getting
+           ;; it wrong: the corpus case stopped wrapping at a 60px-tall
+           ;; parent and stayed at its 80px max-content).
+           avail-inline (when axis-turn? (orthogonal-available-inline inherited))
+           inherited (if axis-turn?
+                       (assoc inherited :block/containing-height
+                              (:block/containing-inline inherited))
+                       inherited)
+           avail-width (or avail-inline avail-width)
+           ;; An orthogonal flow's `inline-size: auto` is FIT-CONTENT, not
+           ;; fill-available: measured, the corpus case's box is 70 tall
+           ;; inside a 120-tall parent and still 70 inside a 400-tall one,
+           ;; and 60 (wrapping to two lines) inside a 60-tall one. Written
+           ;; as the keyword the branch below already resolves rather than
+           ;; as a number, so `min-inline-size`/`max-inline-size` and
+           ;; `box-sizing` keep meaning what they mean.
+           st (if (and axis-turn? (nil? (:width st)))
+                (assoc st :width "fit-content")
+                st)
+           ;; A box establishing an orthogonal flow establishes an
+           ;; INDEPENDENT block formatting context, which this engine
+           ;; already has a flag for. Measured rather than cited, both
+           ;; inside `<div style="width:300px; height:200px">`:
+           ;;
+           ;;   <div wm:vertical-rl><div margin-right:25px>a</div></div>
+           ;;     -- the vertical box is 45 WIDE, i.e. 25 of block-start
+           ;;        margin held INSIDE it. Its horizontal control
+           ;;        (`<div><div margin-top:25px>`) collapses the 25 out.
+           ;;   <div wm:vertical-rl><div float:left w:40 h:30></div></div>
+           ;;     -- the vertical box is 40x30 and the following sibling
+           ;;        is at y=30, i.e. the float was contained.
+           st (if axis-turn? (assoc st :independent-fc? true) st)
+           theme (if (= flow parent-flow) theme (assoc theme :cssom/flow flow))
+           ;; `text-orientation` inherits and applies only in a vertical
+           ;; mode -- measured, `text-orientation: upright` on a
+           ;; `horizontal-tb` box changes nothing at all. Threaded the same
+           ;; way `flow` is, and for the same reason; see glyph-advance.
+           theme (let [upright? (boolean
+                                 (and (vertical-writing-mode? flow)
+                                      (= "upright" (or (:text-orientation st)
+                                                       (when (:cssom/upright? theme) "upright")))))
+                       fs-base (:font-size theme 14)]
+                   (cond
+                     (= upright? (boolean (:cssom/upright? theme))) theme
+                     ;; The host's own measurer is stashed, not discarded:
+                     ;; a `horizontal-tb` box nested inside an upright
+                     ;; vertical one is not upright (measured --
+                     ;; `text-orientation` has no effect at all in a
+                     ;; horizontal mode) and gets it back.
+                     upright? (assoc theme
+                                     :cssom/upright? true
+                                     :cssom/measure-text (:measure-text theme)
+                                     :measure-text (fn [text fs & _]
+                                                     (* (count (str text)) (or fs fs-base))))
+                     :else (assoc theme
+                                  :cssom/upright? false
+                                  :measure-text (:cssom/measure-text theme))))
+           ;; Where the parent put this box, kept aside: the dispatch runs
+           ;; at the canonical origin when the frame turns, and
+           ;; apply-flow-rotation translates the rotated result back here.
+           px x
+           py y
+           x (if rot 0 x)
+           y (if rot 0 y)
+           ;; An orthogonal flow establishes a block formatting context, so
+           ;; a float belonging to an ancestor's context cannot narrow a
+           ;; line inside it. (It also cannot be expressed: `intruding` is
+           ;; a band in the PARENT's coordinates.)
+           intruding (if rot nil intruding)
            ;; ---- `width: min-content | max-content | fit-content` ----
            ;;
            ;; Resolved HERE, and here is the argument for it. resolve-width
@@ -16885,6 +17490,11 @@
                        :else
                        (layout-block theme x y avail-width opacity inherited st (assoc node :children children)
                                      intruding)))
+               ;; ...and the one place a WRITING MODE is applied. After the
+               ;; transform for the reason stated in `flow-rotation`, and
+               ;; before the stacking absorb below so a span that travels
+               ;; upward carries physical coordinates.
+               laid (if rot (apply-flow-rotation theme rot px py laid) laid)
                ;; Before the absorb, so a positioned descendant that is
                ;; about to be hoisted is silenced too -- it cannot escape
                ;; this element in any case (`content-visibility: hidden`

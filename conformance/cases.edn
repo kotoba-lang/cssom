@@ -3806,12 +3806,17 @@
 
  {:id :text/writing-mode-vertical-rl
   :group :text
-  ;; `writing-mode` matches nothing in src/. Brave lays the text down the
-  ;; page: the inner box is 20 wide and 70 tall, with `alpha` at y=0 and
-  ;; `beta` at y=42. This engine gives it a horizontal 300x20 and one
-  ;; line. Deep gap, recorded rather than chased -- a vertical writing
-  ;; mode is a second axis convention through every function in
-  ;; cssom.layout, not a property to read.
+  ;; AGREES since round forty-two. Brave lays the text down the page: the
+  ;; inner box is 20 wide and 70 tall, with `alpha` at y=0 and `beta` at
+  ;; y=42. This case was in the corpus for eleven rounds reporting a
+  ;; horizontal 300x20 and one line, recorded on the reasoning that a
+  ;; vertical writing mode is `a second axis convention through every
+  ;; function in cssom.layout, not a property to read`. Half of that was
+  ;; right: it IS a second axis convention. What it is not is a second
+  ;; convention through every function -- it is a change of BASIS applied
+  ;; once, at the boundary. See the `writing modes` section in
+  ;; cssom.layout, and the `:writing-mode/*` group below for the rest of
+  ;; what that basis had to get right.
   :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl\">alpha beta</div></div>"}
 
  {:id :multicol/columns-shorthand
@@ -3955,4 +3960,177 @@
   :group :multicol
   ;; And so is a column flex container, between its items.
   :html "<div style=\"width: 300px; height: 40px; column-count: 2; column-gap: 20px\"><div style=\"display: flex; flex-direction: column\"><div style=\"height: 20px\">a</div><div style=\"height: 20px\">b</div><div style=\"height: 20px\">c</div></div></div>"}
+
+ ;; ---- writing modes -----------------------------------------------------
+ ;;
+ ;; Every number in these comments was measured in Brave 151 over CDP on
+ ;; 2026-08-06, before any of it was implemented. The group is here rather
+ ;; than under `:text` because only two of these cases are about text at
+ ;; all: a vertical writing mode is a box-model rotation, and what it
+ ;; mostly changes is which axis a size landed on and which direction
+ ;; block-level children stack in.
+
+ {:id :writing-mode/vertical-rl-wraps-at-the-parents-block-size
+  :group :writing-mode
+  ;; An orthogonal flow's `inline-size: auto` is FIT-CONTENT against the
+  ;; containing block's BLOCK size -- not fill-available, and not
+  ;; max-content. The same markup in a 120-tall parent is the 20x70 box
+  ;; `:text/writing-mode-vertical-rl` measures; in this 60-tall one Brave
+  ;; wraps it onto two lines and reports 40x60, with `alpha` in the right
+  ;; column (x=23) and `beta` in the left (x=3).
+  :html "<div style=\"width: 300px; height: 60px\"><div style=\"writing-mode: vertical-rl\">alpha beta</div></div>"}
+
+ {:id :writing-mode/vertical-rl-does-not-stretch-to-a-taller-parent
+  :group :writing-mode
+  ;; Its control, and the half that says fit-content rather than
+  ;; fill-available: a 400-tall parent leaves the same box at 20x70.
+  :html "<div style=\"width: 300px; height: 400px\"><div style=\"writing-mode: vertical-rl\">alpha beta</div></div>"}
+
+ {:id :writing-mode/vertical-rl-stacks-block-children-right-to-left
+  :group :writing-mode
+  ;; `width` is a BLOCK size in a vertical mode, and the block axis of
+  ;; `-rl` runs leftward: Brave reports an 80x21 box with the first child
+  ;; (30 wide) at x=50 and the second (50 wide) at x=0.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl\"><div style=\"width: 30px\">one</div><div style=\"width: 50px\">two</div></div></div>"}
+
+ {:id :writing-mode/vertical-lr-stacks-block-children-left-to-right
+  :group :writing-mode
+  ;; The same markup under `-lr`: same 80x21 box, first child at x=0 and
+  ;; second at x=30. The block direction is the only difference between
+  ;; the two modes that any box in this corpus can see.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-lr\"><div style=\"width: 30px\">one</div><div style=\"width: 50px\">two</div></div></div>"}
+
+ {:id :writing-mode/sideways-rl-is-vertical-rl
+  :group :writing-mode
+  ;; And its control: `sideways-rl` differs from `vertical-rl` only in how
+  ;; glyphs of upright scripts are oriented, which no box measures. Every
+  ;; number here is `:writing-mode/vertical-rl-stacks-block-children-
+  ;; right-to-left`'s -- 80x21, x=50 then x=0.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: sideways-rl\"><div style=\"width: 30px\">one</div><div style=\"width: 50px\">two</div></div></div>"}
+
+ {:id :writing-mode/sideways-lr-runs-its-inline-axis-upward
+  :group :writing-mode
+  ;; The one mode that is not a rotation of the other three: its inline
+  ;; axis runs UP the page. Brave reports the same 40x40 two-line box
+  ;; `vertical-rl` would, but each line is packed against the far edge --
+  ;; `alpha`'s 35px of ink at y=5..40 and `beta`'s 28 at y=12..40 -- and
+  ;; the columns run left to right (x=2 then x=22).
+  :html "<div style=\"width: 300px; height: 40px\"><div style=\"writing-mode: sideways-lr\">alpha beta</div></div>"}
+
+ {:id :writing-mode/logical-sizes-name-the-other-axis
+  :group :writing-mode
+  ;; The cascade half. `inline-size: 70px; block-size: 20px` is a box 20
+  ;; WIDE and 70 TALL under a vertical mode -- the exact pair the logical
+  ;; property round measured and then gated itself on rather than resolve
+  ;; into an axis this engine could not lay out.
+  :html "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl; inline-size: 70px; block-size: 20px\">v</div></div>"}
+
+ {:id :writing-mode/block-start-is-the-right-edge
+  :group :writing-mode
+  ;; `padding-block-start` is the RIGHT side under vertical-rl: Brave
+  ;; reports a 32x7 box (20 of line box plus 12 of padding) whose content
+  ;; is still at y=0. Its control is on the other axis --
+  ;; `padding-inline-start` is the TOP -- which the next case measures.
+  :html "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl; padding-block-start: 12px\">v</div></div>"}
+
+ {:id :writing-mode/inline-start-is-the-top-edge
+  :group :writing-mode
+  ;; ...and that control: a 20x19 box with its `v` pushed 12px DOWN.
+  :html "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl; padding-inline-start: 12px\">v</div></div>"}
+
+ {:id :writing-mode/an-orthogonal-flow-contains-its-margins
+  :group :writing-mode
+  ;; A box establishing an orthogonal flow establishes a block formatting
+  ;; context. Brave: the vertical box is 45 WIDE -- 25 of the child's
+  ;; block-start margin plus one 20px line box -- and the child sits at
+  ;; x=0. The horizontal control is `:box/margin-collapse-through`, where
+  ;; the same margin leaves the box entirely.
+  :html "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl\"><div style=\"margin-right: 25px\">a</div></div></div>"}
+
+ {:id :writing-mode/an-orthogonal-flow-contains-its-float
+  :group :writing-mode
+  ;; The other half of the same rule: the float does not escape, the
+  ;; vertical box is 40x30, and `after` clears it at y=30.
+  :html "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl\"><div style=\"float: left; width: 40px; height: 30px\"></div></div><div>after</div></div>"}
+
+ {:id :writing-mode/a-vertical-box-is-an-ordinary-block-in-a-horizontal-parent
+  :group :writing-mode
+  ;; Its MARGINS are read, unrotated, by the parent that places it -- the
+  ;; one property family the rotation must leave alone. Brave puts the
+  ;; vertical box at (40, 30), i.e. its physical margin-left and 20 for
+  ;; `before` plus its physical margin-top, and `after` at y=95.
+  :html "<div style=\"width: 300px; height: 200px\"><div>before</div><div style=\"writing-mode: vertical-rl; margin: 10px 20px 30px 40px\">alpha</div><div>after</div></div>"}
+
+ {:id :writing-mode/a-horizontal-box-inside-a-vertical-one-turns-back
+  :group :writing-mode
+  ;; The inverse boundary. Brave: a 90x120 vertical box holding a 70x20
+  ;; horizontal child at x=20 and a 20x120 vertical sibling at x=0 -- the
+  ;; horizontal child consumed 70 of a block axis running right to left.
+  :html "<div style=\"width: 300px; height: 150px\"><div style=\"writing-mode: vertical-rl; height: 120px\"><div style=\"writing-mode: horizontal-tb\">alpha beta</div><div>x y</div></div></div>"}
+
+ {:id :writing-mode/a-block-direction-change-is-not-an-orthogonal-flow
+  :group :writing-mode
+  ;; `vertical-lr` inside `vertical-rl` shares its parent's AXIS, so it is
+  ;; not an orthogonal flow: Brave has it FILL the parent's 120px inline
+  ;; size (where an orthogonal child shrink-wraps) and stack its own two
+  ;; children left-to-right, `p` at x=0 and `q` at x=20, inside a parent
+  ;; whose own block axis runs the other way.
+  :html "<div style=\"width: 300px; height: 150px\"><div style=\"writing-mode: vertical-rl; height: 120px\"><div style=\"writing-mode: vertical-lr\"><div>p</div><div>q</div></div></div></div>"}
+
+ {:id :writing-mode/a-percentage-size-crossing-an-orthogonal-boundary
+  :group :writing-mode
+  ;; The two percentage bases swap at the boundary and `width`/`height`
+  ;; keep naming the physical axes: in a 300x120 parent, `width: 50%;
+  ;; height: 50%` on a vertical-rl box is 150 wide and 60 tall.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; width: 50%; height: 50%\">v</div></div>"}
+
+ {:id :writing-mode/a-percentage-padding-is-of-the-containing-blocks-inline-size
+  :group :writing-mode
+  ;; ...and margins and paddings do NOT swap with them: a percentage
+  ;; resolves against the containing block's INLINE size on all four
+  ;; sides, which for a vertical containing block is its height. Brave:
+  ;; `padding-top: 10%` and `padding-left: 10%` inside a 300x120
+  ;; vertical-rl parent are 12px each -- 10% of 120, not of 300.
+  :html "<div style=\"width: 300px; height: 120px; writing-mode: vertical-rl\"><div style=\"padding-top: 10%; padding-left: 10%\">v</div></div>"}
+
+ {:id :writing-mode/text-align-packs-a-line-along-the-inline-axis
+  :group :writing-mode
+  ;; `text-align` is line-relative, so `center` centres DOWN the page:
+  ;; Brave puts `alpha`'s 35px of ink at y=32.5 in a 100-tall box.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; height: 100px; text-align: center\">alpha</div></div>"}
+
+ {:id :writing-mode/a-float-goes-to-the-inline-start
+  :group :writing-mode
+  ;; And so is `float: left`, which is line-LEFT rather than physical
+  ;; left: Brave puts the float at the TOP of a vertical-rl box (0,0,20,30)
+  ;; and starts the text 30px below it, at y=30.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; height: 100px\"><div style=\"float: left; width: 20px; height: 30px\"></div>alpha beta</div></div>"}
+
+ {:id :writing-mode/text-orientation-upright-advances-by-the-em
+  :group :writing-mode
+  ;; `upright` sets each character upright, so what it advances along the
+  ;; inline axis is the em and not the glyph's horizontal advance.
+  ;; Measured: `alpha` is 70px of inline extent under upright against 35
+  ;; under `mixed`, and `alpha beta` is 140 -- which does not fit this
+  ;; 120-tall parent, so Brave wraps it and reports a 40x120 box.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; text-orientation: upright\">alpha beta</div></div>"}
+
+ {:id :writing-mode/text-orientation-sideways-is-the-default-orientation
+  :group :writing-mode
+  ;; Its control, and the reason `mixed` and `sideways` need no
+  ;; implementation for latin text: both set it sideways, so both give the
+  ;; 20x70 box `:text/writing-mode-vertical-rl` already measures.
+  :html "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; text-orientation: sideways\">alpha beta</div></div>"}
+
+ {:id :writing-mode/aspect-ratio-is-not-rotated
+  :group :writing-mode
+  ;; KNOWN GAP, recorded rather than chased. `aspect-ratio`'s two terms are
+  ;; the PHYSICAL width and height even inside a vertical mode, so
+  ;; `inline-size: 60px; aspect-ratio: 2` is 120 wide by 60 tall in Brave.
+  ;; This engine applies the ratio to the box's canonical axes instead and
+  ;; reports 30x60 -- the ratio inverted. Fixing it is one more entry in
+  ;; `rotate-box-style`, but `aspect-ratio` is resolved in three places
+  ;; (aspect-ratio-block-width, replaced-content-size, the flex base size)
+  ;; and none of them is measured against a vertical mode yet.
+  :html "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl; inline-size: 60px; aspect-ratio: 2\">v</div></div>"}
 ]

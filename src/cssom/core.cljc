@@ -5431,29 +5431,82 @@
   "Which physical side each flow-relative side maps to, per writing
    mode + direction. Keyed by `[writing-mode direction]`.
 
-   SCOPE CUT, and the numbers a future fix needs. Only `horizontal-tb` is
-   here. Under a vertical writing mode the whole box model rotates, and
-   this engine has no vertical layout to rotate with it: measured in Brave
-   151 on 2026-08-06, inside `writing-mode: vertical-rl`,
+   Every row measured in Brave 151 over CDP on 2026-08-06 with one probe --
+   `margin-inline-start: 40px; margin-block-start: 13px` on a box inside a
+   300x200 parent, read back through `getComputedStyle`:
 
-     inline-size:70px; block-size:20px   -> a box 20 WIDE and 70 TALL
-                                            (this engine: 300x20)
-     margin-inline-start: 40px           -> margin-TOP 40px
-     padding-block-start: 12px           -> padding-RIGHT 12px
-     padding-top: 10%                    -> 20px, i.e. 10% of the parent's
-                                            200px HEIGHT (its inline size)
+   | mode          | dir | 40px lands on | 13px lands on |
+   |---------------|-----|---------------|---------------|
+   | horizontal-tb | ltr | margin-left   | margin-top    |
+   | horizontal-tb | rtl | margin-right  | margin-top    |
+   | vertical-rl   | ltr | margin-top    | margin-right  |
+   | vertical-rl   | rtl | margin-bottom | margin-right  |
+   | vertical-lr   | ltr | margin-top    | margin-left   |
+   | sideways-rl   | ltr | margin-top    | margin-right  |
+   | sideways-lr   | ltr | margin-bottom | margin-left   |
+   | sideways-lr   | rtl | margin-top    | margin-left   |
 
-   Adding the four rotated rows here is two minutes' work and would make
-   `getComputedStyle` right while every box stayed laid out horizontally --
-   a mapping that cannot be checked by either layout axis of the
-   conformance corpus. So the mapping is GATED on `horizontal-tb` instead:
-   under a vertical writing mode a logical property stays logical and is
-   ignored, exactly as it was before this change, rather than resolving to
-   a physical side this engine would then use in the wrong axis."
+   -- i.e. `direction` swaps the INLINE pair and never touches the block
+   pair, and `sideways-lr` is the one mode whose inline axis runs the other
+   way (measured independently: `inline-size: 70px` puts its single word at
+   y=63 in a 70-tall box where the other three put it at y=0). The two
+   unmeasured rows (`vertical-lr`/`sideways-rl` under rtl) follow that same
+   inline swap; nothing else in the table varies.
+
+   THIS TABLE WAS GATED ON `horizontal-tb` UNTIL 2026-08-06, and the reason
+   it no longer is, is that the gate's own justification expired. It said
+   the rotated rows `would make getComputedStyle right while every box
+   stayed laid out horizontally -- a mapping that cannot be checked by
+   either layout axis of the conformance corpus`. That was true and was the
+   right call at the time. cssom.layout now lays a vertical writing mode out
+   in a rotated basis (see its `writing modes` section), so all four rows
+   are checked by the geometry axis: `inline-size: 70px; block-size: 20px`
+   is a 20x70 box on both sides, and `padding-block-start: 12px` is 12px of
+   padding on the box's right edge on both sides."
   {["horizontal-tb" "ltr"] {"inline-start" "left" "inline-end" "right"
                             "block-start" "top" "block-end" "bottom"}
    ["horizontal-tb" "rtl"] {"inline-start" "right" "inline-end" "left"
-                            "block-start" "top" "block-end" "bottom"}})
+                            "block-start" "top" "block-end" "bottom"}
+   ["vertical-rl" "ltr"]   {"inline-start" "top" "inline-end" "bottom"
+                            "block-start" "right" "block-end" "left"}
+   ["vertical-rl" "rtl"]   {"inline-start" "bottom" "inline-end" "top"
+                            "block-start" "right" "block-end" "left"}
+   ["sideways-rl" "ltr"]   {"inline-start" "top" "inline-end" "bottom"
+                            "block-start" "right" "block-end" "left"}
+   ["sideways-rl" "rtl"]   {"inline-start" "bottom" "inline-end" "top"
+                            "block-start" "right" "block-end" "left"}
+   ["vertical-lr" "ltr"]   {"inline-start" "top" "inline-end" "bottom"
+                            "block-start" "left" "block-end" "right"}
+   ["vertical-lr" "rtl"]   {"inline-start" "bottom" "inline-end" "top"
+                            "block-start" "left" "block-end" "right"}
+   ["sideways-lr" "ltr"]   {"inline-start" "bottom" "inline-end" "top"
+                            "block-start" "left" "block-end" "right"}
+   ["sideways-lr" "rtl"]   {"inline-start" "top" "inline-end" "bottom"
+                            "block-start" "left" "block-end" "right"}})
+
+(def ^:private logical-flow-sizes
+  "The six sizing longhands, per writing mode. The inline axis is the
+   horizontal one only in `horizontal-tb`; in all four vertical modes it is
+   the page's vertical axis, so `inline-size` is a HEIGHT there.
+
+   Measured, inside a 300x200 parent: `inline-size: 70px; block-size: 20px`
+   is a box 20 wide and 70 tall under `vertical-rl`, `vertical-lr` and
+   `sideways-lr` alike, and 70 wide by 20 tall under `horizontal-tb`.
+
+   `direction` is not a parameter: it reverses an axis, it does not swap
+   the two."
+  (into {}
+        (map (fn [mode]
+               (let [vertical? (not= "horizontal-tb" mode)
+                     inline (if vertical? "height" "width")
+                     block (if vertical? "width" "height")]
+                 [mode {:inline-size (keyword inline)
+                        :block-size (keyword block)
+                        :min-inline-size (keyword (str "min-" inline))
+                        :max-inline-size (keyword (str "max-" inline))
+                        :min-block-size (keyword (str "min-" block))
+                        :max-block-size (keyword (str "max-" block))}])))
+        ["horizontal-tb" "vertical-rl" "vertical-lr" "sideways-rl" "sideways-lr"]))
 
 (def ^:private logical->physical-by-flow
   "`{[writing-mode direction] {logical-property physical-property}}` over
@@ -5466,14 +5519,9 @@
    and a transposed `inline-end` is a bug no test in this file would
    catch (both sides are real properties, both take the same values)."
   (into {}
-        (map (fn [[flow sides]]
+        (map (fn [[[mode _ :as flow] sides]]
                [flow
-                (into {:inline-size :width
-                       :block-size :height
-                       :min-inline-size :min-width
-                       :max-inline-size :max-width
-                       :min-block-size :min-height
-                       :max-block-size :max-height}
+                (into (logical-flow-sizes mode)
                       cat
                       [(for [box ["margin" "padding"]
                              [logical physical] sides]
@@ -5805,10 +5853,11 @@
                  :direction (flow-keyword (win :direction)
                                           (:direction inherited-flow)
                                           (:direction initial-flow))})
-         ;; nil for a vertical writing mode -- see `logical-flow-sides` for
-         ;; the measurements behind that scope cut. A logical declaration
-         ;; then stays under its logical key, which nothing reads, which is
-         ;; where it was before this rename existed.
+         ;; nil only for a flow this table has no row for, which after
+         ;; 2026-08-06 means an unrecognised `writing-mode` keyword. A
+         ;; logical declaration then stays under its logical key, which
+         ;; nothing reads -- the same safe non-answer the vertical modes
+         ;; got while `logical-flow-sides` was gated on `horizontal-tb`.
          rename (get logical->physical-by-flow
                      [(:writing-mode flow) (:direction flow)])
          sorted (if rename

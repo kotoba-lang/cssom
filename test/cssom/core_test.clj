@@ -4193,20 +4193,56 @@
   (is (= 25 (:style/margin-left
              (cascaded-style nil "<div style=\"--gap: 25px\"><div id=\"a\" style=\"margin-inline: var(--gap) 5px\">m</div></div>" "a")))))
 
-(deftest a-vertical-writing-mode-leaves-logical-properties-unmapped
-  ;; SCOPE CUT, asserted so it cannot drift into a silent half-implementation.
-  ;; Measured in Brave inside `writing-mode: vertical-rl`,
-  ;; `margin-inline-start: 40px` is a margin-TOP and `inline-size: 70px` is
-  ;; a 70px HEIGHT -- a rotation this engine has no vertical layout to
-  ;; perform. Rather than write a mapping neither layout axis of the
-  ;; conformance corpus could check, the rename is gated on `horizontal-tb`
-  ;; and the declaration stays under its logical key, exactly where it was
-  ;; before any of this existed.
-  (let [st (cascaded-style nil "<div style=\"writing-mode: vertical-rl\"><div id=\"a\" style=\"margin-inline-start: 40px; inline-size: 70px\">v</div></div>" "a")]
-    (is (nil? (:style/margin-left st)))
-    (is (nil? (:style/margin-top st)))
-    (is (nil? (:style/width st)))
-    (is (= 40 (:style/margin-inline-start st)))))
+(deftest a-vertical-writing-mode-rotates-the-logical-mapping
+  ;; This test used to assert the OPPOSITE -- that a vertical writing mode
+  ;; left every logical property unmapped -- and it was right to. The rename
+  ;; was gated on `horizontal-tb` because the four rotated rows would have
+  ;; made `getComputedStyle` correct while cssom.layout went on laying every
+  ;; box out horizontally, and a mapping neither layout axis of the
+  ;; conformance corpus can check is a mapping nothing keeps honest. The
+  ;; gate was there so that could not happen quietly.
+  ;;
+  ;; What changed on 2026-08-06 is the thing the gate was waiting for:
+  ;; cssom.layout lays a vertical writing mode out in a rotated basis (see
+  ;; its `writing modes` section), so `inline-size: 70px` is now a 70px-tall
+  ;; box on this side as well, and the geometry axis checks every row.
+  ;;
+  ;; Measured in Brave 151 over CDP, inside `writing-mode: vertical-rl` in a
+  ;; 300x200 parent -- these four assertions are those four numbers.
+  (let [st (cascaded-style nil "<div style=\"writing-mode: vertical-rl\"><div id=\"a\" style=\"margin-inline-start: 40px; inline-size: 70px; block-size: 20px; padding-block-start: 12px\">v</div></div>" "a")]
+    (is (= 40 (:style/margin-top st)) "inline-start is the TOP under vertical-rl")
+    (is (= 70 (:style/height st)) "inline-size is a HEIGHT under vertical-rl")
+    (is (= 20 (:style/width st)) "block-size is a WIDTH under vertical-rl")
+    (is (= 12 (:style/padding-right st)) "block-start is the RIGHT under vertical-rl")
+    (is (nil? (:style/margin-left st)))))
+
+(deftest direction-reverses-the-inline-axis-of-a-vertical-writing-mode
+  ;; The control beside the test above, and the reason `logical-flow-sides`
+  ;; is keyed by BOTH properties: `direction` swaps the inline pair and
+  ;; never touches the block pair, in a vertical mode exactly as in a
+  ;; horizontal one. Measured, same probe, `direction: rtl` added.
+  (let [vrl (cascaded-style nil "<div style=\"writing-mode: vertical-rl; direction: rtl\"><div id=\"a\" style=\"margin-inline-start: 40px; margin-block-start: 13px\">v</div></div>" "a")
+        htb (cascaded-style nil "<div style=\"direction: rtl\"><div id=\"a\" style=\"margin-inline-start: 40px; margin-block-start: 13px\">v</div></div>" "a")]
+    (is (= 40 (:style/margin-bottom vrl)) "vertical-rl + rtl: inline-start is the BOTTOM")
+    (is (= 13 (:style/margin-right vrl)) "...and block-start is still the RIGHT")
+    (is (= 40 (:style/margin-right htb)) "horizontal-tb + rtl: inline-start is the RIGHT")
+    (is (= 13 (:style/margin-top htb)) "...and block-start is still the TOP")))
+
+(deftest sideways-lr-is-the-one-mode-whose-inline-axis-runs-the-other-way
+  ;; `vertical-rl`, `vertical-lr` and `sideways-rl` share an inline
+  ;; direction (top to bottom) and differ only in which physical side the
+  ;; block axis starts on. `sideways-lr` differs in BOTH. Measured in Brave
+  ;; with the same `margin-inline-start: 40px; margin-block-start: 13px`
+  ;; probe; the control is `sideways-rl`, which must stay identical to
+  ;; `vertical-rl`.
+  (let [side (fn [mode k]
+               (k (cascaded-style nil (str "<div style=\"writing-mode: " mode "\"><div id=\"a\" style=\"margin-inline-start: 40px; margin-block-start: 13px\">v</div></div>") "a")))]
+    (is (= 40 (side "sideways-lr" :style/margin-bottom)))
+    (is (= 13 (side "sideways-lr" :style/margin-left)))
+    (is (= 40 (side "vertical-lr" :style/margin-top)))
+    (is (= 13 (side "vertical-lr" :style/margin-left)))
+    (is (= 40 (side "sideways-rl" :style/margin-top)))
+    (is (= 13 (side "sideways-rl" :style/margin-right)))))
 
 (deftest a-percentage-box-shorthand-expands-per-side-as-the-raw-value
   ;; Admitted since cssom.layout learned to resolve one. Brave: `padding:

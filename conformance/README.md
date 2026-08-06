@@ -815,6 +815,283 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-four: `writing-mode`, which is a change of basis and not a second engine
+
+`:text/writing-mode-vertical-rl` had been in the corpus for eleven rounds
+with a note saying why it was not being chased: *"a vertical writing mode
+is a second axis convention through every function in cssom.layout, not a
+property to read."* Half of that was right. It **is** a second axis
+convention. What it is not is a convention *through every function* — it is
+a change of **basis**, applied once, at the boundary where the mode
+changes, and the horizontal algorithm underneath is already the right
+algorithm in that basis.
+
+That claim is a measurement, not a design preference, and it was made
+before a line was written. Brave 151 over CDP, 2026-08-06, in the corpus's
+own page shape (800px, monospace 14/20 — this browser's monospace advances
+7px per character):
+
+| shape | Brave | this engine, before |
+|---|---|---|
+| `<div w:300 h:120><div wm:vertical-rl>alpha beta` | inner box **20 × 70** | 300 × 20 |
+| ...the same in a **400**-tall parent | still **20 × 70** | 300 × 20 |
+| ...the same in a **60**-tall parent | **40 × 60**, two lines | 300 × 20 |
+| `alpha` word rect | (3, 0) 15 × 35 | one horizontal run |
+| `beta` word rect | (3, **42**) 15 × 28 | on the same line |
+
+Every one of those is the horizontal answer with the two axes exchanged:
+70 is the text's own advance, 20 is the line-height, 60 is where a 70px
+run wraps against 60px of room. Nothing in the list is a new rule about
+text, or about boxes. It is the same rule, read along the other axis.
+
+#### The four modes are two bits, and one of them is not a rotation
+
+Measured with one probe per mode — `margin-inline-start: 40px;
+margin-block-start: 13px` on a box in a 300 × 200 parent, read back through
+`getComputedStyle` — plus a second (`inline-size: 70px`, then two block
+children of declared block sizes 30 and 50) for what the boxes do:
+
+| mode | dir | 40px lands on | 13px lands on | children stack |
+|---|---|---|---|---|
+| horizontal-tb | ltr | margin-left | margin-top | downward |
+| horizontal-tb | rtl | margin-right | margin-top | downward |
+| vertical-rl | ltr | margin-**top** | margin-**right** | right to left |
+| vertical-rl | rtl | margin-**bottom** | margin-right | right to left |
+| vertical-lr | ltr | margin-top | margin-**left** | left to right |
+| vertical-lr | rtl | margin-bottom | margin-left | left to right |
+| sideways-rl | ltr | margin-top | margin-right | right to left |
+| sideways-rl | rtl | margin-bottom | margin-right | right to left |
+| sideways-lr | ltr | margin-**bottom** | margin-left | left to right |
+| sideways-lr | rtl | margin-**top** | margin-left | left to right |
+
+Two bits, then, and `direction` is not one of them: it swaps the inline
+pair in a vertical mode exactly as it does in a horizontal one, and it
+cancels out of the physical→canonical mapping entirely, because it swaps
+inline-start and inline-end on **both** sides of that mapping.
+
+**`sideways-rl` and `vertical-rl` are the same box geometry in every shape
+measured.** They differ only in how the glyphs of an upright script are
+oriented, and no box in this corpus can see that. `sideways-rl` is in the
+corpus as `vertical-rl`'s control, and that is exactly what it is worth.
+
+**`sideways-lr` is the one mode that is not a rotation of the other three:
+its inline axis runs UP the page.** `inline-size: 70px` puts its single
+word at y=63 in a 70-tall box where every other mode puts it at y=0, and a
+two-line `alpha beta` in a 40-tall parent packs `alpha`'s 35px of ink at
+y=5..40 and `beta`'s 28 at y=12..40 — both ending at the far edge. It is
+the reason the basis table holds a signed permutation per mode rather than
+a rotation count.
+
+#### What that bought, and what it cost
+
+`writing-mode` is now **three tables** (`writing-mode-basis`,
+`writing-mode-sides` in cssom.layout, `logical-flow-sides` in cssom.core),
+two style rewrites built from them, and one block of bindings at the top of
+`layout-node`'s element branch — below which nothing knows a vertical mode
+exists. The style map
+arrives in the box's own canonical frame, `avail-width` is its available
+*inline* size, the dispatch lays out at the origin, and one matrix puts the
+result back into the parent's frame — reusing `transform-ops`, which
+already documents a quarter turn as the case where its axis-aligned
+bounding box is EXACT rather than approximate.
+
+Corpus-wide, 601 → **622** cases, and the entire pre-existing residual is
+byte-identical on all four axes:
+
+| axis | 601 cases | 622 cases |
+|---|---|---|
+| line structure | 572/576 | **593/597** |
+| geometry (boxes) | 2030/2036 | **2089/2095** |
+| geometry (clean cases) | 595/601 | **616/622** |
+| paint order (points) | 14987/15009 | **15522/15544** |
+| paint order (clean cases) | 589/601 | **610/622** |
+| computed style (values) | 28615/28618 | **29439/29442** |
+| computed style (clean cases) | 599/601 | **620/622** |
+
+**One line of the corpus-wide `--dump-ops` changed**, and it is the case
+this round is about: `:text/writing-mode-vertical-rl`'s inner box,
+`300 × 20` → `20 × 70`, which is Brave's number exactly. 601 case blocks
+diffed, 21 added, **zero pre-existing cases moved** — which is the property
+that mattered, because an axis swap can reach every layout path in the
+file, and the whole corpus outside this group is `horizontal-tb`. It is
+guaranteed structurally rather than by luck: `horizontal-tb` is the
+identity in all three tables and both style rewrites return their argument
+unchanged for it.
+
+949 unit tests / 2428 assertions, 0 failures; 0 lint errors and the same 25
+pre-existing warnings. Fifteen new or rewritten unit tests, of which
+**fourteen were confirmed failing against the base commit's `src/`** (42
+assertions) before this round's `src/` was written, each with a control
+beside it that passes on both sides. The fifteenth is the one whose entire
+job is to be that control and pass on both sides:
+`nothing-outside-a-vertical-subtree-is-rotated`, three horizontal shapes
+covering the four property families the rotation touches.
+Downstream: `browser` 754/0, `dom-gpu` 130/0, `htmldom` 180/0, all against
+this branch's cssom. **No new draw-op key**, so `dom-gpu`'s
+`retained_draw_ops.edn` golden needed no regeneration.
+
+#### The gate that was opened, and why it was there
+
+Round thirty-six implemented logical properties and **gated the whole
+logical→physical rename on `horizontal-tb`**, with a unit test asserting
+the gate so it could not drift into a silent half-implementation. Its
+reasoning is worth quoting because it was right: adding the rotated rows
+*"would make `getComputedStyle` right while every box stayed laid out
+horizontally, a mapping neither layout axis of this corpus could check."*
+
+That is the condition this round removes. The rows are in, and the geometry
+axis checks them: `inline-size: 70px; block-size: 20px` is a 20 × 70 box on
+both sides (`:writing-mode/logical-sizes-name-the-other-axis`),
+`padding-block-start: 12px` widens the box's right edge without moving its
+content (`:writing-mode/block-start-is-the-right-edge`), and
+`padding-inline-start: 12px` is its control on the other axis. The test that
+asserted the gate is now the test that asserts the rotation, with the
+reason recorded in it rather than only the number.
+
+#### Three rules that had to be right and are not the axis swap
+
+**A box establishing an orthogonal flow shrink-wraps.** `inline-size: auto`
+is **fit-content** against the containing block's *block* size, not
+fill-available. This is what the 120 / 400 / 60 row of the first table
+measures, and it is what makes the corpus case 70 tall rather than 120.
+Getting the ORDER wrong here is a real trap and was hit once: the two
+percentage bases *exchange* at an orthogonal boundary, and reading the
+available inline size out of the map after the exchange had already
+rewritten it handed the box its parent's inline size — the case stopped
+wrapping at a 60-tall parent and sat at its 80px max-content.
+
+**It also establishes a block formatting context.** Measured rather than
+cited, both halves: a child's block-start margin stays inside it (the box
+is **45** wide for `margin-right: 25px` on the child, against a horizontal
+control that collapses the same margin out to the page), and a float stays
+inside it (**40 × 30**, with the following sibling at y=30).
+
+**Its margins are read by whoever places it, in *that* box's frame.** This
+is the one property family the rotation must leave alone, and the
+distinction only exists at the boundary: `margin: 10px 20px 30px 40px` on a
+vertical-rl box between two ordinary blocks puts it at **(40, 30)** — its
+physical margin-left and its physical margin-top, applied physically —
+while one level in, `margin-top: 10%` on a child of a vertical box is 12px
+applied *down the page*, along the inline axis. Same property, same
+spelling, opposite axis, and the mode that decides is the parent's both
+times. Hence the ambient mode rides on `theme` rather than on the inherited
+style map: `node-style` is called by a box's PARENT (to read its margins,
+to measure it) as often as by the box itself, and `theme` is the one
+argument every one of those calls shares.
+
+That placement is also what makes the intrinsic-size readers right, and
+finding out cost one wrong number: with the rotation applied a level up in
+`layout-node`, two `width: 30px` / `width: 50px` children of a vertical box
+gave it a canonical width of 50 — their *unrotated* `width` — where Brave
+says 21, the max-content of their text. `measure-child`,
+`block-max-content-width`, the flex base size and a grid track's intrinsics
+all read a child's style map through `node-style` and never through
+`layout-node`.
+
+#### `text-orientation`, of which exactly one value is implemented
+
+`text-orientation` changes what a *character* advances along the inline
+axis, which is a text-measurement rule and not a layout one. Measured,
+`alpha` inside `vertical-rl`:
+
+| value | inline extent | rule |
+|---|---|---|
+| `mixed` (initial) | 35px | latin is set sideways: its horizontal advance |
+| `sideways` | 35px | identical, for latin |
+| `upright` | **70px** | 5 × the 14px em |
+
+`upright` is implemented, because the rule is exact without a Unicode
+table: **every** character advances by the em, the space included (`alpha
+beta` is 140, which does not fit a 120-tall parent, so Brave wraps it and
+reports 40 × 120 — and so does this). It is applied by substituting the
+theme's `:measure-text`, not by a branch in `glyph-advance`, and finding
+out why cost one wrong number: `layout-text`, the flex base size, the table
+caption's intrinsic width and the text-selection caret all read
+`(:measure-text theme)` directly, so a branch in `glyph-advance` sized the
+box correctly and never reached the line breaker — `alpha beta` stayed on
+one 140px line inside a 120px box instead of wrapping.
+
+**`mixed` is NOT implemented for the scripts it actually distinguishes**,
+and that is the scope cut. `mixed` sets the em advance *per character*, for
+upright scripts only. Measured, `あいう えお` inside `vertical-rl`: **77px**
+under `mixed` (three ems, a 7px sideways space, two ems) and **84** under
+`upright` (six ems). So this engine is right for `mixed` on latin and
+digits — which is what the corpus holds — and 7px per CJK character short
+otherwise. Closing it needs a script-property table, which is a different
+kind of change from this one.
+
+#### Scope cuts, each with the number a fix will need
+
+- **Glyphs are not rotated.** A `:text` op is a string at an origin laid out
+  along +x, and there is no rotated-glyph primitive here or in this
+  engine's hosts — the same thing `transform-ops` already says about
+  `rotate()`. Two consequences, one repaired and one not.
+
+  Repaired: under a quarter turn the words of one line are at different
+  physical y's, so one op cannot express the line at all. A rotated run is
+  emitted as **one op per word**, each at its own transformed origin, and
+  each re-anchored to the top-left corner of its transformed em box rather
+  than left at the transformed origin point (which is the top-*right*
+  corner under vertical-rl and the *bottom*-left under sideways-lr).
+  Without the re-anchoring a `sideways-lr` op reports y=40 for ink that
+  starts at y=5.
+
+  Not repaired, and it is the one case in this group that fails: a page
+  that MIXES orientations cannot be scored on the line axis.
+  `:writing-mode/a-horizontal-box-inside-a-vertical-one-turns-back` has
+  every box exact, every paint sample exact, every computed value exact,
+  and reports `["x alpha beta"] ["y"]` where Brave reports `["x"] ["alpha
+  beta"] ["y"]`. A rotated word's ink in Brave is 15 wide and 7 tall; this
+  engine's is 7 wide and 15 tall at the same origin, so the vertical
+  sibling's `x` overlaps the horizontal child's line band and the same
+  clustering function merges them. Fixing it means a `:text` op that
+  carries its orientation — a new op key, and `dom-gpu`'s
+  `retained_draw_ops.edn` golden pins whole op maps.
+
+- **`aspect-ratio` is not rotated**, and it is the group's other failing
+  case, deliberately. Its two terms are the physical width and height even
+  inside a vertical mode: `inline-size: 60px; aspect-ratio: 2` is **120
+  wide × 60 tall** in Brave and 30 × 60 here, the ratio inverted. It is one
+  more entry in `rotate-box-style`, but the ratio is resolved in three
+  places and none of them is measured against a vertical mode yet.
+
+- **`overflow-x`/`overflow-y` and `scroll-left`/`scroll-top` are not
+  rotated.** They name physical axes in the DOM — `element.scrollTop` is
+  physical in a vertical mode — so rotating them on the way in without
+  rotating them on the way out would be worse than leaving them.
+
+- **An orthogonal flow whose containing block has no definite block size
+  does not wrap.** Brave falls back to the nearest **scrollport's** block
+  size, and both halves are measured: inside `<div style="width:300px;
+  height:150px; overflow:auto">` a long vertical-rl run is 150 tall, and
+  with no scroll container anywhere it is **419** — exactly
+  `window.innerHeight` for this headless window, read back in the same
+  probe and unchanged by pushing the box 300px down the page. This engine
+  has no viewport block size: `draw-ops` takes a `:width` and nothing else.
+  Inventing one would be inventing the answer, so an unconstrained
+  orthogonal flow resolves `fit-content` to `max-content`. `max-height`
+  also counts as definite in Brave (**90** in a `max-height: 90px` parent)
+  and `definite-content-height` does not answer it, so such a parent takes
+  the same fallback.
+
+- **An element's own CSS `transform` is applied inside the rotation.** A
+  `translateX(10px)` in a vertical-rl box moves its content 10px *down* the
+  page where Brave moves it 10px right. All ten of the corpus's transform
+  cases are `horizontal-tb`, where the two orders are the same matrix.
+
+- **An orthogonal child's contribution to its parent's intrinsic size is
+  its canonical inline size, not its block size.** Measured, `<div
+  style="width:max-content"><div style="writing-mode:vertical-rl">alpha
+  beta</div></div>` is **20 wide** in Brave — the vertical child's *block*
+  size. The general fix needs the child laid out before the parent is
+  sized, a second pass this file's single-pass intrinsic readers do not
+  have.
+
+- **`writing-mode` on a non-atomic inline.** Measured, a `<span
+  style="writing-mode: vertical-rl">` inside a sentence computes
+  `display: inline-block` in Brave and lays out as a 20 × 28 atomic inline.
+  No blockification is implemented; the corpus has no case.
+
 ### Round forty-three: where a box sits on a line
 
 Four residuals in one cluster — everything left that was about a box's

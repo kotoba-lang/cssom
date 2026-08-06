@@ -12791,3 +12791,255 @@
     [77 20] "pre"
     [77 20] "pre-wrap"
     [77 20] "break-spaces"))
+
+;; ---- writing modes ------------------------------------------------------
+;;
+;; Every number in this section was measured in Brave 151 over CDP on
+;; 2026-08-06, in the conformance corpus's own page shape (800px wide,
+;; monospace 14px / line-height 20px), before any of it was implemented.
+;;
+;; The advances differ between the two sides -- that browser's monospace
+;; advances 7px per character and this engine's default model advances
+;; `(long (* 0.6 font-size))` = 8 -- so the assertions below are on the
+;; numbers that DO NOT come from a text measurement: which axis a size
+;; landed on, which physical side a padding moved to, which direction
+;; successive block children stack in, and how many line boxes there are.
+;; The text-derived numbers are the conformance corpus's job, where both
+;; sides wrap against the oracle's own measured advance.
+
+(defn- wm-px
+  "A coordinate as a whole number when it is one. `transform-ops` works in
+   doubles (it rounds to four places), so a rotated box's `:w` is 20.0 where
+   an unrotated one's is 20 -- a difference in the arithmetic, not in the
+   layout, and one no assertion in this section is about."
+  [v]
+  (let [d (double (or v 0))]
+    (if (== d (Math/rint d)) (long d) d)))
+
+(defn- wm-ops
+  "Draw ops for `html` through the REAL pipeline -- htmldom parse, then
+   cssom.core's cascade, which is what turns `inline-size` into a physical
+   longhand -- in the conformance page's own shape."
+  [html]
+  (let [doc (-> (html/parse-into-document
+                 (str "<div id=\"root\" style=\"font-size: 14px; line-height: 20px\">" html "</div>"))
+                (css/apply-cascade (css/parse-rules "")))
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc) {:width 800 :theme {:padding 0 :gap 0
+                                                        :font-size 14 :line-height 20}})))
+
+(defn- wm-boxes
+  "Every element `:node` box the markup itself produced, i.e. with the two
+   boxes the wrapper contributes (`<body>` and the `#root` div) dropped."
+  [html]
+  (->> (wm-ops html)
+       (filterv #(= :node (:draw/op %)))
+       (mapv #(mapv wm-px [(:x %) (:y %) (:w %) (:h %)]))
+       (drop 2)
+       vec))
+
+(defn- wm-texts [html]
+  (->> (wm-ops html)
+       (filterv #(= :text (:draw/op %)))
+       (mapv (fn [op] [(:text op) (wm-px (:x op)) (wm-px (:y op))]))))
+
+(deftest a-vertical-writing-mode-transposes-the-box
+  ;; The corpus case, and the whole claim in one assertion. Brave: the inner
+  ;; box is 20 WIDE and 70 TALL where the same markup in `horizontal-tb` is
+  ;; 300 wide and 20 tall. 70 is the text's own advance (`alpha beta` at
+  ;; 7px/char); this engine's default model says 8, hence 80.
+  (let [[_parent inner]
+        (wm-boxes "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl\">alpha beta</div></div>")]
+    (is (= 20 (nth inner 2)) "one line box wide -- the line-height, on the BLOCK axis")
+    (is (= 80 (nth inner 3)) "and as tall as the text is long -- the INLINE axis"))
+  (let [[_parent inner]
+        (wm-boxes "<div style=\"width: 300px; height: 120px\"><div>alpha beta</div></div>")]
+    (is (= [0 0 300 20] inner) "control: the same markup horizontally")))
+
+(deftest an-orthogonal-flow-shrink-wraps-and-wraps-at-the-parents-block-size
+  ;; `inline-size: auto` in an orthogonal flow is FIT-CONTENT, not
+  ;; fill-available. Measured in Brave, the same box in three parents:
+  ;; 120 tall -> 70; 400 tall -> still 70; 60 tall -> 60, on two lines
+  ;; (a 40-wide box). This engine's own advance makes the first two 80.
+  (let [box (fn [h] (second (wm-boxes (str "<div style=\"width: 300px; height: " h "px\">"
+                                           "<div style=\"writing-mode: vertical-rl\">alpha beta</div></div>"))))]
+    (is (= [0 0 20 80] (box 120)) "it fits, so it shrink-wraps")
+    (is (= [0 0 20 80] (box 400)) "a taller parent does NOT stretch it")
+    (is (= [0 0 40 60] (box 60)) "a shorter one wraps it onto a second line")))
+
+(deftest a-vertical-writing-mode-stacks-block-children-along-the-page-x-axis
+  ;; Which physical direction successive block children stack in is the ONLY
+  ;; thing that separates the four modes' box geometry. Measured, two
+  ;; children of declared block sizes 30 and 50:
+  ;;
+  ;;   vertical-rl / sideways-rl   first at x=50, second at x=0  (right to left)
+  ;;   vertical-lr / sideways-lr   first at x=0,  second at x=30 (left to right)
+  ;;
+  ;; and the containing box is 80 wide in all four.
+  (let [kids (fn [mode]
+               (drop 1 (wm-boxes (str "<div style=\"width: 300px; height: 120px\">"
+                                      "<div style=\"writing-mode: " mode "\">"
+                                      "<div style=\"width: 30px\">one</div>"
+                                      "<div style=\"width: 50px\">two</div></div></div>"))))]
+    (is (= [50 0] (mapv first (drop 1 (kids "vertical-rl")))))
+    (is (= [50 0] (mapv first (drop 1 (kids "sideways-rl")))))
+    (is (= [0 30] (mapv first (drop 1 (kids "vertical-lr")))))
+    (is (= [0 30] (mapv first (drop 1 (kids "sideways-lr")))))
+    (is (= 80 (nth (first (kids "vertical-rl")) 2)) "and `width` was read as a BLOCK size")))
+
+(deftest sideways-lr-runs-its-inline-axis-up-the-page
+  ;; The one mode that is not a rotation of the other three. Measured with
+  ;; `inline-size: 70px`, whose single word sits at y=63 in a 70-tall box
+  ;; under sideways-lr and at y=0 under the other three. Here: two lines,
+  ;; and which one is at the top.
+  (let [ys (fn [mode] (mapv #(nth % 2)
+                            (wm-texts (str "<div style=\"width: 300px; height: 40px\">"
+                                           "<div style=\"writing-mode: " mode "\">alpha beta</div></div>"))))]
+    (is (= [0 0] (ys "vertical-rl")) "both lines start at the top and stack sideways")
+    (is (= [0 8] (ys "sideways-lr"))
+        "...and sideways-lr packs each line against the BOTTOM of the box:
+         Brave puts `alpha`'s 35px of ink at y=5..40 and `beta`'s 28 at
+         y=12..40 in a 40-tall box, i.e. both END at the far edge. The
+         numbers here are this engine's own 8px advance (40 - 40, 40 - 32)")))
+
+(deftest a-vertical-writing-mode-moves-padding-and-border-round-the-box
+  ;; `padding-block-start` is the RIGHT edge under vertical-rl, so a 12px
+  ;; one widens the box by 12 without moving its content down the page.
+  ;; Measured in Brave: a 32x7 box (20 + 12) with its word still at y=0.
+  ;; The control is `padding-inline-start: 12px`, which is the TOP -- a
+  ;; 20x19 box with the word at y=12.
+  (let [[_p block] (wm-boxes "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl; padding-block-start: 12px\">v</div></div>")
+        [_p2 inline] (wm-boxes "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl; padding-inline-start: 12px\">v</div></div>")]
+    (is (= [0 0 32 8] block))
+    (is (= [0 0 20 20] inline))))
+
+(deftest an-orthogonal-flow-establishes-a-block-formatting-context
+  ;; Both halves measured in Brave, both inside a 300x200 parent:
+  ;;
+  ;;   <div wm:vertical-rl><div margin-right:25px>a  -- the box is 45 WIDE,
+  ;;     i.e. the child's block-start margin did NOT collapse out of it. The
+  ;;     horizontal control collapses its margin-top straight to the page.
+  ;;   <div wm:vertical-rl><div float:left w:40 h:30>  -- the box is 40x30,
+  ;;     i.e. the float was contained, and the next sibling is at y=30.
+  (let [[_wrapper outer inner]
+        (wm-boxes "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl\"><div style=\"margin-right: 25px\">a</div></div></div>")]
+    (is (= 45 (nth outer 2)) "25 of contained margin plus one 20px line box")
+    (is (= 0 (first inner)) "and the child sits 25 in from the block-start (right) edge"))
+  (let [[wrapper _vbox _float after]
+        (wm-boxes "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl\"><div style=\"float: left; width: 40px; height: 30px\"></div></div><div>after</div></div>")]
+    (is (= [0 0 40 30] (second (wm-boxes "<div style=\"width: 300px; height: 200px\"><div style=\"writing-mode: vertical-rl\"><div style=\"float: left; width: 40px; height: 30px\"></div></div></div>")))
+        "the vertical box grew to hold its own float")
+    (is (= 30 (second after)) "the following sibling clears the contained float")
+    (is (= 300 (nth wrapper 2)))))
+
+(deftest a-vertical-box-is-an-ordinary-block-in-its-horizontal-parent
+  ;; Its MARGINS are read, unrotated, by the parent that places it -- the
+  ;; one property family the rotation must not touch. Measured in Brave,
+  ;; `margin: 10px 20px 30px 40px` on a vertical-rl box between two
+  ;; ordinary blocks: the box is at (40, 30) and `after` is at y=95.
+  (let [[_p _before vbox after]
+        (wm-boxes "<div style=\"width: 300px; height: 200px\"><div>before</div><div style=\"writing-mode: vertical-rl; margin: 10px 20px 30px 40px\">alpha</div><div>after</div></div>")]
+    (is (= 40 (first vbox)) "physical margin-left, applied physically")
+    (is (= 30 (second vbox)) "20 for `before` plus its physical margin-top")
+    (is (= 100 (second after)) "...and its own rotated height plus margin-bottom")))
+
+(deftest a-horizontal-box-inside-a-vertical-one-turns-back
+  ;; The inverse boundary, which the same relative matrix produces with no
+  ;; second code path. Measured in Brave: `<div wm:vertical-rl h:120>` with
+  ;; a `horizontal-tb` first child and a vertical second one is 90x120, with
+  ;; the horizontal child a 70x20 box at x=20 and the vertical sibling
+  ;; 20x120 at x=0 -- the horizontal child consumed 70 of a block axis that
+  ;; runs right to left.
+  (let [[_p outer htb vrl]
+        (wm-boxes "<div style=\"width: 300px; height: 150px\"><div style=\"writing-mode: vertical-rl; height: 120px\"><div style=\"writing-mode: horizontal-tb\">alpha beta</div><div>x y</div></div></div>")]
+    (is (= 120 (nth outer 3)) "the declared block-axis height is an INLINE size")
+    (is (= 20 (nth htb 3)) "the horizontal child is one 20px line tall")
+    (is (= (+ (first htb) (nth htb 2)) (nth outer 2))
+        "and it starts at the parent's block-start, which is its right edge")
+    (is (= [0 0 20 120] vrl) "the vertical sibling takes the next 20 leftward")))
+
+(deftest a-block-direction-change-inside-one-axis-is-a-mirror-not-a-turn
+  ;; `vertical-lr` inside `vertical-rl` is NOT an orthogonal flow: the axes
+  ;; already agree. Measured in Brave, such a child fills its parent's 120px
+  ;; inline size (where an orthogonal one would shrink-wrap) and stacks its
+  ;; OWN children left-to-right inside a parent that stacks right-to-left --
+  ;; `p` at x=0 and `q` at x=20.
+  (let [[_p _outer inner a b]
+        (wm-boxes "<div style=\"width: 300px; height: 150px\"><div style=\"writing-mode: vertical-rl; height: 120px\"><div style=\"writing-mode: vertical-lr\"><div>p</div><div>q</div></div></div></div>")]
+    (is (= 120 (nth inner 3)) "it FILLS the inline size -- no shrink-wrap, no turn")
+    (is (= 0 (first a)))
+    (is (= 20 (first b)) "and its children run the other way from its parent's")))
+
+(deftest a-rotated-line-becomes-one-text-op-per-word
+  ;; A `:text` op is a string at an origin laid out along +x, so one op
+  ;; cannot express a line whose words are at different physical y's --
+  ;; which is what a quarter turn makes every line. Measured in Brave, the
+  ;; corpus case's two words are 42px apart DOWN the page.
+  ;;
+  ;; The control is the identical markup in `horizontal-tb`, which must
+  ;; still emit the single run it always did: the split is scoped to the
+  ;; turn, not to text.
+  (is (= 2 (count (wm-texts "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl\">alpha beta</div></div>"))))
+  (is (= [["alpha beta" 0 0]]
+         (wm-texts "<div style=\"width: 300px; height: 120px\"><div>alpha beta</div></div>")))
+  (let [[a b] (wm-texts "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl\">alpha beta</div></div>")]
+    (is (= "alpha" (first a)))
+    (is (= "beta" (first b)))
+    (is (= 0 (nth a 2)))
+    (is (= 48 (nth b 2)) "`alpha` plus its trailing space, down the page")))
+
+(deftest nothing-outside-a-vertical-subtree-is-rotated
+  ;; The guarantee the whole change rests on, asserted rather than trusted:
+  ;; `horizontal-tb` is the identity in all three tables, and a document
+  ;; that never mentions `writing-mode` must lay out byte-identically. The
+  ;; shapes below reach the four families the rotation touches -- per-side
+  ;; padding, per-side border, the two axis sizes, and a margin the parent
+  ;; reads.
+  (are [expect html] (= expect (wm-boxes html))
+    ;; the 5px top margin collapses out through the wrapper's own edge,
+    ;; here and in Brave alike -- measured, the child is at (10, 0) on both
+    ;; sides. What this row is about is the 10: a physical margin-left,
+    ;; still read physically.
+    [[0 0 300 40] [10 0 80 30]]
+    "<div style=\"width: 300px; height: 40px\"><div style=\"width: 80px; height: 30px; margin: 5px 0 0 10px\"></div></div>"
+
+    [[0 0 300 40] [0 0 92 44]]
+    "<div style=\"width: 300px; height: 40px\"><div style=\"width: 80px; height: 30px; padding-left: 12px; padding-bottom: 14px\"></div></div>"
+
+    [[0 0 300 40] [0 0 85 37]]
+    "<div style=\"width: 300px; height: 40px\"><div style=\"width: 80px; height: 30px; border-right: 5px solid #000; border-top: 7px solid #000\"></div></div>"))
+
+(deftest text-orientation-upright-advances-by-the-em
+  ;; The whole of `text-orientation` this engine implements, and the reason
+  ;; the other two values need nothing: under `mixed` (the initial value)
+  ;; and under `sideways`, latin text is set SIDEWAYS, so what it advances
+  ;; along the vertical inline axis is its ordinary horizontal advance --
+  ;; which is what every measurement site already answers. Under `upright`
+  ;; each character is set upright and advances by the em instead.
+  ;;
+  ;; Measured in Brave 151, `alpha` inside `writing-mode: vertical-rl` in
+  ;; the corpus's 14px monospace (7px/char): 35px of inline extent under
+  ;; mixed, 35 under sideways, 70 under upright. This engine's own model
+  ;; advances 8px/char, so its three numbers are 40, 40 and the same 70 --
+  ;; the em is not an approximation on either side.
+  (let [h (fn [orientation]
+            (nth (second (wm-boxes (str "<div style=\"width: 300px; height: 400px\">"
+                                        "<div style=\"writing-mode: vertical-rl; text-orientation: "
+                                        orientation "\">alpha</div></div>"))) 3))]
+    (is (= 70 (h "upright")))
+    (is (= 40 (h "mixed")))
+    (is (= 40 (h "sideways"))))
+  ;; ...and it reaches the LINE BREAKER, not just the box: `alpha beta` is
+  ;; 140 upright, which does not fit a 120px-tall parent. Brave wraps it
+  ;; onto two lines and reports a 40x120 box; so does this.
+  (is (= [0 0 40 120]
+         (second (wm-boxes "<div style=\"width: 300px; height: 120px\"><div style=\"writing-mode: vertical-rl; text-orientation: upright\">alpha beta</div></div>"))))
+  ;; The control, and the one place `upright` must NOT reach: it has no
+  ;; effect at all in a horizontal writing mode (measured), and a
+  ;; horizontal box nested inside an upright vertical one gets its ordinary
+  ;; advance back.
+  (is (= [0 0 300 20]
+         (second (wm-boxes "<div style=\"width: 300px; height: 400px\"><div style=\"text-orientation: upright\">alpha</div></div>"))))
+  (let [[_p _outer htb]
+        (wm-boxes "<div style=\"width: 300px; height: 400px\"><div style=\"writing-mode: vertical-rl; text-orientation: upright\"><div style=\"writing-mode: horizontal-tb\">alpha</div></div></div>")]
+    (is (= 40 (nth htb 2)) "5 characters at this engine's 8px advance, not 5 ems")))
