@@ -835,7 +835,7 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
-### Round fifty: `@scope`, and the seventh key in the cascade sort
+### Round fifty-two: `@scope`, and the seventh key in the cascade sort
 
 Round forty-four measured `@scope` and left it. Round forty-nine measured
 it in full and named exactly why it was still open:
@@ -852,46 +852,52 @@ took a shape for each neighbour.
 
 Three columns, because the corpus growing and the engine changing are two
 different things and a single before/after would let one pay for the other.
-The middle column is the **unmodified engine at the base commit**
-(`08c8a4e`) on this round's finished 754-case corpus, run through this
-round's own harness — so column one to column two is coverage and the
-harness's `scope-css` fix, and **only column two to column three is
-attributable to `src/`**.
+This round has the confound round forty-nine had, twice over: **two other
+rounds landed on `main` while it was in flight** — fifty (three value
+grammars) and fifty-one (selector state, pseudo-elements, alignment
+shorthands) — so the middle column is **`main` AS MERGED (`4440220`)**, the
+engine including both of them, on this round's finished 835-case corpus and
+through this round's own harness. Column one to column two therefore mixes
+coverage with two other agents' work, and **only column two to column three
+is attributable to this round**. Everything here was re-measured after the
+merge; no pre-merge number is reported.
 
-| axis | 736 cases, `08c8a4e` | 754, base engine | 754, after |
+| axis | 736 cases, `08c8a4e` | 835, `main` (`4440220`) | 835, after |
 |---|---|---|---|
-| line structure | 704/707 | 722/725 | **722/725** |
-| geometry (boxes) | 2376/2384 | 2459/2467 | **2459/2467** |
-| geometry (clean cases) | 728/735 | 746/753 | **746/753** |
-| paint order | 18343/18362 | 18793/18812 | **18793/18812** |
-| paint order (clean cases) | 724/735 | 742/753 | **742/753** |
-| computed style (values) | 33481/33487 | 34622/34649 | **34645/34649** |
-| computed style (cases clean) | 731/735 | 738/753 | **750/753** |
-| cascade-attributed residual | 5 | 25 | **3** |
+| line structure | 704/707 | 800/805 | **800/805** |
+| geometry (boxes) | 2376/2384 | 2676/2714 | **2676/2714** |
+| geometry (clean cases) | 728/735 | 812/835 | **812/835** |
+| paint order | 18343/18362 | 20767/20837 | **20767/20837** |
+| paint order (clean cases) | 724/735 | 816/834 | **816/834** |
+| computed style (values) | 33481/33487 | 38143/38191 | **38166/38191** |
+| computed style (cases clean) | 731/735 | 805/835 | **817/835** |
+| cascade-attributed residual | 5 | 42 | **20** |
 
-The residual is the number to read. It went 5 → 25 on purpose — those are
-what a corpus that can see `@scope` found in it — and then to **3**, which
-is lower than the round started at: `@scope` is gone from it entirely, and
-what is left is the two `:text/font-size-absolute-keyword` margins and the
-`:container/a-percentage-width-container-is-not-queryable` colour, both
-pre-existing and neither this round's subject.
+The residual is the number to read, and the 42 → 20 is the whole of what
+this round moved on that axis. It accounts for itself exactly: the twelve
+cases in the table below, plus the one `@scope` case that already existed.
+**Not one `:scope/*` value and no `@scope` value of any kind is left in
+it** — the twenty that remain are other rounds' named gaps (`:form/*`
+state, `:selector/dir`, `:selector/has-*`,
+`:container/a-percentage-width-container-is-not-queryable`,
+`:text/font-size-absolute-keyword`).
 
 Line structure, geometry and paint order are **identical to the value**
 across the last two columns, which is what a change confined to the cascade
 should look like.
 
 `src/` was NOT touched by the corpus half of this round: the middle column
-is the base commit's own engine.
+is `main`'s own engine.
 
-1039 unit tests / 2764 assertions, 0 failures (1018/2692 at `08c8a4e`);
-linter 0 errors, 23 pre-existing warnings, all in `test/`. **33 of this
-round's 72 new assertions, in 18 of its 21 new tests, fail on `08c8a4e`'s
-`src/` and pass after** — measured by running this round's test file
-against the base commit's `src/`. The remaining three tests are pure
-controls that pass on both sides and are here to say so:
+1069 unit tests / 2880 assertions, 0 failures; linter 0 errors, 23
+pre-existing warnings, all in `test/`. **33 of this round's 72 new
+assertions, in 18 of its 21 new tests, fail on `main`'s `src/` and pass
+after** — measured by running this round's test file against `4440220`'s
+`src/`, and the same 33 fail against `08c8a4e`'s. The remaining three tests
+are pure controls that pass on both sides and are here to say so:
 `layer-order-beats-proximity` (the new key must not have jumped above the
-layer key), `a-scoped-rule-keeps-the-layer-and-the-media-condition-it-was-
-written-in` (recursing into `@scope` must not lose either), and
+layer key), `a-scoped-rule-keeps-the-layer-and-the-media-condition-it-was-written-in`
+(recursing into `@scope` must not lose either), and
 `a-stylesheet-with-no-scope-in-it-parses-exactly-as-before`. Downstream,
 all run against this checkout of `cssom`: `browser` 754/0, `dom-gpu` 130/0,
 `htmldom` 180/0 — htmldom delegates its style parsing to `cssom.core`, and
@@ -1012,7 +1018,7 @@ comparison in the sort tuple, one `(:rule/scope rule)` lookup per rule per
 element, and one unforced `delay` allocation per element. Every declaration
 carries the same `##-Inf`, so the key is a pure tie and the sort falls
 through to `:order` exactly as before — which is why the ops dump is
-byte-identical on 753 cases.
+byte-identical on 835 cases.
 
 A second comparator for the no-`@scope` case was considered and NOT
 written. It would make the cost provably zero, and it would make two sort
@@ -1040,7 +1046,7 @@ is an added or removed line.
 Both dumps were diffed corpus-wide, in both directions, between the two
 right-hand columns.
 
-**Ops: 0 of 753 cases changed.** Every case's box list is byte-identical,
+**Ops: 0 of 835 cases changed.** Every case's box list is byte-identical,
 in both directions. A cascade change that moved a box would be a bug, and
 this is the instrument that says none did.
 
@@ -1063,7 +1069,7 @@ being scored):
 | `:scope/proximity-is-measured-to-the-nearest-matching-root` | 69/70 | **70/70** |
 | `:scope/important-does-not-reverse-proximity` | 55/56 | **56/56** |
 
-The other 741 are byte-identical on both dumps. The six remaining `:scope`
+The other 823 are byte-identical on both dumps. The six remaining `:scope`
 cases are controls that agree on BOTH sides and are not in this list:
 `a-scope-prelude-contributes-no-specificity`,
 `proximity-and-source-order-pointing-the-same-way`,
@@ -1127,6 +1133,28 @@ rule competes with an unscoped one.
   harness's prefix makes it `#case-N :scope p`, and `<html>` is not a
   descendant of `#case-N`, so both sides say black and the case would
   prove nothing.
+
+#### Merging `main` mid-flight: two conflicts that were not append-at-end
+
+Rounds fifty and fifty-one landed while this was in flight, and three of
+the five conflicts were the usual append-at-end kind (both sides kept). The
+other two are worth naming because both are two rounds touching the same
+few lines for unrelated reasons:
+
+- **`simple-selector-specificity`.** Round fifty-one gave `:is()` arguments
+  a recursive `arg-specificity` that sums over a COMPLEX argument's own
+  compounds — closing exactly the gap round forty-nine's nesting
+  desugaring named as its own cost. This round wrapped the same function in
+  a `:selector/scope-implicit?` guard returning `[0 0 0]`. The guard now
+  wraps their version; neither change is expressible as a hunk that beats
+  the other.
+- **`scope-css`.** Round fifty-one replaced the prelude's `str/split` on
+  `,` with `split-selector-list`, which respects parentheses. This round
+  made the prefix conditional so a rooted `@scope` body can be left
+  unprefixed. Both, plus both docstring paragraphs.
+
+Everything above is measured after that merge. Nothing pre-merge is
+reported.
 
 #### The one scope cut, with the browser numbers a future fix needs
 
@@ -2121,7 +2149,7 @@ hands it a number, and `cssom.core/computed-style` and a live page's
 
 #### `@scope` — measured in full, deliberately not implemented
 
-**LANDED IN ROUND FIFTY**, above, which re-measured every row below from
+**LANDED IN ROUND FIFTY-TWO**, above, which re-measured every row below from
 the browser rather than trusting them and found one of them incomplete:
 proximity is below SPECIFICITY as well as below layer, which the "sits
 between specificity and order" phrasing here does not quite say. See that
@@ -2162,7 +2190,7 @@ why it is not a parser change: the prelude contributes nothing, but
 share one implementation shortcut.
 
 `:cascade/a-scope-rule-does-not-reach-outside-its-root` stays in the
-corpus, still red, still carrying the browser's numbers. (Round fifty found
+corpus, still red, still carrying the browser's numbers. (Round fifty-two found
 that it was red for a DIFFERENT reason than this section says: the
 harness's own id prefix defeated the scope, so Brave read both its
 paragraphs as black. `scope-css` is fixed and the case now measures what it
@@ -3454,7 +3482,7 @@ not textual substitution.**
 features, five measured divergences, none of them fixed *in this round*
 and all of them carrying the browser's numbers. **`@property`, `env()`
 and `attr()` landed in round forty-nine; `all` landed in round
-forty-seven; `@scope` landed in round FIFTY, as the seventh key in the
+forty-seven; `@scope` landed in round FIFTY-TWO, as the seventh key in the
 cascade sort tuple that round forty-nine's measurement said it would need
 — see it above.**
 
