@@ -1478,6 +1478,282 @@ kind of change from this one.
   style="writing-mode: vertical-rl">` inside a sentence computes
   `display: inline-block` in Brave and lays out as a 20 × 28 atomic inline.
   No blockification is implemented; the corpus has no case.
+### Round forty-seven: `all`, and the pseudo-element with no box
+
+Two features round forty-four measured and left, and they are the largest
+remaining residual on the geometry and paint axes respectively. Both landed.
+Every number below was read out of a real headless Brave 151.1.93.129 over
+CDP on 2026-08-06, in the corpus's own frame (800px, 14px monospace, 20px
+line-height), before a line was written.
+
+| axis | base commit | after |
+|---|---|---|
+| line structure | 679/683 | **680/683** |
+| geometry (boxes) | 2315/2331 | **2319/2331** |
+| geometry (clean cases) | 697/711 | **700/711** |
+| paint order (points) | 17713/17762 | **17743/17762** |
+| paint order (clean cases) | 699/711 | **700/711** |
+| computed style (values) | 32713/32745 | **32720/32745** |
+| computed style (cases clean of a cascade mismatch) | 689/711 | **692/711** |
+| cascade-attributed residual | 31 | **24** |
+
+`--dump-ops` was diffed corpus-wide. **Exactly four cases' box lists
+changed, and all four are the four targeted** — the three `:cascade/all-*`
+and `:selector/first-letter-changes-the-line-box`. Nothing else in 711 moved
+a pixel, in either direction, which is the number that matters for a change
+that reaches every property in the cascade.
+
+#### `all` is not a phase, it is a declaration
+
+The temptation is to read `all: initial` as "reset, then apply the rest".
+Six shapes say it is not, and the fourth is the one that decides the design:
+
+| shape | Brave's width |
+|---|---|
+| `#a { width: 120px; all: initial }` | auto |
+| `#a { all: initial; width: 120px }` | 120px |
+| `#a { all: initial } #a { width: 120px }` | 120px |
+| `div#a { width: 120px } #a { all: initial }` | **120px** |
+| `#a { all: initial !important } #a { width: 120px }` | auto |
+| `#a { all: initial } #a { width: 120px !important }` | 120px |
+
+A higher-specificity longhand beats `all` even though it is written first.
+So `all` is a shorthand whose longhands take part in the cascade with `all`'s
+own specificity, origin, layer, importance and position — and the
+implementation is to expand it into exactly that: one clone per property,
+spliced into the ALREADY-SORTED entry list at the `all` entry's own place.
+All six rows then fall out of `group-by` with no code of their own.
+
+That placement — above the flow resolution and above the logical→physical
+rename — is the other half. `all` reaches `writing-mode` (below), so the flow
+this element hands its children has to be resolved after it; and
+`p { margin-inline-start: 40px; all: initial }` reports margin-left **0**
+where the reverse order reports **40**, which only works if the clone
+written for `margin-inline-start` is renamed alongside the declaration it
+beats.
+
+#### Which longhands, and the three that are not
+
+`all` is "every property", and a cascade cannot enumerate those. What it can
+enumerate is the set that has anything to say: **everything anyone declared
+for this element** (which is what beats the author's own earlier `width` and
+the UA sheet's `p { margin: 1em 0 }`), plus **`initial-values`** (the
+properties whose initial value is not the same as absence), plus
+**`inherited-properties`** (where absence means *inherit*, so `initial` has
+to be written to stop it). For `initial` and `unset` that is provably
+complete: a property outside all three has an initial value of absence,
+which is already what it computes. `inherit` needs a fourth — the parent's
+own resolved properties, because `all: inherit` copies a `width: 300px` this
+element has never heard of (measured: 300px, purple).
+
+The exemptions were measured rather than recalled, on a parent declaring all
+three: under `all: initial` the child reports the parent's `direction: rtl`,
+the same `unicode-bidi` its plain sibling does, and the parent's
+`--mycustom: 42px`, while the other 44 properties on it are reset.
+
+**`writing-mode` is not exempt**, and that had to be measured separately
+because it looks like it belongs with the pair above. Inside a
+`writing-mode: vertical-rl` parent, `all: initial` reports `horizontal-tb`
+while `all: unset` and `all: revert` both report `vertical-rl`.
+
+#### `medium` is answerable under `all` and nowhere else
+
+`initial-values` has deliberately held no `font-size` entry since the UA
+sheet moved into the cascade: `font-size: initial` is `medium`, and `medium`
+is keyed on the default size of the FAMILY in use — 13 on a monospace page,
+16 on a proportional one — which a cascade with no font-family model cannot
+answer. Measured on one page, all four:
+
+| declaration | computed font-size |
+|---|---|
+| `font-size: initial` | 13px |
+| `font-size: initial; font-family: initial` | 16px |
+| `all: initial` | 16px |
+| `all: initial` under a 30px parent | 16px |
+
+`all: initial` resets the family in the same operation, so `medium` has
+exactly one value there. The last row is what makes it an absolute answer
+rather than an inherited one, and `all: unset`/`all: revert` are NOT this
+number — `font-size` inherits, so both report the parent's own size, which
+the ordinary keyword resolution already gives.
+
+Six more rows joined `initial-values` for the second reason it exists —
+stopping an inherited property inheriting — each measured with an `unset`
+sibling beside it that reports the parent's value and so separates the two
+keywords: `writing-mode` `horizontal-tb`, `text-orientation` `mixed`,
+`list-style-position` `outside`, `hyphens` `manual`, `orphans` and `widows`
+`2`. `quotes`, `list-style-image`, `font-variant` and `font-stretch` were
+measured too and deliberately left out: nothing in this repo reads any of
+them as a style property.
+
+#### A guarantee the engine had only by accident
+
+`width: 120px; all: initial` and `all: initial; width: 120px` are two
+answers and one block, so declaration ORDER inside a block became
+load-bearing. It was not expressible: `parse-declarations-with-importance`
+returns a map, a Clojure map is an array-map to eight entries and a hash-map
+beyond, and every declaration of one rule shares that rule's `:rule/order`
+— so past the boundary the tie was broken by map iteration order. One
+`border` shorthand plus one `margin` already reaches nine.
+
+Each declaration now carries its own `:index`, and the sort tuple ends with
+it. The gate is `all` past the boundary in both orders; with the `:index`
+removed from the new engine, the `all`-first half flips to auto.
+
+#### What `all` still gets wrong, and it is not the font size
+
+`:cascade/all-initial-resets-every-property` is the one of the three that
+does not go fully clean, and both sides agree the font size is 16. What is
+left is the two things the FAMILY decides:
+
+| quantity | initial family | monospace |
+|---|---|---|
+| `line-height: normal` at 16px | **24** | 17 |
+| advance of `a` at 16px | 9.2 | 9.6 (this engine's 0.6-em estimate) |
+
+so the case reports an 800×21 line box against Brave's 800×24 and the letter
+at y=1.3 against y=4. The width is inside the 2px tolerance; the line box is
+not. Closing it needs a font-family model in the cascade — the same missing
+piece `resolve-font-size`'s absolute-keyword table has been waiting on since
+2026-08-05.
+
+#### `::first-letter` needed no layout machinery at all
+
+Round thirty-two called it unscorable; round forty-four found the sharper
+statement (the pseudo-element has no box but its effect grows the
+paragraph's). What neither said is that its effect is not a rule of its own:
+
+| `::first-letter { font-size: N }` | 10 | none | 20 | 28 | 40 | 60 |
+|---|---|---|---|---|---|---|
+| the `<p>`'s box height | 21 | 20 | 22 | 25 | 29 | 36 |
+
+That is the ordinary inline line-box model this file already implements,
+applied to a one-character box: content area at N, the INHERITED
+`line-height: 20px` giving a half-leading that goes negative past about
+20px, and the line box being the union of that against the block's own 14px
+strut. Which is why the 40px letter **overflows** the paragraph rather than
+fitting inside it — Brave puts the letter's rect at y=37..79 against a
+paragraph box of 48..77 — and why a 10px first letter still leaves a 21px
+paragraph.
+
+So the whole feature is: make the first letter a separate inline box with
+its own style. That shape already exists — it is what a `::before` is
+(`:generated/pseudo`, which `inline-fragments` and `layout-node` already
+carry a font, colour and metrics for). The one thing it must not do is take
+part in `with-generated-content`'s adjacent-text merge, which would fuse it
+straight back into the run it was just split from; so it runs after that
+merge rather than inside it.
+
+The rest of the feature is deciding which characters the box holds.
+
+#### What "the first letter" is, measured character by character
+
+51 leading characters, each on its own `<p>?Alpha beta</p>` under a 40px
+`::first-letter`, classified by which of the first two came back enlarged:
+
+- **Joined by the letter after them** — `" ' ( [ { ) ] } ! # % & * , . / : ; ? @ \`
+  and the Unicode quotes, brackets, `…`, `¡`, `¿`, `•`, `§`, `¶`, `【`, `「`.
+- **Enlarged alone**, i.e. the character IS the first typographic unit and
+  the `A` after it stays 14px — `- _ + < = > | ~ $ ^ \`` , en dash, em dash.
+
+The second row is the finding. It is exactly Pd, Pc and the maths/currency/
+modifier symbols — none of which are punctuation in the sense the property
+means, however much they look like it. **A `\p{P}` regex would have swept up
+all three dashes and been wrong on all three**, so the set is written out as
+a literal (also because `\p{gc=Ps}` needs a different spelling in Java's
+Pattern and in JavaScript's `u`-flagged RegExp, and this is a `.cljc` file).
+
+Five more shapes, each of which the implementation now reproduces:
+
+| markup | first letter |
+|---|---|
+| `Alpha beta` | `A` |
+| `(((Alpha` | `(((A` |
+| `A"lpha` | `A"` — **trailing** punctuation joins it too |
+| `123 Alpha` | `1`, and only the first digit |
+| `((( Alpha` | **none at all** — the paragraph stays 800×20 |
+| `   Alpha` | the collapsed spaces and the `A` |
+| a leading emoji | both halves of the surrogate pair |
+
+#### Where the pseudo-element's effect lives, given it has no box
+
+`::first-letter` applies to a block container's first FORMATTED line, and an
+inline box does not have one — measured, the same rule on a `<span>` leaves
+it at 112×15 with every character at 14px, where on the `<div>` beside it
+it gives 800×29. Stating that as a `display` predicate was tried first and
+got it wrong: this engine's cascade writes no `:style/display` for a
+`<span>` at all (`inline` is the initial value and the UA sheet has no rule
+to state it), so the predicate passed and the span got a first letter.
+
+The CALL SITE is the gate instead. The split is applied in
+`laid-out-children` and nowhere else, and `laid-out-children` is what
+prepares the children of a box this file lays out as a block container; an
+inline `<span>`'s children are walked by `inline-fragments` and never come
+through it. Two earlier splices — in `inline-fragment-bearing?` and in the
+`inline-fragments` walk — were removed for exactly that reason.
+
+A leading inline element is still reached, because the descent happens from
+the BLOCK's own children and the rebuilt `<span>` is what `inline-fragments`
+then walks. That also gets the composition right for free:
+`<span><b>Alpha</b></span>` under a 40px first letter reports 29.1×50 in
+Brave — 40px AND bold, the pseudo-element's size composed with the `<b>`'s
+own weight rather than replacing it — because the box is left where it was
+found instead of being lifted out. An `<img>` before any text ends the
+search, and Brave agrees: no first letter after an atomic inline.
+
+#### Which properties actually apply to `::first-letter`
+
+Measured one declaration at a time, reading `getComputedStyle(el,
+'::first-letter')` back beside the paragraph's own box:
+
+- **Apply and are observable**: `font-size`, `font-weight` (p 21, the bold
+  face is taller), `font-style` (21), `line-height` (60px → p 60),
+  `vertical-align` (`super` → p 25.7), `margin`, `padding`, `border`,
+  `letter-spacing` (the letter's advance goes 7 → 27), `color`,
+  `background`, `text-decoration`, `text-transform`, `visibility`.
+- **Do not apply**: `display`, `position`, `width`/`height` — all three
+  leave the paragraph at 800×20 with the letter at 7×15.
+- **`float` applies and changes the model**: `float: left` takes the letter
+  out of the line entirely, so the paragraph is 800×20 with the letter's own
+  20×42 box beside it, against 800×29 unfloated.
+
+Of these the engine now honours the ones the generated-node style already
+carries. `float` is the one with a number attached to what is missing: the
+declaration is carried and ignored, so a floated first letter leaves the
+paragraph 9px too tall.
+
+#### Scope cuts, each with the number a fix will need
+
+- **The first letter of a `::before`'s generated content.** Brave applies it
+  (`p::before { content: "Xyz" }` with a 40px first letter reports 800×29);
+  this runs after `with-generated-content`, sees a `:generated/pseudo` node
+  rather than text, and declines. Running before it instead would put the
+  split back inside the adjacent-text merge, which is the one thing that
+  must not happen.
+- **A block container whose first child is another block.** Real CSS pushes
+  the pseudo-element down to the innermost first block; this stops at the
+  first non-inline child.
+- **`::first-line`** stays out, for round forty-four's reason: Brave reports
+  the same 800×20 paragraph with and without
+  `::first-line { font-weight: bold }`.
+- **An inline `style="..."` attribute past eight declarations** still has no
+  within-block order. `inline-style` iterates a map that htmldom parsed, and
+  the `:index` fix belongs upstream in the repository that parses the
+  attribute.
+
+#### Tried and withdrawn
+
+- **A `display`-based block-level predicate** on `with-first-letter`
+  (above). It let a `<span>` take a first letter, which the corpus does not
+  contain and the unit test did.
+- **Asserting the layout gates through `gen-boxes`.** Without a host's
+  `:font-metrics` hook this file keeps its long-standing approximation —
+  line box = the tallest line-HEIGHT — under which a 40px letter on a 20px
+  line cannot make the paragraph taller and `::first-letter` has no
+  observable effect at all. `gen-boxes` reported 800×20 for every font size,
+  which is that bargain and not a bug; the tests carry a metrics-bearing
+  theme of their own and say why.
+
 ### Round forty-five: four named leftovers, and the one that turned out to be a rule after all
 
 Four things earlier rounds found, measured and deliberately left, each with
