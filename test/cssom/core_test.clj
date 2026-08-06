@@ -1,6 +1,8 @@
 (ns cssom.core-test
   (:require [cssom.core :as css]
             [cssom.layout :as layout]
+            [clojure.set]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
@@ -4308,3 +4310,354 @@
          (:rule/declarations (first (css/parse-rules "#f { padding: 10% 20% }")))))
   (is (= {:margin-inline-start "20%" :margin-inline-end "20%"}
          (:rule/declarations (first (css/parse-rules "#f { margin-inline: 20% }"))))))
+
+;; ---- @media is a grammar, not a feature list ----
+;;
+;; Every expectation below was read out of a real headless Brave
+;; 151.1.93.129 over CDP on 2026-08-06, on one page at the harness's own
+;; 756px viewport (see `media-condition-matches?` and the block comment
+;; above it for the full table). Each divergence is paired with the control
+;; that makes it a measurement rather than a coincidence: an `and`-joined
+;; query that DOES match beside one that does not, a range below the
+;; viewport beside one above it, an `em` that fits beside one that does not.
+
+(defn- media? [condition]
+  (css/media-condition-matches? condition 756 "dark"))
+
+(deftest not-inverts-a-whole-media-query
+  ;; Brave: `not all and (min-width: 5000px)` applies at 756px and
+  ;; `not all and (min-width: 100px)` does not. The old evaluator had no
+  ;; `not` at all -- it split on `and`, read `not all` as an unrecognised
+  ;; part that matches, and let the width arm decide, which inverted BOTH.
+  (is (true? (media? "not all and (min-width: 5000px)")))
+  (is (false? (media? "not all and (min-width: 100px)")))
+  ;; the Media Queries 4 boolean form, with no media type
+  (is (true? (media? "not (min-width: 5000px)")))
+  (is (false? (media? "not (min-width: 100px)")))
+  ;; and over a media type alone
+  (is (false? (media? "not screen")))
+  (is (true? (media? "not print")))
+  ;; controls: the same queries without `not`
+  (is (false? (media? "all and (min-width: 5000px)")))
+  (is (true? (media? "all and (min-width: 100px)"))))
+
+(deftest media-range-syntax-is-evaluated-rather-than-assumed-to-match
+  ;; Brave: black above the viewport, red below it. The old evaluator
+  ;; matched both, because `width >= 5000px` is not a feature pattern it
+  ;; knew and its default was "unrecognised, so it matches".
+  (is (false? (media? "(width >= 5000px)")))
+  (is (true? (media? "(width >= 100px)")))
+  (is (true? (media? "(width <= 5000px)")))
+  (is (false? (media? "(width < 100px)")))
+  ;; the value may sit on either side, and both ends may be given at once
+  (is (true? (media? "(100px <= width)")))
+  (is (true? (media? "(400px <= width <= 900px)")))
+  (is (false? (media? "(400px <= width <= 500px)")))
+  (is (true? (media? "(width = 756px)")))
+  (is (false? (media? "(width = 755px)"))))
+
+(deftest media-em-resolves-against-the-initial-font-size-not-the-root
+  ;; Measured on a page declaring `html { font-size: 32px }`:
+  ;; `(min-width: 40em)` still matched at 756px, so em is 16 and not 32,
+  ;; and `(min-width: 47.25em)` matched exactly (47.25 * 16 = 756).
+  (is (false? (media? "(min-width: 60em)")))
+  (is (true? (media? "(min-width: 40em)")))
+  (is (true? (media? "(min-width: 47.25em)")))
+  (is (false? (media? "(min-width: 47.30em)")))
+  (is (true? (media? "(max-width: 60em)")))
+  ;; rem is the same number in a media query -- there is no root element
+  ;; to be relative to
+  (is (false? (media? "(min-width: 60rem)")))
+  (is (true? (media? "(min-width: 40rem)")))
+  ;; control: the px form of the same two thresholds
+  (is (false? (media? "(min-width: 960px)")))
+  (is (true? (media? "(min-width: 640px)"))))
+
+(deftest an-unrecognized-media-feature-still-matches-but-an-unknown-type-does-not
+  ;; The one fail-open default this rewrite keeps, and its boundary. Brave
+  ;; matches `(min-resolution: 1dppx)` because it implements the feature;
+  ;; this engine matches it because it does not, and cannot tell that case
+  ;; from a feature no browser has. A bare media TYPE is the opposite: a
+  ;; closed vocabulary, so an unknown one does not match, and Brave agrees.
+  (is (true? (media? "(min-resolution: 1dppx)")))
+  (is (true? (media? "(hover: hover)")))
+  (is (false? (media? "flurb")))
+  (is (true? (media? "screen")))
+  (is (true? (media? "all")))
+  (is (false? (media? "print"))))
+
+(deftest a-media-query-list-is-an-or-and-an-invalid-query-is-not-fatal
+  ;; Brave reports `@media (min-width: 5000px), garbage garbage` back as
+  ;; `(min-width: 5000px), not all` with the rule intact: one unparseable
+  ;; query becomes `not all`, it does not invalidate its neighbours.
+  (is (true? (media? "(min-width: 5000px), (min-width: 100px)")))
+  (is (false? (media? "(min-width: 5000px), garbage garbage")))
+  (is (true? (media? "garbage garbage, (min-width: 100px)")))
+  (is (true? (media? "print, screen")))
+  (is (false? (media? "print, speech"))))
+
+(deftest a-media-length-needs-a-unit-unless-it-is-zero
+  ;; Brave: `(min-width: 100)` does not match at 756px, where
+  ;; `(min-width: 100px)` does. A unitless non-zero number is not a length,
+  ;; so the query is invalid rather than false-by-comparison.
+  (is (false? (media? "(min-width: 100)")))
+  (is (true? (media? "(min-width: 100px)")))
+  (is (true? (media? "(min-width: 0)")))
+  (is (true? (media? "(min-width: 0px)")))
+  (is (true? (media? "(min-width: -5px)"))))
+
+(deftest nested-media-blocks-and-both-nesting-orders-with-layer
+  ;; `@media` inside `@media` is an AND of the two conditions, which the
+  ;; single recursive scanner produces for free.
+  (let [rules (css/parse-rules
+               "@media (min-width: 100px) { @media (max-width: 900px) { p { color: red } } }")]
+    (is (= ["(min-width: 100px)" "(max-width: 900px)"] (:rule/media (first rules))))
+    (is (true? (css/media-condition-matches? (:rule/media (first rules)) 756 "dark")))
+    (is (false? (css/media-condition-matches? (:rule/media (first rules)) 50 "dark")))))
+
+;; ---- @layer: a tree, anonymous layers, and revert-layer ----
+
+(deftest two-anonymous-layers-are-two-layers
+  ;; Brave: blue. Each `@layer { }` with no name is its OWN layer, so the
+  ;; second beats the first even though the first is more specific. This
+  ;; engine tagged both with the same empty name, so they landed in one
+  ;; layer and specificity decided: red.
+  (is (= "blue"
+         (:style/color (cascaded-style
+                        "@layer { p#la1 { color: red } } @layer { #la1 { color: blue } }"
+                        "<div><p id=\"la1\">t</p></div>" "la1"))))
+  ;; ...and an anonymous layer takes its position by first appearance like
+  ;; any other, in both orders
+  (is (= "blue"
+         (:style/color (cascaded-style
+                        "@layer { #x { color: red } } @layer n { #x { color: blue } }"
+                        "<div><p id=\"x\">t</p></div>" "x"))))
+  (is (= "red"
+         (:style/color (cascaded-style
+                        "@layer n { #x { color: blue } } @layer { #x { color: red } }"
+                        "<div><p id=\"x\">t</p></div>" "x")))))
+
+(deftest a-nested-layer-is-the-layer-its-dotted-name-names
+  ;; Brave: red -- `@layer o { @layer i { } }` and `@layer o.i { }` are the
+  ;; SAME layer, so specificity decides inside it. This engine flattened the
+  ;; nested block to its outer name and read `o.i` as a third layer.
+  (is (= "red"
+         (:style/color (cascaded-style
+                        "@layer lb-o { @layer lb-i { p#lb1 { color: red } } } @layer lb-o.lb-i { #lb1 { color: blue } }"
+                        "<div><p id=\"lb1\">t</p></div>" "lb1"))))
+  ;; the sublayers of one parent are ordered among themselves by first
+  ;; appearance
+  (is (= "blue"
+         (:style/color (cascaded-style
+                        "@layer o { @layer i { #x { color: red } } @layer j { #x { color: blue } } }"
+                        "<div><p id=\"x\">t</p></div>" "x")))))
+
+(deftest a-layers-own-declarations-beat-its-sublayers
+  ;; Brave: red in all three, and the source order of the layer's own rules
+  ;; and its sublayer does not matter -- a post-order traversal of the layer
+  ;; tree, not a flat first-appearance list.
+  (is (= "red"
+         (:style/color (cascaded-style
+                        "@layer o { #x { color: red } @layer i { #x { color: blue } } }"
+                        "<div><p id=\"x\">t</p></div>" "x"))))
+  (is (= "red"
+         (:style/color (cascaded-style
+                        "@layer o { @layer i { #x { color: blue } } #x { color: red } }"
+                        "<div><p id=\"x\">t</p></div>" "x"))))
+  ;; `@layer x.y` with no `@layer x` anywhere creates `x` too, at that point
+  (is (= "blue"
+         (:style/color (cascaded-style
+                        "@layer x18.y18 { p#x { color: red } } @layer x18 { #x { color: blue } }"
+                        "<div><p id=\"x\">t</p></div>" "x")))))
+
+(deftest media-inside-a-layer-keeps-the-layer
+  ;; The engine's own documented cut, now closed. Brave: blue -- the rule
+  ;; inside the `@media` stayed in layer `ld-a`, which `ld-b` beats. This
+  ;; engine lost the layer tag, which promoted the rule to UNLAYERED, the
+  ;; strongest normal position there is, and reported red.
+  (is (= "blue"
+         (:style/color (cascaded-style
+                        "@layer ld-a, ld-b; @layer ld-b { #ld1 { color: blue } } @layer ld-a { @media (min-width: 1px) { #ld1 { color: red } } }"
+                        "<div><p id=\"ld1\">t</p></div>" "ld1"))))
+  ;; control, and the nesting order that already worked: `@layer` inside
+  ;; `@media`. Brave: red.
+  (is (= "red"
+         (:style/color (cascaded-style
+                        "@layer le-a, le-b; @media (min-width: 1px) { @layer le-a { #le1 { color: blue } } } @layer le-b { #le1 { color: red } }"
+                        "<div><p id=\"le1\">t</p></div>" "le1"))))
+  ;; and the same for `@supports` inside `@layer`. Brave: blue.
+  (is (= "blue"
+         (:style/color (cascaded-style
+                        "@layer a7, b7; @layer b7 { #s7 { color: blue } } @layer a7 { @supports (display: grid) { #s7 { color: red } } }"
+                        "<div><p id=\"s7\">t</p></div>" "s7")))))
+
+(deftest revert-layer-rolls-back-to-the-previous-layer
+  ;; Brave: 200px. This engine stored the literal string `revert-layer` as
+  ;; the width, which `cssom.layout` cannot read, so the box fell back to
+  ;; `auto` and filled its container.
+  (let [w (fn [css] (:style/width (cascaded-style css "<div><div id=\"r\">w</div></div>" "r")))]
+    (is (= 200 (w "@layer a { #r { width: 200px } } @layer b { #r { width: 120px; width: revert-layer } }")))
+    ;; the PREVIOUS layer, not the first one
+    (is (= 200 (w "@layer a { #r { width: 300px } } @layer b { #r { width: 200px } } @layer c { #r { width: 120px; width: revert-layer } }")))
+    ;; an unlayered `revert-layer` rolls back INTO the layers
+    (is (= 200 (w "@layer a { #r { width: 200px } } #r { width: 120px; width: revert-layer }")))
+    ;; ...and with nothing below at all it rolls past the whole author
+    ;; origin, leaving the width unset (Brave: the container's own width)
+    (is (nil? (w "@layer a { #r { width: 120px; width: revert-layer } }")))
+    (is (nil? (w "#r { width: 120px } #r { width: revert-layer }")))
+    ;; a previous layer that declares nothing for this property is not a
+    ;; previous layer declaring its initial value
+    (is (nil? (w "@layer a { #r { color: green } } @layer b { #r { width: 120px; width: revert-layer } }")))
+    ;; control: `revert`, which rolls back to the previous ORIGIN and is
+    ;; unaffected by any of this
+    (is (nil? (w "@layer a { #r { width: 200px } } @layer b { #r { width: revert } }")))))
+
+(deftest important-still-reverses-the-layer-order-after-the-tree-rewrite
+  ;; Control for the four cases above: the `!important` reversal has to
+  ;; survive layers becoming a tree, and it does. Brave: red, from the
+  ;; EARLIER layer.
+  (is (= "red"
+         (:style/color (cascaded-style
+                        "@layer lm-a { #lm1 { color: red !important } } @layer lm-b { #lm1 { color: blue !important } }"
+                        "<div><p id=\"lm1\">t</p></div>" "lm1"))))
+  ;; and it reaches the unlayered declarations too, which are the WEAKEST
+  ;; for `!important`
+  (is (= "red"
+         (:style/color (cascaded-style
+                        "@layer lg-a { #lg1 { color: red !important } } #lg1 { color: blue !important }"
+                        "<div><p id=\"lg1\">t</p></div>" "lg1"))))
+  ;; ...while for a NORMAL declaration unlayered still wins
+  (is (= "blue"
+         (:style/color (cascaded-style
+                        "@layer lj-a { #lj1 { color: red } } #lj1 { color: blue }"
+                        "<div><p id=\"lj1\">t</p></div>" "lj1")))))
+
+;; ---- @supports: this engine's own support oracle ----
+
+(defn- supports-red? [condition]
+  (= "red" (:style/color (cascaded-style
+                          (str "@supports " condition " { #sx { color: red } }")
+                          "<div><p id=\"sx\">t</p></div>" "sx"))))
+
+(deftest supports-asks-this-engine-whether-it-supports-the-declaration
+  ;; Before this, `@supports` was not recognised at all and every block
+  ;; applied unconditionally -- so each of the four false rows below was
+  ;; red. Each sits beside the control that makes it a measurement: on an
+  ;; engine that applies everything, "applies when it should" is not
+  ;; evidence.
+  (is (true? (supports-red? "(display: grid)")))
+  (is (false? (supports-red? "(display: flurb)")))
+  (is (true? (supports-red? "(color: red)")))
+  (is (false? (supports-red? "(flurb: 1px)")))
+  ;; the value gate speaks for the length properties too: Brave leaves
+  ;; `(width: 10)` black and applies `(width: 10px)`
+  (is (true? (supports-red? "(width: 10px)")))
+  (is (false? (supports-red? "(width: 10)")))
+  (is (true? (supports-red? "(width: calc(1px + 2px))")))
+  ;; a shorthand is answered by running the engine's own expander
+  (is (true? (supports-red? "(padding: 1px 2px)")))
+  (is (true? (supports-red? "(font: 10px/1.2 serif)")))
+  ;; a custom property takes anything, here as everywhere
+  (is (true? (supports-red? "(--anything: whatever)")))
+  ;; ...and a CSS-wide keyword is supported on every property
+  (is (true? (supports-red? "(width: inherit)")))
+  (is (true? (supports-red? "(margin: revert-layer)"))))
+
+(deftest supports-combines-conditions-and-inverts-them
+  (is (false? (supports-red? "not (display: grid)")))
+  (is (true? (supports-red? "not (display: flurb)")))
+  (is (false? (supports-red? "(display: grid) and (display: flurb)")))
+  (is (true? (supports-red? "(display: grid) and (color: red)")))
+  (is (true? (supports-red? "(display: flurb) or (display: grid)")))
+  (is (false? (supports-red? "(display: flurb) or (flurb: 1px)")))
+  (is (true? (supports-red? "((display: grid))")))
+  (is (true? (supports-red? "(display: grid) and ((display: flex) or (display: flurb))"))))
+
+(deftest an-unparseable-supports-condition-is-not-the-same-as-a-false-one
+  ;; The distinction measured by reading `document.styleSheets` back out of
+  ;; Brave 151 on 2026-08-06: 44 `@supports` rules were written and 40
+  ;; survived. `(grid)` and `frobnicate(x)` are `<general-enclosed>` --
+  ;; well-formed, unrecognised, FALSE, and a `not` inverts them. `garbage`
+  ;; and an unparenthesised `display: grid` do not parse at all, so the
+  ;; whole at-rule is invalid and dropped -- which a `not` cannot rescue.
+  (is (false? (supports-red? "(grid)")))
+  (is (true? (supports-red? "not (grid)")))
+  (is (false? (supports-red? "frobnicate(x)")))
+  (is (true? (supports-red? "not frobnicate(x)")))
+  (is (false? (supports-red? "garbage")))
+  (is (false? (supports-red? "not garbage")))
+  (is (false? (supports-red? "display: grid")))
+  ;; ...and one unparseable arm poisons a whole condition, even beside a
+  ;; true one -- measured, Brave drops this rule
+  (is (false? (supports-red? "(display: grid) or garbage"))))
+
+(deftest supports-selector-asks-this-engines-own-selector-parser
+  ;; Brave: `selector(p:has(b))` is red and `selector(:frobnicate)` is
+  ;; black. The oracle is what actually matches: `matches-pseudo?` returns
+  ;; false for an unrecognised pseudo-class, which is indistinguishable at
+  ;; match time from a recognised one that did not match, so the set of
+  ;; implemented names has to be consulted up front.
+  (is (true? (supports-red? "selector(p:has(b))")))
+  (is (false? (supports-red? "selector(:frobnicate)")))
+  (is (true? (supports-red? "selector(p > b)")))
+  (is (true? (supports-red? "selector(.c)")))
+  (is (true? (supports-red? "selector(p:first-child)")))
+  (is (true? (supports-red? "selector(p::before)")))
+  (is (false? (supports-red? "selector(p::frobnicate)"))))
+
+(deftest supports-is-answered-on-the-standalone-computed-style-path-too
+  ;; `@supports` needs no viewport, no element and no container, so it is
+  ;; filtered where the rules are matched rather than in `apply-cascade`
+  ;; beside `@media` -- which means `computed-style`, the path with no tree
+  ;; walk behind it, gets the same answer.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        doc (dom/set-attribute doc p :id "cs")
+        style-of (fn [css] (css/computed-style doc (css/parse-rules css) (dom/node doc p)))]
+    (is (= "red" (:color (style-of "@supports (display: grid) { #cs { color: red } }"))))
+    (is (nil? (:color (style-of "@supports (display: flurb) { #cs { color: red } }"))))
+    ;; ...and the control that shows this really is the standalone path:
+    ;; `@media` IS still unfiltered here, because it needs a viewport only
+    ;; `apply-cascade` is given.
+    (is (= "red" (:color (style-of "@media (min-width: 99999px) { #cs { color: red } }"))))))
+
+;; ---- the two tables this namespace cannot derive, gated against drift ----
+
+(deftest layout-read-properties-covers-every-property-layout-actually-reads
+  ;; `cssom.layout` requires `cssom.core`, so `engine-properties` cannot ask
+  ;; it what it reads and has to keep a copy. This is the check that keeps
+  ;; the copy honest: it re-extracts every `(style node :k)` call site from
+  ;; the source and fails if the table has fallen behind. Whole-line
+  ;; comments are dropped first -- one of them contains the illustrative
+  ;; `(or (style node :x) <ua default>)`.
+  (let [source (slurp "src/cssom/layout.cljc")
+        code (->> (str/split-lines source)
+                  (remove #(str/starts-with? (str/triml %) ";"))
+                  (str/join "\n"))
+        read-properties (->> (re-seq #"\(style\s+[a-z-]+\s+:([a-z0-9-]+)\)" code)
+                             (map (comp keyword second))
+                             set)
+        table @#'css/layout-read-properties]
+    (is (seq read-properties) "the extraction itself has to find something")
+    (is (empty? (clojure.set/difference read-properties table))
+        (str "cssom.layout reads properties cssom.core/layout-read-properties does not list: "
+             (sort (clojure.set/difference read-properties table))))
+    (is (empty? (clojure.set/difference table read-properties))
+        (str "cssom.core/layout-read-properties lists properties cssom.layout no longer reads: "
+             (sort (clojure.set/difference table read-properties))))))
+
+(deftest implemented-pseudo-classes-matches-the-case-keys-it-claims-to-be
+  ;; Same shape of gate for the selector half of the support oracle:
+  ;; `implemented-pseudo-classes` says it is `matches-pseudo?`'s own `case`
+  ;; keys plus the four functional forms, and this is what keeps that true.
+  (let [source (slurp "src/cssom/core.cljc")
+        start (str/index-of source "(defn- matches-pseudo?")
+        body (subs source start (str/index-of source "\n;; ---- :has()" start))
+        case-start (str/index-of body "(case selector-pseudo")
+        case-keys (->> (re-seq #"(?m)^\s{4}:([a-z-]+) " (subs body case-start))
+                       (map (comp keyword second))
+                       set)
+        functional #{:not :is :where :has}
+        table @#'css/implemented-pseudo-classes]
+    (is (seq case-keys) "the extraction itself has to find something")
+    (is (= (into case-keys functional) table))))
