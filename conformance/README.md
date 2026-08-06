@@ -888,50 +888,50 @@ a rotation count.
 `writing-mode-sides` in cssom.layout, `logical-flow-sides` in cssom.core),
 two style rewrites built from them, and one block of bindings at the top of
 `layout-node`'s element branch — below which nothing knows a vertical mode
-exists. The style map
-arrives in the box's own canonical frame, `avail-width` is its available
+exists. The style map arrives in the box's own canonical frame, `avail-width` is its available
 *inline* size, the dispatch lays out at the origin, and one matrix puts the
 result back into the parent's frame — reusing `transform-ops`, which
 already documents a quarter turn as the case where its axis-aligned
 bounding box is EXACT rather than approximate.
 
-Corpus-wide, 672 → **695** cases (round forty-four landed underneath this
-one; both columns are measured after merging it), and the entire
-pre-existing residual is byte-identical on all four axes — every count of
-DISAGREEING points below is unchanged, and every case that was failing
-before is failing for the same reason after:
+Corpus-wide, 688 → **711** cases (rounds forty-four and forty-five landed
+underneath this one; both columns are measured after merging both), and the
+entire pre-existing residual is byte-identical on all four axes — every
+count of DISAGREEING points below is unchanged, and every case that was
+failing before is failing for the same reason after:
 
-| axis | main, 672 cases | this branch, 695 cases |
+| axis | main, 688 cases | this branch, 711 cases |
 |---|---|---|
-| line structure | 642/647 | **665/670** |
-| geometry (boxes) | 2168/2186 | **2232/2250** |
-| geometry (clean cases) | 656/672 | **679/695** |
-| paint order (points) | 16732/16789 | **17307/17364** |
-| paint order (clean cases) | 658/672 | **681/695** |
-| computed style (values) | 30685/30717 | **31579/31611** |
-| computed style (clean cases) | 649/672 | **672/695** |
+| line structure | 656/660 | **679/683** |
+| geometry (boxes) | 2251/2267 | **2315/2331** |
+| geometry (clean cases) | 674/688 | **697/711** |
+| paint order (points) | 17138/17187 | **17713/17762** |
+| paint order (clean cases) | 676/688 | **699/711** |
+| computed style (values) | 31819/31851 | **32713/32745** |
+| computed style (clean cases) | 665/688 | **688/711** |
 
-Read the disagreeing halves rather than the agreeing ones: geometry 18 → 18
-boxes, paint 57 → 57 points, computed style 32 → 32 values, line 5 → 5
-cases. The composition changed by exactly two entries in each of the two
-axes that moved at all — `:text/writing-mode-vertical-rl` left both, and
-`:writing-mode/aspect-ratio-is-not-rotated` and
-`:writing-mode/a-horizontal-box-inside-a-vertical-one-turns-back` joined
-one each, both deliberately (see the scope cuts below).
+Read the DISAGREEING halves rather than the agreeing ones, because that is
+where a regression would show: geometry 16 → 16 boxes, paint 49 → 49
+points, computed style 32 → 32 values, line 4 → 4 cases. Every one of those
+four counts is identical, and the composition changed by exactly one entry
+in each of the two axes that moved at all: `:text/writing-mode-vertical-rl`
+left both, `:writing-mode/aspect-ratio-is-not-rotated` took its place in
+geometry and
+`:writing-mode/a-horizontal-box-inside-a-vertical-one-turns-back` took it
+on the line axis — both deliberately, see the scope cuts below. The new
+group scores **22/23**.
 
 **One line of the corpus-wide `--dump-ops` changed**, and it is the case
 this round is about: `:text/writing-mode-vertical-rl`'s inner box,
-`300 × 20` → `20 × 70`, which is Brave's number exactly. 672 case blocks
+`300 × 20` → `20 × 70`, which is Brave's number exactly. 688 case blocks
 diffed, 23 added, **zero pre-existing cases moved** — which is the property
 that mattered, because an axis swap can reach every layout path in the
 file, and the whole corpus outside this group is `horizontal-tb`. It is
 guaranteed structurally rather than by luck: `horizontal-tb` is the
 identity in all three tables and both style rewrites return their argument
-unchanged for it. (Measured twice: the same diff before the merge, against
-the 601-case corpus this branch started from, also had exactly this one
-line in it.)
-
-954 unit tests / 2452 assertions, 0 failures; 0 lint errors and the same 25
+unchanged for it. (Measured three times, against three successive merge
+bases as main moved underneath this branch; the same one line each time.)
+966 unit tests / 2475 assertions, 0 failures; 0 lint errors and the same 25
 pre-existing warnings. Fifteen new or rewritten unit tests, of which
 **fourteen were confirmed failing against the base commit's `src/`** (42
 assertions) before this round's `src/` was written, each with a control
