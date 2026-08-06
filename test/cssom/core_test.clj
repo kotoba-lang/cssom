@@ -4143,6 +4143,17 @@
                  (when (= id (get-in n [:attrs :id]))
                    (into {} (filter (fn [[k _]] (= "style" (namespace k))) (:attrs n)))))))))
 
+(defn- cascaded-attrs
+  "Every attr `apply-cascade` writes for the element carrying `id`, not
+   just the `:style/*` ones -- which is what a custom property
+   (`:--name`) and a pseudo-element's own resolved map
+   (`:pseudo/first-letter`) live under."
+  [css html id]
+  (let [doc (-> (html/parse-into-document html)
+                (css/apply-cascade (css/parse-rules (or css ""))))]
+    (->> (:nodes doc)
+         (some (fn [[_ n]] (when (= id (get-in n [:attrs :id])) (:attrs n)))))))
+
 (deftest logical-side-shorthands-expand-to-logical-longhands-not-physical-ones
   ;; Two values are `<start> <end>`, NOT the 1-to-4 clockwise rule the
   ;; physical shorthands use. They stay logical here because which physical
@@ -4308,3 +4319,169 @@
          (:rule/declarations (first (css/parse-rules "#f { padding: 10% 20% }")))))
   (is (= {:margin-inline-start "20%" :margin-inline-end "20%"}
          (:rule/declarations (first (css/parse-rules "#f { margin-inline: 20% }"))))))
+
+;; ---- `all`, the shorthand for every property ----
+
+(deftest all-initial-resets-every-property-the-cascade-can-reach
+  ;; Every number here was read out of Brave 151 on 2026-08-06 on the
+  ;; conformance corpus's own 800px / monospace / 14px / line-height 20px
+  ;; page, which is what `cascaded-style`'s wrapper reproduces.
+  ;;
+  ;; `all: initial` takes a `<div>` that asked for 120x30 back to a 9.2x16
+  ;; INLINE box at 16px -- the UA sheet's `div { display: block }` is
+  ;; beaten, the author's own width and height are beaten, and the
+  ;; inherited 14px font is replaced rather than inherited.
+  (let [st (cascaded-style "#a { width: 120px; height: 30px; all: initial }"
+                           "<div style=\"font-size: 14px\"><div id=\"a\">a</div></div>" "a")]
+    (is (= "inline" (:style/display st)) "the UA `div { display: block }` is reset")
+    (is (nil? (:style/width st)) "the author's own width, written BEFORE the `all`, is gone")
+    (is (nil? (:style/height st)))
+    (is (= 16 (:style/font-size st)) "`medium` in the initial family -- see all-initial-font-size")
+    (is (= "#000000" (:style/color st)))
+    (is (= 0 (:style/margin-left st)))
+    (is (= "horizontal-tb" (:style/writing-mode st))))
+
+  ;; The control on the same declaration block: `all` is a declaration and
+  ;; not a phase, so a longhand written AFTER it survives. Brave reports
+  ;; 120px wide and 30px tall, still inline and still 16px.
+  (let [st (cascaded-style "#a { all: initial; width: 120px; height: 30px }"
+                           "<div style=\"font-size: 14px\"><div id=\"a\">a</div></div>" "a")]
+    (is (= 120 (:style/width st)))
+    (is (= 30 (:style/height st)))
+    (is (= "inline" (:style/display st)) "...and everything it did reset stays reset")))
+
+(deftest all-is-an-ordinary-declaration-in-the-cascade
+  ;; Four shapes that a "reset, then re-apply" reading gets wrong, each
+  ;; measured in Brave 151 on 2026-08-06.
+  (let [w (fn [css] (:style/width (cascaded-style css "<div><div id=\"a\">a</div></div>" "a")))]
+    (is (= 120 (w "#a { all: initial } #a { width: 120px }"))
+        "a later rule of equal specificity beats it")
+    (is (= 120 (w "div#a { width: 120px } #a { all: initial }"))
+        "a HIGHER-specificity longhand beats it even though it is written first")
+    (is (nil? (w "#a { all: initial !important } #a { width: 120px }"))
+        "an important `all` beats a normal longhand")
+    (is (= 120 (w "#a { all: initial } #a { width: 120px !important }"))
+        "and loses to an important one")))
+
+(deftest all-unset-inherits-what-inherits-and-initialises-the-rest
+  ;; Brave: the `<p>` becomes a 7x15 inline box with BLACK text, because
+  ;; `color` inherits (from a parent that declares none) while `display`
+  ;; does not.
+  (let [st (cascaded-style "#a { color: #ff0000; all: unset }"
+                           "<div><p id=\"a\">a</p></div>" "a")]
+    (is (= "inline" (:style/display st)) "`unset` is `initial` for a non-inherited property")
+    (is (nil? (:style/color st)) "...and `inherit` for an inherited one, which here is absence")
+    (is (= 0 (:style/margin-top st)) "the UA `p { margin: 1em 0 }` is gone")
+    (is (nil? (:style/font-size st)) "font-size INHERITS under `unset` -- it is not the 16 of `initial`"))
+
+  ;; ...and the control that separates `unset` from `initial` on an
+  ;; inherited property with a value to inherit: Brave reports 30px here
+  ;; and 16px for `all: initial` in the same place.
+  (let [st (cascaded-style "#a { all: unset }"
+                           "<div style=\"font-size: 30px\"><div id=\"a\">a</div></div>" "a")]
+    (is (= 30 (:style/font-size st)) "`unset` on an inherited property copies the parent's own 30"))
+  (let [st (cascaded-style "#a { all: initial }"
+                           "<div style=\"font-size: 30px\"><div id=\"a\">a</div></div>" "a")]
+    (is (= 16 (:style/font-size st)) "an absolute answer, not the parent's 30")))
+
+(deftest all-revert-rolls-back-to-the-user-agent-origin
+  ;; Brave: `p { margin-left: 40px; all: revert }` reports margin-left 0
+  ;; and the box at x=0, with the UA `p { margin: 1em 0 }` standing at
+  ;; 14px top and bottom, and `display: block` standing too.
+  (let [st (cascaded-style "#a { margin-left: 40px; all: revert }"
+                           "<div><p id=\"a\">a</p></div>" "a")]
+    (is (= 0 (:style/margin-left st)) "the author's own declaration is gone, not merely outranked")
+    (is (= 14 (:style/margin-top st)) "the UA `p { margin: 1em 0 }` is what is left")
+    (is (= "block" (:style/display st)) "...and so is the UA `p { display: block }`"))
+
+  ;; The control: reversed, the author declaration is written after the
+  ;; `all` and survives. Brave reports margin-left 40 and the box at x=40.
+  (let [st (cascaded-style "#a { all: revert; margin-left: 40px }"
+                           "<div><p id=\"a\">a</p></div>" "a")]
+    (is (= 40 (:style/margin-left st)))))
+
+(deftest all-does-not-reach-direction-unicode-bidi-or-a-custom-property
+  ;; Measured in Brave 151 on 2026-08-06: under a parent declaring all
+  ;; three, an `all: initial` child reports the parent's `rtl`, the same
+  ;; `unicode-bidi` its plain sibling does, and the parent's `--mine`,
+  ;; while the other 44 properties on it are reset.
+  (let [st (cascaded-style "#a { all: initial }"
+                           "<div style=\"direction: rtl\"><div id=\"a\" style=\"--mine: 42px\">a</div></div>" "a")
+]
+    (is (nil? (:style/direction st)) "no `direction: initial` was written, so the rtl still inherits")
+    (is (= 42 (:style/--mine st)) "a custom property is not a property `all` reaches")
+    (is (= "inline" (:style/display st)) "...and the rest of the element WAS reset"))
+
+  ;; `writing-mode` is the near miss, and it is NOT exempt: Brave reports
+  ;; `horizontal-tb` for `all: initial` inside a `vertical-rl` parent and
+  ;; `vertical-rl` for `all: unset`.
+  (let [st (cascaded-style "#a { all: initial }"
+                           "<div style=\"writing-mode: vertical-rl\"><div id=\"a\">a</div></div>" "a")]
+    (is (= "horizontal-tb" (:style/writing-mode st))))
+  (let [st (cascaded-style "#a { all: unset }"
+                           "<div style=\"writing-mode: vertical-rl\"><div id=\"a\">a</div></div>" "a")]
+    (is (= "vertical-rl" (:style/writing-mode st)))))
+
+(deftest all-inherit-copies-the-parent-including-what-this-element-never-declared
+  ;; Brave: a `<div>` with `all: inherit` inside a
+  ;; `color: purple; width: 300px` parent reports both -- `width` is a
+  ;; non-inherited property this element has no declaration for anywhere,
+  ;; so only reading the parent's own resolved style can answer it.
+  (let [st (cascaded-style "#a { all: inherit }"
+                           "<div style=\"color: purple; width: 300px\"><div id=\"a\">a</div></div>" "a")]
+    (is (= 300 (:style/width st)))
+    (is (= "purple" (:style/color st)))))
+
+(deftest all-with-a-non-keyword-value-is-invalid-and-changes-nothing
+  ;; Brave leaves `#s { all: 5px }` as a plain 800x20 block. The control
+  ;; beside it is the same element with a real keyword.
+  (let [st (cascaded-style "#a { all: 5px }" "<div><div id=\"a\">a</div></div>" "a")]
+    (is (= "block" (:style/display st)) "the UA `div { display: block }` still stands")
+    (is (nil? (:style/all st)) "and no `:style/all` attr is written for nobody to read"))
+  (let [st (cascaded-style "#a { all: initial }" "<div><div id=\"a\">a</div></div>" "a")]
+    (is (= "inline" (:style/display st)))))
+
+(deftest all-beats-a-logical-longhand-through-the-physical-rename
+  ;; The expansion runs above the logical-to-physical rename, so a clone
+  ;; written for `margin-inline-start` is renamed alongside the declaration
+  ;; it beats. Brave: margin-left 0 in the first order, 40 in the second.
+  (let [st (cascaded-style "#a { margin-inline-start: 40px; all: initial }"
+                           "<div><p id=\"a\">a</p></div>" "a")]
+    (is (= 0 (:style/margin-left st))))
+  (let [st (cascaded-style "#a { all: initial; margin-inline-start: 40px }"
+                           "<div><p id=\"a\">a</p></div>" "a")]
+    (is (= 40 (:style/margin-left st)))))
+
+(deftest all-still-knows-where-it-sits-past-eight-declarations-in-one-block
+  ;; The guarantee `all` made load-bearing, and the reason
+  ;; `parse-declarations-with-importance` records an `:index`. A Clojure map
+  ;; is an array-map to eight entries and a hash-map beyond, and every
+  ;; declaration of one rule shares that rule's `:rule/order` -- so past the
+  ;; boundary the tie between `all` and a longhand in the SAME block was
+  ;; broken by map iteration order.
+  ;;
+  ;; Ten declarations either side of the `all`, which is well past it.
+  ;; Brave 151, 2026-08-06: width auto in the first, 120px in the second.
+  (let [head (str "color: red; font-style: italic; text-align: right;"
+                  " letter-spacing: 3px; word-spacing: 5px; text-indent: 7px;"
+                  " tab-size: 3; cursor: pointer; visibility: visible;")
+        w (fn [css] (:style/width (cascaded-style css "<div><div id=\"a\">a</div></div>" "a")))]
+    (is (nil? (w (str "#a { " head " width: 120px; all: initial }")))
+        "`all` last: the width written before it is gone")
+    (is (= 120 (w (str "#a { " head " all: initial; width: 120px }")))
+        "`all` first: the width written after it stands")))
+
+(deftest a-first-letter-rule-resolves-as-its-own-pseudo-element
+  ;; `::first-letter` reaches the cascade the way `::before` does, and --
+  ;; the part that matters -- it must NOT reach the element itself. A
+  ;; 40px `::first-letter` on a paragraph leaves the paragraph at 14px in
+  ;; Brave; only the letter grows.
+  (let [attrs (cascaded-attrs "#a::first-letter { font-size: 40px }"
+                              "<div><p id=\"a\">Alpha beta</p></div>" "a")]
+    (is (= {:font-size 40} (:pseudo/first-letter attrs)))
+    (is (nil? (:style/font-size attrs)) "the rule does not apply to the element"))
+  ;; The control: the same declaration with no pseudo-element does apply.
+  (let [attrs (cascaded-attrs "#a { font-size: 40px }"
+                              "<div><p id=\"a\">Alpha beta</p></div>" "a")]
+    (is (= 40 (:style/font-size attrs)))
+    (is (nil? (:pseudo/first-letter attrs)))))
