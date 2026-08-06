@@ -1268,8 +1268,20 @@
    declaration: a `<p style=\"display: initial\">` must report `inline`,
    and dropping the declaration would leave the UA sheet's `block`
    standing. `initial` has to WRITE a value (see `initial-values`), and it
-   is the only one of the four that has to."
-  {"inherit" :inherit "initial" :initial "unset" :unset "revert" :revert})
+   is the only one of the four that has to.
+
+   `revert-layer` (CSS Cascading and Inheritance Level 5) is the fifth, and
+   is here because storing it as a literal string had the same shape of bug
+   the four above did: `#x { width: 200px }` in one layer and
+   `#x { width: revert-layer }` in the next left `cssom.layout` holding the
+   word `revert-layer` as a width, which it cannot read, so the box fell
+   back to `auto` and filled its container -- 800x20 against Brave's
+   200x20. It rolls back to the value the property would have had if no
+   declaration in the CURRENT LAYER existed; see
+   `resolve-css-wide-keyword`'s `:revert-layer` clause for the six shapes
+   measured behind that sentence."
+  {"inherit" :inherit "initial" :initial "unset" :unset "revert" :revert
+   "revert-layer" :revert-layer})
 
 (defn- css-wide-keyword
   "The CSS-wide keyword `value` names (`:inherit`/`:initial`/`:unset`/
@@ -2672,183 +2684,211 @@
             (= ch \}) (if (= depth 1) idx (recur (inc idx) (dec depth)))
             :else (recur (inc idx) depth)))))))
 
-(defn- split-media-segments
-  "Splits raw CSS text into an ordered sequence of
-   {:segment/type :plain :segment/text \"...\"} and
-   {:segment/type :media :segment/condition \"(min-width: 600px)\" :segment/text \"...\"}
-   segments, preserving source order (so :rule/order stays stable across
-   plain and @media-wrapped rules)."
+;; ---- conditional group at-rules: ONE recursive scanner ----
+;;
+;; `@media`, `@container`, `@layer` and `@supports` all wrap ordinary style
+;; rules in a condition rather than holding declarations of their own, and
+;; real stylesheets nest them in every order. This used to be three
+;; separate `split-*-segments` passes chained in a fixed order
+;; (media -> container -> layer), and that fixed order was itself the bug:
+;; a `@layer` inside a `@media` was seen, and a `@media` inside a `@layer`
+;; was not -- the outer layer tag was simply lost, which does not merely
+;; forget the layer, it promotes the rule to UNLAYERED, the strongest
+;; normal position in the author origin. A rule written to be overridable
+;; became unoverridable. Measured in Brave 151.1.93.129 over CDP on
+;; 2026-08-06: `@layer a, b; @layer b { blue } @layer a { @media
+;; (min-width: 1px) { red } }` reports BLUE (the rule stayed in layer `a`,
+;; which `b` beats); this engine reported RED.
+;;
+;; One walk, carrying the context each nested rule inherits, has no order to
+;; get wrong.
+
+(def ^:private conditional-at-rule-names
+  "The at-rules this scanner recurses INTO -- the ones whose body holds
+   rules. `@font-face`/`@property`/`@keyframes`/`@page`/`@counter-style`
+   hold declarations, not rules, and are deliberately absent: the plain
+   `selector { decls }` reader below picks their body up as if the wrapper
+   were not there, which is the behavior they had before this scanner
+   existed and is out of scope here."
+  ["media" "container" "layer" "supports"])
+
+(defn- next-conditional-at-rule
+  "The first `@media`/`@container`/`@layer`/`@supports` at or after `idx` in
+   `s`, as `[index name]`, or nil.
+
+   Deliberately a plain substring search rather than a tokenizer, which is
+   the same bounded reader every at-rule scan in this file has always used:
+   an `@media` appearing inside a string literal or a comment would be
+   mistaken for an at-rule. No corpus case and no stylesheet this engine
+   parses does that, and a tokenizer is a much larger change than the
+   nesting bug this scanner exists to fix."
+  [s idx]
+  (->> conditional-at-rule-names
+       (keep (fn [nm]
+               (when-let [i (str/index-of s (str "@" nm) idx)]
+                 [i nm])))
+       (sort-by first)
+       first))
+
+(def ^:private anonymous-layer-prefix
+  "The stem of the name an anonymous `@layer { ... }` block is given. It
+   starts with a space so that no author can write it: a real layer name is
+   a CSS identifier, and `layer-name-path` trims before splitting, so no
+   authored name can ever collide with one of these."
+  " anon-")
+
+(defn- layer-name-path
+  "A `@layer` header's name resolved to a full path vector, relative to the
+   path it is nested in: `@layer i` inside `@layer o` is `[\"o\" \"i\"]`,
+   and so is a top-level `@layer o.i` -- real CSS says those two ARE the
+   same layer, which is exactly what a shared path representation makes
+   true by construction. Measured in Brave 151 on 2026-08-06:
+   `@layer o { @layer i { p#x { red } } } @layer o.i { #x { blue } }`
+   reports RED, i.e. ONE layer with specificity deciding inside it; this
+   engine flattened the nested block to its OUTER name and read `o.i` as an
+   unrelated third name, so it saw two layers and reported blue.
+
+   A blank header is an ANONYMOUS layer, which is its own distinct layer
+   every time it is written (measured: two `@layer { }` blocks are two
+   layers and the second beats the first regardless of specificity; this
+   engine tagged both with the same empty name and let specificity decide).
+   It is given a name no author can write -- `anon-id` is the scanner's own
+   running counter -- so everything downstream keeps treating a layer as a
+   name and nothing has to learn about anonymity."
+  [parent-path header anon-id]
+  (let [header (str/trim (str header))]
+    (if (str/blank? header)
+      (conj (vec parent-path) (str anonymous-layer-prefix anon-id))
+      (into (vec parent-path)
+            (->> (str/split header #"\.")
+                 (map str/trim)
+                 (remove str/blank?))))))
+
+(defn- layer-paths-with-prefixes
+  "`path` preceded by every one of its own prefixes, shortest first --
+   `[\"o\" \"i\"]` -> `([\"o\"] [\"o\" \"i\"])`. Writing `@layer x.y { }`
+   with no `@layer x` anywhere creates `x` too, at that point in the order;
+   measured in Brave 151 on 2026-08-06, `@layer x.y { p#L red } @layer x
+   { #L blue }` reports BLUE, which is only true if `x` exists and its own
+   declarations outrank its sublayer's."
+  [path]
+  (map #(vec (take % path)) (range 1 (inc (count path)))))
+
+(defn- scan-conditional-at-rules
+  "One recursive walk of `css`. Returns
+   `{:segments [{:segment/text \"...\" :segment/ctx {...}} ...]
+     :layer-paths [path ...]}`:
+
+   - `:segments` are the runs of plain `selector { decls }` text, each
+     paired with the at-rule context it is nested in -- `:media` (a vector
+     of raw condition strings, outermost first), `:supports` (the same),
+     `:container` / `:container-name`, and `:layer` (a path vector, nil
+     when unlayered). Source order is preserved, so `:rule/order` stays
+     stable across plain and wrapped rules.
+   - `:layer-paths` is every layer path at the point it is FIRST NAMED, in
+     source order and with prefixes expanded, from both the bare
+     `@layer a, b;` ordering statement and the `@layer name { ... }` block
+     form. `layer-priority-map` turns it into priorities.
+
+   Both come out of the SAME walk on purpose: an anonymous layer's
+   generated name has to be the same string in both, and two independent
+   scans that happen to count the same way today are two scans that can
+   stop counting the same way."
   [css]
-  (let [s (str (or css ""))
-        n (count s)]
-    (loop [idx 0 segments []]
-      (let [at-idx (str/index-of s "@media" idx)]
-        (if (nil? at-idx)
-          (cond-> segments
-            (< idx n) (conj {:segment/type :plain :segment/text (subs s idx)}))
-          (let [brace-open (str/index-of s "{" at-idx)]
-            (if (nil? brace-open)
-              (conj segments {:segment/type :plain :segment/text (subs s idx)})
-              (let [condition (str/trim (subs s (+ at-idx (count "@media")) brace-open))
-                    brace-close (find-matching-brace s brace-open)]
-                (if (nil? brace-close)
-                  (conj segments {:segment/type :plain :segment/text (subs s idx)})
-                  (recur (inc brace-close)
-                         (cond-> segments
-                           (> at-idx idx) (conj {:segment/type :plain
-                                                 :segment/text (subs s idx at-idx)})
-                           true (conj {:segment/type :media
-                                       :segment/condition condition
-                                       :segment/text (subs s (inc brace-open) brace-close)}))))))))))))
+  (let [anon (volatile! 0)
+        paths (volatile! [])
+        note-layer! (fn [path] (vswap! paths into (layer-paths-with-prefixes path)))]
+    (letfn
+     [(walk [s ctx]
+        (let [n (count s)]
+          (loop [idx 0 out []]
+            (if-let [[at-idx nm] (next-conditional-at-rule s idx)]
+              (let [brace-idx (str/index-of s "{" at-idx)
+                    semi-idx (str/index-of s ";" at-idx)
+                    statement? (and semi-idx (or (nil? brace-idx) (< semi-idx brace-idx)))
+                    before (when (> at-idx idx)
+                             [{:segment/text (subs s idx at-idx) :segment/ctx ctx}])]
+                (cond
+                  ;; An at-rule STATEMENT: `@layer a, b;`. It carries no
+                  ;; rules -- all it does is fix those layers' priority up
+                  ;; front, which is what `note-layer!` records here. Any
+                  ;; other statement-form at-rule (`@import url(x) screen;`)
+                  ;; has no body either and is skipped the same way.
+                  statement?
+                  (do (when (= "layer" nm)
+                        (doseq [nme (->> (str/split (subs s (+ at-idx (count "@layer")) semi-idx) #",")
+                                         (map str/trim)
+                                         (remove str/blank?))]
+                          (note-layer! (layer-name-path (:layer ctx) nme nil))))
+                      (recur (inc semi-idx) (into out (or before []))))
 
-(defn- split-container-segments
-  "Splits raw CSS text into an ordered sequence of
-   {:segment/type :plain :segment/text \"...\"} and
-   {:segment/type :container :segment/name \"sidebar\" (or nil, unnamed)
-   :segment/condition \"(min-width: 400px)\" :segment/text \"...\"}
-   segments, preserving source order -- mirrors split-media-segments exactly
-   (same brace-depth-aware find-matching-brace), extended to also pull an
-   optional leading container-name token out of the at-rule's own header
-   text (real CSS's `@container [<container-name>]? <container-condition>`
-   grammar -- e.g. `@container sidebar (min-width: 400px)` vs the unnamed
-   `@container (min-width: 400px)`): everything before the header's first
-   top-level `(` is the name (blank collapses to nil, the unnamed-query
-   case), everything from that `(` onward is the condition text (verbatim,
-   handed to container-condition-matches? later, exactly like
-   split-media-segments already hands :segment/condition to
-   media-condition-matches? verbatim).
+                  (nil? brace-idx)
+                  (into out [{:segment/text (subs s idx) :segment/ctx ctx}])
 
-   A header with no `(` at all (a malformed/unsupported at-rule, e.g. a
-   `style()`/`scroll-state()` container query this engine doesn't parse)
-   still produces a :container segment (name nil, condition = the raw
-   header text) rather than being silently dropped or misfiled as :plain --
-   container-condition-matches? then honestly fails to recognize any
-   feature in that raw text and returns false, the same conservative
-   default this engine already uses everywhere else for an unrecognized
-   form, rather than this segment's rules silently becoming unconditional."
-  [css]
-  (let [s (str (or css ""))
-        n (count s)]
-    (loop [idx 0 segments []]
-      (let [at-idx (str/index-of s "@container" idx)]
-        (if (nil? at-idx)
-          (cond-> segments
-            (< idx n) (conj {:segment/type :plain :segment/text (subs s idx)}))
-          (let [brace-open (str/index-of s "{" at-idx)]
-            (if (nil? brace-open)
-              (conj segments {:segment/type :plain :segment/text (subs s idx)})
-              (let [header (str/trim (subs s (+ at-idx (count "@container")) brace-open))
-                    paren-idx (str/index-of header "(")
-                    container-name (when (and paren-idx (pos? paren-idx))
-                                      (not-empty (str/trim (subs header 0 paren-idx))))
-                    condition (if paren-idx (subs header paren-idx) header)
-                    brace-close (find-matching-brace s brace-open)]
-                (if (nil? brace-close)
-                  (conj segments {:segment/type :plain :segment/text (subs s idx)})
-                  (recur (inc brace-close)
-                         (cond-> segments
-                           (> at-idx idx) (conj {:segment/type :plain
-                                                 :segment/text (subs s idx at-idx)})
-                           true (conj {:segment/type :container
-                                       :segment/name container-name
-                                       :segment/condition condition
-                                       :segment/text (subs s (inc brace-open) brace-close)}))))))))))))
+                  :else
+                  (if-let [close (find-matching-brace s brace-idx)]
+                    (let [header (str/trim (subs s (+ at-idx (inc (count nm))) brace-idx))
+                          body (subs s (inc brace-idx) close)
+                          inner-ctx
+                          (case nm
+                            "media" (update ctx :media (fnil conj []) header)
+                            "supports" (update ctx :supports (fnil conj []) header)
+                            "container"
+                            (let [paren (str/index-of header "(")]
+                              (assoc ctx
+                                     :container (if paren (subs header paren) header)
+                                     :container-name (when (and paren (pos? paren))
+                                                       (not-empty (str/trim (subs header 0 paren))))))
+                            "layer"
+                            (let [path (layer-name-path (:layer ctx) header (vswap! anon inc))]
+                              (note-layer! path)
+                              (assoc ctx :layer path)))]
+                      (recur (inc close) (into (into out (or before [])) (walk body inner-ctx))))
+                    ;; Unbalanced braces: emit the remainder as plain text
+                    ;; rather than dropping it -- the same "degrade, don't
+                    ;; crash" posture the rest of this file takes.
+                    (into out [{:segment/text (subs s idx) :segment/ctx ctx}]))))
+              (cond-> out
+                (< idx n) (conj {:segment/text (subs s idx) :segment/ctx ctx}))))))]
+      {:segments (walk (str (or css "")) {}) :layer-paths @paths})))
 
-(defn- split-layer-segments
-  "Splits raw CSS text into an ordered sequence of
-   {:segment/type :plain :segment/text \"...\"} and
-   {:segment/type :layer :segment/name \"foo\" :segment/text \"...\"}
-   segments, preserving source order -- mirrors `split-media-segments`
-   exactly, brace-depth-aware via the same `find-matching-brace`.
+(defn- layer-priority-map
+  "`path -> priority integer` for every layer named in a stylesheet, where a
+   HIGHER integer wins (see `resolve-style-and-flow`'s sort).
 
-   Also recognizes the bare `@layer name1, name2;` ordering statement (no
-   braces -- CSS's way of fixing layer priority up front, before any of
-   those layers' rules are actually written). That statement carries no
-   rules of its own, so it is simply dropped from the segment stream here;
-   its declared order is picked up separately by `layer-declaration-order`,
-   which scans the same text independently."
-  [css]
-  (let [s (str (or css ""))
-        n (count s)]
-    (loop [idx 0 segments []]
-      (let [at-idx (str/index-of s "@layer" idx)]
-        (if (nil? at-idx)
-          (cond-> segments
-            (< idx n) (conj {:segment/type :plain :segment/text (subs s idx)}))
-          (let [brace-idx (str/index-of s "{" at-idx)
-                semi-idx (str/index-of s ";" at-idx)
-                bare-statement? (and semi-idx (or (nil? brace-idx) (< semi-idx brace-idx)))]
-            (cond
-              bare-statement?
-              (recur (inc semi-idx)
-                     (cond-> segments
-                       (> at-idx idx) (conj {:segment/type :plain
-                                             :segment/text (subs s idx at-idx)})))
+   Layers form a TREE, not a list, and the order is a POST-ORDER traversal
+   of it: a layer's sublayers come first (lowest priority), then that
+   layer's own un-sublayered declarations. Every row measured in Brave 151
+   on 2026-08-06, on one page:
 
-              (nil? brace-idx)
-              (conj segments {:segment/type :plain :segment/text (subs s idx)})
+   | shape | Brave |
+   |---|---|
+   | `@layer o { @layer i {red} @layer j {blue} }` | blue -- `j` after `i` |
+   | `@layer o { red @layer i {blue} }` | RED -- the layer's OWN rules beat its sublayer |
+   | `@layer o { @layer i {blue} red }` | RED -- and the source order of the two does not matter |
+   | `@layer x.y {red} @layer x {blue}` | BLUE -- same rule, with `x` created implicitly |
 
-              :else
-              (let [layer-name (str/trim (subs s (+ at-idx (count "@layer")) brace-idx))
-                    brace-close (find-matching-brace s brace-idx)]
-                (if (nil? brace-close)
-                  (conj segments {:segment/type :plain :segment/text (subs s idx)})
-                  (recur (inc brace-close)
-                         (cond-> segments
-                           (> at-idx idx) (conj {:segment/type :plain
-                                                 :segment/text (subs s idx at-idx)})
-                           true (conj {:segment/type :layer
-                                       :segment/name layer-name
-                                       :segment/text (subs s (inc brace-idx) brace-close)}))))))))))))
-
-(defn- layer-declaration-order
-  "Scans `css` left-to-right for every point a layer name is *first named* --
-   either a bare `@layer a, b;` ordering statement's comma list, or a
-   `@layer name { ... }` block's opening -- and returns those names in
-   source order (not yet deduped; callers dedup keeping the first
-   occurrence). Matches real CSS: a layer's priority is fixed at the point
-   it is first named, whichever form that takes, so a bare ordering
-   statement earlier in the source wins over a later block's position."
-  [css]
-  (let [s (str (or css ""))
-        n (count s)]
-    (loop [idx 0 names []]
-      (let [at-idx (str/index-of s "@layer" idx)]
-        (if (nil? at-idx)
-          names
-          (let [brace-idx (str/index-of s "{" at-idx)
-                semi-idx (str/index-of s ";" at-idx)
-                bare-statement? (and semi-idx (or (nil? brace-idx) (< semi-idx brace-idx)))]
-            (cond
-              bare-statement?
-              (let [declared (->> (str/split (subs s (+ at-idx (count "@layer")) semi-idx) #",")
-                                   (map str/trim)
-                                   (remove str/blank?))]
-                (recur (inc semi-idx) (into names declared)))
-
-              (nil? brace-idx)
-              names
-
-              :else
-              (let [layer-name (str/trim (subs s (+ at-idx (count "@layer")) brace-idx))
-                    brace-close (find-matching-brace s brace-idx)]
-                (if (nil? brace-close)
-                  names
-                  (recur (inc brace-close)
-                         (cond-> names
-                           (not (str/blank? layer-name)) (conj layer-name))))))))))))
-
-(defn- layer-priority-order
-  "Distinct layer names in declared/encountered priority order (see
-   `layer-declaration-order`): index 0 is the lowest priority (loses ties),
-   higher indices win -- a later-declared/encountered layer beats an
-   earlier one, matching real CSS cascade-layer semantics."
-  [css]
-  (vec (distinct (layer-declaration-order css))))
+   Children are ordered by first appearance, which is what
+   `scan-conditional-at-rules` records. The previous implementation was a
+   flat `distinct` over first-appearance NAMES with no tree at all: it got
+   the first row right and the other three wrong."
+  [ordered-paths]
+  (let [ordered (distinct ordered-paths)
+        children (reduce (fn [m path]
+                           (let [parent (vec (butlast path))
+                                 leaf (last path)]
+                             (update m parent
+                                     (fn [v] (if (some #{leaf} v) v (conj (or v []) leaf))))))
+                         {}
+                         ordered)
+        post-order (fn post-order [path]
+                     (concat (mapcat #(post-order (conj path %)) (get children path []))
+                             (when (seq path) [path])))]
+    (into {} (map-indexed (fn [idx path] [path idx]) (post-order [])))))
 
 (defn- parse-rules-raw
-  "Parses `selector { decls }` pairs with no @media awareness. Returns rule
-   maps without :rule/order or :rule/media (callers attach those)."
+  "Parses `selector { decls }` pairs with no at-rule awareness. Returns rule
+   maps without :rule/order or any at-rule context (callers attach those)."
   [css]
   (->> (re-seq #"(?s)([^{}]+)\{([^{}]+)\}" (or css ""))
        (map (fn [[_ selector-text body]]
@@ -2857,75 +2897,61 @@
                :rule/declaration-meta (parse-declarations-with-importance body)}))))
 
 (defn parse-rules
-  "Parses raw CSS text into rule maps. Rules nested inside an `@media (...)`
-   block carry that condition (raw text, e.g. \"(min-width: 600px)\") under
-   :rule/media; top-level rules have :rule/media nil (always applies).
-   `apply-cascade` decides which :rule/media conditions currently hold.
+  "Parses raw CSS text into rule maps, carrying the condition of every
+   conditional group at-rule each rule is nested in (see
+   `scan-conditional-at-rules` -- one recursive walk, so the four at-rules
+   compose in ANY nesting order):
 
-   Rules nested inside an `@layer <name> { ... }` block carry that name
-   under :rule/layer; top-level (non-`@layer`) rules have :rule/layer nil,
-   meaning \"unlayered\". Each rule also carries :rule/layer-priority, an
-   integer resolved from the whole stylesheet's declared/encountered layer
-   order (see `layer-priority-order`): a bare `@layer a, b;` ordering
-   statement fixes priority up front if present, otherwise a layer's
-   priority is the order it is first named, by that statement or its first
-   `@layer name { ... }` block, whichever comes first in the source.
-   Unlayered rules always resolve to one past the highest named-layer index
-   (real CSS: unlayered author styles beat every layered one). Downstream,
-   `resolve-style-for` sorts on :rule/layer-priority, not the raw name.
+   - :rule/media -- the raw `@media` condition text (e.g.
+     \"(min-width: 600px)\"), or a VECTOR of them when `@media` blocks are
+     nested inside each other, or nil (always applies). `apply-cascade`
+     decides which currently hold (`media-condition-matches?`).
+   - :rule/supports -- the raw `@supports` condition text, same
+     single-or-vector shape, or nil. Evaluated by
+     `supports-condition-matches?`, which unlike `@media` needs no runtime
+     context at all -- only this engine's own support oracle.
+   - :rule/container / :rule/container-name -- the raw `@container`
+     condition and its optional container name. NOT decided here: this
+     needs a container's own resolved size, not one global number (see
+     `container-rule-matches?`).
+   - :rule/layer -- the layer's full DOTTED name (`\"o.i\"` for a `@layer i`
+     nested inside `@layer o`, which real CSS says is the same layer as a
+     top-level `@layer o.i`), or nil for unlayered. Each rule also carries
+     :rule/layer-priority, resolved from the whole stylesheet's layer TREE
+     by `layer-priority-map`.
 
-   Rules nested inside an `@container [<name>]? (<condition>) { ... }` block
-   (see `split-container-segments` for the at-rule grammar) carry that raw
-   condition text under :rule/container and the optional name under
-   :rule/container-name; top-level (non-`@container`) rules have both nil.
-   `apply-cascade` decides which :rule/container conditions currently hold
-   (see its own docstring and `container-rule-matches?` -- unlike
-   :rule/media, this needs a container's own resolved size, not a single
-   global number, so it is NOT decided up front here the way
-   rule-applies-to-viewport? decides :rule/media).
+   Unlayered rules resolve to one past the highest named-layer index, and
+   what that WINS is decided in `resolve-style-and-flow`, not here -- real
+   CSS: unlayered author styles beat every layered one of the same
+   importance, and for `!important` lose to every one of them.
 
-   Segment nesting order is media -> container -> layer -> plain rules, so
-   all three at-rules compose (`@media (...) { @container (...) { @layer x
-   { ... } } }`), mirroring how media -> layer nesting already worked before
-   `@container` support existed.
-
-   Known simplifications:
-   - Anonymous `@layer { ... }` blocks (no name) are treated as unlayered
-     rather than as their own distinct anonymous layer.
-   - `@media` nested inside `@layer` loses the outer layer tag on that
-     nested block's rules (they still get :rule/media correctly, just fall
-     back to :rule/layer nil); `@layer` nested inside `@media` is fully
-     supported. The same applies to `@container` nested inside `@layer`
-     (loses the layer tag; a `@layer` nested inside `@container` is fully
-     supported, same media/layer precedent)."
+   Known simplifications, both measured rather than assumed:
+   - Nested `@container` blocks keep only the INNERMOST condition. This
+     engine's `@container` support is bounded to one queryable ancestor
+     anyway (see `container-rule-matches?`), so a second condition would
+     have nothing left to be evaluated against.
+   - An at-rule written inside a STYLE rule's body (CSS nesting) is not
+     recognised as nested; see the namespace docstring's nesting
+     paragraph."
   [css]
   (let [css (str (or css ""))
-        layer-order (layer-priority-order css)
-        layer-index (into {} (map-indexed (fn [idx name] [name idx]) layer-order))
-        unlayered-priority (count layer-order)
-        priority-for (fn [layer-name]
-                       (if (nil? layer-name)
-                         unlayered-priority
-                         (get layer-index layer-name unlayered-priority)))]
-    (->> (split-media-segments css)
-         (mapcat (fn [{:segment/keys [type text condition]}]
-                   (let [media (when (= type :media) condition)]
-                     (->> (split-container-segments text)
-                          (mapcat (fn [container-segment]
-                                    (let [container? (= :container (:segment/type container-segment))
-                                          container (when container? (:segment/condition container-segment))
-                                          container-name (when container? (:segment/name container-segment))]
-                                      (->> (split-layer-segments (:segment/text container-segment))
-                                           (mapcat (fn [layer-segment]
-                                                     (let [layer-name (when (= :layer (:segment/type layer-segment))
-                                                                         (:segment/name layer-segment))]
-                                                       (map #(assoc %
-                                                                    :rule/media media
-                                                                    :rule/container container
-                                                                    :rule/container-name container-name
-                                                                    :rule/layer layer-name
-                                                                    :rule/layer-priority (priority-for layer-name))
-                                                            (parse-rules-raw (:segment/text layer-segment))))))))))))))
+        {:keys [segments layer-paths]} (scan-conditional-at-rules css)
+        priority-of (layer-priority-map layer-paths)
+        unlayered-priority (count priority-of)
+        one-or-many (fn [v] (case (count v) 0 nil 1 (first v) (vec v)))]
+    (->> segments
+         (mapcat (fn [{:segment/keys [text ctx]}]
+                   (let [layer-path (:layer ctx)]
+                     (map #(assoc %
+                                  :rule/media (one-or-many (:media ctx))
+                                  :rule/supports (one-or-many (:supports ctx))
+                                  :rule/container (:container ctx)
+                                  :rule/container-name (:container-name ctx)
+                                  :rule/layer (when layer-path (str/join "." layer-path))
+                                  :rule/layer-priority (if layer-path
+                                                         (get priority-of layer-path unlayered-priority)
+                                                         unlayered-priority))
+                          (parse-rules-raw text)))))
          (map-indexed (fn [idx rule] (assoc rule :rule/order idx)))
          vec)))
 
@@ -2934,22 +2960,351 @@
   #?(:clj (Long/parseLong s)
      :cljs (js/parseInt s 10)))
 
-(def ^:private media-feature-pattern
-  #"(?i)\(\s*(min-width|max-width)\s*:\s*(\d+)(?:px)?\s*\)")
+;; ---- @media: a GRAMMAR, evaluated, not a feature list ----
+;;
+;; The previous evaluator split the condition text on `and` and pattern-
+;; matched each part against `(min-width|max-width: <n>px)` and
+;; `(prefers-color-scheme: light|dark)`, treating everything it did not
+;; recognise as MATCHING "so unsupported media features don't silently hide
+;; rules". That default is right for a genuinely unknown FEATURE and wrong
+;; for grammar it merely failed to parse -- and the difference is not a
+;; nuance, it INVERTS answers. Measured in Brave 151.1.93.129 over CDP on
+;; 2026-08-06, at the harness's own 756px viewport:
+;;
+;; | condition | Brave | old evaluator |
+;; |---|---|---|
+;; | `(width >= 5000px)` | black | red -- "unrecognized, so it matches" |
+;; | `(min-width: 60em)` (= 960px) | black | red -- same |
+;; | `not all and (min-width: 5000px)` | RED | black -- `not` was not a part it could see, so it split on `and` and the false arm decided |
+;; | `(min-resolution: 1dppx)` | RED | RED -- the control: a real unknown FEATURE, where the default is right |
+;;
+;; So the fix is not more feature patterns, it is parsing the grammar --
+;; media type, `not`/`only`, `and`/`or`, the comma list, nested parens and
+;; Media Queries 4 range syntax -- and keeping the fail-open default for
+;; exactly one thing: a feature NAME inside well-formed parens that this
+;; engine does not implement.
+;;
+;; Everything else these functions do was measured on the same page. The
+;; rows that shaped the code:
+;;
+;; | condition | Brave | why it is here |
+;; |---|---|---|
+;; | `(min-width: 47.25em)` | RED (= exactly 756) | `em` in a media query is 16px, NOT the root's font size -- the page declared `html { font-size: 32px }` and `(min-width: 40em)` still matched at 756 |
+;; | `(min-width: 100)` | black | a unitless non-zero length is INVALID, not 100px |
+;; | `(min-width: 0px)`, `(min-width: -5px)` | RED | zero needs no unit, and a negative min-width is legal and trivially true |
+;; | `flurb` (bare) | black | an unknown media TYPE does not match -- unlike an unknown feature |
+;; | `(min-width: 5000px), garbage garbage` | black, and the rule SURVIVES, reported back as `(min-width:5000px), not all` | an unparseable query in a comma list becomes `not all`; it does not invalidate its neighbours |
+;; | `(min-width: 100px) and (flurb: 1)` | black | Brave is three-valued: unknown propagates through `and`/`or` and reads false at the top |
+;; | `not (flurb: 1px)` | black | ...and through `not` too |
+;;
+;; The last two rows are where this engine deliberately still differs: it
+;; is TWO-valued, with an unknown feature reading as true, so it answers
+;; red to both. That is the documented fail-open default -- see
+;; `media-feature-matches?` -- and the `min-resolution` row above is what
+;; it buys.
 
-(def ^:private color-scheme-feature-pattern
-  "`(prefers-color-scheme: light|dark)` -- the one non-width media feature
-   this engine recognizes, since it's ubiquitous in real-world CSS (a page's
-   light/dark variants are almost always both written as ordinary `@media
-   (prefers-color-scheme: dark) { ... }` blocks, ordinary declarations
-   competing on specificity/order like anything else) and, unlike most other
-   Level 4 media features, has a genuine, simple binary value a host can
-   reasonably inject (see media-condition-matches?'s `color-scheme` arg and
-   apply-cascade's `:color-scheme` opt) rather than needing real hardware/
-   OS sensing this engine has no way to do (`hover`/`pointer`/`prefers-
-   reduced-motion`/etc. remain unrecognized and fall through to the
-   documented always-matching default below)."
-  #"(?i)\(\s*prefers-color-scheme\s*:\s*(light|dark)\s*\)")
+(def ^:private media-em-px
+  "The font size a media query's `em`/`rem` resolves against: 16px, CSS's
+   own INITIAL font size, and specifically not the root element's computed
+   one. Measured in Brave 151 on 2026-08-06 on a page declaring
+   `html { font-size: 32px }`: `(min-width: 40em)` matched at a 756px
+   viewport (640 <= 756, so em = 16; against the root's 32 it would be 1280
+   and would not have matched), and `(min-width: 47.25em)` matched exactly
+   (47.25 * 16 = 756.0).
+
+   Real CSS says this in so many words -- relative units in a media query
+   are evaluated against their INITIAL values -- and it is the whole reason
+   `@media (min-width: 60em)` is a portable 960px breakpoint in every
+   stylesheet that uses one."
+  16)
+
+(def ^:private media-length-pattern
+  "A media feature's `<length>` value: an optionally-signed integer or
+   decimal, with an optional `px`/`em`/`rem` unit. The unit group is
+   optional rather than required because a missing unit is legal on zero --
+   and only on zero, see `parse-media-length`."
+  #"(?i)^([-+]?(?:\d+\.?\d*|\.\d+))(px|em|rem)?$")
+
+(defn- parse-media-number
+  "A decimal literal to a number, in both hosts."
+  [s]
+  #?(:clj (Double/parseDouble s) :cljs (js/parseFloat s)))
+
+(defn- parse-media-length
+  "A media feature's `<length>` value in px, or nil when it is not a length
+   this engine can read -- which per Media Queries 4 makes the whole query
+   INVALID (equivalent to `not all`), not merely unmatched, and is why the
+   callers below distinguish nil here from `false`.
+
+   `em`/`rem` resolve against `media-em-px`. A bare number is a length only
+   when it is zero: measured in Brave 151 on 2026-08-06, `(min-width: 100)`
+   does not match at a 756px viewport while `(min-width: 0)` and
+   `(min-width: 0px)` both do."
+  [s]
+  (when-let [[_ number unit] (re-matches media-length-pattern (str/trim (str s)))]
+    (let [n (parse-media-number number)]
+      (case (some-> unit str/lower-case)
+        "px" n
+        ("em" "rem") (* n media-em-px)
+        nil (when (zero? n) 0.0)))))
+
+(def ^:private media-types
+  "The media types this engine answers TRUE for. `print` and every other
+   type (`speech`, `tty`, ...) answer false, and so does an unrecognised
+   one: measured in Brave 151 on 2026-08-06, a bare `@media flurb` block
+   does not apply. That is the opposite of the fail-open default an unknown
+   FEATURE gets, and deliberately so -- a media type is a closed vocabulary,
+   a feature set is not."
+  #{"all" "screen"})
+
+(def ^:private media-range-comparators
+  #{"<" "<=" ">" ">=" "="})
+
+(def ^:private media-range-token-pattern
+  "Splits a range-syntax feature into `<value> <op> <name>` tokens without
+   needing lookbehind (which `re-seq` has in both hosts but which reads far
+   worse than an explicit alternation)."
+  #"<=|>=|[<>=]|[^<>=\s]+")
+
+(defn- flip-comparator
+  "`a < width` is `width > a`. Used to normalise both range orders, and
+   both ends of the two-ended form, onto one comparison against the
+   viewport."
+  [op]
+  (case op "<" ">" "<=" ">=" ">" "<" ">=" "<=" "=" "="))
+
+(defn- split-top-level
+  "Splits `s` on single-character `sep` at paren depth 0, so a comma inside
+   `(...)` does not split a media-query list. Returns trimmed, non-blank
+   parts."
+  [s sep]
+  (let [n (count s)]
+    (loop [idx 0 start 0 depth 0 out []]
+      (if (>= idx n)
+        (->> (conj out (subs s start))
+             (map str/trim)
+             (remove str/blank?)
+             vec)
+        (let [ch (nth s idx)]
+          (cond
+            (= ch \() (recur (inc idx) start (inc depth) out)
+            (= ch \)) (recur (inc idx) start (max 0 (dec depth)) out)
+            (and (zero? depth) (= ch sep))
+            (recur (inc idx) (inc idx) depth (conj out (subs s start idx)))
+            :else (recur (inc idx) start depth out)))))))
+
+(defn- split-top-level-word
+  "Splits `s` on the whole word `word` (`and`/`or`) at paren depth 0.
+   Returns nil when the word does not occur there at all, so a caller can
+   tell \"one part\" from \"several\" without re-scanning. Word-boundary
+   checked on both sides, so the `and` inside `brand` never splits."
+  [s word]
+  (let [n (count s)
+        w (count word)]
+    (loop [idx 0 start 0 depth 0 out []]
+      (if (>= idx n)
+        (when (seq out)
+          (->> (conj out (subs s start))
+               (map str/trim)
+               (remove str/blank?)
+               vec))
+        (let [ch (nth s idx)]
+          (cond
+            (= ch \() (recur (inc idx) start (inc depth) out)
+            (= ch \)) (recur (inc idx) start (max 0 (dec depth)) out)
+            (and (zero? depth)
+                 (<= (+ idx w) n)
+                 (= word (str/lower-case (subs s idx (+ idx w))))
+                 (or (zero? idx) (some? (re-matches #"[\s)]" (str (nth s (dec idx))))))
+                 (or (= (+ idx w) n) (some? (re-matches #"[\s(]" (str (nth s (+ idx w)))))))
+            (recur (+ idx w) (+ idx w) depth (conj out (subs s start idx)))
+
+            :else (recur (inc idx) start depth out)))))))
+
+(defn- strip-leading-word
+  "`s` with a leading whole word `word` removed, or nil when `s` does not
+   start with one."
+  [s word]
+  (let [w (count word)]
+    (when (and (>= (count s) w)
+               (= word (str/lower-case (subs s 0 w)))
+               (or (= (count s) w) (some? (re-matches #"[\s(]" (str (nth s w))))))
+      (str/trim (subs s w)))))
+
+(defn- parenthesised?
+  "Whether `s` is exactly ONE `( ... )` group -- i.e. the paren it opens
+   with is closed by its last character, so `(a) and (b)` is not."
+  [s]
+  (and (str/starts-with? s "(")
+       (str/ends-with? s ")")
+       (let [n (count s)]
+         (loop [idx 0 depth 0]
+           (if (>= idx n)
+             true
+             (let [ch (nth s idx)
+                   depth (cond (= ch \() (inc depth)
+                               (= ch \)) (dec depth)
+                               :else depth)]
+               (if (and (zero? depth) (< idx (dec n)))
+                 false
+                 (recur (inc idx) depth))))))))
+
+(defn- media-feature-matches?
+  "Evaluates ONE `( ... )` media-in-parens against `viewport-width` and
+   `color-scheme`. Returns true, false, or `::invalid`.
+
+   `condition-fn` is always `media-condition-matches*`, threaded in as an
+   ordinary higher-order argument rather than called by name: the two
+   functions need each other (a media-in-parens may hold a whole nested
+   condition), and this namespace does not use `declare` to paper over a
+   forward reference -- the same explicit-matcher shape `matches-pseudo?`
+   and `parse-calc-level` already use.
+
+   Four shapes, all measured in Brave 151 on 2026-08-06 (see the block
+   comment above this section for the table):
+
+   - a nested condition, `((min-width: 100px) and (max-width: 5000px))`;
+   - `<name> : <value>` -- a plain feature. `min-width`/`max-width`/`width`
+     compare against the viewport, `prefers-color-scheme` against the
+     caller's scheme. A KNOWN feature carrying a value this engine cannot
+     read as a length is `::invalid`, not false (Brave: `(min-width: 100)`
+     does not match);
+   - `<value> <op> <name>`, `<name> <op> <value>` and the two-ended
+     `<value> <op> <name> <op> <value>` -- Media Queries 4 range syntax,
+     which is GRAMMAR and not a feature: the old evaluator's fail-open
+     default read `(width >= 5000px)` as matching, where Brave leaves it
+     black;
+   - `<name>` alone -- a boolean feature.
+
+   An UNRECOGNISED feature name returns TRUE, which is this engine's
+   long-standing fail-open default and the one thing this rewrite
+   deliberately keeps. It is not what Brave does -- Brave is three-valued
+   and answers false for `(flurb: 1px)` -- but this engine cannot tell
+   \"a feature no browser has\" from \"a feature every browser has and I do
+   not\", and the second is far more common in real stylesheets. The
+   corpus's control for it is `(min-resolution: 1dppx)`, which is exactly
+   that second case: Brave matches it, and so does this."
+  [text viewport-width color-scheme condition-fn]
+  (let [inner (str/trim (subs text 1 (dec (count text))))
+        feature-of (fn [name]
+                     (case (str/lower-case (str/trim (str name)))
+                       ("width" "min-width" "max-width") :width
+                       "prefers-color-scheme" :color-scheme
+                       nil))
+        compare-width (fn [op n]
+                        (case op
+                          "<" (< viewport-width n) "<=" (<= viewport-width n)
+                          ">" (> viewport-width n) ">=" (>= viewport-width n)
+                          "=" (== viewport-width n)))]
+    (cond
+      (str/blank? inner) ::invalid
+
+      ;; a nested condition -- checked first, because its own inner text
+      ;; holds the `:` and the parens the branches below key on
+      (or (str/starts-with? inner "(") (some? (strip-leading-word inner "not")))
+      (condition-fn inner viewport-width color-scheme)
+
+      (some? (re-find #"[<>=]" inner))
+      (let [tokens (vec (re-seq media-range-token-pattern inner))]
+        (case (count tokens)
+          3 (let [[a op b] tokens]
+              (cond
+                (not (contains? media-range-comparators op)) ::invalid
+                (= :width (feature-of a)) (if-let [n (parse-media-length b)]
+                                            (compare-width op n)
+                                            ::invalid)
+                (= :width (feature-of b)) (if-let [n (parse-media-length a)]
+                                            (compare-width (flip-comparator op) n)
+                                            ::invalid)
+                ;; a range over a feature this engine does not implement:
+                ;; the grammar parsed, so this is the fail-open case
+                :else true))
+          5 (let [[a op1 name op2 b] tokens
+                  lo (parse-media-length a)
+                  hi (parse-media-length b)]
+              (cond
+                (not (and (contains? media-range-comparators op1)
+                          (contains? media-range-comparators op2))) ::invalid
+                (not= :width (feature-of name)) (if (feature-of name) ::invalid true)
+                (not (and lo hi)) ::invalid
+                :else (and (compare-width (flip-comparator op1) lo)
+                           (compare-width op2 hi))))
+          ::invalid))
+
+      (str/includes? inner ":")
+      (let [[name value] (map str/trim (str/split inner #":" 2))]
+        (case (feature-of name)
+          :width (if-let [n (parse-media-length value)]
+                   (case (str/lower-case name)
+                     "min-width" (>= viewport-width n)
+                     "max-width" (<= viewport-width n)
+                     "width" (== viewport-width n))
+                   ::invalid)
+          :color-scheme (if (contains? #{"light" "dark"} (str/lower-case value))
+                          (= (str/lower-case value) (str/lower-case (str color-scheme)))
+                          ::invalid)
+          true))
+
+      :else
+      (if (= :width (feature-of inner))
+        (pos? viewport-width)
+        true))))
+
+(defn- media-condition-matches*
+  "Evaluates a `<media-condition>` -- one or more `<media-in-parens>` joined
+   by `and`/`or`, or a `not` of one. Returns true, false or `::invalid`;
+   `::invalid` PROPAGATES rather than being inverted by a `not`, which is
+   what makes an unparseable condition different from a false one."
+  [s viewport-width color-scheme]
+  (let [s (str/trim s)
+        combine (fn [op parts]
+                  (let [vals (map #(media-condition-matches* % viewport-width color-scheme) parts)]
+                    (cond
+                      (some #{::invalid} vals) ::invalid
+                      (= :and op) (every? true? vals)
+                      :else (boolean (some true? vals)))))]
+    (cond
+      (str/blank? s) ::invalid
+      (split-top-level-word s "and") (combine :and (split-top-level-word s "and"))
+      (split-top-level-word s "or") (combine :or (split-top-level-word s "or"))
+      (some? (strip-leading-word s "not"))
+      (let [inner (media-condition-matches* (strip-leading-word s "not") viewport-width color-scheme)]
+        (if (= ::invalid inner) ::invalid (not inner)))
+      (parenthesised? s) (media-feature-matches? s viewport-width color-scheme
+                                                 media-condition-matches*)
+      :else ::invalid)))
+
+(defn- media-query-matches?
+  "Evaluates ONE `<media-query>` of a comma-separated list: an optional
+   `not`/`only` qualifier, then either a media TYPE (optionally followed by
+   `and <condition>` parts) or a bare `<media-condition>`.
+
+   Returns true or false -- never `::invalid`, because an invalid media
+   query is DEFINED to be `not all`, i.e. false, and measured that way:
+   Brave 151 reports `@media (min-width: 5000px), garbage garbage` back as
+   `(min-width: 5000px), not all` with the rule still standing, so one
+   unparseable query does not invalidate its neighbours in the list."
+  [query viewport-width color-scheme]
+  (let [s (str/trim query)
+        negated? (some? (strip-leading-word s "not"))
+        s (or (strip-leading-word s "not") (strip-leading-word s "only") s)
+        parts (or (split-top-level-word s "and") [s])
+        head (first parts)
+        ;; a leading bare word is a media TYPE; anything else has to be a
+        ;; condition, and `media-condition-matches*` will say so
+        type? (and (seq head) (some? (re-matches #"[A-Za-z][A-Za-z0-9-]*" head)))
+        result (if type?
+                 (let [type-ok (contains? media-types (str/lower-case head))
+                       rest-vals (map #(media-condition-matches* % viewport-width color-scheme)
+                                      (rest parts))]
+                   (if (some #{::invalid} rest-vals)
+                     ::invalid
+                     (and type-ok (every? true? rest-vals))))
+                 (media-condition-matches* s viewport-width color-scheme))]
+    (cond
+      (= ::invalid result) false
+      negated? (not result)
+      :else (boolean result))))
 
 (def default-viewport-width
   "Viewport width (px) `apply-cascade` assumes for @media evaluation when the
@@ -2967,14 +3322,22 @@
   "light")
 
 (defn media-condition-matches?
-  "Evaluates a raw @media condition (as stored in :rule/media) against a
-   viewport width in px and a `color-scheme` (\"light\"/\"dark\", see
-   default-color-scheme). Supports `(min-width: Npx)` / `(max-width: Npx)`,
-   `(prefers-color-scheme: light|dark)`, combined with `and`; a bare
-   `screen`/`all` media type always matches, `print` never does; anything
-   else unrecognized (`hover`, `pointer`, `prefers-reduced-motion`, `not`/
-   `only` qualifiers, ...) is treated as matching (so unsupported media
-   features don't silently hide rules).
+  "Evaluates a raw @media condition (as stored in :rule/media -- one string,
+   or a VECTOR of them when `@media` blocks nest inside each other) against
+   a viewport width in px and a `color-scheme` (\"light\"/\"dark\", see
+   default-color-scheme). A vector is an AND: every enclosing block's
+   condition has to hold for a rule inside all of them to apply.
+
+   One condition is a comma-separated `<media-query-list>`, which is an OR.
+   See `media-query-matches?` / `media-condition-matches*` /
+   `media-feature-matches?` for the grammar this parses and the browser
+   measurements behind each part, and the block comment above this section
+   for what the previous split-on-`and` evaluator got wrong.
+
+   Features implemented: `width`/`min-width`/`max-width` (px/em/rem, plain
+   and Media Queries 4 range syntax) and `prefers-color-scheme`. Any other
+   feature name inside well-formed parens matches, on purpose -- see
+   `media-feature-matches?`.
 
    2-arity overload (`color-scheme` omitted) defaults to
    default-color-scheme, preserving the exact behavior every caller had
@@ -2982,26 +3345,15 @@
   ([condition viewport-width]
    (media-condition-matches? condition viewport-width default-color-scheme))
   ([condition viewport-width color-scheme]
-   (let [condition (str/replace (str condition) #"(?i)^\s*@media\s*" "")
-         parts (->> (str/split condition #"(?i)\s+and\s+")
-                    (map str/trim)
-                    (remove str/blank?))]
-     (every? (fn [part]
-               (let [lower (str/lower-case part)]
-                 (cond
-                   (= lower "print") false
-                   (contains? #{"screen" "all"} lower) true
-                   :else
-                   (if-let [[_ kind value] (re-matches media-feature-pattern part)]
-                     (let [n (parse-media-width value)]
-                       (case (str/lower-case kind)
-                         "min-width" (>= viewport-width n)
-                         "max-width" (<= viewport-width n)
-                         true))
-                     (if-let [[_ scheme] (re-matches color-scheme-feature-pattern part)]
-                       (= (str/lower-case scheme) (str/lower-case (str color-scheme)))
-                       true)))))
-             parts))))
+   (if (vector? condition)
+     (every? #(media-condition-matches? % viewport-width color-scheme) condition)
+     (let [condition (-> (str condition)
+                         (str/replace #"(?i)^\s*@media\s*" "")
+                         str/trim)]
+       (if (str/blank? condition)
+         true
+         (boolean (some #(media-query-matches? % viewport-width color-scheme)
+                        (split-top-level condition \,))))))))
 
 (defn- rule-applies-to-viewport?
   [rule viewport-width color-scheme]
@@ -4754,7 +5106,27 @@
    A `revert` with nothing below it degrades to `unset`, per the spec's
    own definition, and so does a `revert` inside the lowest origin -- this
    sheet has no CSS-wide keyword in it, so that branch is reachable only
-   from a host that supplies its own UA rules."
+   from a host that supplies its own UA rules.
+
+   `revert-layer` takes the same `lower-entries` argument and differs only
+   in WHICH entries the caller hands it: everything from a lower origin,
+   plus everything in this origin that is not in the winner's own LAYER
+   (`resolve-style-and-flow` assembles it). That phrasing -- \"not in this
+   layer\", rather than \"in an earlier layer\" -- is what the six shapes
+   measured in Brave 151 over CDP on 2026-08-06 actually say:
+
+   | stylesheet | Brave |
+   |---|---|
+   | `@layer a { w:200 } @layer b { w:120; w:revert-layer }` | **200** -- the previous layer |
+   | `@layer a { w:300 } @layer b { w:200 } @layer c { w:120; w:revert-layer }` | **200** -- the previous layer, not the first |
+   | `@layer a { w:120; w:revert-layer }` (the only layer) | **auto** -- past the whole author origin |
+   | `#x { w:120 } #x { w:revert-layer }` (no layers at all) | **auto** -- unlayered is a layer for this purpose |
+   | `@layer a { w:200 } #x { w:120; w:revert-layer }` | **200** -- an unlayered `revert-layer` rolls back INTO the layers |
+   | `@layer a { color:green } @layer b { w:120; w:revert-layer }` | **auto** -- the previous layer declaring nothing is not the previous layer declaring the initial value |
+
+   Row four is why this is not simply `revert` with a layer test: with no
+   `@layer` anywhere, the unlayered declarations are still a layer of their
+   own and rolling back past them reaches the UA origin."
   [document node property keyword-kind lower-entries]
   (case keyword-kind
     :inherit (parent-computed-value document node property)
@@ -4764,13 +5136,14 @@
                                        :inherit
                                        :initial)
                                      nil)
-    :revert (if-let [{:keys [value]} (last lower-entries)]
-              (if-let [nested (css-wide-keyword value)]
-                (resolve-css-wide-keyword document node property
-                                          (if (= :revert nested) :unset nested)
-                                          nil)
-                value)
-              (resolve-css-wide-keyword document node property :unset nil))))
+    (:revert :revert-layer)
+    (if-let [{:keys [value]} (last lower-entries)]
+      (if-let [nested (css-wide-keyword value)]
+        (resolve-css-wide-keyword document node property
+                                  (if (contains? #{:revert :revert-layer} nested) :unset nested)
+                                  nil)
+        value)
+      (resolve-css-wide-keyword document node property :unset nil))))
 
 ;; ---- `all`, the shorthand for every property ----
 
@@ -5929,6 +6302,482 @@
                           (keyword (str "border-" physical "-" sub))])])]))
         logical-flow-sides))
 
+;; ---- @supports: this engine's own support oracle ----
+;;
+;; `@supports` is the one at-rule whose condition is a question about the
+;; IMPLEMENTATION rather than about the page, the device or the element:
+;; "do you support this declaration?". Answering it with a hard-coded list
+;; of shapes would be answering a different question, so the oracle below
+;; asks the engine itself, in the two places the engine's own knowledge
+;; actually lives -- which are not the same place for the property and for
+;; the value.
+;;
+;; Before this, `parse-rules` did not recognise the at-rule at all, the
+;; plain `selector { decls }` reader picked its inner rules up as if the
+;; wrapper were not there, and every `@supports` block therefore applied
+;; UNCONDITIONALLY. Measured in Brave 151.1.93.129 over CDP on 2026-08-06,
+;; that is right half the time:
+;;
+;; | condition | Brave | this engine, before |
+;; |---|---|---|
+;; | `(display: grid)` | red | red -- but only because it applies everything |
+;; | `(display: flurb)` | black | red |
+;; | `(flurb: 1px)` | black | red |
+;; | `not (display: grid)` | black | red |
+;; | `(display: grid) and (display: flurb)` | black | red |
+;; | `(display: flurb) or (display: grid)` | red | red |
+;; | `selector(p:has(b))` | red | red |
+;; | `selector(:frobnicate)` | black | red |
+;;
+;; The same page measured the two things a `@supports` evaluator has to get
+;; right beyond the declarations themselves, and they are NOT the same
+;; answer:
+;;
+;; - A `<general-enclosed>` -- something well-formed that the UA does not
+;;   understand, i.e. `(grid)` or `frobnicate(x)` -- is FALSE, and `not`
+;;   inverts it: `@supports (grid)` is black and `@supports not (grid)` is
+;;   RED. Same for the function form.
+;; - A condition that does not PARSE at all -- `garbage`, an unparenthesised
+;;   `display: grid`, or `(display: grid) or garbage` -- makes the whole
+;;   at-rule invalid, and the browser drops it: all four came back black,
+;;   AND `not garbage` came back black too, where `not (grid)` was red.
+;;   Reading `document.styleSheets[0].cssRules` confirmed it: 44 `@supports`
+;;   rules were written and 40 survived, the four missing ones being exactly
+;;   those. So "unparseable" is not "false" -- a `not` can rescue a false
+;;   condition and cannot rescue an unparseable one, which is why
+;;   `supports-condition-matches?` below returns a third value for it.
+;;
+;; What this engine still gets wrong, measured, and why it is a scope cut
+;; rather than a bug: the value half of the oracle only speaks for the
+;; properties whose value space this engine writes down (see
+;; `property-value-keywords`, `length-valued-properties` and the shorthand
+;; expanders). Measured on the same page and NOT fixed:
+;;
+;; | condition | Brave | this engine |
+;; |---|---|---|
+;; | `(color: #zzz)` | black | true -- this namespace has no colour parser to ask; `cssom.layout` does the colour reading |
+;; | `(text-decoration: flurb)` | black | true -- nothing here enumerates what a `text-decoration` may be |
+;;
+;; The fail direction is deliberate and is the same one `@media`'s
+;; unknown-feature default takes: a real declaration is never called
+;; unsupported. Closing either row means moving a value grammar this engine
+;; keeps in `cssom.layout` up into this namespace, which is a bigger change
+;; than the at-rule this section exists to evaluate.
+
+(def ^:private layout-read-properties
+  "Every property `cssom.layout` reads off a resolved element, i.e. every
+   `(style node :k)` call site in that file -- 137 of them at the time of
+   writing.
+
+   Written down HERE rather than derived at load time because
+   `cssom.layout` requires `cssom.core` and not the other way round, so
+   this namespace cannot ask it. `cssom.core-test`'s
+   `layout-read-properties-covers-every-property-layout-actually-reads`
+   closes that gap the only way a one-directional dependency allows: it
+   re-extracts the call sites from `src/cssom/layout.cljc` and fails if the
+   two ever disagree. Regenerate with
+
+     grep -o '(style [a-z-]* :[a-z0-9-]*' src/cssom/layout.cljc | sed 's/.*://' | sort -u"
+  #{:align-content :align-items :align-self :aspect-ratio :backdrop-filter
+    :background :background-color :border-bottom-color :border-collapse
+    :border-color :border-left-color :border-right-color :border-spacing
+    :border-style :border-top-color :border-width :bottom :box-shadow-blur
+    :box-shadow-color :box-shadow-spread :box-shadow-x :box-shadow-y
+    :box-sizing :break-inside :caption-side :clear :clip-path :color
+    :column-count :column-fill :column-gap :column-rule :column-rule-color
+    :column-rule-style :column-rule-width :column-span :column-width
+    :columns :contain :container-type :content-visibility :direction
+    :display :filter :flex-basis :flex-direction :flex-grow :flex-shrink
+    :flex-wrap :float :font-family :font-size :font-style :font-weight :gap
+    :grid-area :grid-auto-columns :grid-auto-flow :grid-auto-rows
+    :grid-column :grid-row :grid-template-areas :grid-template-columns
+    :grid-template-rows :height :hyphens :isolation :justify-content
+    :justify-items :justify-self :left :letter-spacing :line-height
+    :list-style :list-style-position :list-style-type :margin
+    :margin-bottom :margin-left :margin-right :margin-top :max-height
+    :max-width :min-height :min-width :mix-blend-mode :opacity :order
+    :orphans :outline-color :outline-offset :outline-width :overflow
+    :overflow-wrap :overflow-x :overflow-y :padding :padding-bottom
+    :padding-left :padding-right :padding-top :perspective :pointer-events
+    :position :right :rotate :row-gap :scale :tab-size :table-layout
+    :text-align :text-decoration :text-indent :text-orientation
+    :text-overflow :text-shadow-blur :text-shadow-color :text-shadow-x
+    :text-shadow-y :text-transform :top :transform :transform-origin
+    :transform-style :translate :vertical-align :view-transition-name
+    :visibility :white-space :width :will-change :word-break :word-spacing
+    :word-wrap :writing-mode :z-index})
+
+(def ^:private shorthand-properties
+  "The shorthands `parse-declarations-with-importance` expands into
+   longhands. They never reach a resolved element under their own name (the
+   expanders replace them), so `layout-read-properties` cannot see them,
+   but `@supports (padding: 1px 2px)` and `@supports (font: 10px/1.2
+   serif)` are both red in Brave 151 and this engine really does support
+   them -- it is the expanders that prove it."
+  #{:margin :padding :inset :border :border-width :border-style
+    :border-color :border-top :border-right :border-bottom :border-left
+    :border-block :border-inline :border-block-start :border-block-end
+    :border-inline-start :border-inline-end
+    :margin-block :margin-inline :padding-block :padding-inline
+    :inset-block :inset-inline
+    :outline :box-shadow :text-shadow :font :flex})
+
+(def ^:private engine-properties
+  "The properties this engine models, which is the PROPERTY half of the
+   `@supports` oracle. A `delay` because it reads `ua-rules`, which is
+   itself `parse-rules` over `ua-stylesheet-text`, and a load-time cycle
+   through the parser is exactly the sort of thing that works until someone
+   puts an `@supports` in the UA sheet.
+
+   Four sources, and the point is that three of them are tables this engine
+   already maintains for its own reasons rather than a list written for
+   this feature:
+
+   - `inherited-properties` and the keys of `initial-values` -- what the
+     CSS-wide keywords need to know;
+   - `em-resolvable-properties` -- what relative-length resolution needs to
+     know;
+   - every property the engine's own user-agent stylesheet declares, read
+     back out through `parse-rules` (so the parser genuinely answers for
+     this part);
+   - `layout-read-properties` and `shorthand-properties`, which are the two
+     places where the knowledge exists but is not reachable from here (see
+     their own docstrings)."
+  (delay
+    (reduce into
+            #{}
+            [inherited-properties
+             (set (keys initial-values))
+             em-resolvable-properties
+             layout-read-properties
+             shorthand-properties
+             (mapcat (comp keys :rule/declarations) ua-rules)])))
+
+(def ^:private property-value-keywords
+  "For the properties whose value space this engine ENUMERATES, the
+   keywords it accepts -- the VALUE half of the oracle, and a different
+   half from the property one because the property registry above cannot
+   answer it: `display` and `flurb` are equally well-formed identifiers,
+   and only a per-property vocabulary separates `display: grid` from
+   `display: flurb`.
+
+   Deliberately NOT every property. A property absent from this table
+   accepts any value that is not obviously malformed, which is the honest
+   answer for a property whose value space this engine has never had to
+   write down -- see the scope cut in the block comment above. The entries
+   here are the ones `cssom.layout` actually branches on, cross-checked
+   against its own literal sets (`blockified-displays`,
+   `flex-or-grid-container-displays`, `border-style-keywords`,
+   `outline-style-keywords`, ...) plus the values those sets imply exist.
+
+   Every one of these is a keyword-only property: a property that also
+   accepts a length or a colour is either absent from this table or listed
+   in `length-valued-properties` below, never both."
+  {:display #{"inline" "block" "inline-block" "flex" "inline-flex" "grid"
+              "inline-grid" "flow-root" "list-item" "contents" "none"
+              "table" "inline-table" "table-row" "table-row-group"
+              "table-header-group" "table-footer-group" "table-column"
+              "table-column-group" "table-cell" "table-caption" "ruby"}
+   :position #{"static" "relative" "absolute" "fixed" "sticky"}
+   :float #{"none" "left" "right" "inline-start" "inline-end"}
+   :clear #{"none" "left" "right" "both" "inline-start" "inline-end"}
+   :overflow #{"visible" "hidden" "clip" "scroll" "auto"}
+   :overflow-x #{"visible" "hidden" "clip" "scroll" "auto"}
+   :overflow-y #{"visible" "hidden" "clip" "scroll" "auto"}
+   :visibility #{"visible" "hidden" "collapse"}
+   :box-sizing #{"content-box" "border-box"}
+   :direction #{"ltr" "rtl"}
+   :writing-mode #{"horizontal-tb" "vertical-rl" "vertical-lr"
+                   "sideways-rl" "sideways-lr"}
+   :text-orientation #{"mixed" "upright" "sideways"}
+   :white-space #{"normal" "nowrap" "pre" "pre-wrap" "pre-line" "break-spaces"}
+   :word-break #{"normal" "break-all" "keep-all" "break-word"}
+   :overflow-wrap #{"normal" "break-word" "anywhere"}
+   :word-wrap #{"normal" "break-word" "anywhere"}
+   :text-align #{"start" "end" "left" "right" "center" "justify" "match-parent"}
+   :text-transform #{"none" "capitalize" "uppercase" "lowercase" "full-width"}
+   :font-style #{"normal" "italic" "oblique"}
+   :border-collapse #{"separate" "collapse"}
+   :caption-side #{"top" "bottom"}
+   :empty-cells #{"show" "hide"}
+   :table-layout #{"auto" "fixed"}
+   :flex-direction #{"row" "row-reverse" "column" "column-reverse"}
+   :flex-wrap #{"nowrap" "wrap" "wrap-reverse"}
+   :container-type #{"normal" "inline-size" "size"}
+   :list-style-position #{"inside" "outside"}
+   :border-style #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                   "groove" "ridge" "inset" "outset"}
+   :border-top-style #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                       "groove" "ridge" "inset" "outset"}
+   :border-right-style #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                         "groove" "ridge" "inset" "outset"}
+   :border-bottom-style #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                          "groove" "ridge" "inset" "outset"}
+   :border-left-style #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                        "groove" "ridge" "inset" "outset"}})
+
+(def ^:private length-valued-properties
+  "The properties whose value this engine reads as a LENGTH, plus the
+   keywords each of them also accepts. `em-resolvable-properties` is the
+   authority for which properties these are -- it is the same question
+   asked for a different reason -- and this table only adds the keyword
+   half, which that one has no need for.
+
+   Measured in Brave 151 on 2026-08-06: `@supports (width: 10px)` and
+   `@supports (width: calc(1px + 2px))` are red, and
+   `@supports (width: 10)` is BLACK -- a unitless non-zero number is not a
+   length, which is exactly the distinction `parse-media-length` makes for
+   the same reason one line of CSS away."
+  {:default #{"auto" "inherit" "min-content" "max-content" "fit-content" "none" "normal"}
+   :line-height #{"normal"}
+   :vertical-align #{"baseline" "sub" "super" "top" "text-top" "middle"
+                     "bottom" "text-bottom"}
+   :letter-spacing #{"normal"}
+   :word-spacing #{"normal"}
+   :border-width #{"thin" "medium" "thick"}
+   :border-top-width #{"thin" "medium" "thick"}
+   :border-right-width #{"thin" "medium" "thick"}
+   :border-bottom-width #{"thin" "medium" "thick"}
+   :border-left-width #{"thin" "medium" "thick"}
+   :outline-width #{"thin" "medium" "thick"}})
+
+(def ^:private unitless-number-properties
+  "The length-ish properties whose value may legitimately be a bare number:
+   `line-height: 2` is twice the font size (see `parse-property-value`,
+   which keeps it a string for exactly this reason) and a `flex-basis: 0`
+   is a zero of any kind. Everything else in `length-valued-properties`
+   needs a unit on a non-zero value."
+  #{:line-height :flex-basis})
+
+(def ^:private supports-value-function-pattern
+  "A whole value that is one function call this engine resolves --
+   `var()`, `calc()` and the math family, plus the colour functions. Used
+   only to say YES: a value shaped like a function this engine implements
+   is supported whatever the property, which is what makes
+   `@supports (width: calc(1px + 2px))` red the way Brave has it."
+  #"(?i)^(var|calc|min|max|clamp|rgb|rgba|hsl|hsla|url|attr|counter)\(.*\)$")
+
+(defn- supports-value?
+  "Whether `value` is one this engine accepts for `property`. See
+   `property-value-keywords` for which half of the oracle this is and what
+   it deliberately does not answer."
+  [property value]
+  (let [v (str/trim (str value))
+        lower (str/lower-case v)]
+    (cond
+      (str/blank? v) false
+      ;; a custom property takes anything, in every browser and here
+      (str/starts-with? (name property) "--") true
+      (some? (css-wide-keyword v)) true
+      (some? (re-matches supports-value-function-pattern v)) true
+
+      ;; A SHORTHAND is the one place the parser can be asked directly, and
+      ;; so it is: `parse-declarations` runs the same expander a real
+      ;; stylesheet would, and an expander that produced longhands is an
+      ;; expander that understood the value. `padding: 1px 2px` expands to
+      ;; four longhands (Brave: red) and `padding: flurb` expands to
+      ;; nothing, leaving only the shorthand key the `dissoc` removes.
+      (contains? shorthand-properties property)
+      (boolean (seq (dissoc (parse-declarations (str (name property) ": " v)) property)))
+
+      (contains? property-value-keywords property)
+      (contains? (get property-value-keywords property) lower)
+
+      (contains? em-resolvable-properties property)
+      (or (contains? (:default length-valued-properties) lower)
+          (contains? (get length-valued-properties property #{}) lower)
+          (some? (re-matches #"(?i)^[-+]?(?:\d+\.?\d*|\.\d+)(px|em|rem|%|vw|vh|vmin|vmax|ch|ex|pt|pc|in|cm|mm|q)$" v))
+          (and (contains? unitless-number-properties property)
+               (some? (re-matches #"^[-+]?(?:\d+\.?\d*|\.\d+)$" v)))
+          (some? (re-matches #"^[-+]?0+(?:\.0*)?$" v)))
+
+      ;; a property whose value space this engine has never enumerated: it
+      ;; genuinely cannot tell one identifier from another, so it says the
+      ;; thing that never hides a real declaration
+      :else true)))
+
+(defn- supports-declaration?
+  "Whether `text` -- the inside of a `@supports ( ... )`, e.g.
+   `display: grid` -- is a declaration this engine supports. Both halves
+   have to hold: the property has to be one this engine models
+   (`engine-properties`) and the value one it accepts for that property
+   (`supports-value?`). nil when `text` is not a declaration at all, which
+   the caller reads as `<general-enclosed>` rather than as false."
+  [text]
+  (when-let [[name value] (and (str/includes? text ":")
+                               (map str/trim (str/split text #":" 2)))]
+    (when (and (seq name) (seq value)
+               (some? (re-matches #"(?i)^(--)?[A-Za-z_][-A-Za-z0-9_]*$" name)))
+      (let [property (keyword (str/lower-case name))]
+        (boolean (and (or (str/starts-with? name "--")
+                          (contains? @engine-properties property))
+                      (supports-value? property value)))))))
+
+(def ^:private implemented-pseudo-classes
+  "The bare pseudo-classes `matches-pseudo?` implements -- exactly its
+   `case` keys -- plus the four functional ones `parse-simple-selector`
+   captures into their own keys (`:not`/`:is`/`:where`/`:has`, matched by
+   `has-group-matches?` and the group matchers rather than through
+   `matches-pseudo?`).
+
+   This is the SELECTOR half of the support oracle, and it is a real one:
+   `matches-pseudo?` returns false for an unrecognised pseudo-class, which
+   is indistinguishable at match time from a recognised one that did not
+   match, so the set has to be stated. `cssom.core-test`'s
+   `implemented-pseudo-classes-matches-the-case-keys-it-claims-to-be` reads
+   the case keys back out of this file and fails if the two drift.
+
+   Measured in Brave 151 on 2026-08-06: `@supports selector(p:has(b))` is
+   red and `@supports selector(:frobnicate)` is black, which is the pair
+   this set exists to tell apart. What it gets wrong, in the safe
+   direction: `:hover`/`:link`/`:visited`/`:active` are real pseudo-classes
+   this engine does not implement, so `@supports selector(:hover)` is red
+   in Brave and false here."
+  #{:disabled :enabled :checked :required :optional :read-only :read-write
+    :invalid :valid :in-range :out-of-range :focus :focus-within
+    :first-child :last-child :only-child :first-of-type :last-of-type
+    :nth-child :nth-of-type :nth-last-child :nth-last-of-type
+    :root :empty :lang
+    :not :is :where :has})
+
+(def ^:private implemented-pseudo-elements
+  "The pseudo-elements this engine generates a resolution for (see
+   `computed-style`'s `:pseudo` map and `pseudo-element-style-for`). Both
+   spellings of each are the same keyword by the time
+   `parse-simple-selector` is done with it.
+
+   `::first-line`/`::first-letter`/`::marker` are absent because this
+   engine produces no box for them, which is the same reason the
+   conformance corpus calls the first two unscorable."
+  #{:before :after})
+
+(defn- supports-selector?
+  "Whether `text` -- the argument of a `@supports selector( ... )` -- is a
+   selector this engine implements. Parsed with this engine's own
+   `parse-selector`, then every pseudo-class and pseudo-element it named is
+   checked against what actually matches them; tags, ids, classes,
+   attributes and combinators are all supported, so they need no check."
+  [text]
+  (let [selector (parse-selector text)
+        parts (or (:selector/parts selector) [selector])]
+    (boolean
+     (and (seq (str/trim (str text)))
+          (every? (fn [part]
+                    (and (every? implemented-pseudo-classes (:selector/pseudos part))
+                         (or (nil? (:selector/pseudo-element part))
+                             (contains? implemented-pseudo-elements
+                                        (:selector/pseudo-element part)))))
+                  parts)))))
+
+(defn- supports-in-parens
+  "Evaluates ONE `<supports-in-parens>`: a parenthesised declaration, a
+   parenthesised nested condition, a `selector(...)` call, or a
+   `<general-enclosed>`. Returns true, false or `::invalid`.
+
+   `condition-fn` is `supports-condition*`, threaded in for the same
+   forward-reference reason `media-feature-matches?` takes one.
+
+   A `<general-enclosed>` -- a well-formed `(...)` that is not a
+   declaration, or a function call that is not `selector()` -- is FALSE and
+   not `::invalid`, which is the distinction measured on `(grid)` /
+   `not (grid)` and `frobnicate(x)` / `not frobnicate(x)`: the browser
+   keeps those rules and inverts them."
+  [s condition-fn]
+  (let [s (str/trim s)]
+    (cond
+      (str/blank? s) ::invalid
+
+      (some? (re-matches #"(?is)^selector\((.*)\)$" s))
+      (supports-selector? (second (re-matches #"(?is)^selector\((.*)\)$" s)))
+
+      (parenthesised? s)
+      (let [inner (str/trim (subs s 1 (dec (count s))))]
+        (cond
+          (str/blank? inner) ::invalid
+          ;; a nested condition -- `((a) or (b))`, `(not (a))`
+          (or (str/starts-with? inner "(")
+              (some? (strip-leading-word inner "not"))
+              (some? (split-top-level-word inner "and"))
+              (some? (split-top-level-word inner "or")))
+          (condition-fn inner)
+          :else (if-let [declared (supports-declaration? inner)]
+                  declared
+                  ;; either a declaration this engine does not support, or
+                  ;; a general-enclosed. Both are false; `supports-
+                  ;; declaration?` returns nil for the second and false for
+                  ;; the first, and nothing downstream needs to tell them
+                  ;; apart.
+                  false)))
+
+      ;; a function call that is not `selector()` is <general-enclosed>
+      (some? (re-matches #"(?is)^[A-Za-z_][-A-Za-z0-9_]*\(.*\)$" s)) false
+
+      ;; anything else -- a bare word, an unparenthesised declaration -- is
+      ;; not <supports-in-parens> at all
+      :else ::invalid)))
+
+(defn- supports-condition*
+  "Evaluates a `<supports-condition>`: `not <in-parens>`, or one or more
+   `<in-parens>` joined by `and` or `or`. Returns true, false or
+   `::invalid`, and `::invalid` propagates through `not`/`and`/`or` rather
+   than being inverted or absorbed -- measured, `(display: grid) or
+   garbage` is dropped by Brave even though its first arm is true."
+  [s]
+  (let [s (str/trim s)
+        combine (fn [op parts]
+                  (let [vals (map supports-condition* parts)]
+                    (cond
+                      (some #{::invalid} vals) ::invalid
+                      (= :and op) (every? true? vals)
+                      :else (boolean (some true? vals)))))]
+    (cond
+      (str/blank? s) ::invalid
+      (split-top-level-word s "and") (combine :and (split-top-level-word s "and"))
+      (split-top-level-word s "or") (combine :or (split-top-level-word s "or"))
+      (some? (strip-leading-word s "not"))
+      (let [inner (supports-condition* (strip-leading-word s "not"))]
+        (if (= ::invalid inner) ::invalid (not inner)))
+      :else (supports-in-parens s supports-condition*))))
+
+(defn supports-condition-matches?
+  "Whether a raw `@supports` condition (as stored in :rule/supports -- one
+   string, or a vector of them when `@supports` blocks nest) holds for THIS
+   engine. See the block comment above this section for the grammar, the
+   browser measurements, and what the oracle deliberately does not answer.
+
+   An unparseable condition answers false, the same as a false one, because
+   a dropped at-rule and a false one hide the same rules -- the difference
+   between them lives one level down, in `supports-condition*`, where a
+   `not` can invert a false condition and cannot rescue an invalid one."
+  [condition]
+  (if (vector? condition)
+    (every? supports-condition-matches? condition)
+    (let [condition (-> (str condition)
+                        (str/replace #"(?i)^\s*@supports\s*" "")
+                        str/trim)]
+      (if (str/blank? condition)
+        true
+        (true? (supports-condition* condition))))))
+
+(def ^:private supports-condition-cache
+  "`@supports` conditions are evaluated per rule per element, and the answer
+   depends on nothing but the text -- no viewport, no element, no
+   container. Memoised on the raw text so a stylesheet with one
+   `@supports` block does not re-parse its condition once per node."
+  (atom {}))
+
+(defn- rule-supported?
+  "Whether `rule`'s `@supports` condition (if any) holds. nil -- no
+   `@supports` around it -- always does."
+  [rule]
+  (let [condition (:rule/supports rule)]
+    (or (nil? condition)
+        (if-let [cached (find @supports-condition-cache condition)]
+          (val cached)
+          (let [answer (supports-condition-matches? condition)]
+            (swap! supports-condition-cache assoc condition answer)
+            answer)))))
+
 (def ^:private initial-flow
   "The flow every element starts in: CSS's own initial `writing-mode` and
    `direction`. Also what a detached subtree, and any caller with no tree
@@ -6165,6 +7014,15 @@
                                     (matches? document node selector)
                                     (matches? node selector))
                             :when (container-rule-matches? rule (:node/id node) container-ctx)
+                            ;; `@supports` is filtered HERE rather than in
+                            ;; `apply-cascade` beside `@media`, because
+                            ;; unlike `@media` its answer depends on nothing
+                            ;; the caller supplies -- so the standalone
+                            ;; `computed-style`/`pseudo-element-style-for`
+                            ;; paths, which have no viewport to filter
+                            ;; against and therefore skip the `@media`
+                            ;; filter entirely, get the right answer too.
+                            :when (rule-supported? rule)
                             [property value] declarations]
                         (let [{:keys [important? index]} (get declaration-meta property)
                               important? (boolean important?)
@@ -6176,6 +7034,16 @@
                            :specificity (specificity selector)
                            :inline? false
                            :layer (if important? (- raw-layer) raw-layer)
+                           ;; The same value WITHOUT the `!important`
+                           ;; negation, which :layer above needs and
+                           ;; `revert-layer` must not see: "is this
+                           ;; declaration in the winner's layer" is a
+                           ;; question about layer identity, and negating
+                           ;; the number to encode importance ordering
+                           ;; would make an `!important` declaration in
+                           ;; layer 2 look like a different layer from a
+                           ;; normal one in layer 2.
+                           :layer-key raw-layer
                            :order order
                            ;; Position WITHIN the block, which :order cannot
                            ;; say -- every declaration of one rule shares a
@@ -6224,6 +7092,7 @@
                               :specificity (specificity selector)
                               :inline? false
                               :layer 0
+                              :layer-key 0
                               :order (:rule/order rule)
                               ;; This sheet's rules are small enough that
                               ;; their own within-block order has never
@@ -6241,6 +7110,17 @@
                                                 :specificity [1 0 0]
                                                 :inline? true
                                                 :layer max-layer-priority
+                                                ;; Inline declarations have
+                                                ;; no layer in real CSS; the
+                                                ;; sentinel below the
+                                                ;; unlayered one keeps them
+                                                ;; out of every layer for
+                                                ;; `revert-layer`'s "not in
+                                                ;; this layer" test, which
+                                                ;; is what it means for an
+                                                ;; inline `revert-layer` to
+                                                ;; roll back into the sheet.
+                                                :layer-key ::inline
                                                 :order idx
                                                 ;; An inline block is one
                                                 ;; "rule", so :order is
@@ -6293,19 +7173,30 @@
                        sorted)
                   sorted)
          ;; Grouped per property rather than reduced straight into a map,
-         ;; because `revert` needs the LOSING entries too -- it rolls the
-         ;; cascade back to the previous origin rather than to nothing.
-         ;; `sort-by` is stable and `group-by` preserves input order within
-         ;; each group, so the last entry of each group is the same winner
-         ;; the old straight reduce ended on.
+         ;; because `revert`/`revert-layer` need the LOSING entries too --
+         ;; they roll the cascade back to the previous origin, or to the
+         ;; previous layer, rather than to nothing. `sort-by` is stable and
+         ;; `group-by` preserves input order within each group, so the last
+         ;; entry of each group is the same winner the old straight reduce
+         ;; ended on.
          m (reduce-kv
             (fn [m property entries]
               (let [{:keys [value] :as winner} (peek entries)]
                 (if-let [kind (css-wide-keyword value)]
                   (let [resolved (resolve-css-wide-keyword
                                   document node property kind
-                                  (when (= :revert kind)
-                                    (filterv #(< (:origin %) (:origin winner)) entries)))]
+                                  (case kind
+                                    :revert (filterv #(< (:origin %) (:origin winner)) entries)
+                                    ;; "as if no declaration in the
+                                    ;; winner's own layer existed" -- see
+                                    ;; `resolve-css-wide-keyword`'s
+                                    ;; :revert-layer table for the six
+                                    ;; shapes this phrasing is measured
+                                    ;; against.
+                                    :revert-layer (filterv #(or (< (:origin %) (:origin winner))
+                                                                (not= (:layer-key %) (:layer-key winner)))
+                                                           entries)
+                                    nil))]
                     (if (= drop-declaration resolved)
                       m
                       (assoc m property resolved)))

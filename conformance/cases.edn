@@ -5021,4 +5021,100 @@
   ;; matches the same element. Brave: blue.
   :html "<div id=\"ua1\"><p>text</p></div>"
   :css "#ua1 * { color: #ff0000 } #ua1 p { color: #0000ff }"}
+
+ ;; ---- round forty-seven: the at-rules, actually evaluated ----
+ ;;
+ ;; Every expected value below was read out of a real headless Brave
+ ;; 151.1.93.129 over CDP on 2026-08-06, before the case was written.
+ ;; These nine are what the eleven divergences round forty-four MEASURED
+ ;; did not pin down: the rules behind them, and the boundaries either
+ ;; side of each rule.
+
+ {:id :supports/a-general-enclosed-condition-is-false-and-not-inverts-it
+  :group :supports
+  ;; `(grid)` is a `<general-enclosed>` -- well-formed, unrecognised --
+  ;; which is FALSE, so `not (grid)` is TRUE and the block applies.
+  ;; Brave: red. The discriminating half of the pair below.
+  :html "<div><p id=\"ge1\">text</p></div>"
+  :css "@supports not (grid) { #ge1 { color: #ff0000 } }"}
+
+ {:id :supports/an-unparseable-condition-is-not-a-false-one
+  :group :supports
+  ;; ...and its pair. A bare `garbage` does not parse as a
+  ;; `<supports-condition>` at all, so the whole at-rule is invalid and
+  ;; dropped -- which a `not` cannot rescue. Brave: black, and reading
+  ;; `document.styleSheets` back confirms the rule is simply absent, where
+  ;; the `not (grid)` rule above is present and true. One condition is
+  ;; false, the other never existed; only these two side by side show that
+  ;; those are different answers.
+  :html "<div><p id=\"ue1\">text</p></div>"
+  :css "@supports not garbage { #ue1 { color: #ff0000 } }"}
+
+ {:id :supports/an-unsupported-value-on-a-length-property
+  :group :supports
+  ;; The value half of the oracle, on a property whose values are lengths
+  ;; rather than keywords: a unitless non-zero number is not a length.
+  ;; Brave: black. `(width: 10px)` is red, which is the control the
+  ;; `:supports/a-supported-condition-applies` group already carries in
+  ;; keyword form.
+  :html "<div><p id=\"uv1\">text</p></div>"
+  :css "@supports (width: 10) { #uv1 { color: #ff0000 } }"}
+
+ {:id :layer/a-layers-own-rules-beat-its-sublayer
+  :group :layer
+  ;; Layers are a TREE and the order is a post-order traversal of it: a
+  ;; layer's sublayers come first, then the layer's own un-sublayered
+  ;; declarations. Brave: red, from the OUTER layer, even though the
+  ;; sublayer block is written later. This is the rule behind
+  ;; `a-nested-layer-is-the-layer-its-dotted-name-names` above, measured
+  ;; on its own.
+  :html "<div><p id=\"po1\">text</p></div>"
+  :css "@layer po-o { #po1 { color: #ff0000 } @layer po-i { #po1 { color: #0000ff } } }"}
+
+ {:id :layer/an-anonymous-layer-takes-its-place-in-the-order
+  :group :layer
+  ;; The control beside `two-anonymous-layers-are-two-layers`: an
+  ;; anonymous layer is not only distinct, it sits where it is written.
+  ;; Written after a named layer, it wins. Brave: blue.
+  :html "<div><p id=\"ao1\">text</p></div>"
+  :css "@layer ao-a { #ao1 { color: #ff0000 } } @layer { #ao1 { color: #0000ff } }"}
+
+ {:id :layer/an-unlayered-revert-layer-rolls-back-into-the-layers
+  :group :layer
+  ;; `revert-layer` rolls back to the value the property would have had if
+  ;; no declaration in the CURRENT layer existed -- and the unlayered
+  ;; declarations are a layer for that purpose, so an unlayered
+  ;; `revert-layer` reaches the layered value below it rather than past the
+  ;; whole author origin. Brave: 200x20. The version with no `@layer`
+  ;; anywhere is 800x20 on both sides and is deliberately not a case (it
+  ;; would pass for the wrong reason -- see round forty-four).
+  :html "<div><div id=\"rl1\">w</div></div>"
+  :css "@layer rl-a { #rl1 { width: 200px } } #rl1 { width: 120px; width: revert-layer }"}
+
+ {:id :media/an-unknown-media-type-does-not-apply
+  :group :media
+  ;; The boundary of the fail-open default. An unknown FEATURE matches
+  ;; (`:media/an-unrecognized-feature-still-applies`); an unknown media
+  ;; TYPE does not, because a media type is a closed vocabulary. Brave:
+  ;; black. `@media screen` beside it is the control the group already has.
+  :html "<div><p id=\"ut1\">text</p></div>"
+  :css "@media flurb { #ut1 { color: #ff0000 } }"}
+
+ {:id :media/a-length-with-no-unit-is-invalid
+  :group :media
+  ;; 100 is not 100px: a unitless non-zero length makes the query invalid,
+  ;; which is `not all`. Brave: black, at a 756px viewport where
+  ;; `(min-width: 100px)` is red -- so this measures the unit and not the
+  ;; comparison.
+  :html "<div><p id=\"nu1\">text</p></div>"
+  :css "@media (min-width: 100) { #nu1 { color: #ff0000 } }"}
+
+ {:id :media/two-ended-range-syntax-around-the-viewport
+  :group :media
+  ;; The matching direction of `range-syntax-above-the-viewport-does-not-
+  ;; apply`, and the two-ended form: 756 is inside [400, 900]. Brave: red.
+  ;; A range that only ever failed would not tell "evaluated" from
+  ;; "dropped".
+  :html "<div><p id=\"tr1\">text</p></div>"
+  :css "@media (400px <= width <= 900px) { #tr1 { color: #ff0000 } }"}
 ]

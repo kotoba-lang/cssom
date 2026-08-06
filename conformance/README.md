@@ -815,6 +815,232 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-eight: the at-rules stop being decoration
+
+Round forty-four put seventy-one at-rule cases into the corpus and found
+eleven divergences it did not fix, in three clusters: `@supports` was not
+implemented at all and failed OPEN, `@media` had three grammar gaps behind
+a working feature set, and `@layer` had four. This round closes all eleven,
+and every rule below was read out of a real headless Brave 151.1.93.129
+over CDP on 2026-08-06 before a line of it was written.
+
+Three columns, because the corpus growing and the engine changing are two
+different things. The middle column is the **unmodified engine at the base
+commit** on the unmodified 711-case corpus — it reproduces round
+forty-six's published numbers to the value, which is what says the two
+right-hand columns are comparable. The third is this round's engine on the
+same 711 cases; the fourth adds this round's nine new cases.
+
+| axis | 711, base engine | 711, after | 720, after | 720, merged |
+|---|---|---|---|---|
+| line structure | 679/683 | **679/683** | 688/692 | 689/692 |
+| geometry (boxes) | 2315/2331 | **2316/2331** | 2334/2349 | 2338/2349 |
+| geometry (clean cases) | 697/711 | **698/711** | 707/720 | 710/720 |
+| paint order | 17713/17762 | **17713/17762** | 17938/17987 | 17968/17987 |
+| paint order (clean cases) | 699/711 | **699/711** | 708/720 | 709/720 |
+| computed style (values) | 32713/32745 | **32724/32745** | 32976/32997 | 32983/32997 |
+| computed style (cases clean) | 688/711 | **699/711** | 708/720 | 711/720 |
+| cascade-attributed residual | 31 | **20** | 20 | 13 |
+
+The fourth column is after merging round forty-seven (`all` and
+`::first-letter`), and the gain in it is theirs, not this round's:
+`--dump-ops` diffed across the merge changes exactly four cases, and all
+four are `:cascade/all-*` and `:selector/first-letter-changes-the-line-box`.
+The two rounds touch the same three declaration-entry constructors in
+`resolve-style-and-flow` and nothing else — `all`'s `:decl-index` and this
+round's `:layer-key` answer different questions and neither reads the
+other.
+
+`--dump-ops` was diffed corpus-wide between the first two columns.
+**Exactly one case's box list changed, in one direction, and it is the
+intended one**: `:layer/revert-layer-rolls-back-to-the-previous-layer`,
+800×20 → 200×20, which is Brave's own number. Nothing else moved a pixel
+in 711 cases. That is the whole geometry delta — the other ten divergences
+are colours, which only the computed-style axis can see. Diffed again
+between the second and third columns: the nine new cases add nine new box
+lists and **change none of the 711 that were already there**.
+
+#### `@supports` needed a support oracle, not a parser change
+
+Round forty-four declined to fix this and said why: "answering `@supports`
+honestly means a real support oracle for this engine's own property/value
+grammar". That is right, and the oracle turned out to have **two halves
+that live in different places**, which is the interesting part.
+
+The **property** half is a registry assembled from four sources, three of
+which are tables this engine already maintains for its own reasons —
+`inherited-properties` and `initial-values` (what the CSS-wide keywords
+need), `em-resolvable-properties` (what relative-length resolution needs),
+and every property the engine's own UA stylesheet declares, read back out
+through `parse-rules`, so the parser genuinely answers for that part. The
+fourth is `layout-read-properties`, the 137 `(style node :k)` call sites in
+`cssom.layout`. That one is a copy, because `cssom.layout` requires
+`cssom.core` and not the other way round — so it is **gated**: a test
+re-extracts the call sites from the source and fails if the two ever
+disagree.
+
+The **value** half cannot come from the property registry, because
+`display` and `flurb` are equally well-formed identifiers and only a
+per-property vocabulary tells `display: grid` from `display: flurb`. It is
+three separate answers depending on what kind of property it is: a
+keyword-valued property is checked against its own vocabulary; a
+length-valued one against the length grammar (which is why
+`@supports (width: 10)` is false and `(width: 10px)` is true, exactly as
+`@media`'s own length parser decides one line away); and a **shorthand is
+answered by running the engine's own expander** — `padding: 1px 2px`
+expands to four longhands and `padding: flurb` expands to nothing, so the
+parser answers for itself.
+
+`selector()` has its own oracle and it is a real one: `matches-pseudo?`
+returns false for an unrecognised pseudo-class, which is indistinguishable
+at match time from a recognised one that did not match, so the set of
+implemented names is stated and gated the same way against that function's
+own `case` keys.
+
+**What Brave does with a condition it cannot parse, measured — and it is
+not what it does with a false one.** Forty-four `@supports` rules were
+written onto one page and `document.styleSheets[0].cssRules` read back:
+**forty survived**. The four that did not were `garbage`, `not garbage`,
+an unparenthesised `display: grid`, and `(display: grid) or garbage`. Set
+against the ones that did:
+
+| condition | Brave | what it says |
+|---|---|---|
+| `(grid)` | black | a `<general-enclosed>` is FALSE |
+| `not (grid)` | **red** | ...and `not` inverts it |
+| `frobnicate(x)` | black | an unknown FUNCTION is general-enclosed too |
+| `not frobnicate(x)` | **red** | ...same inversion |
+| `garbage` | black | does not parse: the whole at-rule is invalid |
+| `not garbage` | **black** | ...and a `not` cannot rescue what was never there |
+| `(display: grid) or garbage` | black | one unparseable arm poisons a true one |
+
+So the evaluator is three-valued internally — true, false, and a third
+value that propagates through `not`/`and`/`or` instead of being inverted —
+even though the two failure modes hide the same rules and are
+indistinguishable from outside. `:supports/a-general-enclosed-condition-is-
+false-and-not-inverts-it` and `:supports/an-unparseable-condition-is-not-a-
+false-one` are the pair in the corpus; neither alone measures anything.
+
+Scope cut, with its numbers: the value half only speaks for properties
+whose value space this engine writes down. `@supports (color: #zzz)` and
+`@supports (text-decoration: flurb)` are both **black in Brave and true
+here**, because the colour grammar and the text-decoration grammar live in
+`cssom.layout`. The fail direction is deliberate and matches `@media`'s:
+a real declaration is never called unsupported.
+
+#### `@media` was a feature list where it needed to be a grammar
+
+The three divergences were `not all and (…)`, range syntax, and `em`. They
+look like three missing features and are one missing distinction: the
+documented default that "unrecognized features match, so nothing is
+silently hidden" is **right for a feature and wrong for grammar**, and on
+grammar it does not widen an answer, it inverts one.
+
+The engine now parses the whole `<media-query-list>` — the comma list, the
+`not`/`only` qualifiers, media types, `and`/`or`, nested parens and Media
+Queries 4 range syntax — and keeps the fail-open default for exactly one
+thing: a feature NAME inside well-formed parens that it does not
+implement. `:media/an-unrecognized-feature-still-applies`
+(`min-resolution: 1dppx`) is what that default buys, and
+`:media/an-unknown-media-type-does-not-apply` (`@media flurb`, black in
+Brave) is its boundary — a media type is a closed vocabulary, a feature set
+is not.
+
+Two numbers that had to be measured rather than reasoned about:
+
+- **`em` in a media query is 16px, not the root element's font size.**
+  Measured on a page declaring `html { font-size: 32px }`:
+  `(min-width: 40em)` still matched at a 756px viewport, and
+  `(min-width: 47.25em)` matched *exactly* — 47.25 × 16 = 756.0. Against
+  the root's 32 it would have been 1280 and 1512.
+- **A unitless non-zero length is invalid, not px.** `(min-width: 100)` is
+  black where `(min-width: 100px)` is red, so the query is invalid rather
+  than false-by-comparison. `(min-width: 0)` and `(min-width: -5px)` are
+  both red.
+
+And one that decides the shape of the top level: `@media (min-width:
+5000px), garbage garbage` is reported back by Brave as `(min-width:
+5000px), not all` **with the rule still standing**. An unparseable query
+becomes `not all`; it does not invalidate its neighbours in the list. That
+is the opposite of `@supports`, where one unparseable arm drops the whole
+at-rule, and the two evaluators differ in exactly that place for exactly
+that reason.
+
+Where this engine still diverges, measured and deliberate: Brave is
+three-valued about unknown FEATURES too, so `(min-width: 100px) and
+(flurb: 1)` and `(min-width: 5000px) or (flurb: 1px)` are both black there
+and red here. That is the cost of the fail-open default, and it is the same
+cost `min-resolution` is the benefit of.
+
+#### `@layer` is a tree, and three separate walks could not see it
+
+All four `@layer` divergences came from one shape: layer context was
+computed by three `split-*-segments` passes chained in a fixed order,
+media → container → layer. A `@layer` inside a `@media` was seen and a
+`@media` inside a `@layer` was not — and losing the tag does not forget the
+layer, it promotes the rule to **unlayered**, the strongest normal position
+in the author origin. One recursive walk carrying the context each nested
+rule inherits has no order to get wrong, and it made `@supports` nesting
+free.
+
+The other three needed the layer *order* to stop being a flat list of
+first-appearance names. Measured, on one page:
+
+| shape | Brave | what it says |
+|---|---|---|
+| `@layer { p#x {red} } @layer { #x {blue} }` | blue | each anonymous block is its OWN layer |
+| `@layer n { … } @layer { … }` | the anonymous one | ...and it takes its place in the order like any other |
+| `@layer o { @layer i { p#x {red} } } @layer o.i { #x {blue} }` | red | the nested form and the dotted form are ONE layer |
+| `@layer o { red @layer i { blue } }` | **red** | a layer's own declarations beat its sublayers |
+| `@layer o { @layer i { blue } red }` | **red** | ...and the source order of the two does not matter |
+| `@layer x.y {red} @layer x {blue}` | blue | `x.y` creates `x` too, and the same rule applies |
+
+Which is a **post-order traversal of the layer tree**: children first, in
+first-appearance order, then the node itself. Rows four and five are what
+a flat list cannot express at all, and are why the fix is a tree rather
+than a second sort key.
+
+`revert-layer` was stored as the literal string `revert-layer`, which
+`cssom.layout` cannot read as a width — 800×20 against Brave's 200×20, and
+the `div w` +600 in the geometry residual. It is now the fifth CSS-wide
+keyword, and it resolves to "the value this property would have had if no
+declaration in the winner's own LAYER existed". That phrasing, rather than
+"in an earlier layer", is what six measured shapes say:
+
+| stylesheet | Brave |
+|---|---|
+| `@layer a { w:200 } @layer b { w:120; w:revert-layer }` | **200** |
+| `@layer a { w:300 } @layer b { w:200 } @layer c { w:120; w:revert-layer }` | **200** — the previous layer, not the first |
+| `@layer a { w:120; w:revert-layer }` | **auto** — past the whole author origin |
+| `#x { w:120 } #x { w:revert-layer }` | **auto** — unlayered is a layer for this purpose |
+| `@layer a { w:200 } #x { w:120; w:revert-layer }` | **200** — an unlayered `revert-layer` rolls back INTO the layers |
+| `@layer a { color:green } @layer b { w:120; w:revert-layer }` | **auto** — a previous layer declaring nothing is not one declaring the initial value |
+
+Rows four and five together are why it is not `revert` with a layer test.
+
+The control that had to survive all of this is
+`:layer/important-reverses-the-layer-order`: `!important` reverses layer
+order *and* flips unlayered from strongest to weakest, the engine already
+got it right, and turning a list into a tree must not disturb it. It is in
+the unit suite three times over, and it passes on both sides of the commit.
+
+#### Proved to fail first
+
+Twenty new `deftest`s, 109 assertions. Run against the **base commit**, 42
+assertions fail across 17 of the 18 behavioural groups; the eighteenth is
+`important-still-reverses-the-layer-order-after-the-tree-rewrite`, which is
+pure control and passes on both sides. Every group also carries controls
+that pass on both sides — an `and`-joined media query that does match
+beside one that does not, a range below the viewport beside one above it,
+an `em` that fits beside one that does not, `not (display: flurb)` beside
+`not (display: grid)`, `@layer` inside `@media` beside `@media` inside
+`@layer`.
+
+Two of the twenty are drift gates rather than behaviour: they re-extract
+`layout-read-properties` and `implemented-pseudo-classes` from the sources
+they claim to mirror and fail if the copies fall behind. They are the price
+of `cssom.layout` requiring `cssom.core` and not the reverse.
+
 ### Round forty-six: `writing-mode`, which is a change of basis and not a second engine
 
 `:text/writing-mode-vertical-rl` had been in the corpus for eleven rounds
