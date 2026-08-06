@@ -34,6 +34,14 @@ and a sum hides an exchange. This corpus has already been bitten by one: a
 three other cases improved by as much. Diffing two dumps names every case
 whose boxes moved, in both directions.
 
+`--dump-style` (added 2026-08-06) is the same instrument for the CASCADE,
+and it exists because the ops dump cannot see the changes a cascade round
+makes: round forty-nine's six nesting cases "are not in either list …
+their divergence is a colour, which the ops dump cannot see". It writes one
+line per DISAGREEING computed-style value under its case id, plus each
+case's agree/total, so a case that starts or stops diverging on any
+property — or stops being scored at all — is an added or removed line.
+
 ## Why line structure and not pixels
 
 This engine has no glyph shaping — widths come from a
@@ -826,6 +834,360 @@ an `<li>`'s marker inside the item's own line, where a browser's
 out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
+
+### Round fifty-two: `@scope`, and the seventh key in the cascade sort
+
+Round forty-four measured `@scope` and left it. Round forty-nine measured
+it in full and named exactly why it was still open:
+
+> one of its rules is a **new dimension in the cascade sort tuple**, not a
+> parse or a value change. `resolve-style-and-flow` sorts on
+> `(juxt :important? :origin :inline? :layer :specificity :order)`; scope
+> needs a seventh key computed per (rule, element) pair from the ancestor
+> distance to the matched root.
+
+That key is this round, and the whole of the design question was **where in
+the six it goes**. The answer is a measurement, not a spec reading, and it
+took a shape for each neighbour.
+
+Three columns, because the corpus growing and the engine changing are two
+different things and a single before/after would let one pay for the other.
+This round has the confound round forty-nine had, twice over: **two other
+rounds landed on `main` while it was in flight** — fifty (three value
+grammars) and fifty-one (selector state, pseudo-elements, alignment
+shorthands) — so the middle column is **`main` AS MERGED (`4440220`)**, the
+engine including both of them, on this round's finished 835-case corpus and
+through this round's own harness. Column one to column two therefore mixes
+coverage with two other agents' work, and **only column two to column three
+is attributable to this round**. Everything here was re-measured after the
+merge; no pre-merge number is reported.
+
+| axis | 736 cases, `08c8a4e` | 835, `main` (`4440220`) | 835, after |
+|---|---|---|---|
+| line structure | 704/707 | 800/805 | **800/805** |
+| geometry (boxes) | 2376/2384 | 2676/2714 | **2676/2714** |
+| geometry (clean cases) | 728/735 | 812/835 | **812/835** |
+| paint order | 18343/18362 | 20767/20837 | **20767/20837** |
+| paint order (clean cases) | 724/735 | 816/834 | **816/834** |
+| computed style (values) | 33481/33487 | 38143/38191 | **38166/38191** |
+| computed style (cases clean) | 731/735 | 805/835 | **817/835** |
+| cascade-attributed residual | 5 | 42 | **20** |
+
+The residual is the number to read, and the 42 → 20 is the whole of what
+this round moved on that axis. It accounts for itself exactly: the twelve
+cases in the table below, plus the one `@scope` case that already existed.
+**Not one `:scope/*` value and no `@scope` value of any kind is left in
+it** — the twenty that remain are other rounds' named gaps (`:form/*`
+state, `:selector/dir`, `:selector/has-*`,
+`:container/a-percentage-width-container-is-not-queryable`,
+`:text/font-size-absolute-keyword`).
+
+Line structure, geometry and paint order are **identical to the value**
+across the last two columns, which is what a change confined to the cascade
+should look like.
+
+`src/` was NOT touched by the corpus half of this round: the middle column
+is `main`'s own engine.
+
+1069 unit tests / 2880 assertions, 0 failures; linter 0 errors, 23
+pre-existing warnings, all in `test/`. **33 of this round's 72 new
+assertions, in 18 of its 21 new tests, fail on `main`'s `src/` and pass
+after** — measured by running this round's test file against `4440220`'s
+`src/`, and the same 33 fail against `08c8a4e`'s. The remaining three tests
+are pure controls that pass on both sides and are here to say so:
+`layer-order-beats-proximity` (the new key must not have jumped above the
+layer key), `a-scoped-rule-keeps-the-layer-and-the-media-condition-it-was-written-in`
+(recursing into `@scope` must not lose either), and
+`a-stylesheet-with-no-scope-in-it-parses-exactly-as-before`. Downstream,
+all run against this checkout of `cssom`: `browser` 754/0, `dom-gpu` 130/0,
+`htmldom` 180/0 — htmldom delegates its style parsing to `cssom.core`, and
+a cascade change has turned its suite red twice before.
+
+#### Where proximity sits, proved from both sides
+
+`.far > .near > p` throughout, and every pair run in BOTH source orders so
+that "the later rule won" is never a possible explanation. One probe page
+per probe, headless Brave 151.1.93.129 over CDP, 2026-08-06.
+
+| probe | Brave |
+|---|---|
+| `@scope (.near) { p }` red vs `@scope (.far) { p }` blue | **RED** — the nearer root wins |
+| ...source order reversed | **RED** — so proximity beats ORDER |
+| `@scope (.near) { p }` red vs `@scope (.far) { div p }` blue | **BLUE** — so SPECIFICITY beats proximity |
+| ...source order reversed | **BLUE** |
+| `@layer la, lb; @layer lb { @scope (.far) { p } }` blue, `@layer la { @scope (.near) { p } }` red | **BLUE** — so LAYER beats proximity |
+| ...both scopes in `lb` instead (the control) | **RED** |
+| both declarations `!important`, nearer written first | **RED** |
+| ...source order reversed | **RED** — importance does NOT reverse proximity the way it reverses layers |
+| `<p style="color:blue">` against `@scope (#r) { p }` red | **BLUE** — element-attached beats proximity |
+
+So the order is
+`importance → origin → inline → layer → specificity → PROXIMITY → source
+order`, and the tuple becomes
+
+```clojure
+(juxt :important? :origin :inline? :layer :specificity :proximity :order :decl-index)
+```
+
+The two specificity rows are the ones worth dwelling on, because "between
+layer and order" was the guess and it is not the same claim as "below
+specificity": a proximity key placed one position higher reads BLUE→RED on
+the third row and nothing else changes. The control on the fourth-from-last
+row is what makes the pair evidence rather than a coincidence — the
+identical shape at EQUAL specificity answers the other way.
+
+**An unscoped declaration is at INFINITE proximity, and that is a
+measurement too.** `@scope (#r) { p { red } }` followed by a plain
+`p { blue }` — same specificity, same layer, the unscoped rule written
+LATER — is **RED**. Put both inside one `@layer za` and it is still red.
+Put the unscoped rule in a later layer and it is BLUE, which is the control
+that says the layer key above still decides first. So an unscoped
+declaration is not merely "unranked by proximity"; it is at the worst
+proximity there is and loses every tie to a scoped one.
+
+**What proximity counts** is the hop count from the ELEMENT up to the root,
+not the root's own depth: `.o1 > div > .o2 > div > div > p` is blue (`.o2`
+at 3 hops beats `.o1` at 5) and `.o2 > div > div > div > .o1 > p` is red
+(`.o1` at 1 beats `.o2` at 5) — same two rules, opposite answers. When one
+root SELECTOR matches several ancestors it is the nearest that counts
+(`.r > .m > .r > p` with `@scope (.r)` red and `@scope (.m)` blue is RED,
+against a `.r > .m > p` control that is BLUE).
+
+#### The other half: `@scope` is a range, and the prelude has no specificity
+
+| probe | Brave |
+|---|---|
+| `@scope (#r) { .x }` | inside red, outside black |
+| `@scope (#r) { div }`, root itself a `div` | the ROOT is out — a scoped selector carries an implicit `:scope ` DESCENDANT prefix |
+| `@scope (#r) { div > p }` | a `<p>` whose parent IS the root is out — the prefix attaches to the WHOLE complex selector, not per compound |
+| `@scope (#r) { :scope }` | ...and `:scope` is how you reach the root |
+| `@scope (.r) { div:scope }` / `.r :scope` / `:is(:scope) p` | all three suppress the implicit prefix — `:scope` ANYWHERE counts |
+| `@scope (#r) { p }` vs `div p` | **BLUE** — the prelude contributes NO specificity |
+| `@scope (#r) { :scope p }` vs `div p` | **RED** — `:scope` is an ordinary (0,1,0) pseudo-class |
+| `@scope (#r) to (.lim)` | donut hole, and the limit element ITSELF is out |
+| `@scope (#r) to (:scope > .lim)` | the limit is a SELECTOR evaluated against the scope, not a class test |
+| `@scope (.r) to (.r)` over `.r > p` | red — a limit matching the root does not cut the root |
+| `@scope (.ra, .rb)` / `to (.l1, .l2)` | both halves are selector LISTS |
+| `@scope (div > .r)` | a root may be a complex selector |
+| `@scope (#a) { @scope (.b) { p } }` | red only where BOTH are ancestors |
+| `.r > .lim > .r > p` under `@scope (.r) to (.lim)` | **RED** — every matching ancestor roots its OWN scope, and a cut one does not suppress the others |
+| `.far > .near > .lim > p`, `@scope (.near) to (.lim)` red vs `@scope (.far)` blue | **BLUE** — when the nearer scope is cut, the farther one decides |
+| `:scope p` OUTSIDE any `@scope` | matches — and `:scope { outline-color: red }` lands the outline on `<html>` and nothing else, so an unscoped `:scope` is `:root` |
+
+The last row is a second, smaller fix riding along: `matches-pseudo?`
+returned `false` for `:scope`, and the namespace docstring listed it as
+deliberately out of scope. It is now `*scope-roots*` when a `@scope` is
+being matched and the document root otherwise — both halves measured.
+
+#### The implementation, and what the seventh key cost
+
+The `:scope ` prefix is applied **at parse time**, as a real first part of
+the selector flagged `:selector/scope-implicit?`, which
+`simple-selector-specificity` returns `[0 0 0]` for. That flag is the whole
+of the difference between the prelude and a written `:scope`, and it is
+what lets `specificity`, `pseudo-element-of` and `matches?` all read one
+selector value and never disagree about which one they got. The combinator
+walk in `matches-parts?` then does the range check for free — a scoped
+selector is an ordinary complex selector once `:scope` can answer.
+
+Proximity is per (rule, element), so it cannot be precomputed. But it is
+only ever computed for a rule that HAS a `:rule/scope`, and the ancestor
+index it needs is a `delay` that a stylesheet without `@scope` never
+forces. Roots are tried NEAREST FIRST and the first that matches wins, so
+the answer is the nearest root the selector could actually use rather than
+the nearest root that exists — which is measurable, and is what the
+"nearer scope is cut, farther one decides" row above pins.
+
+Measured cost, same machine, base `src/` against this round's:
+
+| configuration | base `src/` | this round |
+|---|---|---|
+| 42 elements, 50 rules, no `@scope` | 61.9 / 67.2 / 54.6 ms | 57.2 / 52.6 / 69.1 ms |
+| the same plus two `@scope` blocks | 57.9 / 65.6 / 61.2 ms | 61.5 / 56.1 / 82.1 ms |
+
+Three alternating JVMs per engine, min-of-six-trials within each, 20
+warm-up cascades before the first measurement — and **the cost is below
+this benchmark's noise floor**. The spread of one engine against itself on
+one stylesheet (54.6-67.2 ms) is wider than any gap between the two
+engines, and the two distributions overlap completely. Reporting a
+percentage here would be reporting the machine.
+
+What the key costs *structurally* is the honest answer: for a stylesheet
+with no `@scope`, one extra `:proximity` lookup per declaration per
+comparison in the sort tuple, one `(:rule/scope rule)` lookup per rule per
+element, and one unforced `delay` allocation per element. Every declaration
+carries the same `##-Inf`, so the key is a pure tie and the sort falls
+through to `:order` exactly as before — which is why the ops dump is
+byte-identical on 835 cases.
+
+A second comparator for the no-`@scope` case was considered and NOT
+written. It would make the cost provably zero, and it would make two sort
+tuples that have to be kept in step by hand — on the function every
+declaration of every case goes through. An unmeasurable cost is not worth
+that.
+
+The first version of this benchmark ran the two configurations
+sequentially and reported the second as 27% FASTER than the first on the
+base commit, for a stylesheet with two more rules in it. That was the
+second configuration inheriting the first one's JIT warm-up. Both are now
+timed alternately inside one JVM.
+
+#### `--dump-style`, because the ops dump cannot see a colour
+
+`--dump-ops` exists because "four sums over 735 cases" hides an exchange.
+A cascade round needs the same instrument for the axis it actually moves,
+and round forty-nine said so in passing without building it: its six
+nesting cases "are not in either list … their divergence is a colour, which
+the ops dump cannot see". `--dump-style` writes one line per disagreeing
+value under its case id, plus each case's agree/total, so a case that
+starts or stops diverging on any property — or stops being scored at all —
+is an added or removed line.
+
+Both dumps were diffed corpus-wide, in both directions, between the two
+right-hand columns.
+
+**Ops: 0 of 835 cases changed.** Every case's box list is byte-identical,
+in both directions. A cascade change that moved a box would be a bug, and
+this is the instrument that says none did.
+
+**Computed style: exactly 12 cases changed, every one of them TOWARDS the
+browser, and no case's compared TOTAL changed** (so no case quietly stopped
+being scored):
+
+| case | before | after |
+|---|---|---|
+| `:cascade/a-scope-rule-does-not-reach-outside-its-root` | 55/56 | **56/56** |
+| `:scope/the-scope-root-itself-does-not-match-a-bare-descendant-rule` | 40/42 | **42/42** |
+| `:scope/the-scope-pseudo-class-reaches-the-root` | 40/42 | **42/42** |
+| `:scope/an-explicit-scope-pseudo-class-does-add-specificity` | 55/56 | **56/56** |
+| `:scope/proximity-beats-source-order` | 55/56 | **56/56** |
+| `:scope/a-limit-cuts-the-limit-element-and-everything-under-it` | 96/98 | **98/98** |
+| `:scope/the-limit-element-itself-is-out` | 66/70 | **70/70** |
+| `:scope/a-limit-selector-is-relative-to-the-scope-root` | 94/98 | **98/98** |
+| `:scope/a-cut-root-does-not-suppress-a-nearer-uncut-one` | 83/84 | **84/84** |
+| `:scope/nested-scopes-both-have-to-contain-the-element` | 109/112 | **112/112** |
+| `:scope/proximity-is-measured-to-the-nearest-matching-root` | 69/70 | **70/70** |
+| `:scope/important-does-not-reverse-proximity` | 55/56 | **56/56** |
+
+The other 823 are byte-identical on both dumps. The six remaining `:scope`
+cases are controls that agree on BOTH sides and are not in this list:
+`a-scope-prelude-contributes-no-specificity`,
+`proximity-and-source-order-pointing-the-same-way`,
+`specificity-beats-proximity`, `layer-order-beats-proximity`,
+`a-scoped-rule-keeps-the-layer-it-was-written-in`,
+`a-scoped-rule-keeps-the-media-condition-it-was-written-in` and
+`proximity-with-only-one-matching-root-per-scope`. Each is beside a case
+that DOES move, and only the pair is evidence.
+
+#### The harness could not express a scoped rule either
+
+`scope-css` prefixes every selector with the case's own container id. A
+scoped selector carries an implicit `:scope ` descendant prefix, and the
+container is an **ancestor** of the scope root — so the rule reaching the
+browser was `:scope #case-N .x`, which matches nothing. Measured:
+
+| CSS on the page | Brave |
+|---|---|
+| `@scope (#sc) { #cN .x { red } }`, `#cN > #sc > .x` plus a `.x` beside it | BOTH black |
+| `@scope (#sc) { #cN :scope .x { red } }` | inside red, outside black |
+| `@scope (#sc) { .x { red } }`, no prefix at all | inside red, outside black, and a `.x` in another container black |
+
+The third row is the fix: a rooted `@scope` prelude already confines its
+rules to that root's subtree, so the id prefix buys nothing and costs the
+whole feature. The body of a rooted `@scope` is now emitted unprefixed. A
+prelude-less `@scope` is not given that treatment — it would scope to the
+shared `<body>` and reach every case.
+
+**This means the case that existed before this round was measuring
+something else.** `:cascade/a-scope-rule-does-not-reach-outside-its-root`
+reported two cascade-attributed mismatches, and its comment said Brave
+reddens the paragraph inside and leaves the one outside black. Under the
+prefix Brave read BOTH as black, so the divergence was real and its
+explanation was not.
+
+**And it has a cost, named where it bites.** The two sides of this harness
+now receive different CSS in one respect: `cascaded-document` hands the
+engine the raw `:css`, so an unscoped selector carries one more id in the
+browser than in the engine, while a rooted `@scope` body carries the same
+in both. That was always true and always harmless — before the `:scope`
+group every competing selector in a case was unscoped and they all gained
+the same id — and it inverts a specificity comparison the moment a scoped
+rule competes with an unscoped one.
+
+#### Measured and deliberately NOT added
+
+- **"An unscoped declaration is at infinite proximity", as a corpus case.**
+  A real rule and a real divergence, and not expressible on the shared
+  page for the reason just above: equal specificity on one side is unequal
+  on the other, by construction. The case was written, found to agree on
+  the BASE commit, and removed — the engine's red came from specificity and
+  the browser's from proximity. It lives in the unit tests, which call
+  `apply-cascade` directly and therefore have one CSS text rather than two.
+- **A prelude-less `@scope`, as a corpus case.** On the corpus page the
+  stylesheet is in `<head>`, so the owning element is `<head>` and Brave
+  matches nothing — which this engine also does, for an entirely different
+  reason. It would pass for precisely the wrong reason, the same test
+  `revert-layer` on an unlayered declaration failed in round forty-four.
+  Measured in both directions and kept as a unit test.
+- **`:scope` outside any `@scope`, as a corpus case.** Same shape: the
+  harness's prefix makes it `#case-N :scope p`, and `<html>` is not a
+  descendant of `#case-N`, so both sides say black and the case would
+  prove nothing.
+
+#### Merging `main` mid-flight: two conflicts that were not append-at-end
+
+Rounds fifty and fifty-one landed while this was in flight, and three of
+the five conflicts were the usual append-at-end kind (both sides kept). The
+other two are worth naming because both are two rounds touching the same
+few lines for unrelated reasons:
+
+- **`simple-selector-specificity`.** Round fifty-one gave `:is()` arguments
+  a recursive `arg-specificity` that sums over a COMPLEX argument's own
+  compounds — closing exactly the gap round forty-nine's nesting
+  desugaring named as its own cost. This round wrapped the same function in
+  a `:selector/scope-implicit?` guard returning `[0 0 0]`. The guard now
+  wraps their version; neither change is expressible as a hunk that beats
+  the other.
+- **`scope-css`.** Round fifty-one replaced the prelude's `str/split` on
+  `,` with `split-selector-list`, which respects parentheses. This round
+  made the prefix conditional so a rooted `@scope` body can be left
+  unprefixed. Both, plus both docstring paragraphs.
+
+Everything above is measured after that merge. Nothing pre-merge is
+reported.
+
+#### The one scope cut, with the browser numbers a future fix needs
+
+**A prelude-less `@scope { … }` applies to nothing here.** It scopes to the
+element that OWNS the stylesheet — the `<style>` element's own parent — and
+`parse-rules` is handed CSS text with no owner attached. Measured in Brave
+151, 2026-08-06:
+
+| probe | Brave | here |
+|---|---|---|
+| `<style>@scope { p { red } }</style>` inside `<div id=w>`, `<p>` in the same div | RED | black |
+| ...the `<p>` outside that div | black | black |
+| the same `@scope` in a `<head>` `<style>` | black | black |
+| `@scope to (.lim) { p { red } }` in a div, `<p>` before the limit | RED | black |
+| two `<style>@scope {…}</style>`, one per div | each div's own `<p>` takes its own colour | both black |
+
+So it fails **closed**, which is the safe direction and is already right for
+two of the five shapes. Closing it means carrying the owning element id from
+the `<style>` element through `parse-rules`, which every caller —
+`apply-cascade`, this harness, `htmldom` — would have to learn to pass.
+That is a signature change to the whole stylesheet pipeline rather than a
+scope change.
+
+Smaller, and named where they are made:
+
+- **Nested `@scope` proximity is counted from the INNERMOST scope.** An
+  element must be inside every enclosing scope (measured), and no probe
+  discriminates what the outer scopes' own proximity would contribute, so
+  nothing is claimed about it.
+- **`names-scope?` reads the selector's raw text.** A literal `:scope`
+  inside a quoted attribute value (`[data-x=":scope"]`) would be mistaken
+  for the pseudo-class — the same bounded reader every at-rule scan in this
+  file uses.
 
 ### Round fifty-one: selector STATE, the pseudo-elements with no box, and the alignment shorthands
 
@@ -1787,6 +2149,15 @@ hands it a number, and `cssom.core/computed-style` and a live page's
 
 #### `@scope` — measured in full, deliberately not implemented
 
+**LANDED IN ROUND FIFTY-TWO**, above, which re-measured every row below from
+the browser rather than trusting them and found one of them incomplete:
+proximity is below SPECIFICITY as well as below layer, which the "sits
+between specificity and order" phrasing here does not quite say. See that
+round for the shapes that place it from both sides, and for the two rows
+this section does not have — that an unscoped declaration is at infinite
+proximity, and that `!important` does not reverse proximity the way it
+reverses layer order.
+
 The fourth value function of round forty-four's five, and the reason it
 is not in this round is a specific one rather than "ran out of time":
 one of its rules is a **new dimension in the cascade sort tuple**, not a
@@ -1819,7 +2190,11 @@ why it is not a parser change: the prelude contributes nothing, but
 share one implementation shortcut.
 
 `:cascade/a-scope-rule-does-not-reach-outside-its-root` stays in the
-corpus, still red, still carrying the browser's numbers.
+corpus, still red, still carrying the browser's numbers. (Round fifty-two found
+that it was red for a DIFFERENT reason than this section says: the
+harness's own id prefix defeated the scope, so Brave read both its
+paragraphs as black. `scope-css` is fixed and the case now measures what it
+claims.)
 ### Round forty-eight: the at-rules stop being decoration
 
 Round forty-four put seventy-one at-rule cases into the corpus and found
@@ -3107,10 +3482,9 @@ not textual substitution.**
 features, five measured divergences, none of them fixed *in this round*
 and all of them carrying the browser's numbers. **`@property`, `env()`
 and `attr()` landed in round forty-nine; `all` landed in round
-forty-seven; `@scope` is still open, and round forty-nine's entry carries
-a full `@scope` measurement
-including the proximity rule that makes it a cascade change rather than a
-parser one.**
+forty-seven; `@scope` landed in round FIFTY-TWO, as the seventh key in the
+cascade sort tuple that round forty-nine's measurement said it would need
+— see it above.**
 
 | case | Brave | this engine |
 |---|---|---|

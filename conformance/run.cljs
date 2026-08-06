@@ -65,6 +65,7 @@
         "--debug-style" (recur (rest args) (assoc out :debug-style true))
         "--debug-paint" (recur (rest args) (assoc out :debug-paint true))
         "--dump-ops" (recur (drop 2 args) (assoc out :dump-ops (second args)))
+        "--dump-style" (recur (drop 2 args) (assoc out :dump-style (second args)))
         (recur (rest args) out))
       out)))
 
@@ -595,6 +596,14 @@
             (and (= \, c) (zero? depth)) (recur (inc i) (inc i) depth (conj out (subs s start i)))
             :else (recur (inc i) start depth out)))))))
 
+(defn- rooted-scope-prelude?
+  "Whether `prelude` is an `@scope` that names a scope ROOT -- the form
+   whose rules are already confined to that root's subtree, and which
+   therefore must not have its body prefixed with the case container's id.
+   See `scope-css` for the three browser measurements behind that."
+  [prelude]
+  (boolean (re-find #"(?i)^@scope\s*\(" (str/trim (str prelude)))))
+
 (defn- scope-css
   "Prefixes every STYLE RULE selector in a case's CSS with that case's
    container id, so all cases can share one page without one case's
@@ -624,6 +633,42 @@
      (`p { & span { ... } }`) is relative to its parent and already
      scoped by it -- prefixing it again would make it `#case-0 & span`,
      which matches nothing.
+
+   A ROOTED `@scope` is the fourth shape, and it is the same trap the
+   nested rule above is: a scoped selector carries an implicit `:scope `
+   descendant prefix, so prefixing it with the case container's id makes it
+   `:scope #case-0 .x` -- and `#case-0` is an ANCESTOR of the scope root,
+   not a descendant, so it matches nothing. Measured in Brave 151 over CDP
+   on 2026-08-06, one probe page per probe:
+
+   | CSS | Brave |
+   |---|---|
+   | `@scope (#sc) { #cN .x { red } }`, `#cN > #sc > .x` plus a `.x` beside it | BOTH black -- the rule reaches nothing |
+   | `@scope (#sc) { #cN :scope .x { red } }` | inside red, outside black -- an explicit `:scope` survives the prefix |
+   | `@scope (#sc) { .x { red } }`, no prefix at all | inside red, outside black, and a `.x` in ANOTHER container black |
+
+   The third row is why the body is left unprefixed rather than rewritten:
+   a rooted `@scope` prelude ALREADY confines its rules to that root's
+   subtree, so the id prefix buys nothing and costs the whole feature. It
+   does mean the scope root's own selector has to be unique on the shared
+   page -- which is the discipline `cases.edn` already states for `@scope`
+   roots, layer names and `@property` names alike.
+
+   A PRELUDE-LESS `@scope { ... }` is NOT given this treatment: it scopes
+   to the owning `<style>` element's parent, which on the corpus page is
+   the shared `<body>`, so its rules would reach every case. It keeps the
+   prefix, and stays confined.
+
+   What this costs, named here because nothing else would notice it: the
+   two sides of the harness now differ in one respect. `cascaded-document`
+   gives the ENGINE the case's raw `:css`; the browser gets this function's
+   output. An unscoped selector therefore carries one more id in the
+   browser than in the engine -- which was always true and always harmless,
+   because before the `:scope` group every competing selector in a case was
+   unscoped and they all gained the same id. A rooted `@scope` body now
+   gains nothing, so a case where a SCOPED rule competes with an UNSCOPED
+   one at close specificity is comparing different numbers on the two
+   sides. `cases.edn` names the one measurement that makes inexpressible.
 
    The selector list is split by `split-selector-list`, which respects
    parentheses -- see its docstring for the mis-scoping a plain `split`
@@ -658,7 +703,11 @@
                                  (cond
                                    (and at-name (contains? conditional-group-at-rules
                                                            (str/lower-case at-name)))
-                                   (str prelude " {" (or (scope-css body scope) "") "}")
+                                   (str prelude " {"
+                                        (or (scope-css body
+                                                       (if (rooted-scope-prelude? prelude) nil scope))
+                                            "")
+                                        "}")
 
                                    at-name (str prelude " {" body "}")
 
@@ -666,7 +715,7 @@
                                    (str (->> (split-selector-list prelude)
                                              (map str/trim)
                                              (remove str/blank?)
-                                             (map #(str scope " " %))
+                                             (map #(if (str/blank? (str scope)) % (str scope " " %)))
                                              (str/join ", "))
                                         " {" body "}")))))
                   ;; unbalanced: emit the remainder untouched rather than
@@ -2058,6 +2107,38 @@
         line))
      "utf8")
     (println (str "ops dumped: " f "\n")))
+  ;; `--dump-style <file>` is `--dump-ops` for the CASCADE, and it exists
+  ;; because the ops dump is blind to exactly the changes a cascade round
+  ;; makes. Round forty-nine's own note: six nesting cases changed and
+  ;; "their divergence is a colour, which the ops dump cannot see". A
+  ;; sort-tuple change is on the path of every declaration of every case,
+  ;; and the four sums it is scored by hide an exchange as readily as the
+  ;; geometry sums did the 5/5 -> 0/5 table regression that motivated
+  ;; `--dump-ops`.
+  ;;
+  ;; One line per compared value that DISAGREES, under its case id, in the
+  ;; axis's own order -- so a case that stops or starts diverging on any
+  ;; property shows up as an added or removed line, in both directions.
+  ;; Cases with no disagreement are listed with a count, so a case that
+  ;; goes from "scored 40 values" to "scored none" is visible too.
+  (when-let [f (:dump-style (parse-args *command-line-args*))]
+    (fs/writeFileSync
+     f
+     (str/join
+      "\n"
+      (for [r results
+            line (cons (str "CASE " (:id r)
+                            (if-let [s (:sty r)]
+                              (str "  " (:agree s) "/" (:total s))
+                              "  <no styles>"))
+                       (for [d (:diffs (:sty r))]
+                         (str "  " (pad-right (name (:prop d)) 18)
+                              (pad-right (str (:tag d)) 10)
+                              (pad-right (name (:cause d)) 14)
+                              (:engine d) " -> " (:oracle d))))]
+        line))
+     "utf8")
+    (println (str "style dumped: " f "\n")))
   (when (:debug-geometry (parse-args *command-line-args*))
     (doseq [r results :when (seq (:oracle-boxes r))]
       (println "GEO" (:id r))
