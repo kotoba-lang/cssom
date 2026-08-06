@@ -658,6 +658,15 @@
 ;; JS-facing __kotobaValidationReason. ----
 
 (deftest length-constraints-do-not-apply-to-non-text-like-controls
+  ;; PRE-EXISTING and not this test's subject, recorded here with its
+  ;; numbers so it is not rediscovered: real HTML applies `maxlength`/
+  ;; `minlength` only once a control's DIRTY VALUE FLAG is set, i.e. after
+  ;; a user edit, so a DEFAULT value that violates one is still valid.
+  ;; Measured in Brave 151 on 2026-08-06: `<input type=text value=12345
+  ;; maxlength=3>` and `<textarea maxlength=3>12345</textarea>` are BOTH
+  ;; `:valid`, where this engine reports both invalid. The assertions
+  ;; below pin this engine's behaviour, not the browser's; closing the gap
+  ;; means modelling the dirty flag, which nothing in this file has.
   (let [rules (css/parse-rules
                "input:invalid, textarea:invalid, select:invalid { color: red } input:valid, textarea:valid, select:valid { color: green }")
         build (fn [tag attrs]
@@ -684,7 +693,24 @@
                              doc (dom/append-child doc el opt)
                              doc (dom/append-child doc root el)
                              doc (css/apply-cascade doc rules)]
-                         (get-in doc [:nodes el :attrs :style/color])))]
+                         (get-in doc [:nodes el :attrs :style/color])))
+        ;; A `<textarea>`'s value is its TEXT, not a `value` attribute --
+        ;; HTML gives it no such attribute, and this assertion used to set
+        ;; one. Measured in Brave 151 on 2026-08-06:
+        ;; `<textarea value="12345" maxlength=3></textarea>` reports `.value`
+        ;; `""`, so the string it was written to constrain was never in the
+        ;; control at all. `textarea-default-value` reads the children now,
+        ;; so the assertion needs a real one to keep meaning what it meant.
+        build-textarea (fn [text attrs]
+                         (let [[root doc] (dom/create-element dom/empty-document :div)
+                               doc (dom/set-root doc root)
+                               [el doc] (dom/create-element doc :textarea)
+                               doc (reduce-kv #(dom/set-attribute %1 el %2 %3) doc attrs)
+                               [t doc] (dom/create-text-node doc text)
+                               doc (dom/append-child doc el t)
+                               doc (dom/append-child doc root el)
+                               doc (css/apply-cascade doc rules)]
+                           (get-in doc [:nodes el :attrs :style/color])))]
     (is (= "green" (build :input {:type "number" :value "12345" :maxlength "3"}))
         "maxlength must be ignored entirely for type=number")
     (is (= "green" (build :input {:type "range" :value "99" :min "0" :max "100" :maxlength "1"}))
@@ -695,8 +721,13 @@
         "maxlength must be ignored entirely for a <select> -- previously entirely unguarded")
     (is (= "red" (build :input {:type "text" :value "12345" :maxlength "3"}))
         "maxlength must still apply to a real text-like input, unaffected by this fix")
-    (is (= "red" (build :textarea {:value "12345" :maxlength "3"}))
+    (is (= "red" (build-textarea "12345" {:maxlength "3"}))
         "maxlength must still apply to <textarea>, unaffected by this fix")
+    (is (= "green" (build-textarea "12345" {}))
+        ;; The control for the line above, and the one that says the
+        ;; textarea's value is being READ rather than assumed: the same
+        ;; text with no `maxlength` is valid.
+        "a <textarea>'s text is its value, and an unconstrained one is valid")
     (is (= "red" (build :input {:type "email" :value "a" :minlength "5"}))
         "minlength must still apply to a real text-like input, unaffected by this fix")))
 
@@ -5133,15 +5164,24 @@
   (is (nil? (:style/color (cascaded-attrs ":checked { color: red }"
                                           "<div id=\"a\" checked>x</div>" "a")))))
 
-;; :read-only/:read-write and :required/:optional are measured in full and
-;; deliberately unchanged -- see the comment block above `matches-pseudo?` in
-;; src/cssom/core.cljc for the table and for why closing them is a cross-repo
-;; change (kotoba-lang/browser's query-selector suite pins the current
-;; answers in three assertions). What is asserted here is the part that
-;; already agrees with Brave, so that a future fix has a control to keep.
+;; ---- Round fifty-three: the form-control cluster ----------------------
+;;
+;; `:read-only`/`:read-write` and `:required`/`:optional` were measured in
+;; full by round fifty-one, written, and REVERTED, because
+;; kotoba-lang/browser's query-selector suite asserted the answers this
+;; file gave then. Both halves land together now; the three downstream
+;; assertions are corrected in that repo. Every expected value below was
+;; re-read out of a real headless Brave 151.1.93.129 over CDP on
+;; 2026-08-06, one probe page per probe, through `Element.matches()`.
+;;
+;; `font-style` rather than `color` throughout, because the UA sheet writes
+;; `input:disabled { color: #545454 }` and a colour therefore cannot say
+;; whether the AUTHOR rule matched -- the same reason the `:in-range` test
+;; below already gives.
 
 (deftest read-only-still-matches-a-plain-paragraph-and-a-readonly-field
-  ;; The control: the two answers the old pair already got right.
+  ;; The control: the answers the old pair already got right, kept across
+  ;; the rewrite of both clauses into `user-alterable?`.
   (let [css "p:read-only { color: red }"]
     (is (= "red" (:style/color (cascaded-attrs css "<p id=\"a\">x</p>" "a")))))
   (let [css "input:read-only { color: red } input:read-write { color: green }"]
@@ -5149,6 +5189,150 @@
   (let [css "textarea:read-only { color: red } textarea:read-write { color: green }"]
     (is (= "red" (:style/color (cascaded-attrs css "<textarea id=\"a\" readonly></textarea>" "a"))))
     (is (= "green" (:style/color (cascaded-attrs css "<textarea id=\"a\"></textarea>" "a"))))))
+
+(deftest read-only-is-the-complement-of-read-write-and-reaches-a-disabled-field
+  ;; Brave: `<input disabled>` is `:read-only` and not `:read-write`. This
+  ;; file used to give it NEITHER, which is what says the two clauses were
+  ;; two lists rather than a predicate and its complement.
+  (let [css "input:read-only { font-style: italic } input:read-write { font-style: oblique }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" disabled>" "a"))))
+    (is (= "oblique" (:style/font-style (cascaded-attrs css "<input id=\"a\">" "a"))))))
+
+(deftest read-only-reaches-an-input-type-that-cannot-be-typed-into
+  ;; The row round fifty-one's table recorded as "same" and which was not:
+  ;; a checkbox is `:read-only` in Brave, and `editable-form-control?` --
+  ;; every `<input>` bar hidden/file -- made it `:read-write` here.
+  (let [css "input:read-only { font-style: italic } input:read-write { font-style: oblique }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"checkbox\">" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"range\">" "a"))))
+    ;; ...and the control, from the same nineteen-type probe: a `date`
+    ;; input IS `:read-write`, so this is a measured set and not "only
+    ;; type=text".
+    (is (= "oblique" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"date\">" "a"))))
+    (is (= "oblique" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"number\">" "a"))))))
+
+(deftest read-write-reaches-a-contenteditable-subtree-and-stops-at-a-false-one
+  ;; Brave: the editable div, a `<p>` inside it and a `<span>` inside it are
+  ;; all `:read-write`; a `contenteditable="false"` child is `:read-only`
+  ;; and so is a `<p>` nested inside THAT one -- so the nearest ancestor
+  ;; decides, not "any ancestor is editable".
+  (let [css ":read-write { font-style: oblique }"
+        tree (str "<div id=\"w\" contenteditable=\"true\">"
+                  "<p id=\"a\">edit</p>"
+                  "<p id=\"b\" contenteditable=\"false\">no<span id=\"c\">deep</span></p>"
+                  "</div><p id=\"d\">outside</p>")]
+    (is (= "oblique" (:style/font-style (cascaded-attrs css tree "w"))))
+    (is (= "oblique" (:style/font-style (cascaded-attrs css tree "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css tree "b"))))
+    (is (nil? (:style/font-style (cascaded-attrs css tree "c"))))
+    (is (nil? (:style/font-style (cascaded-attrs css tree "d"))))))
+
+(deftest a-controls-own-state-wins-over-an-editable-ancestor
+  ;; The two halves of `user-alterable?` do not compose. Measured on
+  ;; `<div contenteditable="true"><input readonly><input disabled><input></div>`:
+  ;; only the third is `:read-write`.
+  (let [css "input:read-write { font-style: oblique }"
+        tree (str "<div contenteditable=\"true\">"
+                  "<input id=\"a\" readonly><input id=\"b\" disabled><input id=\"c\">"
+                  "</div>")]
+    (is (nil? (:style/font-style (cascaded-attrs css tree "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css tree "b"))))
+    (is (= "oblique" (:style/font-style (cascaded-attrs css tree "c"))))))
+
+(deftest required-and-optional-ignore-disabled-and-readonly
+  ;; The rule that separates `:required` from validity: Brave reports
+  ;; `<input required disabled>` `:required` and `<input disabled>`
+  ;; `:optional`, where this file used to give both NEITHER.
+  (let [css "input:required { font-style: italic } input:optional { font-style: oblique }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" required disabled>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" required readonly>" "a"))))
+    (is (= "oblique" (:style/font-style (cascaded-attrs css "<input id=\"a\" disabled>" "a"))))))
+
+(deftest required-applies-by-input-type-and-optional-is-everything-else
+  ;; The half that is NOT "the attribute alone": measured across
+  ;; twenty-two types, `required` applies to file but not to hidden, and to
+  ;; no `<button>` at all.
+  (let [css ":required { font-style: italic } :optional { font-style: oblique }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"file\" required>" "a")))
+        "Brave: a required file input IS :required -- round fifty-one's recorded scope cut")
+    (is (= "oblique" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"hidden\" required>" "a")))
+        "...and a hidden one is :optional even with the attribute")
+    (is (= "oblique" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"range\" required>" "a"))))
+    (is (= "oblique" (:style/font-style (cascaded-attrs css "<button id=\"a\" required>x</button>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<select id=\"a\" required><option>o</option></select>" "a"))))
+    ;; The control on the SUBJECT set: neither pseudo-class reaches an
+    ;; element that is not a form control, measured on <fieldset> and <p>.
+    (is (nil? (:style/font-style (cascaded-attrs css "<fieldset id=\"a\"></fieldset>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<p id=\"a\">x</p>" "a"))))))
+
+(deftest indeterminate-is-a-progress-with-no-value-and-a-radio-group-with-none-checked
+  (let [css ":indeterminate { font-style: italic }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<progress id=\"a\"></progress>" "a")))
+        "a <progress> with no `value` ATTRIBUTE is indeterminate")
+    (is (nil? (:style/font-style (cascaded-attrs css "<progress id=\"a\" value=\"0.5\"></progress>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<progress id=\"a\" value=\"abc\"></progress>" "a")))
+        "Brave: presence of the attribute is the whole test -- an unparseable value is still determinate")
+    (let [none "<p><input id=\"a\" type=\"radio\" name=\"g\"><input id=\"b\" type=\"radio\" name=\"g\"></p>"
+          one "<p><input id=\"a\" type=\"radio\" name=\"g\" checked><input id=\"b\" type=\"radio\" name=\"g\"></p>"]
+      (is (= "italic" (:style/font-style (cascaded-attrs css none "a"))))
+      (is (= "italic" (:style/font-style (cascaded-attrs css none "b")))
+          "BOTH radios of an unchecked group, because it is a property of the group")
+      (is (nil? (:style/font-style (cascaded-attrs css one "a"))))
+      (is (nil? (:style/font-style (cascaded-attrs css one "b")))))))
+
+(deftest an-indeterminate-attribute-on-a-checkbox-is-not-a-browser-behaviour
+  ;; The one shape of `:indeterminate` that is NOT reachable from static
+  ;; markup, asserted so nobody adds it: measured in Brave, neither
+  ;; `<input type=checkbox indeterminate>` nor `indeterminate="true"`
+  ;; matches. It is an IDL property with no content attribute behind it.
+  (let [css ":indeterminate { font-style: italic }"]
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"checkbox\" indeterminate>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"checkbox\" indeterminate=\"true\">" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"checkbox\" checked>" "a"))))))
+
+(deftest placeholder-shown-is-the-attributes-presence-and-an-empty-value
+  (let [css ":placeholder-shown { font-style: italic }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" placeholder=\"hint\">" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" placeholder=\"hint\" value=\"typed\">" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\">" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" placeholder=\"\">" "a")))
+        "Brave: an EMPTY placeholder is still shown -- presence, not content")
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" placeholder=\"hint\" value=\" \">" "a")))
+        "...and a single space is not an empty value, so the placeholder is hidden by whitespace")
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<textarea id=\"a\" placeholder=\"hint\"></textarea>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<textarea id=\"a\" placeholder=\"hint\">typed</textarea>" "a")))
+        "a <textarea>'s value is its TEXT, which is why control-value now reads it")))
+
+(deftest placeholder-shown-applies-only-to-the-types-placeholder-applies-to
+  (let [css ":placeholder-shown { font-style: italic }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"number\" placeholder=\"h\">" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"date\" placeholder=\"h\">" "a")))
+        "measured: a date input never shows a placeholder, although it IS :read-write")
+    (is (nil? (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"checkbox\" placeholder=\"h\">" "a"))))))
+
+(deftest default-is-the-state-the-control-was-born-in
+  (let [css ":default { font-style: italic }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<p><input id=\"a\" type=\"checkbox\" checked><input type=\"checkbox\"></p>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<p><input type=\"checkbox\" checked><input id=\"a\" type=\"checkbox\"></p>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<select><option>a</option><option id=\"a\" selected>b</option></select>" "a")))
+        "an <option> is :default when it is SELECTED, the same attribute :checked reads")
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<input id=\"a\" type=\"checkbox\" checked>" "a")))
+        "Brave: a checked checkbox needs no form at all")))
+
+(deftest default-on-a-button-is-the-forms-first-submit-button
+  (let [css ":default { font-style: italic }"]
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<form><button id=\"a\">one</button><button>two</button></form>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<form><button>one</button><button id=\"a\">two</button></form>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<form><div><span><button id=\"a\">deep</button></span></div><button>later</button></form>" "a")))
+        "document order, not child order -- a nested button still wins over a shallower later one")
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<form><input id=\"a\" type=\"submit\"></form>" "a"))))
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<form><input id=\"a\" type=\"image\"></form>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<form><button id=\"a\" type=\"button\">b</button><button>real</button></form>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<form><input id=\"a\" type=\"reset\"></form>" "a"))))
+    (is (nil? (:style/font-style (cascaded-attrs css "<button id=\"a\">x</button>" "a")))
+        "Brave: a button with no form is NOT :default, which is the pair that makes this three rules")
+    (is (= "italic" (:style/font-style (cascaded-attrs css "<form id=\"f1\"></form><button id=\"a\" form=\"f1\">owned</button>" "a")))
+        "`form=` ownership reaches outside the form's subtree, and ancestor-form-id already knows it")))
 
 (deftest the-range-pseudo-classes-do-depend-on-disabledness
   ;; The control that a fix to the block above must keep: Brave DOES take a

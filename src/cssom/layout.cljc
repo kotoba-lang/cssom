@@ -7850,6 +7850,113 @@
    deliberately does not carry."
   34)
 
+(def ^:private number-input-spin-width
+  "The horizontal slack a `<input type=\"number\"` reserves for its spin
+   buttons, INSIDE its borders -- and only when its own `min`/`max` size it
+   (see number-input-preferred-chars).
+
+   A CONSTANT, and that is measured rather than assumed: a number field
+   whose bounds fit two characters against a `<input type=text size=2>` in
+   the same font, at seven font/size pairs, is 15px wider at every one of
+   them -- Arial 10 (37 vs 22), Arial 13.3333 (42 vs 27), Arial 20
+   (51 vs 36), Arial 40 (79 vs 64), monospace 20 (50 vs 35), monospace 28
+   (61 vs 46), serif 13.3333 (43 vs 28). It is a fixed-size platform
+   widget, exactly like `select-arrow-width`'s 20, and NOT a multiple of
+   the em -- which is why a 40px number field is 15 wider and not 45.
+
+   It is not charged to a number field with no `min`/`max`: measured,
+   `<input type=number>` is 153 in the corpus frame, the same as
+   `<input type=text>`, so the decoration enters the width exactly when
+   the bounds do. Blink calls that pair
+   `LayoutTextControlSingleLine`'s `include_decoration`."
+  15)
+
+(defn- strict-number-attr
+  "An attribute as a plain decimal number for number-field SIZING, parsed
+   strictly: no surrounding whitespace, no leading `+`, no scientific
+   notation. Returns the ALREADY-NORMALIZED literal parts
+   `[sign integer-digits fraction-digits]` rather than a double, because
+   what this rule needs is how many characters the value RENDERS as and a
+   double cannot say (`1.50` and `1.5` are the same number and not the
+   same width).
+
+   Strict on purpose, and each rejection is measured in Brave 151 on
+   2026-08-06 in the corpus frame, where a number field that cannot size
+   itself from its bounds falls back to twenty characters (153px):
+   `min=\" 1 \" max=10` is 153, and so is `min=0 max=+50`. Scientific
+   notation is rejected here too and that one is a DIVERGENCE rather than
+   an agreement -- `min=0 max=1e3` is 35 in Brave and is 153 here. It is
+   the same cut `cssom.core/parse-number` already documents for
+   `min`/`max` validation, arriving by a second route, and closing it
+   means a decimal model rather than a regex."
+  [v]
+  (when-let [[_ sign int-part frac] (and (string? v) (re-matches #"(-?)(\d+)(?:\.(\d+))?" v))]
+    (let [trimmed (str/replace int-part #"^0+(?=\d)" "")]
+      [sign trimmed (or frac "")])))
+
+(defn- number-input-preferred-chars
+  "How many characters a `<input type=\"number\">` sizes itself to, or nil
+   when it sizes itself the ordinary way (twenty characters of `size`).
+
+   Blink's rule, and it is a rule about the BOUNDS and not about the value:
+   a number field with both a `min` and a `max` reserves room for the
+   longest number it can hold, and one without them is exactly as wide as a
+   text field. Measured in Brave 151 on 2026-08-06, one probe page per
+   probe, in the corpus frame (all widths `7n + 28`, i.e. `n` characters of
+   the control face plus the box and the spin buttons):
+
+   | attributes                     | Brave | n  | longest rendering |
+   |--------------------------------|-------|----|-------------------|
+   | none                           |   153 | 20 | -- (`size`)       |
+   | `min=1 max=9`                  |    35 |  1 | `9`               |
+   | `min=1 max=10`                 |    42 |  2 | `10`              |
+   | `min=-1 max=10`                |    42 |  2 | `-1` / `10`       |
+   | `min=-10 max=-1`               |    49 |  3 | `-10`             |
+   | `min=-999 max=999`             |    56 |  4 | `-999`            |
+   | `min=0 max=999999`             |    70 |  6 | `999999`          |
+   | `min=1 max=1000000000000`      |   119 | 13 | thirteen digits   |
+   | `min=0.5 max=1.5`              |    49 |  3 | `0.5`             |
+   | `min=1.0 max=2.0`              |    49 |  3 | `1.0`             |
+   | `min=-100.25 max=0`            |    77 |  7 | `-100.25`         |
+   | `min=1 max=10 step=0.01`       |    63 |  5 | `10.00`           |
+   | `min=0 max=1 step=0.001`       |    63 |  5 | `0.001`           |
+   | `min=0 max=100 step=0.5`       |    63 |  5 | `100.0`           |
+   | `min=0 max=100 step=1.0`       |    63 |  5 | `100.0`           |
+   | `min=0 max=10 step=0.25`       |    63 |  5 | `10.00`           |
+   | `min=10 max=1` (inverted)      |    42 |  2 | `10`              |
+   | `min=0 max=0`                  |    35 |  1 | `0`               |
+
+   Three things fall out of that table that a spec reading does not give:
+
+   - **Both bounds are needed.** `max=100` alone and `min=0` alone are both
+     153, so this is not \"whichever bound exists\".
+   - **The FRACTION is the widest of the three literals, not of the step
+     alone.** `min=0.5 max=1.5` carries no `step` and is still three
+     characters wide, and `step=1.0` widens `min=0 max=100` from three
+     characters to five. So the decimal places are `max` over the step's,
+     the min's and the max's own written fractions -- which is why this
+     works on the LITERALS and not on parsed doubles.
+   - **`step=any` opts out entirely** (measured: `min=1 max=10 step=any` is
+     153), and a `step` that is not a number is simply ignored rather than
+     opting out (Blink's own comment says as much; `step=2` is two
+     characters, the same as no step).
+
+   `size` is not consulted at all: `<input type=number size=2>` and
+   `size=40` are both 153, and with bounds both are the bounds' width."
+  [node]
+  (let [attrs (:attrs node)
+        step (some-> (:step attrs) str)]
+    (when-not (and step (= "any" (str/lower-case step)))
+      (let [mn (strict-number-attr (some-> (:min attrs) str))
+            mx (strict-number-attr (some-> (:max attrs) str))]
+        (when (and mn mx)
+          (let [step-frac (count (nth (or (strict-number-attr step) ["" "" ""]) 2))
+                decimals (max step-frac (count (nth mn 2)) (count (nth mx 2)))
+                rendered (fn [[sign int-digits _]]
+                           (+ (count sign) (count int-digits)
+                              (if (pos? decimals) (inc decimals) 0)))]
+            (max (rendered mn) (rendered mx))))))))
+
 (def ^:private textarea-default-cols
   "HTML's own default `cols` for a `<textarea>`, the attribute that sizes
    it. `size` -- which this file used to read for a textarea too -- is not
@@ -8207,6 +8314,50 @@
               ;; which is not a CSS fact and is not derivable from the
               ;; document -- so the engine is correct exactly while the
               ;; nominal-character term wins, and narrow otherwise.
+              ;;
+              ;; `::file-selector-button` is the same cut arriving from the
+              ;; author's side, and 2026-08-06 measured the whole of it so
+              ;; the next round does not have to. The pseudo-element styles
+              ;; the shadow `<button>`, and BOTH of the control's own
+              ;; dimensions are computed from that button's box:
+              ;;
+              ;;   width  = max(ceil(34 x advance("0")),
+              ;;                ceil(button border box) + 4 + ceil(label))
+              ;;   height = max(button MARGIN box, the label's 21px line)
+              ;;
+              ;; measured against seven declarations on the pseudo-element
+              ;; (control box, then the button's own computed box):
+              ;;
+              ;;   declaration          control    button
+              ;;   (none)               253x27     108.656x27
+              ;;   padding: 0           253x25      96.656x25
+              ;;   padding: 5px         253x35     114.656x35
+              ;;   padding: 20px        261x65     136.656x65
+              ;;   padding: 40px        301x105    176.656x105
+              ;;   padding: 0 20px      261x25     136.656x25
+              ;;   border: 5px          253x33     114.656x33
+              ;;   margin: 12px         253x51     108.656x27
+              ;;   font-size: 30px      349x51     224.500x51
+              ;;   width: 300px         253x27     300x27
+              ;;   height: 80px         253x80     108.656x80
+              ;;   display: none        253x21     --
+              ;;
+              ;; Two of those rows are rules a spec reading would miss: a
+              ;; `margin` on the button counts toward the control's HEIGHT
+              ;; and not toward its width, and an explicit `width` on the
+              ;; button does not reach the control's intrinsic width at all
+              ;; (the button overflows instead).
+              ;;
+              ;; The HEIGHT half is derivable here and the WIDTH half is
+              ;; not, which is why neither is implemented rather than half.
+              ;; The width's second term is `ceil(92.656 + padding + border)
+              ;; + 4 + ceil(119.313)`, and those two numbers are this
+              ;; machine's Japanese UA strings -- writing them down is the
+              ;; measurement of a UI language that round forty-five already
+              ;; refused for the same control. `:form/file-selector-button-
+              ;; padding-grows-the-control` therefore stays red at 253x27
+              ;; against Brave's 261x65: `input w` -8, `input h` -38, `p h`
+              ;; -38 and 15 paint points, all of them one case.
               (= "file" input-type)
               (+ (long (Math/ceil (* char-w file-input-default-chars))) inset-x)
 
@@ -8219,11 +8370,25 @@
               ;; is 7, and why charging `avg * n` alone would have made every
               ;; input 5px narrow at exactly the moment the average stopped
               ;; being 6% too wide.
-              (+ (long (Math/ceil
-                        (+ (* avg-w (parse-int (get-in child [:attrs :size])
-                                               inline-atomic-default-input-chars))
-                           advance-slack)))
-                 inset-x)))
+              ;;
+              ;; A `type="number"` with BOTH bounds is the same formula with
+              ;; a different character count and one added widget: it
+              ;; reserves room for the longest number it can hold rather
+              ;; than for `size` (which HTML does not apply to it at all),
+              ;; plus its spin buttons. See number-input-preferred-chars for
+              ;; the eighteen shapes behind the count and
+              ;; number-input-spin-width for the seven fonts behind the 15;
+              ;; a number field with no bounds takes neither and is exactly
+              ;; a text field, which is measured too.
+              (let [bounded (when (= "number" input-type)
+                              (number-input-preferred-chars child))]
+                (+ (long (Math/ceil
+                          (+ (* avg-w (or bounded
+                                          (parse-int (get-in child [:attrs :size])
+                                                     inline-atomic-default-input-chars)))
+                             advance-slack)))
+                   (if bounded number-input-spin-width 0)
+                   inset-x))))
 
           ;; A `<textarea>` is `cols` characters (HTML's own attribute, and
           ;; its own default of 20) PLUS a reserved vertical-scrollbar
