@@ -834,11 +834,11 @@ same 711 cases; the fourth adds this round's nine new cases.
 | axis | 711, base engine | 711, after | 720, after |
 |---|---|---|---|
 | line structure | 679/683 | **679/683** | 688/692 |
-| geometry (boxes) | 2315/2331 | **2316/2331** | 2343/2359 |
+| geometry (boxes) | 2315/2331 | **2316/2331** | 2334/2349 |
 | geometry (clean cases) | 697/711 | **698/711** | 707/720 |
-| paint order | 17713/17762 | **17713/17762** | 17896/17945 |
+| paint order | 17713/17762 | **17713/17762** | 17938/17987 |
 | paint order (clean cases) | 699/711 | **699/711** | 708/720 |
-| computed style (values) | 32713/32745 | **32724/32745** | 33150/33182 |
+| computed style (values) | 32713/32745 | **32724/32745** | 32976/32997 |
 | computed style (cases clean) | 688/711 | **699/711** | 708/720 |
 | cascade-attributed residual | 31 | **20** | 20 |
 
@@ -847,7 +847,9 @@ same 711 cases; the fourth adds this round's nine new cases.
 intended one**: `:layer/revert-layer-rolls-back-to-the-previous-layer`,
 800×20 → 200×20, which is Brave's own number. Nothing else moved a pixel
 in 711 cases. That is the whole geometry delta — the other ten divergences
-are colours, which only the computed-style axis can see.
+are colours, which only the computed-style axis can see. Diffed again
+between the second and third columns: the nine new cases add nine new box
+lists and **change none of the 711 that were already there**.
 
 #### `@supports` needed a support oracle, not a parser change
 
