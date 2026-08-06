@@ -776,6 +776,132 @@
   [white-space]
   (not (contains? #{"nowrap" "pre"} white-space)))
 
+(def ^:private soft-hyphen
+  "U+00AD SOFT HYPHEN, the character an author writes as `&shy;`. Written
+   as a code point rather than as a literal because it is invisible in
+   source.
+
+   It renders nothing and advances nothing where it sits -- measured in
+   Brave 151, 2026-08-06, in the conformance harness's 14px monospace page:
+   `super&shy;cali` at 300px is 63 wide, exactly the nine characters around
+   it, and `ab&shy;cd` at 90px is 28. What it is, is a conditional break
+   opportunity."
+  (str (char 0x00ad)))
+
+(def ^:private soft-hyphen-pattern (re-pattern soft-hyphen))
+
+(def ^:private inserted-hyphen
+  "U+2010 HYPHEN -- the glyph a browser DRAWS at the end of a line it broke
+   at a soft hyphen. It is not U+002D HYPHEN-MINUS, and the difference is
+   not academic: measured in Brave 151 on 2026-08-06 in the harness's 14px
+   monospace page, `-` is 7px wide and U+2010 is **14** (the monospace face
+   has no U+2010, and what the fallback supplies is not fixed-pitch), while
+   in 14px Arial both are 4.67. Both of Chromium's hyphenating paths report
+   the wider one: `super&shy;califragilistic` at 90px gives a first line of
+   35 + **14**, and `hyphens: auto` splitting `hyphenation` gives 42 + 14.
+
+   It is in NEITHER document -- it is a glyph the layout inserts -- which
+   is why it is appended to the text of the line it ends rather than being
+   split out of a token."
+  (str (char 0x2010)))
+
+(defn- soft-hyphen-parts
+  "Splits `word` at every soft hyphen, KEEPING the character at the end of
+   the part it follows, and folding away any part that is nothing but soft
+   hyphens.
+
+     `super<shy>califragilistic`  ->  [`super<shy>` `califragilistic`]
+     `alphabetagam<shy>`          ->  [`alphabetagam<shy>`]
+     `<shy>abc`                   ->  [`<shy>abc`]
+
+   Keeping the character rather than stripping it is what makes a word that
+   never breaks byte-identical to what this engine produced before soft
+   hyphens existed -- a host measures it at zero (the oracle's own advance
+   table says 0 for U+00AD, measured) and paints nothing for it, exactly as
+   a browser does. Only a word that ACTUALLY breaks changes, and there the
+   change is the inserted glyph.
+
+   A trailing soft hyphen yields one part, i.e. no opportunity. SCOPE CUT,
+   measured in Brave 151 on 2026-08-06: `alphabetagam&shy; delta` in a 90px
+   box is 40 tall with line one 84 wide plus a 14px hyphen HANGING past the
+   90px edge, and `delta` on line two -- the break is the ordinary space
+   break, and the hyphen is drawn anyway because the line happens to end
+   right after a soft hyphen. This engine takes the same space break and
+   draws no hyphen: same line structure, different paint."
+  [word]
+  (let [raw (loop [from 0 out []]
+              (if-let [i (str/index-of word soft-hyphen from)]
+                (recur (inc i) (conj out (subs word from (inc i))))
+                (let [tail (subs word from)]
+                  (if (= "" tail) out (conj out tail)))))]
+    (reduce (fn [acc p]
+              (if (and (seq acc)
+                       (str/blank? (str/replace (peek acc) soft-hyphen-pattern "")))
+                (conj (pop acc) (str (peek acc) p))
+                (conj acc p)))
+            []
+            raw)))
+
+(defn- soft-hyphen-lines
+  "Greedy line packing with soft-hyphen break opportunities INSIDE a word,
+   for the single-text-child path (layout-text). The inline-run path has
+   its own copy of the same rule, in inline-line-breaker, because the two
+   pack different units -- words joined by a space here, styled fragments
+   with box edges there.
+
+   Same greedy rule as text-lines-measured, one atom at a time, where an
+   atom is a whole word or a soft-hyphen part of one: add it if the line
+   still fits, otherwise close the line -- and if the atom we could not
+   add is one a soft hyphen introduced, the closed line grows by
+   `inserted-hyphen`.
+
+   Measured in Brave 151, 2026-08-06, in the harness's 14px monospace /
+   20px line page (7px per character), every row a PAIR so the rule can be
+   told from the shape:
+
+   | markup                                  | box   | Brave                     |
+   |-----------------------------------------|-------|---------------------------|
+   | `super&shy;califragilistic`             | 90px  | 40 tall, 35+14 then 105   |
+   | `supercalifragilistic`                  | 90px  | 20 tall, one 140px line   |
+   | the first under `hyphens: none`         | 90px  | 20 tall, one 140px line   |
+   | `super&shy;cali`                        | 300px | 20 tall, 63 wide          |
+   | `su&shy;per&shy;cali&shy;fragi&shy;listic` | 90px | 40 tall, 63+14 then 77 |
+   | `aaa&shy;bbb&shy;ccccccccccccccc`       | 120px | 40 tall, 42+14 then 105   |
+   | `aaaaaaaaaaaa&shy;bb`                   | 90px  | 40 tall, 84+14 then 14    |
+
+   The fourth row is the one that says the character costs nothing where
+   it sits, the fifth and sixth that greedy takes the LAST opportunity that
+   fits rather than the first, and the last that a hyphenated line may
+   overflow its box (84+14 is 98 in a 90px box).
+
+   SCOPE CUT, measured, and the one shape this rule gets wrong: a
+   hyphenated line has to FIT, and when it does not, Blink falls back to an
+   earlier opportunity instead. `alpha bravo&shy;charlie` at 91px is
+   77 + 14 = 91 on line one and `charlie` on line two -- which this
+   produces -- but the SAME markup at 88px is `alpha` alone on line one and
+   `bravocharlie` (84, unhyphenated) on line two, where this engine still
+   breaks at the soft hyphen and overflows to 91. The threshold is exactly
+   the inserted glyph's width, which is what identifies the rule; what it
+   needs that this loop does not have is the ability to reject an
+   opportunity and re-pack from the previous one."
+  [line-w max-w-of hyphens text]
+  (let [max-w-of (if (fn? max-w-of) max-w-of (constantly max-w-of))
+        atoms (->> (str/split (str text) #"\s+")
+                   (remove str/blank?)
+                   (map-indexed (fn [wi w]
+                                  (map-indexed (fn [pi p] {:text p :space? (and (pos? wi) (zero? pi))
+                                                           :shy? (pos? pi)})
+                                               (if (= "none" hyphens) [w] (soft-hyphen-parts w)))))
+                   (apply concat)
+                   vec)]
+    (loop [as atoms cur nil lines []]
+      (if-let [a (first as)]
+        (let [cand (str cur (when (and cur (:space? a)) " ") (:text a))]
+          (if (or (nil? cur) (<= (line-w cand) (max-w-of (count lines))))
+            (recur (rest as) cand lines)
+            (recur as nil (conj lines (if (:shy? a) (str cur inserted-hyphen) cur)))))
+        (if cur (conj lines cur) lines)))))
+
 (defn- break-long-word
   "Splits a word that cannot fit `max-w` into the largest pieces that do --
    real CSS `overflow-wrap: break-word` / `word-break: break-all`, which is
@@ -1502,10 +1628,19 @@
                                         (break-long-word line-w content-w %))
                                      ls))
                         ls))
+        ;; A soft hyphen is a break opportunity text-lines/
+        ;; text-lines-measured cannot express -- both pack whole WORDS --
+        ;; so a segment that actually contains one goes through
+        ;; soft-hyphen-lines instead. Gated on the character being present
+        ;; rather than on the property, so text with no soft hyphen in it
+        ;; keeps the packing it has always had, byte for byte, whatever
+        ;; `hyphens` says.
+        shy? (fn [s] (boolean (str/index-of (str s) soft-hyphen)))
         wrap (fn [max-w-of s]
-               (if measured?
-                 (text-lines-measured line-w max-w-of s)
-                 (text-lines char-w (max-w-of 0) s)))
+               (cond
+                 (shy? s) (soft-hyphen-lines line-w max-w-of (:hyphens text-style) s)
+                 measured? (text-lines-measured line-w max-w-of s)
+                 :else (text-lines char-w (max-w-of 0) s)))
         ;; Each `[segment re-wrap?]` starts at a FORCED break -- the
         ;; block's own beginning, or a preserved newline -- which is the
         ;; distinction `text-indent: ... each-line` turns on.
@@ -3127,6 +3262,12 @@
    :text-overflow (style node :text-overflow)
    :overflow-wrap (or (style node :overflow-wrap) (style node :word-wrap))
    :word-break (style node :word-break)
+   ;; Whether a U+00AD SOFT HYPHEN in this element's text is a break
+   ;; opportunity. `manual` is the initial value and honours it, `none`
+   ;; suppresses it, and `auto` adds the browser's own dictionary on top --
+   ;; see inline-line-breaker's `shy` pass, which implements the first two
+   ;; and measures the third as a scope cut.
+   :hyphens (some-> (style node :hyphens) str str/lower-case str/trim)
    ;; CSS Color Module Level 4's `opacity`: "Opacity values outside the
    ;; range [0,1]... are clamped to the range [0,1] in computed values."
    ;; Previously read raw via parse-dbl with no clamp -- an author value
@@ -7472,6 +7613,16 @@
    where every browser's ~20ch default text-field width comes from."
   20)
 
+(def ^:private file-input-default-chars
+  "How many nominal `0` glyphs of its own font a file input reserves for
+   the filename it may one day show. Blink's own
+   `kDefaultWidthNumChars`, and the only term of that control's width
+   that is a property of the FONT rather than of the browser's UI
+   language -- see the `file` branch of atomic-intrinsic-width for the
+   eight fonts this was measured against and for the localized term it
+   deliberately does not carry."
+  34)
+
 (def ^:private textarea-default-cols
   "HTML's own default `cols` for a `<textarea>`, the attribute that sizes
    it. `size` -- which this file used to read for a textarea too -- is not
@@ -7784,8 +7935,53 @@
 
           (= :input tag)
           (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
-            (if (contains? #{"checkbox" "radio"} input-type)
+            (cond
+              (contains? #{"checkbox" "radio"} input-type)
               13
+
+              ;; A FILE input is not sized from `size` at all -- HTML does
+              ;; not apply that attribute to it, and measured in Brave 151
+              ;; (2026-08-06) `<input type="file" size="5">` is the same 253
+              ;; as one with no `size`. It is `file-input-default-chars`
+              ;; nominal `0` glyphs of its own font, rounded up once:
+              ;;
+              ;;   font                     0-glyph x 34   Brave's width
+              ;;   Arial 13.3333 (the UA control face)  252.063   253
+              ;;   Arial 10                             189.094   190
+              ;;   Arial 16                             302.547   303
+              ;;   Arial 20                             378.188   379
+              ;;   Arial 40                             756.375   757
+              ;;   serif 13.3333                        266.500   267
+              ;;   monospace 20                         340.000   340
+              ;;   monospace 28                         476.000   476
+              ;;
+              ;; SCOPE CUT, and it is the reason this was left open for two
+              ;; rounds. Blink's own number is the MAX of that and a second
+              ;; term made of two LOCALIZED user-agent strings: the shadow
+              ;; button's label, plus 4px, plus the "no file selected"
+              ;; label. Read out of the UA shadow tree over CDP on
+              ;; 2026-08-06, this machine's browser is in Japanese, not the
+              ;; en-US an earlier round assumed:
+              ;;
+              ;;   button `ファイルを選択`  108.656 (92.656 of text + 8 + 8)
+              ;;   label  `選択されていません` 119.313
+              ;;   gap between them            4.000
+              ;;
+              ;; 108.656 + 4 + 119.313 = 231.97, which LOSES to 252.063 --
+              ;; so 253 is this branch's answer for the right reason, not a
+              ;; coincidence. The other term does win at some fonts and is
+              ;; then not reproducible here: at `font-family: monospace;
+              ;; font-size: 14px` the CJK label is full-width, the second
+              ;; term is 113.313 + 4 + 126 = 243.313, and Brave reports 244
+              ;; against this branch's 238. Implementing that would mean
+              ;; carrying a table of every UA string in every UI language,
+              ;; which is not a CSS fact and is not derivable from the
+              ;; document -- so the engine is correct exactly while the
+              ;; nominal-character term wins, and narrow otherwise.
+              (= "file" input-type)
+              (+ (long (Math/ceil (* char-w file-input-default-chars))) inset-x)
+
+              :else
               ;; `size` AVERAGE characters plus one glyph's worth of slack,
               ;; rounded up once at the end -- Blink's own formula, measured
               ;; against 1,540 `<input size=n>` widths (see avg-advance and
@@ -9886,6 +10082,51 @@
       (mapv #(long (* % (/ content-w total))) natural)
       natural)))
 
+(defn- collapsed-track-offsets
+  "Where each track starts in a stack of `sizes` separated by `gap`, once
+   the indices in `collapsed` have been zeroed and each of them has taken
+   ONE adjacent gap away with it.
+
+   The rule is one rule for both axes -- `visibility: collapse` on a row is
+   the same track removal as on a column, turned ninety degrees -- and
+   WHICH gap goes is measured rather than assumed. Brave 151, 2026-08-06,
+   three 26px rows at `border-spacing: 10px` and three 18px columns at the
+   default 2px, with the collapsed track in each of the three positions:
+
+     collapsed   row y=        column x=      table h / w
+     first       10, 10, 46    2,  2, 22      82 / 42
+     middle      10, 36, 46    2, 20, 22      82 / 42
+     last        10, 46, 72    2, 22, 40      82 / 42
+
+   So the gap BEFORE the collapsed track is the one that goes -- EXCEPT
+   for track 0, where the space in front is the table's own leading
+   border-spacing, which belongs to the table rather than to a track and
+   stays put (the first row is still at y=10, the first column still at
+   x=2); there the gap AFTER it goes instead. All six shapes come to the
+   same total, and that is the invariant worth stating: exactly one track
+   and exactly one gap leave together, whatever the position.
+
+   This engine had the middle and last cases right and the FIRST case
+   wrong from the day the row axis landed until 2026-08-06: it dropped the
+   gap after track i whenever track i+1 was collapsed, which says nothing
+   at all about a collapsed track 0, so a table whose first row collapsed
+   came back 88 tall against Brave's 82 with its second row 10px low. The
+   column axis is what found it, by asking the same question sideways.
+
+   Collapsed tracks get an offset too -- they sit flush against whatever
+   precedes them, which is exactly where Brave reports their zero-sized
+   boxes."
+  [sizes gap collapsed]
+  (vec (reductions
+        (fn [at i]
+          (+ at (nth sizes i 0)
+             (if (or (collapsed (inc i))
+                     (and (zero? i) (collapsed 0)))
+               0
+               gap)))
+        0
+        (range (max 0 (dec (count sizes)))))))
+
 (defn- layout-table
   "Lays out a `<table>` as rows of cells: columns sized by their widest
    cell (table-column-widths), rows as tall as their tallest cell, cells
@@ -9935,26 +10176,46 @@
    an anonymous TABLE box around a stray `display: table-cell` outside any
    table (it lays out as an ordinary block instead -- measured in Brave,
    two such divs sit side by side in a generated table),
-   `visibility: collapse` on a COLUMN (the row and row-group half of that
-   property IS implemented -- see `collapsed-row?` below), and full
-   border-conflict resolution under `border-collapse` (widths only -- see
-   collapse? below).
+   and full border-conflict resolution under `border-collapse` (widths
+   only -- see collapse? below).
 
-   The column half is the same track rule as the row half turned ninety
-   degrees, measured in Brave 151 on 2026-08-06: a collapsed `<col>` has
-   width 0, the cells in it have width 0 and their full row height, the
-   columns after it shift left, and one border-spacing goes with it --
-   three 16px columns with the middle one collapsed give a 32px table with
-   the third column at x=16, and under separate borders the table is 38
-   (2 + 16 + 0 + 0 + 2 + 16 + 2), the same `one gap goes, one stays`
-   pattern the rows use. What it needs that the row half does not is a
-   change to the table's own USED WIDTH: a `width: 300px` table whose three
-   declared 100px columns include one collapsed column renders at 200, so
-   the collapse has to run before the table's width is final rather than
-   after it, which is the reverse of the row axis (there, a declared table
-   HEIGHT is divided over every row INCLUDING the collapsed one and only
-   then dropped -- a `height: 100px` table over three rows with one
-   collapsed is 66.67 tall, i.e. two thirds of 100).
+   `visibility: collapse` is implemented on BOTH axes -- rows and row
+   groups through `collapsed-row?`, columns and column groups through
+   `collapsed-cols`. The two share one track rule (collapsed-track-offsets)
+   and differ in exactly one thing, which is why the column half landed a
+   round later: what the collapse does to the table's own OUTER SIZE.
+
+   Measured in Brave 151 on 2026-08-06:
+
+   - **Down the rows, a declared HEIGHT is divided over every row
+     INCLUDING the collapsed one, and only then is that row dropped.** A
+     `height: 100px` table over three rows with the middle one collapsed
+     is 66.67 tall -- two thirds of 100, not 100.
+   - **Across the columns, a declared WIDTH is REDUCED by the collapsed
+     column.** A `width: 300px` table whose three declared 100px columns
+     include one collapsed column is 200.66 wide, its two surviving
+     columns still 97.31 and 97.34 -- the same numbers the uncollapsed
+     control gives them. The auto-column form says it again: the same
+     table with three `auto` columns is 300 wide with columns 94 / 103.58
+     / 94.42 uncollapsed, and 194.42 wide with 94 / 0 / 94.42 collapsed.
+
+   The second reading is the one that makes the ordering easy rather than
+   hard, and it took the measurement to see it: the collapsed column is
+   sized EXACTLY as it would have been, surplus distribution and all, and
+   only then is its width (plus one border-spacing) taken off the table.
+   So the collapse runs AFTER the column widths are final, like the row
+   half -- not before, which is what a `300px -> 200` reading alone
+   suggests. The widest-column form confirms it from the other side: a
+   collapsed column holding a 12-character word still measures 86px wide
+   and the table goes 112 -> 24, i.e. 112 - 86 - 2.
+
+   Three more, each measured because a spec reading leaves it open:
+   `visibility: collapse` on the TABLE collapses every row and leaves the
+   width alone (42x4 against the control's 42x50), so the column test is
+   self-or-column-group and NOT self-or-ancestor the way the row test is;
+   the same declaration on a `<td>` collapses nothing (it is `hidden`
+   there, and the table stays 62 wide); and a collapsed `<col>` reports a
+   0x0 box where its siblings report `width x rows-height`.
    Before this existed a table rendered as one stacked column of every cell
    in document order -- the two conformance cases scored 0/2 -- so this is
    a large step from nothing, not a complete table implementation.
@@ -10203,9 +10464,58 @@
                                                     :when (or (nth col-widths i nil)
                                                               (nth declared-cols i nil))]
                                                 i))))
-        col-offsets (vec (reductions (fn [acc cw] (+ acc cw spacing))
-                                     lead-x
-                                     widths))
+        ;; ---- `visibility: collapse` on a column or a column group ----
+        ;;
+        ;; Read here, and applied to the table's own width right below,
+        ;; because a collapsed column is sized EXACTLY as a visible one --
+        ;; declared width, shared surplus and all -- and only then removed.
+        ;; See the docstring for the six measurements that say so, and
+        ;; collapsed-track-offsets for the gap half of the rule.
+        ;;
+        ;; Self-or-COLUMN-GROUP, deliberately not self-or-ancestor: the row
+        ;; test above also fires when the TABLE is collapsed, because a
+        ;; collapsed table has no rows left, but measured it still has its
+        ;; full WIDTH (42x4 against the control's 42x50). A `<td>`'s own
+        ;; `visibility: collapse` collapses nothing either -- outside
+        ;; row/row-group/column/column-group the value is plain `hidden`,
+        ;; which is what the two controls beside the corpus cases say.
+        collapsed-cols (into #{}
+                             (comp (filter (fn [c]
+                                             (or (= "collapse" (:visibility (node-style (:el c) theme)))
+                                                 (and (:group c)
+                                                      (= "collapse" (:visibility (node-style (:group c) theme)))))))
+                                   (map :col)
+                                   (filter #(< % n-cols)))
+                             columns)
+        ;; What leaves with them: their whole width, and one border-spacing
+        ;; each. Under `border-collapse: collapse` the spacing is already 0,
+        ;; so only the width comes off -- measured, three 18px collapsed-
+        ;; border columns with the middle one collapsed give 36 against the
+        ;; control's 54.
+        col-shrink (if (seq collapsed-cols)
+                     (+ (reduce + 0 (map #(nth widths % 0) collapsed-cols))
+                        (* spacing (count collapsed-cols)))
+                     0)
+        ;; The widths a BOX is reported at. The widths above stay as they
+        ;; were, because they are also what every cell in the column is
+        ;; LAID OUT at: measured, a collapsed column holding a 12-character
+        ;; word leaves its row 22 tall, exactly as the uncollapsed control
+        ;; does, so the cell is not re-wrapped inside a zero-width box.
+        used-widths (if (seq collapsed-cols)
+                      (vec (map-indexed (fn [i cw] (if (collapsed-cols i) 0 cw)) widths))
+                      widths)
+        w (max 0 (- w col-shrink))
+        content-w (max 0 (- content-w col-shrink))
+        col-offsets (mapv #(+ lead-x %)
+                          (collapsed-track-offsets used-widths spacing collapsed-cols))
+        ;; The span from the first of `n` columns to the last one's right
+        ;; edge, gaps included and dropped gaps excluded. Identical to
+        ;; `sum(widths) + (n-1)*spacing` whenever nothing is collapsed,
+        ;; which is what it used to be spelled as.
+        col-span-w (fn [start n]
+                     (let [last-i (+ start (dec (max 1 n)))]
+                       (max 0 (- (+ (nth col-offsets last-i 0) (nth used-widths last-i 0))
+                                 (nth col-offsets start 0)))))
         ;; The caption sits in the TABLE WRAPPER box: it spans the table's
         ;; whole BORDER-box width (so a table border does not indent it) and
         ;; goes above or below everything else according to `caption-side`,
@@ -10364,18 +10674,24 @@
         row-heights (if (seq collapsed)
                       (vec (map-indexed (fn [i h] (if (collapsed i) 0 h)) row-heights))
                       row-heights)
-        ;; The border-spacing BEFORE a collapsed row goes with it; the one
-        ;; after it stays. Measured with `border-spacing: 10px` over
-        ;; three 22px rows with the middle one collapsed: Brave puts the
-        ;; rows at y=10, y=32 (the collapsed one, flush against the first
-        ;; row's bottom edge) and y=42, and the row group is 54 tall --
-        ;; i.e. exactly the two visible rows and ONE gap, with the
-        ;; collapsed row's zero-height box sitting at the top of that gap.
-        ;; With `border-collapse: collapse` (spacing 0) the same rule gives
-        ;; the corpus case its 44.
+        ;; One border-spacing goes with each collapsed row -- see
+        ;; collapsed-track-offsets, which is the same rule the columns use
+        ;; and which carries the measurement for all three positions. This
+        ;; used to be spelled inline here as "the gap AFTER row i is 0 when
+        ;; row i+1 is collapsed", which is right for a collapsed middle or
+        ;; last row and says nothing about a collapsed FIRST one; the
+        ;; column axis found the gap. With `border-collapse: collapse`
+        ;; (spacing 0) the rule gives the corpus case its 44 either way.
+        row-offsets (collapsed-track-offsets row-heights spacing collapsed)
+        ;; A row's share of its GROUP's height: its own advance to the next
+        ;; row, and for the last row its height plus the trailing spacing
+        ;; the group op takes off again once (see `:h (max 0 (- h spacing))`
+        ;; there). Keeping that trailing term is what makes the group's
+        ;; height the rows' extent exactly, collapsed rows and all.
         row-advance (fn [i]
-                      (+ (nth row-heights i 0) (if (collapsed (inc i)) 0 spacing)))
-        row-offsets (vec (reductions + 0 (map row-advance (range (count row-heights)))))
+                      (if (< (inc i) (count row-heights))
+                        (- (nth row-offsets (inc i) 0) (nth row-offsets i 0))
+                        (+ (nth row-heights i 0) spacing)))
         ;; The rows' own extent, gaps included but with no trailing one:
         ;; `row-offsets` carries the gap that FOLLOWS each row, so the last
         ;; row's own height is what closes it.
@@ -10494,11 +10810,24 @@
                                                      ops)
                                       ;; the cell's OWN box spans every row
                                       ;; it covers, even though its content
-                                      ;; is centred inside that box
+                                      ;; is centred inside that box -- and
+                                      ;; every COLUMN it covers, at the
+                                      ;; widths those columns are reported
+                                      ;; at rather than the ones the cell
+                                      ;; was laid out inside. The two differ
+                                      ;; only where a column collapsed:
+                                      ;; measured, a cell in a collapsed
+                                      ;; column is 0 wide and keeps its
+                                      ;; full row height, and a `colspan`
+                                      ;; crossing one needs no special case
+                                      ;; -- 20 + a dropped gap + 0 is the 20
+                                      ;; Brave reports for it.
                                       (mapv (fn [op]
                                               (if (and (= :node (:draw/op op))
                                                        (= cell-id (:id op)))
-                                                (assoc op :y row-y :h cell-h)
+                                                (cond-> (assoc op :y row-y :h cell-h)
+                                                  (seq collapsed-cols)
+                                                  (assoc :w (col-span-w (:col c) (:colspan c))))
                                                 op))))))
                              cells)]
              {:draws (vec (concat draws row-bg (when row-op [row-op]) cell-draws))
@@ -10540,26 +10869,42 @@
         ;; a `<col style="width:120px">` reports 120x22 next to its table's
         ;; own 186x26, and this engine reported no box at all.
         rows-h rows-extent
-        col-span-w (fn [start n]
-                     (+ (reduce + 0 (map #(nth widths % 0) (range start (+ start n))))
-                        (* spacing (max 0 (dec n)))))
         col-ops (vec (for [c columns
-                           :when (and (:first? c) (< (:col c) (count widths)))]
+                           :when (and (:first? c) (< (:col c) (count widths)))
+                           ;; A COLLAPSED column's `<col>` is 0x0, not
+                           ;; 0-wide and full height: measured in Brave, its
+                           ;; two visible siblings report 18x22 and it
+                           ;; reports 0x0 at the x its zero-width column
+                           ;; starts at. The `<colgroup>` around it keeps
+                           ;; its own full height and the table's reduced
+                           ;; width (38x22 against the control's 58x22).
+                           :let [gone? (collapsed-cols (:col c))]]
                        (merge {:draw/op :node :id (:node/id (:el c)) :tag (:tag (:el c))
                                :x (+ content-x (nth col-offsets (:col c) 0)) :y rows-y0
-                               :w (col-span-w (:col c) (:span c)) :h rows-h
+                               :w (col-span-w (:col c) (:span c)) :h (if gone? 0 rows-h)
                                :class (attr (:el c) :class) :listeners (listeners (:el c))
                                :opacity opacity}
                               (style-passthrough (node-style (:el c) theme)))))
         colgroup-ops (vec (for [[g cs] (group-by :group columns)
                                 :when (and g (not= g (:el (first cs))))
                                 :let [lo (apply min (map :col cs))
-                                      hi (apply max (map :col cs))]
+                                      hi (apply max (map :col cs))
+                                      ;; a group whose columns are ALL
+                                      ;; collapsed is 0x0, exactly like a
+                                      ;; single collapsed `<col>`: measured
+                                      ;; in Brave, a `<colgroup
+                                      ;; style="visibility: collapse">` over
+                                      ;; one column reports 0x0 where the
+                                      ;; group beside it reports 38x22. A
+                                      ;; group that keeps even one column
+                                      ;; keeps its full height and loses
+                                      ;; only the collapsed columns' width.
+                                      all-gone? (every? #(collapsed-cols (:col %)) cs)]
                                 :when (< lo (count widths))]
                             (merge {:draw/op :node :id (:node/id g) :tag (:tag g)
                                     :x (+ content-x (nth col-offsets lo 0)) :y rows-y0
                                     :w (col-span-w lo (inc (- (min hi (dec (count widths))) lo)))
-                                    :h rows-h
+                                    :h (if all-gone? 0 rows-h)
                                     :class (attr g :class) :listeners (listeners g)
                                     :opacity opacity}
                                    (style-passthrough (node-style g theme)))))
@@ -11629,6 +11974,11 @@
            ;; plain span breaks (the space is still the span's, and the
            ;; span now permits it).
            :white-space (or (:white-space st) (:white-space inherited))
+           ;; ...and `hyphens`, carried the same way and for the same
+           ;; reason: the element that CONTAINS a soft hyphen is the one
+           ;; whose value decides whether it is a break opportunity. See
+           ;; inline-tokens' `shy` split.
+           :hyphens (or (:hyphens st) (:hyphens inherited))
            ;; carried for the same reason it is carried down the block
            ;; path (see layout-node): `caption-side` inherits, and the
            ;; element that reads it is the TABLE, which may be several
@@ -12264,7 +12614,32 @@
           (let [text (apply-text-transform (:text-transform (:style fr)) (str (:text fr)))
                 lead? (boolean (re-find #"^\s" text))
                 trail? (boolean (re-find #"\s$" text))
-                words (remove str/blank? (str/split text #"\s+"))]
+                ;; A U+00AD SOFT HYPHEN is a break opportunity INSIDE a
+                ;; word, so it becomes a TOKEN BOUNDARY here rather than a
+                ;; character the breaker has to find later -- the same
+                ;; shape `<wbr>` already has, and for the same reason: a
+                ;; piece in inline-line-breaker is a substring of its
+                ;; token, so an opportunity that is not a token boundary
+                ;; has nowhere to live.
+                ;;
+                ;; The character stays in the text (see soft-hyphen-parts),
+                ;; so a word that never breaks is packed and merged back
+                ;; into exactly the string it was. `hyphens: none` leaves
+                ;; the word whole and therefore leaves no opportunity at
+                ;; all -- measured, `super&shy;califragilistic` at 90px is
+                ;; 40 tall under the initial `manual` and 20 under `none`,
+                ;; the same single 140px line the markup without the
+                ;; character gives.
+                shy-ok? (not= "none" (:hyphens (:style fr)))
+                split-word (fn [word]
+                             (if shy-ok?
+                               (map-indexed (fn [p s]
+                                              (cond-> {:text s} (pos? p) (assoc :shy? true)))
+                                            (soft-hyphen-parts word))
+                               [{:text word}]))
+                words (vec (mapcat (fn [wi w] (map #(assoc % :wi wi) (split-word w)))
+                                   (range)
+                                   (remove str/blank? (str/split text #"\s+"))))]
             (if (empty? words)
               (recur (rest frs)
                      (if (pos? (count text)) (joined pending (:style fr)) pending)
@@ -12274,17 +12649,25 @@
                      (when trail? (space-of (:style fr)))
                      false
                      (into out
-                           (map-indexed (fn [i word]
-                                          (let [space (if (zero? i)
-                                                        (cond
-                                                          lead? (joined pending (:style fr))
-                                                          :else pending)
-                                                        (space-of (:style fr)))]
+                           (map-indexed (fn [i {word :text wi :wi shy? :shy?}]
+                                          (let [;; a soft-hyphen split is a
+                                                ;; boundary with no space in
+                                                ;; it, so only the FIRST part
+                                                ;; of each word can carry one
+                                                first-of-word? (or (zero? i)
+                                                                   (not= wi (:wi (nth words (dec i)))))
+                                                space (cond
+                                                        (not first-of-word?) nil
+                                                        (zero? wi) (cond
+                                                                     lead? (joined pending (:style fr))
+                                                                     :else pending)
+                                                        :else (space-of (:style fr)))]
                                             (cond-> {:kind :word
                                                      :text word
                                                      :space-before? (some? space)
                                                      :space-style (:style space)
                                                      :space-wrap? (boolean (:wrap? space))
+                                                     :shy-before? (boolean shy?)
                                                      :wbr-before? (and wbr? (zero? i))
                                                      :style (:style fr)
                                                      :owners (:owners fr)
@@ -12571,6 +12954,31 @@
         ;; dragged outside the content edge with it.
         content? (fn [pieces] (boolean (some #(not= :marker (:kind %)) pieces)))
         flush (fn [lines pieces w style] (conj lines {:pieces pieces :w w :style style}))
+        ;; The glyph a line grows by when the break that ends it is a SOFT
+        ;; HYPHEN's: `inserted-hyphen` appended to the last piece, and the
+        ;; pen advanced by its width. Returns `[pieces advance]`.
+        ;;
+        ;; The advance is charged to the line that is being closed, not to
+        ;; the next one, so it lands in that line's `:w` -- which is what
+        ;; `text-align` and the run's max-content width read. Measured in
+        ;; Brave 151 on 2026-08-06 with `text-align: right`, which is the
+        ;; only way to see a line's true right edge: `super&shy;
+        ;; califragilistic` in a 90px box puts `super` at x=41, i.e. the
+        ;; first line is 49 wide (35 + 14) and not 35.
+        ;;
+        ;; A line whose last piece is not ordinary text -- a marker, an
+        ;; atomic inline -- gets nothing. inline-tokens only ever puts
+        ;; `:shy-before?` on a word token, so the piece before it is a word
+        ;; too unless the shy opened the run.
+        hyphenated (fn [pieces]
+                     (let [p (peek pieces)]
+                       (if (and p (:text p) (nil? (:kind p)))
+                         (let [hw (w-of inserted-hyphen (:style p))]
+                           [(conj (pop pieces)
+                                  (assoc p :text (str (:text p) inserted-hyphen)
+                                           :w (+ (:w p) hw)))
+                            hw])
+                         [pieces 0])))
         ;; How much of two owner stacks is the SAME box, not merely the
         ;; same tag with the same declarations: `:idx` is inline-fragments'
         ;; own per-element counter, so `<b>x</b><b>y</b>` closes one box
@@ -12647,6 +13055,14 @@
                                   ;; measures why it does not go through
                                   ;; `:space-wrap?`
                                   (:wbr-before? t) true
+                                  ;; ...and so is a soft hyphen, which
+                                  ;; inline-tokens has already turned into
+                                  ;; a token boundary. Unconditional for
+                                  ;; the same reason `<wbr>` is: the
+                                  ;; opportunity is in the CHARACTER, not
+                                  ;; in a collapsed space whose owner has
+                                  ;; to be consulted.
+                                  (:shy-before? t) true
                                   ;; nothing in front of it to break from
                                   (nil? prev-kind) true
                                   ;; rule 1: the element containing the
@@ -12755,8 +13171,22 @@
                     ;; finished line, and this piece is what it is handed.
                     ;; `:sticky/*` rides along for the same reason again --
                     ;; see the atomic branch of layout-inline-run.
+                    ;;
+                    ;; `:rel` rides along because an atomic inline is not an
+                    ;; owner of ITSELF: a `position: relative` inline box
+                    ;; around this one reaches layout-inline-run through
+                    ;; `:owners`, but this box's own offset lives nowhere
+                    ;; else. inline-fragments computes it (see its `:rel`
+                    ;; branch) and the atomic branch of layout-inline-run
+                    ;; reads it off the PIECE, so leaving it out of this
+                    ;; select-keys dropped the offset silently -- measured
+                    ;; in Brave 151 (2026-08-06), `ab<span style="display:
+                    ;; inline-block; position:relative; left:30px; top:10px">
+                    ;; </span>cd` in a 300px block puts the span at x=44 y=10
+                    ;; where this engine left it at x=14 y=0, and an <img>
+                    ;; with the same declarations is x=44 y=10 as well.
                     piece (fn [x] (cond-> (assoc (select-keys t [:owners :opacity :draw :h :ml :mt
-                                                                 :baseline-offset :valign
+                                                                 :baseline-offset :valign :rel
                                                                  :sticky/st :sticky/w])
                                                  :kind :atomic :x x :w (:w t))
                                     (seq pad-start) (assoc :pad-start pad-start)))]
@@ -12781,9 +13211,20 @@
                                     (:advance t) (assoc :advance (:advance t))
                                     (seq pad-start) (assoc :pad-start pad-start)))]
                 (if (and (content? pieces) opp? (> (+ x sep cluster) content-w))
-                  (let [nx (indent-at (inc (count lines)) false)]
+                  (let [nx (indent-at (inc (count lines)) false)
+                        ;; A line that ENDS at a soft hyphen grows by the
+                        ;; inserted glyph. It is appended to the last piece
+                        ;; rather than emitted as a piece of its own for two
+                        ;; reasons, one of them measured: a piece of its own
+                        ;; would be a second draw-op and therefore a second
+                        ;; WORD to anything reading the ops (the conformance
+                        ;; harness splits an op's text back into words), and
+                        ;; the glyph is not a word -- Brave reports it as
+                        ;; part of the first line's own text run, a 14px
+                        ;; fragment butted against the 35px `super` at x=35.
+                        [pieces hw] (if (:shy-before? t) (hyphenated pieces) [pieces 0])]
                     (recur (rest ts) (inc i) (+ nx open-adv ww) [(piece (+ nx open-adv))]
-                           (flush lines pieces x st) owners))
+                           (flush lines pieces (+ x hw) st) owners))
                   (let [last-piece (peek pieces)
                         merge? (and last-piece
                                     (not= :marker (:kind last-piece))
@@ -17037,6 +17478,7 @@
                      :letter-spacing (:letter-spacing inherited)
                      :word-spacing (:word-spacing inherited)
                      :tab-size (:tab-size inherited)
+                     :hyphens (:hyphens inherited)
                      ;; ...except `text-indent`, which the generated
                      ;; content's OWN block has already applied to its
                      ;; first line: charging it again here would indent a
@@ -17053,6 +17495,7 @@
                    :letter-spacing (:letter-spacing inherited)
                    :word-spacing (:word-spacing inherited)
                    :tab-size (:tab-size inherited)
+                   :hyphens (:hyphens inherited)
                    :indent (:text-indent inherited)}
                   (:text-decoration inherited)
                   (:text-align inherited) (:direction inherited)
@@ -17339,6 +17782,13 @@
                                 :text-transform text-transform :white-space white-space
                                 :text-overflow text-overflow
                                 :overflow-wrap overflow-wrap
+                                ;; `hyphens` inherits, and the element that
+                                ;; CONTAINS a soft hyphen is the one whose
+                                ;; value decides whether it is a break
+                                ;; opportunity -- see soft-hyphen-lines and
+                                ;; inline-tokens, the two packers that read
+                                ;; it.
+                                :hyphens (or (:hyphens st) (:hyphens inherited))
                                 :letter-spacing letter-spacing :word-spacing word-spacing
                                 :text-indent text-indent :tab-size tab-size
                                 ;; `caption-side` inherits in real CSS and
