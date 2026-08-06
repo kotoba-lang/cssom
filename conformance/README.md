@@ -828,54 +828,60 @@ DESTRUCTIVE rather than absent, and named the trap in the same breath:
 > bug fix.
 
 That is the fix this round landed, plus three of the five value functions
-that round left measured and unimplemented. Three columns, because the
-corpus growing and the engine changing are two different things and a
-single before/after would let one pay for the other. The middle column is
-the **unmodified engine at the base commit** on the finished 726-case
-corpus.
+that round left measured and unimplemented.
 
-| axis | 711 cases | 726, base engine | 726, after |
+Three columns, because the corpus growing and the engine changing are two
+different things and a single before/after would let one pay for the
+other. This round has a third confound the earlier ones did not:
+**another round (`all` / `::first-letter`, commit `3770934`) landed on
+`main` while this one was in flight**, so the middle column is `main` AS
+MERGED — the engine including that round, on this round's finished
+726-case corpus. Column one to column two therefore mixes coverage with
+somebody else's work, and **only column two to column three is
+attributable to this round**. Everything below was re-measured after the
+merge; the pre-merge numbers are not reported.
+
+| axis | 711 cases, `aa18bab` | 726, `main` (`3770934`) | 726, after |
 |---|---|---|---|
-| line structure | 679/683 | 694/698 | **694/698** |
-| geometry (boxes) | 2315/2331 | 2345/2366 | **2353/2366** |
-| geometry (clean cases) | 697/711 | 707/726 | **715/726** |
-| paint order | 17713/17762 | 18073/18122 | **18073/18122** |
-| paint order (clean cases) | 699/711 | 714/726 | **714/726** |
-| computed style (values) | 32713/32745 | 33195/33235 | **33211/33235** |
-| computed style (cases clean) | 688/711 | 699/726 | **708/726** |
-| cascade-attributed residual | 31 | 39 | **23** |
+| line structure | 679/683 | 695/698 | **695/698** |
+| geometry (boxes) | 2315/2331 | 2349/2366 | **2357/2366** |
+| geometry (clean cases) | 697/711 | 710/726 | **718/726** |
+| paint order | 17713/17762 | 18103/18122 | **18103/18122** |
+| paint order (clean cases) | 699/711 | 715/726 | **715/726** |
+| computed style (values) | 32713/32745 | 33202/33235 | **33218/33235** |
+| computed style (cases clean) | 688/711 | 702/726 | **711/726** |
+| cascade-attributed residual | 31 | 32 | **16** |
 
-`src/` was NOT touched by the corpus half of this round, so the move from
-column one to column two is coverage and nothing else — the residual goes
-31 → 39 because fifteen new cases went into territory the engine did not
-answer, and 39 → 23 because it now does. Those 16 values are exactly the
-eight the six original nesting cases carried plus eight from the four new
-nesting cases that carry a colour divergence (2 + 2 + 1 + 3) — the two
-`&`-specificity cases contribute none, see below.
+`src/` was NOT touched by the corpus half of this round. The residual's
+32 → 16 is the whole of what this round moved on that axis, and it
+accounts for itself exactly: eight values from the six original nesting
+cases, and eight from the four new nesting cases that carry a colour
+divergence (2 + 2 + 1 + 3). The two `&`-specificity cases contribute
+none, for a reason given below.
 
 Line structure and paint order are byte-identical across the last two
 columns, which is what a change confined to the cascade should look
 like.
 
-**`--dump-ops` was diffed per case, corpus-wide, in BOTH directions and
-against both baselines.** Against the 711-case baseline, exactly three
-cases' box lists changed:
+**`--dump-ops` was diffed per case, corpus-wide, in BOTH directions,
+against `main` as merged and on the same 726 cases.** Exactly eight
+cases' box lists changed, every one of them TO the browser's number and
+none away from it; **the other 718 are byte-identical**:
 
-| case | before | after | Brave |
+| case | `main` | after | Brave |
 |---|---|---|---|
 | `:cascade/a-registered-custom-property-has-an-initial-value` | 800×20 | **60×20** | 60×20 |
+| `:cascade/an-invalid-value-for-a-registered-property-becomes-its-initial` | 800×20 | **70×20** | 70×20 |
+| `:cascade/a-registered-property-with-inherits-false-does-not-inherit` | 200×20 | **80×20** | 80×20 |
 | `:cascade/env-resolves-a-known-variable-rather-than-its-fallback` | 800×20 | **0×20** | 0×20 |
+| `:cascade/env-with-an-unknown-name-uses-its-fallback` | 800×20 | **130×20** | 130×20 |
 | `:cascade/attr-in-a-length` | 800×20 | **55×20** | 55×20 |
+| `:cascade/attr-falls-back-when-the-attribute-is-unusable` | 800×20 | **30×20** | 30×20 |
+| `:cascade/attr-resolves-inside-calc` | 800×20 | **65×20** | 65×20 |
 
-Against the middle column — same 726 cases, base engine against this one
-— eight did, those three plus five of the new ones
-(`an-invalid-value-for-a-registered-property-becomes-its-initial`
-800→**70**, `a-registered-property-with-inherits-false-does-not-inherit`
-200→**80**, `env-with-an-unknown-name-uses-its-fallback` 800→**130**,
-`attr-falls-back-when-the-attribute-is-unusable` 800→**30**,
-`attr-resolves-inside-calc` 800→**65**). Every one moved TO the browser's
-number and none moved away from it; **718 of 726 cases' box lists are
-byte-identical**.
+The same diff was run against the 711-case baseline this round started
+from, where three of those eight exist and all three changed, and the
+other 708 did not.
 
 That the six nesting cases are not in either list is the point of running
 both dumps: their divergence is a colour, which the ops dump cannot see.
@@ -897,9 +903,10 @@ coincidence — they are regression guards on the desugaring's own choice,
 not divergences, and the residual arithmetic above accounts for zero of
 their values.
 
-983 unit tests / 2521 assertions, 0 failures (was 966/2475); linter 0
-errors, 25 pre-existing warnings, all in `test/`. **34 of the new
-assertions fail on the base commit's `src/` and pass after**, and every
+998 unit tests / 2583 assertions, 0 failures after the merge (966/2475 at
+`aa18bab`, 983/2521 for this round alone); linter 0 errors, 25
+pre-existing warnings, all in `test/`. **34 of this round's new
+assertions fail on `aa18bab`'s `src/` and pass after**, and every
 control beside them passes on both sides — the nested-rule-in-its-own-block
 case, the one-parent specificity case, the unregistered-custom-property
 case, the whole-value `var()` case, and both `attr()` invalidity cases. Downstream: `browser`
