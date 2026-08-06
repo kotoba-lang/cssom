@@ -13347,3 +13347,154 @@
                     [w h]))
       "and the initial `normal` does not, so the property is read for its
        VALUE rather than for its presence"))
+
+;; ---- `::first-letter` ------------------------------------------------------
+
+(def ^:private fl-theme
+  "The `tm-theme` page, plus the `:font-metrics` hook.
+
+   The hook is not decoration here, it is the precondition. Without a
+   host's real metrics this file keeps its long-standing approximation --
+   line box = the tallest line-HEIGHT, baseline one font-size down (see
+   `line-metrics`) -- under which a 40px letter on a 20px line-height
+   paragraph cannot make the paragraph any taller, and `::first-letter`
+   has no observable effect at all. `gen-boxes` was tried first and
+   reported 800x20 for every font size, which is that bargain and not a
+   bug.
+
+   The numbers are the conformance oracle's own monospace face, measured
+   in Brave 151 on 2026-08-04 and scaled linearly: ascent 12 and descent 3
+   at 14px, which is the 15px-tall character rect Brave reports for this
+   page."
+  {:padding 0 :gap 0
+   :measure-text (fn [text font-size _weight _style _family]
+                   (* (/ (or font-size 14) 14) 7.0 (count (str text))))
+   :font-metrics (fn [font-size _weight _style _family]
+                   (let [fs (or font-size 14)]
+                     {:ascent (* fs (/ 12.0 14)) :descent (* fs (/ 3.0 14))}))})
+
+(defn- fl-ops [css html]
+  (let [doc (-> (html/parse-into-document
+                 (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">" html "</div>"))
+                (css/apply-cascade (css/parse-rules css)))
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc) {:width 800 :theme fl-theme})))
+
+(defn- fl-boxes [css html]
+  (->> (fl-ops css html)
+       (filter #(= :node (:draw/op %)))
+       (drop 2)
+       (mapv (fn [o] (into [(:tag o)] (map tm-n ((juxt :x :y :w :h) o)))))))
+
+(defn- fl-texts [css html]
+  (->> (fl-ops css html) (filter #(= :text (:draw/op %))) (mapv :text)))
+
+(deftest a-first-letter-grows-the-line-box-it-is-on
+  ;; The pseudo-element has no box; its EFFECT does. Brave 151, 2026-08-06,
+  ;; on `<p>Alpha beta gamma delta</p>` in this page's 14px monospace at
+  ;; 20px line-height, with `::first-letter { font-size: N }`:
+  ;;
+  ;;   N        10   none   20   28   40   60
+  ;;   p box    21    20    22   25   29   36
+  ;;
+  ;; -- the ordinary line-box union of a one-character inline box at N
+  ;; against the block's own 14px strut, which is why the paragraph grows
+  ;; by 9 rather than by the 26 the letter itself gained. Brave puts the
+  ;; 40px letter's own rect at y=37..79 against a paragraph box of 48..77:
+  ;; it OVERFLOWS the line rather than fitting inside it, because its
+  ;; inherited `line-height: 20px` gives it a negative half-leading.
+  (is (= [[:p 0 0 800 28]]
+         (fl-boxes "#f::first-letter { font-size: 40px }" "<p id=\"f\">Alpha beta gamma delta</p>"))
+      "28 against Brave's 29 -- this theme's metrics are a LINEAR scaling of
+       one measured 14px face, where a real font's ascent/descent are
+       integers at every size, so a large size lands a pixel short. The
+       conformance harness, which feeds the oracle's own per-size table
+       through the same hook, reports the same 28")
+  ;; The control: the identical markup with no rule.
+  (is (= [[:p 0 0 800 20]]
+         (fl-boxes "" "<p id=\"f\">Alpha beta gamma delta</p>")))
+  ;; ...and the two ends of the measured table, which is what says this is
+  ;; a line-box union and not a constant.
+  (is (= [[:p 0 0 800 22]]
+         (fl-boxes "#f::first-letter { font-size: 20px }" "<p id=\"f\">Alpha beta gamma delta</p>")))
+  (is (= [[:p 0 0 800 35]]
+         (fl-boxes "#f::first-letter { font-size: 60px }" "<p id=\"f\">Alpha beta gamma delta</p>"))
+      "Brave 36, the same one-pixel scaling residue")
+  ;; A SMALLER first letter does not shrink the line: the strut still
+  ;; holds it open. Brave 21 for 10px, against the plain 20.
+  (is (= [[:p 0 0 800 21]]
+         (fl-boxes "#f::first-letter { font-size: 10px }" "<p id=\"f\">Alpha beta gamma delta</p>"))))
+
+(deftest the-first-letter-is-one-character-plus-the-punctuation-around-it
+  ;; Every row measured in Brave 151 on 2026-08-06 by reading a `Range`
+  ;; rect per character under `::first-letter { font-size: 40px }` and
+  ;; recording which characters came back at 40px.
+  (let [split (fn [text]
+                (fl-texts "#f::first-letter { font-size: 40px }"
+                          (str "<p id=\"f\">" text "</p>")))]
+    (is (= ["A" "lpha beta"] (split "Alpha beta"))
+        "one typographic character unit")
+    (is (= ["\"A" "lpha beta"] (split "\"Alpha beta"))
+        "preceding punctuation joins it")
+    (is (= ["(((A" "lpha beta"] (split "(((Alpha beta"))
+        "...however much of it there is")
+    (is (= ["A\"" "lpha beta"] (split "A\"lpha beta"))
+        "and so does punctuation AFTER the letter")
+    (is (= ["1" "23 Alpha"] (split "123 Alpha"))
+        "a digit is a first letter, and only the first one of them")
+    (is (= ["-" "Alpha beta"] (split "-Alpha beta"))
+        "a HYPHEN is category Pd, which is not punctuation for this
+         purpose -- it is the first character unit itself, and the `A`
+         after it stays 14px")
+    (is (= ["((( Alpha beta"] (split "((( Alpha beta"))
+        "punctuation with no letter after it is no first letter at all --
+         Brave leaves that paragraph at its plain 800x20")
+    (is (= [[:p 0 0 800 20]]
+           (fl-boxes "#f::first-letter { font-size: 40px }" "<p id=\"f\">((( Alpha beta</p>"))
+        "...and the box says the same thing")))
+
+(deftest a-first-letter-belongs-to-a-block-container
+  ;; Brave 151, 2026-08-06: `#s::first-letter { font-size: 40px }` on a
+  ;; `<span>` leaves the span at 112x15 with every character at 14px,
+  ;; while the identical rule on a `<div>` gives 800x29.
+  (is (= (fl-boxes "" "<p><span id=\"s\">Alpha beta gamma</span></p>")
+         (fl-boxes "#s::first-letter { font-size: 40px }"
+                   "<p><span id=\"s\">Alpha beta gamma</span></p>"))
+      "byte-identical with and without the rule")
+  (is (= [[:div 0 0 800 28]]
+         (fl-boxes "#d::first-letter { font-size: 40px }" "<div id=\"d\">Alpha beta gamma</div>"))
+      "the control beside it: on a block container the same rule applies
+       (Brave 800x29)"))
+
+(deftest a-first-letter-reaches-into-a-leading-inline-and-stops-at-an-atomic-one
+  ;; Brave 151, 2026-08-06, both on one page under a 40px `::first-letter`:
+  ;;   <p><span>Alpha</span> beta</p>              p 800x29
+  ;;   <p><img width=20 height=20>Alpha beta</p>   p 800x26, `A` at 14px
+  (is (= 28 (last (first (fl-boxes "#f::first-letter { font-size: 40px }"
+                                   "<p id=\"f\"><span>Alpha</span> beta</p>"))))
+      "the letter is taken from INSIDE the span, so the paragraph grows
+       (Brave 800x29)")
+  (is (= ["A" "lpha" "beta"]
+         (fl-texts "#f::first-letter { font-size: 40px }"
+                   "<p id=\"f\"><span>Alpha</span> beta</p>"))
+      "and it is split out of the span's own text, not lifted out of it")
+  ;; The control: the identical markup with no rule.
+  (is (= 20 (last (first (fl-boxes "" "<p id=\"f\"><span>Alpha</span> beta</p>"))))
+      )
+  ;; An atomic inline before any text: there is no first letter after it,
+  ;; and the paragraph keeps the height the image alone gives it.
+  (is (= (fl-boxes "" "<p id=\"f\"><img width=\"20\" height=\"20\">Alpha beta</p>")
+         (fl-boxes "#f::first-letter { font-size: 40px }"
+                   "<p id=\"f\"><img width=\"20\" height=\"20\">Alpha beta</p>"))
+      "byte-identical with and without the rule"))
+
+(deftest a-first-letter-composes-with-the-inline-boxes-it-sits-inside
+  ;; Brave: `<p><span><b>Alpha</b></span> beta</p>` with a 40px
+  ;; `::first-letter` reports the first character at 29.1x50 -- 40px AND
+  ;; bold, i.e. the pseudo-element's size composed with the `<b>`'s own
+  ;; weight rather than replacing it. The engine gets that by leaving the
+  ;; split box where it found it instead of lifting it out, which is what
+  ;; this asserts: the `A` is a text op of its own, still inside the `<b>`.
+  (is (= ["A" "lpha" "beta"]
+         (fl-texts "#f::first-letter { font-size: 40px }"
+                   "<p id=\"f\"><span><b>Alpha</b></span> beta</p>"))))

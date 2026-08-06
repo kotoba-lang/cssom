@@ -7608,6 +7608,233 @@
    the measurement (`display: none` without `controls`)."
   (into #{:input :button :select :textarea} replaced-tags))
 
+;; ---- `::first-letter` ----
+;;
+;; The pseudo-element with no box of its own. Round thirty-two left it out
+;; because "neither produces an element box, so neither the geometry axis
+;; nor the oracle's element probe can see one", which is true of the
+;; pseudo-element and false of its EFFECT: the first letter is an inline box
+;; on the block's first line, and a bigger inline box makes a taller line
+;; box. Measured in Brave 151 on 2026-08-06, `#p::first-letter { font-size:
+;; N }` on `<p>Alpha beta gamma delta</p>` in the corpus's 14px/20px
+;; monospace page:
+;;
+;;   N        10   14(none)  20   28   40   60
+;;   p box    21     20      22   25   29   36
+;;
+;; -- which is not a rule of its own. It is the ordinary inline line-box
+;; model this file already implements, applied to a one-character box: the
+;; first letter's own content area at font-size N, its inherited
+;; `line-height: 20px` giving a half-leading of (20-N*k)/2 that goes
+;; NEGATIVE past about 20px, and the line box being the union of that with
+;; the block's own strut. That is why the 40px letter overflows the
+;; paragraph rather than fitting inside it: Brave puts the letter's rect at
+;; y=37..79 against a paragraph box of 48..77.
+;;
+;; So `::first-letter` needs no new layout machinery. It needs the first
+;; letter to become a separate inline box with its own style, which is what
+;; the ::before/::after generated-node shape already is -- and the whole of
+;; this section is deciding WHICH characters that box holds.
+
+(def ^:private first-letter-punctuation
+  "The characters that join the first letter instead of ending the search:
+   Unicode general categories Ps, Pe, Pi, Pf and Po. CSS's own list, and
+   measured rather than taken from it, because the categories that are NOT
+   in it are the ones that decide the shape of this function.
+
+   Brave 151, 2026-08-06: 51 leading characters, each on its own
+   `<p>?Alpha beta</p>` under `::first-letter { font-size: 40px }`,
+   classified by which of the first two characters came back enlarged.
+
+   Enlarged TOGETHER WITH the `A` -- i.e. preceding punctuation:
+     \" ' ( [ { ) ] } ! # % & * , . / : ; ? @ \\
+     \\u201C \\u201D \\u2018 \\u2019 \\u00AB \\u00BB \\u2039 \\u203A \\u201E \\u201A
+     \\u2026 \\u00A1 \\u00BF \\u2022 \\u00A7 \\u00B6 \\u3010 \\u300C
+
+   Enlarged ALONE -- the character IS the first typographic unit, and the
+   `A` after it is ordinary text:
+     - _ + < = > | ~ $ ^ `  \\u2013 \\u2014
+
+   The second row is the finding. It is exactly Pd (`-`, en dash, em
+   dash), Pc (`_`) and the maths/currency/modifier SYMBOLS -- none of
+   which are punctuation in the sense the property means, however much
+   they look like it. A `\\p{P}` regex would have swept up all three
+   dashes and been wrong on all three.
+
+   Written as a literal set rather than a Unicode-property regex on
+   purpose: `\\p{gc=Ps}` needs a different spelling in Java's Pattern and
+   in JavaScript's `u`-flagged RegExp, and this file is `.cljc`. The cost
+   is that a character outside this set that Brave would treat as
+   punctuation ends the search early instead -- which yields the FIRST
+   character alone as the first letter, i.e. the same answer as an
+   ordinary letter, rather than a crash or a wrong box."
+  (set (str "\"'([{)]}!#%&*,./:;?@\\"
+            "“”‘’«»‹›„‚"
+            "…¡¿•§¶【「」】"
+            "、。！？（）")))
+
+(defn- first-letter-space? [c]
+  (contains? #{\space \tab \newline \return \formfeed} c))
+
+(defn- first-letter-unit-length
+  "How many chars the typographic character unit at `i` occupies -- 2 for a
+   surrogate pair, 1 otherwise. Measured: a leading emoji
+   (`\\uD83D\\uDE00Alpha`) comes back with BOTH halves enlarged and the `A`
+   plain, so the unit is the pair and not the code unit."
+  [s i]
+  (let [c #?(:clj (int (.charAt ^String s i)) :cljs (.charCodeAt s i))]
+    (if (and (<= 0xD800 c 0xDBFF) (< (inc i) (count s))) 2 1)))
+
+(defn- first-letter-split
+  "Splits `s` into `[first-letter remainder]`, or nil when `s` has no first
+   letter at all.
+
+   The algorithm, each step with the shape that measured it in Brave 151 on
+   2026-08-06:
+
+   1. Leading white space is skipped but KEPT in the first-letter box.
+      `\"   Alpha beta\"` reports 42px-tall rects for all three spaces
+      (width 0, since they collapse) and for the `A`.
+   2. Any run of `first-letter-punctuation` is taken. `\"(((Alpha\"` returns
+      `\"(((A\"`.
+   3. If that run is not followed by a typographic character unit -- end of
+      string, or white space -- there is NO first letter. `\"((( Alpha\"`
+      leaves the paragraph at its plain 800x20 with every character at
+      14px, which is the one shape in this file that returns nil for a
+      non-empty string.
+   4. One typographic character unit is taken (`first-letter-unit-length`).
+      Exactly one: `\"123 Alpha\"` enlarges the `1` and leaves the `2`.
+   5. Any run of punctuation AFTER it is taken as well. `\"A\\\"lpha\"`
+      returns `\"A\\\"\"` -- the trailing quote is enlarged too, which is the
+      step a reading of \"the first letter plus what precedes it\" would
+      have missed."
+  [s]
+  (let [n (count s)]
+    (loop [i 0]
+      (cond
+        (>= i n) nil
+        (first-letter-space? (nth s i)) (recur (inc i))
+        :else
+        (let [after-punct (loop [j i]
+                            (if (and (< j n) (contains? first-letter-punctuation (nth s j)))
+                              (recur (inc j))
+                              j))]
+          (when (and (< after-punct n)
+                     (not (first-letter-space? (nth s after-punct))))
+            (let [end (+ after-punct (first-letter-unit-length s after-punct))
+                  end (loop [j end]
+                        (if (and (< j n) (contains? first-letter-punctuation (nth s j)))
+                          (recur (inc j))
+                          j))]
+              [(subs s 0 end) (subs s end)])))))))
+
+(defn- first-letter-descendable?
+  "True when the first letter may be somewhere INSIDE `child` rather than
+   after it. Measured in Brave 151, 2026-08-06, all on the same page:
+
+   | first child of the `<p>`        | 40px first letter lands on |
+   |---------------------------------|----------------------------|
+   | `<span>Alpha</span> beta`       | the `A` inside the span (p 800x29) |
+   | `<span><b>Alpha</b></span> beta`| the `A`, bold AND 40px (p 800x31)  |
+   | `<img width=20 height=20>Alpha` | nothing -- p 800x26, `A` at 14px    |
+
+   The second row is why the descent rebuilds the tree in place rather than
+   lifting the letter out: the box is inside the `<b>`, so it picks up the
+   `<b>`'s own weight as well as the pseudo-element's size, and the engine
+   gets that for free by leaving it there.
+
+   The third is the boundary: an atomic inline is a box, not a letter, and
+   there is no first letter after it."
+  [child]
+  (and (map? child)
+       (= :element (:node/type child))
+       (not (contains? inline-atomic-tags (:tag child)))
+       (not (non-rendered-tag? (:tag child)))
+       (contains? #{nil "inline"} (get-in child [:attrs :style/display]))))
+
+(defn- splice-first-letter
+  "Rebuilds `children` with its first letter replaced by a generated node
+   carrying `style`, or returns nil when there is no first letter to take.
+
+   The node is the SAME shape `generated-content-node` produces for a
+   ::before, and deliberately so: a `:generated/pseudo` node is already an
+   inline box that carries its own font, colour and metrics into the line
+   (see `inline-fragments`' generated-node? branch and `layout-node`'s),
+   which is the entire mechanism `::first-letter` needs. What it must NOT
+   do is take part in `with-generated-content`'s adjacent-text merge, which
+   would fuse it back into one run with the text it was just split from and
+   restore the single font size this exists to break -- which is why this
+   runs AFTER that merge rather than inside it."
+  [style children]
+  (when-let [head (first children)]
+    (cond
+      (some? (real-text-child head))
+      (when-let [[letter remainder] (first-letter-split (real-text-child head))]
+        (into [{:generated/pseudo :first-letter
+                :generated/text letter
+                :generated/style style}]
+              (concat (when (seq remainder) [remainder]) (subvec (vec children) 1))))
+
+      (first-letter-descendable? head)
+      (when-let [inner (splice-first-letter style (:children head))]
+        (into [(assoc head :children (vec inner))] (subvec (vec children) 1)))
+
+      :else nil)))
+
+(defn- with-first-letter
+  "`children` with `node`'s `::first-letter` applied, if it has one and
+   there is a letter to apply it to.
+
+   There is no block-level test here, because the CALL SITE is the test:
+   this is applied in `laid-out-children` and nowhere else, and
+   `laid-out-children` is what prepares the children of a box this file
+   lays out as a block container. An inline `<span>`'s children never come
+   through it -- they are walked by `inline-fragments` -- so an inline box
+   never gets a first letter, which is the measured rule: Brave 151 on
+   2026-08-06 leaves `#s::first-letter { font-size: 40px }` on a `<span>`
+   at 112x15 with every character at 14px, while the identical rule on the
+   `<div>` beside it gives 800x29. The pseudo-element applies to a block
+   container's first FORMATTED LINE, and an inline box does not have one --
+   it is on somebody else's. Stating it as a `display` predicate here was
+   tried first and got it wrong: this engine's cascade writes no
+   `:style/display` for a `<span>` at all (`inline` is the initial value
+   and the UA sheet has no rule to state it), so the predicate passed and
+   the span got a first letter.
+
+   A leading inline element is still reached, because the descent in
+   `splice-first-letter` happens from the BLOCK's own children -- the
+   rebuilt `<span>` is what `inline-fragments` then walks.
+
+   Not implemented, each with the number a fix would need:
+
+   - **The first letter of a ::before's generated content.** Brave applies
+     `::first-letter` to it (`p::before { content: \"Xyz\" }` with a 40px
+     first letter reports 800x29); this runs after `with-generated-content`,
+     sees a `:generated/pseudo` node rather than text, and declines. Running
+     before it instead would put the split back inside the adjacent-text
+     merge, which is the one thing that must not happen.
+   - **A block container whose first child is another block.** Real CSS
+     pushes the pseudo-element down to the innermost first block; this stops
+     at the first non-inline child and leaves the letter alone.
+   - **`float` on the first letter.** Brave takes it out of the line
+     entirely -- `::first-letter { float: left; font-size: 40px }` leaves
+     the paragraph at 800x20 with the letter's own 20x42 box beside it,
+     against 800x29 unfloated. Here the float declaration is carried on the
+     generated node's style and ignored, so the paragraph is 29 either way:
+     9px too tall in the floated case.
+   - **`display`, `position`, `width`/`height`.** Brave reports no change
+     from any of the four on a non-floated first letter (`display: block`,
+     `position: absolute`, `width: 200px; height: 50px` all leave the
+     paragraph at 800x20 with the letter at 7x15), which is also what
+     happens here -- but by not reading them rather than by rejecting
+     them."
+  [node children]
+  (if-let [style (and (map? node)
+                      (= :element (:node/type node))
+                      (attr node :pseudo/first-letter))]
+    (or (splice-first-letter style (vec children)) children)
+    children))
+
 (def ^:private inline-atomic-default-input-chars
   "HTML's own default `size` for a text input is 20 characters, which is
    where every browser's ~20ch default text-field width comes from."
@@ -7713,7 +7940,9 @@
               theme
               (with-nested-list-margins
                node
-               (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node))))))
+               (with-first-letter
+                node
+                (with-generated-content node (with-implicit-list-markers node (with-details-visibility node (:children node)))))))
         ;; The cascade's own value, read directly rather than through
         ;; node-style: this function is on the intrinsic-sizing path as
         ;; well as the layout one and runs many times per element, and no
