@@ -815,6 +815,292 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round forty-four: four named leftovers, and the one that turned out to be a rule after all
+
+Four things earlier rounds found, measured and deliberately left, each with
+its reason written down. Three landed; the fourth landed as a rule with a
+narrower scope than the whole of Blink's, and the fourth's original reason
+for being left turned out to be **measuring the wrong strings**.
+
+Everything below was measured in Brave 151 over CDP on 2026-08-06, before
+anything was written, in the harness's own frame (14px monospace, a 20px
+line, 7px per character) unless another font is named.
+
+#### `position: relative` on an atomic inline was one key wide
+
+`inline-fragments` computes the accumulated offset onto the fragment
+(`:rel`) and `layout-inline-run`'s atomic branch reads it off the *piece* —
+and `inline-line-breaker`'s `select-keys`, which is what turns a fragment
+into a piece, never listed the key. So the declaration was accepted,
+resolved, accumulated and then dropped one function short of the only place
+that reads it. Brave puts
+
+```
+ab<span style="display:inline-block; position:relative; left:30px; top:10px"></span>cd
+```
+
+at **x=44, y=10** where this engine left it at 14, 0, and an `<img>` with
+the same declarations lands in the same place. An earlier round put the key
+in, saw it work, and **took it back out** because the change was outside its
+four cases and had no corpus case for it.
+
+The one-key version is right, and the round that wrote it was right not to
+ship it blind: three interactions it could not have known about were probed
+before it landed this time, and all three already worked once the key was
+there.
+
+- **A relatively positioned atomic inline is a containing block, and its
+  absolutely positioned child follows the shift.** Brave: the span at 44,0
+  and the child at 49,3 — the child's own 5,3 measured from where the parent
+  ended up. It works for free because the child is laid out inside the
+  atomic's own `layout-node` call and `translate-ops` moves the whole run.
+- **`z-index` on it creates a stacking context, and the hoisted ops keep the
+  shift.** Probed both ways round: `z-index: 0` on the inline-block confines
+  a `z-index: 5` descendant so a `z-index: 2` sibling of the wrapper paints
+  over it (Brave answers `lime`), and `z-index: auto` does not confine, so
+  the descendant wins (Brave answers `red`). The engine already agreed on
+  both — `stacking-context?`/`stack-level` never cared what kind of box it
+  was — and the hoisted `<i>` comes out at the shifted x=44, y=5, because
+  `absorb-stacking-contexts` runs at the ancestor context, after the line has
+  already translated the atomic's ops. **The two shapes have identical
+  geometry**; only the paint axis can tell them apart, which is why both are
+  in the corpus.
+- **The shift moves nothing else.** The line box is 20 tall and the block
+  after it sits at y=20 with the offset and without it, on both sides. It is
+  a paint-time translate, as the code comment already claimed.
+
+And the hit region moves with it: `translate-ops` carries `:hit`, and Brave's
+`elementFromPoint` answers the span over the shifted box and the container
+over where it used to be. That is what `browser.session/node-at` and
+dom-gpu's `retained` host consume, and their suites are green.
+
+Two smaller measurements, recorded because they cost nothing to take: offsets
+**accumulate** through a relatively positioned inline box around a relatively
+positioned inline-block (10 + 20 = x=51, 4 + 6 = y=10, and the engine's
+`rel+` already did this), and a percentage `top` on an atomic inline in an
+auto-height container resolves to **0** (`left: 10%` of a 300px block is 30
+and `top: 50%` is nothing).
+
+#### The soft hyphen: the glyph is U+2010, and it lives on the piece that ends the line
+
+The round that measured `&shy;` wrote that what was missing "is not the
+opportunity but the inserted glyph: a break here changes the text that is
+measured and painted, and a piece in this file is a substring of its token."
+That diagnosis was exactly right, and it is what the shape of this
+implementation follows.
+
+**The glyph is U+2010 HYPHEN, not U+002D HYPHEN-MINUS**, and the difference
+is measurable rather than pedantic. In this platform's monospace face `-` is
+7px at 14px and **U+2010 is 14** — the face has no U+2010 and what the
+fallback supplies is not fixed-pitch — while in 14px Arial both are 4.67.
+Both of Chromium's hyphenating paths report the wider number:
+`super&shy;califragilistic` at 90px gives a first line of 35 + **14**, and
+`hyphens: auto` splitting `hyphenation` gives 42 + 14. That 14 is what
+identified the glyph; a spec reading would have written `-` and been 7px
+wrong on every hyphenated line in this font.
+
+Where it ended up living: **appended to the text of the last piece on the
+line being closed**, and nowhere else. Not a piece of its own — a second op
+is a second *word* to anything reading the ops (this harness splits an op's
+text back into words), and Brave reports the glyph as part of the first
+line's own run, a 14px fragment butted against the 35px `super` at x=35. The
+soft hyphen character itself **stays in the text** rather than being
+stripped, which is what keeps a word that never breaks byte-identical to what
+the engine produced before: a host measures U+00AD at zero (the oracle's own
+advance table says 0, measured) and paints nothing for it.
+
+There are two packers, because there are two paths, and both had to learn it:
+`soft-hyphen-lines` for a lone text child and `inline-line-breaker` for a
+text run with siblings. The first is new; the second needed the opportunity
+in `steps` and a `hyphenated` helper beside `flush`. `soft-hyphen-parts` is
+shared.
+
+Seven shapes, every one a pair so the rule can be told from the shape:
+
+| markup                                     | box   | Brave                   |
+|--------------------------------------------|-------|-------------------------|
+| `super&shy;califragilistic`                | 90px  | 40 tall, 35+14 then 105 |
+| `supercalifragilistic`                     | 90px  | 20 tall, one 140px line |
+| the first under `hyphens: none`            | 90px  | 20 tall, one 140px line |
+| `super&shy;cali`                           | 300px | 20 tall, 63 wide        |
+| `su&shy;per&shy;cali&shy;fragi&shy;listic` | 90px  | 40 tall, 63+14 then 77  |
+| `aaa&shy;bbb&shy;ccccccccccccccc`          | 120px | 40 tall, 42+14 then 105 |
+| `aaaaaaaaaaaa&shy;bb`                      | 90px  | 40 tall, 84+14 then 14  |
+
+The fourth row says the character costs nothing where it sits, the fifth and
+sixth that greedy takes the **last** opportunity that fits rather than the
+first, and the last that a hyphenated line may overflow its box (84 + 14 is
+98 in a 90px box).
+
+**The scope cut, measured, and it is the interesting one.** A hyphenated line
+has to FIT, and when it does not Blink falls back to an earlier opportunity
+rather than breaking there. `alpha bravo&shy;charlie` at **91px** is 77 + 14
+= 91 on line one and `charlie` on line two — which this engine produces — but
+the same markup at **88px** is `alpha` alone on line one and `bravocharlie`
+(84, unhyphenated) on line two, where this engine still breaks at the soft
+hyphen and overflows to 91. The threshold is exactly the inserted glyph's
+width, which is what identifies the rule; what it needs that this greedy
+forward-only loop does not have is the ability to *reject* an opportunity
+after seeing where the pen lands and re-pack from the previous one. **No
+corpus case carries that shape on purpose**: both answers are two lines and
+40px tall, so it would pass the geometry axis while being wrong, which is the
+one failure mode this corpus exists to prevent.
+
+A second, smaller cut: a soft hyphen at the very END of a word yields no
+opportunity here. Measured, `alphabetagam&shy; delta` in a 90px box is 40
+tall in Brave with line one 84 wide **plus a 14px hyphen hanging past the
+90px edge** and `delta` on line two — the break is the ordinary space break
+and the hyphen is drawn anyway, because the line happens to end right after a
+soft hyphen. Same line structure here, different paint.
+
+`hyphens: auto` is untouched and stays measured-but-not-implemented:
+`hyphenation example` at 70px with `lang="en"` is 60 tall against 40, with
+Chromium's own dictionary splitting `hyphen-ation` (42 + 14, then 35). It
+needs a dictionary, and nothing in this round brings one closer.
+
+#### A harness artifact this exposed, and why the case is now `:oracle/blind`
+
+The line axis cannot read a soft-hyphenated case, and the reason is the
+inserted glyph rather than the engine. A word that spans two lines is
+measured one CHARACTER at a time (there is no other way to say which line
+each part landed on), and **Chromium attributes the hyphen it inserted to the
+character after the break**. Measured: the range covering the `c` of
+`califragilistic` reports `getClientRects()` = `[[35,2,14,15],[0,22,7,15]]` —
+the hyphen's rect on line ONE and its own on line two — and
+`getBoundingClientRect()`, which is what the harness reads, is their union
+`[0,2,49,35]`. That union's midpoint falls inside line one's vertical span,
+so the clustering function merges the two lines and the oracle reports
+`["super<shy>c alifragilistic"]` for a box it has itself rendered as two
+lines.
+
+The two sides also spell the glyph differently and legitimately: the oracle's
+line one ends with the SOFT HYPHEN it found in the document, this engine's
+with the U+2010 it inserted, and neither is in the other's line — the same
+class of difference `normalize` already case-folds for `text-transform`.
+
+Both are fixable in the harness — take the LAST client rect per character
+rather than the bounding box, and fold the two hyphen characters in
+`normalize` — and both were left alone. Changing what the oracle *says*
+rewrites the `want` side of every case in the corpus, and this round already
+had four engine changes in flight. The measurement above is what a future
+round needs to do it. Meanwhile the three breaking cases are `:oracle/blind`,
+which excludes only the line score; geometry and paint are still compared and
+are the honest axes here.
+
+The harness did change in exactly one place, and it is an addition rather
+than a rewrite: **U+2010 joined the measured per-character advance table**,
+beside the 0x2013/0x2014 already there, because the engine now emits it.
+Adding a key to that table cannot change an existing value.
+
+#### `input[type=file]`: there was a rule, and the reason it was left was measuring the wrong strings
+
+The round that declined to hard-code 253 gave a reason: the shadow `<button>`
+holding "Choose File" is 87.141 wide and "No file chosen" is 84.484, they sum
+to 171.625, that is **81 short of 253**, and both strings are en-US — so a
+253 in the engine would be a measurement of this machine's UI language.
+
+Refusing the constant was right. The premise was wrong. Read out of the UA
+shadow tree over CDP (`DOM.getDocument` with `pierce`), **this machine's
+browser UI is Japanese**:
+
+| shadow part      | text                 | width   |
+|------------------|----------------------|---------|
+| button           | `ファイルを選択`     | 108.656 |
+| gap              |                      | 4       |
+| filename label   | `選択されていません` | 119.313 |
+
+108.656 + 4 + 119.313 = **231.97**, which does not reach 253 either — so the
+81 was never a "reserved filename column", it was two strings the control
+does not contain.
+
+Blink's width is `ceil(max(34 × advance("0"), button + 4 + label))`, and here
+the **first** term wins: 34 nominal `0` glyphs of the UA control face (Arial
+13.3333) measure 252.063, which ceils to exactly 253. That term is a property
+of the FONT and not of the UI language, which is what makes it implementable.
+Eight font/size pairs, all of them `ceil(34 × w0)`:
+
+| font                 | 34 × `0` | Brave |
+|----------------------|----------|-------|
+| Arial 13.3333 (UA)   | 252.063  | 253   |
+| Arial 10             | 189.094  | 190   |
+| Arial 16             | 302.547  | 303   |
+| Arial 20             | 378.188  | 379   |
+| Arial 40             | 756.375  | 757   |
+| serif 13.3333        | 266.500  | 267   |
+| monospace 20         | 340.000  | 340   |
+| monospace 28         | 476.000  | 476   |
+
+Two controls that separate this from a constant: `<input type=file size=5>`
+is still 253 (HTML does not apply `size` to a file input), and one with
+`padding: 10px; border: 3px solid` is 279 — the 34 characters are the
+content and the border box adds to it.
+
+**Verdict: a rule, and half of Blink's.** The localized term genuinely does
+win at some fonts — at `monospace 14px` the CJK label is full-width, the
+second term is 113.313 + 4 + 126 = 243.313, and Brave reports 244 against
+this branch's 238 — so the engine is correct exactly while the nominal-
+character term wins and narrow otherwise, which is written at the branch with
+those numbers. Reproducing the other term means carrying every UA string in
+every UI language, which is not a CSS fact and is not derivable from the
+document. The corpus case is NOT `:oracle/blind`: it agrees at 253, for the
+right reason, at the font the corpus uses.
+
+#### `visibility: collapse` on a column, and the ordering that turned out to be the easy way round
+
+The round that landed the row axis was right that the mechanism is the same
+track removal turned ninety degrees, and right that a `rowspan`/`colspan`
+crossing a collapsed track needs no special case. What it expected to be hard
+was the outer size: a `width: 300px` table whose three declared 100px columns
+include one collapsed column renders at 200, so "the collapse has to run
+before the table's width is final", which is the reverse of the row axis.
+
+Measured, it is the other way about, and the measurement is what makes the
+change small. The collapsed column is sized **exactly as a visible one** —
+declared width, shared surplus and all — and only then is its width plus one
+border-spacing taken off the table:
+
+| shape (`width: 300px`, 3 columns, middle collapsed) | columns          | table   |
+|-----------------------------------------------------|------------------|---------|
+| three declared `100px`, control                     | 97.31 / 97.34 / 97.34 | 300 |
+| the same with the middle collapsed                  | 97.31 / **0** / 97.34 | 200.66 |
+| three `auto`, control                               | 94 / 103.58 / 94.42 | 300   |
+| the same with the middle collapsed                  | 94 / **0** / 94.42 | 194.42 |
+
+The surviving columns keep the numbers the control gives them, to two
+decimals, in both pairs — so nothing is re-distributed, and the collapse runs
+*after* the widths are final exactly like the row half. 300 − 103.58 − 2 =
+194.42. A third pair says it from the other side: a collapsed column holding
+a twelve-character word still measures 86 wide, and the table goes 112 → 24.
+
+**And the columns found a bug in the rows.** Asking the same question in each
+of the three positions turned up an asymmetry the row axis had shipped
+without: a collapsed track takes exactly ONE adjacent gap with it, and the
+gap that goes is the one BEFORE it — except for track 0, where the space in
+front is the table's own leading border-spacing, which belongs to the table
+and stays, so the gap AFTER it goes instead.
+
+| collapsed | Brave, rows y=  | Brave, columns x= | table h / w |
+|-----------|-----------------|-------------------|-------------|
+| first     | 10, 10, 46      | 2, 2, 22          | 82 / 42     |
+| middle    | 10, 36, 46      | 2, 20, 22         | 82 / 42     |
+| last      | 10, 46, 72      | 2, 22, 40         | 82 / 42     |
+
+All six totals are the same, which is the invariant. The row axis had been
+spelled as "the gap after row i is 0 when row i+1 is collapsed", which is
+correct for a collapsed middle or last row and says nothing whatever about a
+collapsed *first* one: that table came back 88 tall in the border-spacing form
+against Brave's 82, with its second row 10px low. Both axes now go through
+one `collapsed-track-offsets`.
+
+Three more, each measured because a spec reading leaves it open:
+`visibility: collapse` on the TABLE collapses every row and leaves the width
+alone (42×4 against the control's 42×50), so the column test is
+self-or-column-group where the row test is self-or-ancestor; the same
+declaration on a `<td>` collapses nothing (it is `hidden` there, and the table
+stays 62 wide); and a collapsed `<col>` reports a **0×0** box where its
+siblings report `width × rows-height`, as does a `<colgroup>` all of whose
+columns are collapsed.
+
 ### Round forty-three: where a box sits on a line
 
 Four residuals in one cluster — everything left that was about a box's

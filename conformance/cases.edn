@@ -1067,6 +1067,50 @@
   :group :position
   :html "<div style=\"display: flex\"><div style=\"position: relative; width: 120px; height: 40px\"><div style=\"position: absolute; right: 0; top: 0\">tag</div></div><div>next</div></div>"}
 
+ {:id :position/relative-on-an-inline-block
+  :group :position
+  ;; `position: relative` on an ATOMIC inline -- an inline-block, an
+  ;; <img>, a form control -- was silently dropped until 2026-08-06: the
+  ;; offset was computed on the fragment and read off the piece, and the
+  ;; piece never carried it across. Brave puts this span at x=44, y=10
+  ;; where the same span without the declaration is at 14, 0 (the control
+  ;; below), and an <img> with the same declarations lands in the same
+  ;; place. `vertical-align: top` is not the subject: without it an EMPTY
+  ;; inline-block sits on the baseline and makes the line box 26 rather
+  ;; than 20, which is a different divergence this engine still has.
+  :html "<div style=\"width: 300px\">ab<span style=\"display: inline-block; vertical-align: top; width: 30px; height: 20px; position: relative; left: 30px; top: 10px\"></span>cd</div><div>after</div>"}
+
+ {:id :position/an-inline-block-with-no-relative-offset
+  :group :position
+  ;; CONTROL for the case above, and for the one after it: the shift is
+  ;; paint-only, so the line box is 20 tall and `after` is at y=20 in BOTH
+  ;; -- the offset moves the box and nothing else.
+  :html "<div style=\"width: 300px\">ab<span style=\"display: inline-block; vertical-align: top; width: 30px; height: 20px\"></span>cd</div><div>after</div>"}
+
+ {:id :position/relative-inline-block-bottom-and-right
+  :group :position
+  ;; `bottom`/`right` shift the opposite way here too: Brave reports x=2
+  ;; (14 - 12) and y=-6, i.e. the box hangs above its own line.
+  :html "<div style=\"width: 300px\">ab<span style=\"display: inline-block; vertical-align: top; width: 30px; height: 20px; position: relative; right: 12px; bottom: 6px\"></span>cd</div>"}
+
+ {:id :position/absolute-child-of-a-relative-inline-block
+  :group :position
+  ;; A relatively positioned ATOMIC inline is a containing block, and the
+  ;; child follows the SHIFT: Brave puts the span at 44,24 and its
+  ;; absolutely positioned child at 49,27 -- the child's own 5,3 measured
+  ;; from where the parent ended up, not from where it started.
+  ;;
+  ;; The `top: 24px` is not the subject and is not decoration either: it
+  ;; moves the shifted box clear of the words on its own line. The harness
+  ;; decides which text is inside an atomic inline GEOMETRICALLY on the
+  ;; engine side (draw-ops carry no parentage, see engine-lines'
+  ;; `inside-atomic?`) where the oracle uses real parentage, and a box
+  ;; shifted right far enough to sit on top of the text after it made the
+  ;; engine side discard `cd` -- reported as `want [\"ab cd\"] got
+  ;; [\"ab\"]` for a layout that agreed on every box. The 24 costs the case
+  ;; nothing: the shift is still 30 across and the child still follows it.
+  :html "<div style=\"width: 300px\">ab<span style=\"display: inline-block; vertical-align: top; width: 40px; height: 20px; position: relative; left: 30px; top: 24px\"><span style=\"position: absolute; left: 5px; top: 3px; width: 10px; height: 6px; background: red\"></span></span>cd</div>"}
+
  {:id :position/absolute-child-of-a-relative-inline
   :group :position
   ;; A relatively positioned INLINE is a containing block too.
@@ -2680,12 +2724,66 @@
 
  {:id :text/soft-hyphen-is-a-break-opportunity
   :group :text
+  :oracle/blind true
   ;; U+00AD is a conditional break point (`hyphens: manual` is the initial
   ;; value), so the browser breaks the word there and this box is two lines
-  ;; tall. The LINE axis's rendering of this one is an artifact -- a word
-  ;; broken across lines reports a union rect that the harness re-groups
-  ;; per character -- so the geometry axis is the honest reading here.
+  ;; tall: 90x40, first line 35 + a 14px inserted hyphen, second line 105.
+  ;; IMPLEMENTED 2026-08-06 -- see soft-hyphen-lines and inline-line-breaker.
+  ;;
+  ;; `:oracle/blind`, and the reason is the inserted glyph rather than the
+  ;; engine. The harness measures a word that spans two lines one CHARACTER
+  ;; at a time (a multi-rect word has no other way to say which line each
+  ;; part landed on), and Chromium attributes the hyphen it INSERTED to the
+  ;; character after the break: measured 2026-08-06, the range covering the
+  ;; `c` of `califragilistic` reports getClientRects() = [[35,2,14,15],
+  ;; [0,22,7,15]] -- the hyphen's rect on line ONE and its own on line two --
+  ;; and getBoundingClientRect(), which is what the harness reads, is their
+  ;; union [0,2,49,35]. That union's midpoint sits inside line one's span,
+  ;; so the two lines cluster into one and the oracle reports
+  ;; ["super<shy>c alifragilistic"] for a box it has itself rendered as two
+  ;; lines. Nothing the engine emits can match that.
+  ;;
+  ;; The two sides also spell the glyph differently and legitimately: the
+  ;; oracle's line one ends with the SOFT HYPHEN it found in the document,
+  ;; the engine's with the U+2010 HYPHEN it inserted, and neither is in the
+  ;; other's line. Geometry and paint are the honest axes here and both are
+  ;; compared -- `:oracle/blind` only excludes the line score.
   :html "<div style=\"width: 90px\">super&shy;califragilistic</div>"}
+
+ {:id :text/soft-hyphen-under-hyphens-none
+  :group :text
+  ;; CONTROL: `hyphens: none` removes the opportunity, so the same markup
+  ;; is one 140px line in a 90px box -- 90x20 on both sides, exactly what
+  ;; the word without the character gives.
+  :html "<div style=\"width: 90px; hyphens: none\">super&shy;califragilistic</div>"}
+
+ {:id :text/soft-hyphen-costs-nothing-where-it-sits
+  :group :text
+  ;; CONTROL, and the measurement that says the character is not a glyph:
+  ;; with room to spare the box is 300x20 and the text is 63 wide, exactly
+  ;; the nine characters around it.
+  :html "<div style=\"width: 300px\">super&shy;cali</div>"}
+
+ {:id :text/soft-hyphen-greedy-takes-the-last-that-fits
+  :group :text
+  :oracle/blind true
+  ;; Two opportunities, and the greedy loop takes the SECOND: Brave puts
+  ;; `aaabbb` + a hyphen (42 + 14) on line one and the fifteen c's (105) on
+  ;; line two, 120x40. Breaking at the first would have given 21 + 14.
+  ;; Blind for the same inserted-glyph reason as the case above.
+  :html "<div style=\"width: 120px\">aaa&shy;bbb&shy;ccccccccccccccc</div>"}
+
+ {:id :text/a-hyphenated-line-may-overflow-its-box
+  :group :text
+  :oracle/blind true
+  ;; The hyphen does not have to fit for the break to be taken once the
+  ;; content before it already reaches the edge: Brave's first line is
+  ;; 84 + 14 = 98 in a 90px box, `bb` on the second, 90x40. (What DOES
+  ;; depend on the hyphen fitting is whether an EARLIER opportunity is
+  ;; preferred -- see soft-hyphen-lines' scope cut, which this engine does
+  ;; not implement and which no case here can show, because the two answers
+  ;; have the same height.)
+  :html "<div style=\"width: 90px\">aaaaaaaaaaaa&shy;bb</div>"}
 
  {:id :text/hyphens-auto-breaks-inside-a-word
   :group :text
@@ -3343,6 +3441,25 @@
   ;; this engine: `article`.
   :html "<div style=\"position: relative; height: 60px\"><div style=\"position: relative\"><section style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #f00; z-index: 5\">a</section></div><article style=\"position: absolute; left: 0; top: 0; width: 700px; height: 60px; background: #0f0; z-index: 2\">b</article></div>"}
 
+ {:id :stacking/relative-inline-block-with-z-zero-confines-a-descendant
+  :group :stacking
+  ;; The same pair as the two block cases below, on an ATOMIC inline, so
+  ;; that the `position: relative` fix on that path is measured for
+  ;; stacking as well as for position. An integer `z-index` on a
+  ;; positioned box makes it a stacking context, so the `z-index: 5`
+  ;; child is confined to it and the `z-index: 2` sibling of its wrapper
+  ;; paints on top -- Brave answers `lime` over the overlap. The
+  ;; GEOMETRY of this case and of the one after it is identical, which is
+  ;; the point: only the paint axis can tell them apart.
+  :html "<div style=\"position: relative; width: 300px; height: 24px\">ab<span style=\"display: inline-block; width: 60px; height: 20px; position: relative; z-index: 0; background: blue\"><span style=\"position: absolute; left: 0; top: 0; width: 60px; height: 20px; background: red; z-index: 5\"></span></span><span style=\"position: absolute; left: 0; top: 0; width: 120px; height: 20px; background: lime; z-index: 2\"></span></div>"}
+
+ {:id :stacking/relative-inline-block-with-z-auto-does-not-confine
+  :group :stacking
+  ;; ...and with `z-index: auto` the inline-block is NOT a stacking
+  ;; context, so its `z-index: 5` child competes in the wrapper's context
+  ;; and beats the `z-index: 2` sibling -- Brave answers `red`.
+  :html "<div style=\"position: relative; width: 300px; height: 24px\">ab<span style=\"display: inline-block; width: 60px; height: 20px; position: relative; background: blue\"><span style=\"position: absolute; left: 0; top: 0; width: 60px; height: 20px; background: red; z-index: 5\"></span></span><span style=\"position: absolute; left: 0; top: 0; width: 120px; height: 20px; background: lime; z-index: 2\"></span></div>"}
+
  {:id :stacking/relative-with-z-zero-confines-a-descendant
   :group :stacking
   ;; Second half, and the ONLY difference in the markup is `z-index: 0` on
@@ -3613,6 +3730,57 @@
   ;; this engine both keep the 20px and put `b` at y=20.
   :html "<div style=\"width: 300px\"><div style=\"height: 20px; visibility: collapse\">a</div><div style=\"height: 20px\">b</div></div>"}
 
+ {:id :visibility/collapse-removes-a-table-column
+  :group :visibility
+  ;; The column half of the same property, landed 2026-08-06. Brave: the
+  ;; collapsed `<col>` is 0x0, the cell in it is 0 wide and keeps its full
+  ;; row height, the third column shifts left, and ONE border-spacing goes
+  ;; with the column -- table 42x26 with cells at x=2, 20 and 22, against
+  ;; the control's 62 with cells at 2, 22 and 42.
+  :html "<table><colgroup><col><col style=\"visibility: collapse\"><col></colgroup><tr><td style=\"width: 16px\">a</td><td style=\"width: 16px\">b</td><td style=\"width: 16px\">c</td></tr></table>"}
+
+ {:id :visibility/a-table-column-that-is-not-collapsed
+  :group :visibility
+  ;; CONTROL for the case above, same markup without the declaration:
+  ;; 62x26, three 18px columns and four 2px gaps.
+  :html "<table><colgroup><col><col><col></colgroup><tr><td style=\"width: 16px\">a</td><td style=\"width: 16px\">b</td><td style=\"width: 16px\">c</td></tr></table>"}
+
+ {:id :visibility/collapse-on-a-column-group-removes-its-columns
+  :group :visibility
+  ;; A `<colgroup>` collapses every column it covers, and a group whose
+  ;; columns are ALL gone is 0x0 rather than 0 wide and full height --
+  ;; measured, exactly as a single collapsed `<col>` is. Here the FIRST
+  ;; column goes, so the gap that leaves with it is the one AFTER it (the
+  ;; table's leading border-spacing is the table's, not the column's): the
+  ;; second cell sits at x=2, the same place the first one would have.
+  :html "<table><colgroup style=\"visibility: collapse\"><col></colgroup><colgroup><col><col></colgroup><tr><td style=\"width: 16px\">a</td><td style=\"width: 16px\">b</td><td style=\"width: 16px\">c</td></tr></table>"}
+
+ {:id :visibility/collapse-on-a-cell-collapses-nothing
+  :group :visibility
+  ;; CONTROL, and the reason the column test is self-or-column-group rather
+  ;; than self-or-ancestor: `collapse` on a `<td>` is plain `hidden`. The
+  ;; table is still 62 wide with three 18px columns.
+  :html "<table><tr><td style=\"width: 16px\">a</td><td style=\"width: 16px; visibility: collapse\">b</td><td style=\"width: 16px\">c</td></tr></table>"}
+
+ {:id :visibility/collapse-on-the-first-table-row
+  :group :visibility
+  ;; The position the row axis got wrong until the column axis asked the
+  ;; same question sideways. A collapsed track takes exactly one adjacent
+  ;; gap with it, and for track ZERO that gap is the one AFTER it: Brave
+  ;; puts the second row at the same y the first would have had. Under
+  ;; `border-collapse: collapse` the spacing is 0 either way, so what this
+  ;; case actually pins is the table height -- 44, not 66, and not the 88
+  ;; the old rule gave the border-spacing form.
+  :html "<table style=\"border-collapse: collapse\"><tr style=\"visibility: collapse\"><td>one</td></tr><tr><td>two</td></tr><tr><td>three</td></tr></table>"}
+
+ {:id :visibility/a-colspan-crossing-a-collapsed-column
+  :group :visibility
+  ;; No special case needed, and that is the finding: the spanning cell is
+  ;; the sum of the columns it covers and the gaps between them, and a
+  ;; collapsed column contributes zero of each. Brave reports it 20 wide --
+  ;; column 0's 20, a dropped gap, and column 1's 0.
+  :html "<table><colgroup><col><col style=\"visibility: collapse\"><col></colgroup><tr><td colspan=\"2\" style=\"width: 40px\">wide</td><td style=\"width: 16px\">c</td></tr><tr><td style=\"width: 16px\">a</td><td style=\"width: 16px\">b</td><td style=\"width: 16px\">c</td></tr></table>"}
+
  {:id :visibility/collapse-on-a-flex-item-is-hidden
   :group :visibility
   ;; AGREES, including on a flex item, where the spec once said
@@ -3782,6 +3950,27 @@
   ;; reserves a fixed filename column, and both strings are en-US. A 253
   ;; in the engine would be a measurement of this machine's UI language.
   ;; Engine: 145x27, i.e. the div agrees and the input's width does not.
+  ;;
+  ;; RE-MEASURED 2026-08-06, and the reading above was wrong in its
+  ;; premise. The UA shadow tree, read over CDP with `DOM.getDocument
+  ;; pierce`, is not en-US at all -- this machine's browser UI is
+  ;; JAPANESE: the shadow button holds `ファイルを選択` and is 108.656
+  ;; wide (92.656 of text plus 8 on each side), the filename label is
+  ;; `選択されていません` at 119.313, and the gap between them is 4. Those
+  ;; sum to 231.97, which does NOT reach 253 -- so the earlier `87.141 +
+  ;; 84.484, 81 short` was measuring two strings the control does not
+  ;; contain.
+  ;;
+  ;; Blink's own width is `ceil(max(34 x advance("0"), button + 4 +
+  ;; label))`, and here the FIRST term wins: 34 nominal `0` glyphs of the
+  ;; UA control face (Arial 13.3333) is 252.063, which ceils to exactly
+  ;; 253. That term is a property of the FONT, not of the UI language, and
+  ;; it is what is now implemented (atomic-intrinsic-width's `file`
+  ;; branch, verified against eight font/size pairs). The localized term
+  ;; is a documented scope cut -- it wins at other fonts (at `monospace
+  ;; 14px` the CJK label is full-width and Brave reports 244 against this
+  ;; branch's 238) and reproducing it would mean carrying every UA string
+  ;; in every UI language, which is not a CSS fact.
   :html "<div style=\"width: 400px\"><input type=\"file\"></div>"}
 
  ;; ---- five singles, each in the group it belongs to ----

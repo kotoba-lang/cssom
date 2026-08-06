@@ -383,7 +383,14 @@
     var CHARS = [];
     for (var c1 = 32; c1 <= 126; c1++) CHARS.push(c1);
     for (var c2 = 160; c2 <= 255; c2++) CHARS.push(c2);
-    [0x2013,0x2014,0x2018,0x2019,0x201C,0x201D,0x2022,0x2026,0x2030,0x2039,
+    // 0x2010 is HYPHEN, and it is here because the ENGINE now emits it:
+    // it is the glyph Chromium inserts at the end of a line it broke at a
+    // soft hyphen (see cssom.layout's `inserted-hyphen`). Measured here
+    // rather than assumed to be the same as `-`, because it is not -- this
+    // system's monospace face has no U+2010 and the fallback reports 14px
+    // at 14px where `-` reports 7.
+    [0x2010,
+     0x2013,0x2014,0x2018,0x2019,0x201C,0x201D,0x2022,0x2026,0x2030,0x2039,
      0x203A,0x2044,0x2122,0x2190,0x2191,0x2192,0x2193,0x2194,0x2212,0x2260,
      0x2264,0x2265,0x221E,0x2248,0x2217,0x25CA,0x2660,0x2663,0x2665,0x2666,
      0x2020,0x2021,0x203E,0x2032,0x2033].forEach(function (c) { CHARS.push(c); });

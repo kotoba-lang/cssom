@@ -12791,3 +12791,258 @@
     [77 20] "pre"
     [77 20] "pre-wrap"
     [77 20] "break-spaces"))
+
+;; ---- `position: relative` on an ATOMIC inline ----------------------------
+;;
+;; Measured in Brave 151 over CDP on 2026-08-06, in the conformance
+;; harness's own frame (14px monospace, 20px line, 7px per character), and
+;; carried in the corpus as `:position/relative-on-an-inline-block` and its
+;; three neighbours. The offset was computed on the fragment
+;; (inline-fragments) and read off the piece (layout-inline-run), and the
+;; piece's own `select-keys` never copied it across -- so every one of these
+;; came back unshifted.
+
+(deftest relative-on-an-atomic-inline-shifts-it
+  ;; Brave: x=44, y=10 with the declarations, x=14, y=0 without.
+  (is (= [:span 44 10 30 20]
+         (tm-box :span (str "<div style=\"width:300px\">ab<span style=\"display:inline-block;"
+                            " vertical-align:top; width:30px; height:20px; position:relative;"
+                            " left:30px; top:10px\"></span>cd</div>"))))
+  (is (= [:span 14 0 30 20]
+         (tm-box :span (str "<div style=\"width:300px\">ab<span style=\"display:inline-block;"
+                            " vertical-align:top; width:30px; height:20px\"></span>cd</div>")))
+      "CONTROL: the same span with no offset")
+  ;; `bottom`/`right` go the other way: Brave reports x=2 and y=-6.
+  (is (= [:span 2 -6 30 20]
+         (tm-box :span (str "<div style=\"width:300px\">ab<span style=\"display:inline-block;"
+                            " vertical-align:top; width:30px; height:20px; position:relative;"
+                            " right:12px; bottom:6px\"></span>cd</div>")))))
+
+(deftest a-relative-atomic-inlines-shift-moves-nothing-else
+  ;; The shift is paint-time: the line box is 20 tall and `after` is at
+  ;; y=20 whether or not the box moved. Brave says so for both.
+  (let [with (tm-boxes (str "<div style=\"width:300px\">ab<span style=\"display:inline-block;"
+                            " vertical-align:top; width:30px; height:20px; position:relative;"
+                            " left:30px; top:10px\"></span>cd</div><div>after</div>"))
+        without (tm-boxes (str "<div style=\"width:300px\">ab<span style=\"display:inline-block;"
+                               " vertical-align:top; width:30px; height:20px\"></span>cd</div>"
+                               "<div>after</div>"))
+        divs (fn [bs] (filterv #(= :div (first %)) bs))]
+    (is (= (divs without) (divs with))
+        "both <div>s -- the line's own box and the block after it -- are identical")))
+
+(deftest a-relative-atomic-inline-is-a-containing-block-and-its-child-follows-the-shift
+  ;; Brave: the span at 44,24 and its absolutely positioned child at 49,27
+  ;; -- the child's own 5,3 from where the parent ENDED UP. (The `top: 24px`
+  ;; matches the corpus case, which needs the shifted box clear of the text
+  ;; on its own line for a harness reason written there; the rule under test
+  ;; is the 5,3.)
+  (let [bs (tm-boxes (str "<div style=\"width:300px\">ab<span style=\"display:inline-block;"
+                          " vertical-align:top; width:40px; height:20px; position:relative;"
+                          " left:30px; top:24px\"><span style=\"position:absolute; left:5px;"
+                          " top:3px; width:10px; height:6px\"></span></span>cd</div>"))]
+    (is (= [[:span 44 24 40 20] [:span 49 27 10 6]]
+           (filterv #(= :span (first %)) bs)))))
+
+;; ---- U+00AD SOFT HYPHEN --------------------------------------------------
+;;
+;; Every number measured in Brave 151 over CDP on 2026-08-06 in the same
+;; frame, with one addition the flat `tm-theme` cannot express: the soft
+;; hyphen advances NOTHING and the U+2010 HYPHEN the browser inserts at a
+;; hyphenated break advances 14 (this platform's monospace face has no
+;; U+2010, and what the fallback supplies is not fixed-pitch, where `-` is
+;; 7). `shy-theme` models exactly that, so the assertions below are the
+;; browser's own numbers.
+
+(def ^:private shy-theme
+  {:padding 0 :gap 0
+   :measure-text (fn [text font-size _weight _style _family]
+                   (let [k (/ (or font-size 14) 14)]
+                     (reduce + 0 (map (fn [c] (condp = c
+                                                (char 0x00ad) 0.0
+                                                (char 0x2010) (* k 14.0)
+                                                (* k 7.0)))
+                                      (str text)))))})
+
+(defn- shy-lines
+  "`[[text x y] ...]` for every text op of `html`, laid out in shy-theme."
+  [html]
+  (let [doc (-> (html/parse-into-document
+                 (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">" html "</div>"))
+                (css/apply-cascade (css/parse-rules "")))
+        [_ doc] (dom/consume-ops doc)]
+    (->> (layout/draw-ops (dom/tree doc) {:width 800 :theme shy-theme})
+         (filter #(= :text (:draw/op %)))
+         (mapv (fn [o] [(:text o) (tm-n (:x o)) (tm-n (:y o))])))))
+
+(defn- shy-div-h [html]
+  (let [doc (-> (html/parse-into-document
+                 (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">" html "</div>"))
+                (css/apply-cascade (css/parse-rules "")))
+        [_ doc] (dom/consume-ops doc)]
+    (->> (layout/draw-ops (dom/tree doc) {:width 800 :theme shy-theme})
+         (filter #(= :node (:draw/op %)))
+         (drop 2)
+         first
+         :h
+         tm-n)))
+
+(def ^:private shy (str (char 0x00ad)))
+(def ^:private hy (str (char 0x2010)))
+
+(deftest a-soft-hyphen-is-a-break-opportunity-and-inserts-a-glyph
+  ;; Brave: 90x40, first line 35 + a 14px hyphen, second line 105. The same
+  ;; word without the character is 90x20, and so is the same markup under
+  ;; `hyphens: none`.
+  (is (= [[(str "super" shy hy) 0 0] ["califragilistic" 0 20]]
+         (shy-lines (str "<div style=\"width:90px\">super" shy "califragilistic</div>"))))
+  (is (= 40 (shy-div-h (str "<div style=\"width:90px\">super" shy "califragilistic</div>"))))
+  (is (= [["supercalifragilistic" 0 0]]
+         (shy-lines "<div style=\"width:90px\">supercalifragilistic</div>"))
+      "CONTROL: no soft hyphen, no opportunity -- one overflowing line")
+  (is (= [[(str "super" shy "califragilistic") 0 0]]
+         (shy-lines (str "<div style=\"width:90px; hyphens:none\">super" shy
+                         "califragilistic</div>")))
+      "CONTROL: `hyphens: none` removes the opportunity and keeps the character"))
+
+(deftest a-soft-hyphen-costs-nothing-where-it-sits
+  ;; Brave: `super&shy;cali` at 300px is 63 wide -- the nine characters
+  ;; around it, and nothing for the character itself.
+  (is (= [[(str "super" shy "cali") 0 0]]
+         (shy-lines (str "<div style=\"width:300px\">super" shy "cali</div>")))))
+
+(deftest greedy-packing-takes-the-last-soft-hyphen-that-fits
+  ;; Brave: `aaa&shy;bbb&shy;ccccccccccccccc` at 120px breaks at the SECOND
+  ;; opportunity -- 42 + 14 on line one, 105 on line two -- not the first.
+  (is (= [[(str "aaa" shy "bbb" shy hy) 0 0] ["ccccccccccccccc" 0 20]]
+         (shy-lines (str "<div style=\"width:120px\">aaa" shy "bbb" shy
+                         "ccccccccccccccc</div>"))))
+  ;; ...and a hyphenated line may overflow: 84 + 14 = 98 in a 90px box.
+  (is (= [[(str "aaaaaaaaaaaa" shy hy) 0 0] ["bb" 0 20]]
+         (shy-lines (str "<div style=\"width:90px\">aaaaaaaaaaaa" shy "bb</div>")))))
+
+(deftest a-soft-hyphen-works-inside-an-inline-run-too
+  ;; The inline-run path (a text child with a sibling) has its own copy of
+  ;; the rule, in inline-line-breaker, and must reach the same answer.
+  (is (= [["x" 0 0] [(str "super" shy hy) 14 0] ["califragilistic" 0 20]]
+         (shy-lines (str "<div style=\"width:90px\">x <b>super" shy
+                         "califragilistic</b></div>")))))
+
+;; ---- an `<input type=file>`'s width --------------------------------------
+
+(deftest a-file-inputs-width-is-thirty-four-nominal-characters
+  ;; Brave 151, 2026-08-06: 253x27 in the UA control face (Arial 13.3333),
+  ;; and 34 `0` glyphs of that face measure 252.063 -- which ceils to
+  ;; exactly 253. `control-theme` gives `0` its measured 7.4136 at 13.3333
+  ;; so the assertion is the browser's own number rather than this frame's
+  ;; 7px approximation of it.
+  (let [control-theme {:padding 0 :gap 0
+                       :measure-text (fn [text font-size _w _s _f]
+                                       (* (/ (or font-size 13.3333) 13.3333)
+                                          7.4136 (count (str text))))}
+        boxes (fn [html]
+                (let [doc (-> (html/parse-into-document
+                               (str "<div id=\"root\" style=\"font-size:14px;line-height:20px\">"
+                                    html "</div>"))
+                              (css/apply-cascade (css/parse-rules "")))
+                      [_ doc] (dom/consume-ops doc)]
+                  (->> (layout/draw-ops (dom/tree doc) {:width 800 :theme control-theme})
+                       (filter #(and (= :node (:draw/op %)) (= :input (:tag %))))
+                       (mapv (fn [o] [(tm-n (:w o)) (tm-n (:h o))])))))]
+    (is (= [[253 27]] (boxes "<div style=\"width:400px\"><input type=\"file\"></div>")))
+    (is (= [[253 27]] (boxes "<div style=\"width:400px\"><input type=\"file\" size=\"5\"></div>"))
+        "CONTROL: `size` does not apply to a file input -- Brave reports 253 either way")
+    (is (= [279] (mapv first (boxes (str "<div style=\"width:400px\"><input type=\"file\""
+                                         " style=\"padding:10px; border:3px solid\"></div>"))))
+        (str "CONTROL: the 34 characters are the CONTENT and the border box adds to it -- "
+             "Brave 279 = 253 + 20 of padding + 6 of border. Only the WIDTH is asserted: "
+             "Brave makes that control 53 tall and this engine 27, an unrelated and "
+             "pre-existing divergence (a file input's height does not take its own padding "
+             "here) that this round did not touch."))))
+
+;; ---- `visibility: collapse` on a table COLUMN ----------------------------
+;;
+;; The column half of the property, measured in Brave 151 over CDP on
+;; 2026-08-06 alongside the row half it shares its track rule with. The
+;; corpus carries these as `:visibility/collapse-removes-a-table-column`
+;; and its four neighbours.
+
+(deftest a-collapsed-column-is-taken-out-of-the-tables-width
+  ;; Brave: table 42x26, cells 18/0/18 at x=2, 20 and 22 -- the collapsed
+  ;; column's width AND one border-spacing leave together. The control is
+  ;; 62 with cells at 2, 22 and 42.
+  (is (= [[:table 0 0 42 26]
+          [:colgroup 2 2 38 22] [:col 2 2 18 22] [:col 20 2 0 0] [:col 22 2 18 22]
+          [:tbody 2 2 38 22] [:tr 2 2 38 22]
+          [:td 2 2 18 22] [:td 20 2 0 22] [:td 22 2 18 22]]
+         (tm-boxes (str "<table><colgroup><col><col style=\"visibility: collapse\"><col>"
+                        "</colgroup><tr><td style=\"width:16px\">a</td>"
+                        "<td style=\"width:16px\">b</td><td style=\"width:16px\">c</td>"
+                        "</tr></table>"))))
+  (is (= [[:table 0 0 62 26]
+          [:colgroup 2 2 58 22] [:col 2 2 18 22] [:col 22 2 18 22] [:col 42 2 18 22]
+          [:tbody 2 2 58 22] [:tr 2 2 58 22]
+          [:td 2 2 18 22] [:td 22 2 18 22] [:td 42 2 18 22]]
+         (tm-boxes (str "<table><colgroup><col><col><col></colgroup>"
+                        "<tr><td style=\"width:16px\">a</td>"
+                        "<td style=\"width:16px\">b</td><td style=\"width:16px\">c</td>"
+                        "</tr></table>")))
+      "CONTROL: the same table with no collapsed column")
+  (is (= [[:table 0 0 62 26] [:tbody 2 2 58 22] [:tr 2 2 58 22]
+          [:td 2 2 18 22] [:td 22 2 18 22] [:td 42 2 18 22]]
+         (tm-boxes (str "<table><tr><td style=\"width:16px\">a</td>"
+                        "<td style=\"width:16px; visibility: collapse\">b</td>"
+                        "<td style=\"width:16px\">c</td></tr></table>")))
+      "CONTROL: `collapse` on a CELL collapses nothing -- it is `hidden` there"))
+
+(deftest a-collapsed-column-group-takes-every-column-it-covers
+  ;; Brave: the group is 0x0 (not 0 wide and full height), and because the
+  ;; column that goes is the FIRST one, the gap that leaves with it is the
+  ;; one AFTER it -- the second cell sits at x=2, where the first would
+  ;; have been.
+  (is (= [[:table 0 0 42 26]
+          [:colgroup 2 2 0 0] [:colgroup 2 2 38 22]
+          [:col 2 2 0 0] [:col 2 2 18 22] [:col 22 2 18 22]
+          [:tbody 2 2 38 22] [:tr 2 2 38 22]
+          [:td 2 2 0 22] [:td 2 2 18 22] [:td 22 2 18 22]]
+         (tm-boxes (str "<table><colgroup style=\"visibility: collapse\"><col></colgroup>"
+                        "<colgroup><col><col></colgroup>"
+                        "<tr><td style=\"width:16px\">a</td>"
+                        "<td style=\"width:16px\">b</td><td style=\"width:16px\">c</td>"
+                        "</tr></table>")))))
+
+(deftest a-colspan-crossing-a-collapsed-column-needs-no-special-case
+  ;; Brave reports the spanning cell 20 wide: column 0's 20, a dropped gap,
+  ;; and column 1's zero.
+  (is (= [[:td 2 2 20 22] [:td 24 2 18 22]
+          [:td 2 26 20 22] [:td 22 26 0 22] [:td 24 26 18 22]]
+         (filterv #(= :td (first %))
+                  (tm-boxes (str "<table><colgroup><col>"
+                                 "<col style=\"visibility: collapse\"><col></colgroup>"
+                                 "<tr><td colspan=\"2\" style=\"width:40px\">wide</td>"
+                                 "<td style=\"width:16px\">c</td></tr>"
+                                 "<tr><td style=\"width:16px\">a</td>"
+                                 "<td style=\"width:16px\">b</td>"
+                                 "<td style=\"width:16px\">c</td></tr></table>"))))))
+
+(deftest a-collapsed-FIRST-track-drops-the-gap-after-it-not-before-it
+  ;; The one position the row axis had wrong, found by asking the same
+  ;; question of the columns. Brave, `border-spacing: 10px` over three rows
+  ;; with the FIRST collapsed: rows at y=10, y=10 and y=46, table 82 -- the
+  ;; leading spacing is the TABLE's and stays, and the gap between the
+  ;; collapsed row and the next one is the one that goes. Brave's rows are
+  ;; 26 tall there (a `<td>`'s 1px UA padding around a 24px line) where this
+  ;; frame's are 22, so the numbers below are the same STRUCTURE at 22:
+  ;; 10 + 0 + 0 + 22 + 10 + 22 + 10 = 74. Before this rule the engine put
+  ;; the second row at y=20 and made the table 84.
+  (is (= [[:table 0 74] [:tbody 10 54] [:tr 10 0] [:tr 10 22] [:tr 42 22]]
+         (collapse-rows (str "<table style=\"border-spacing: 10px\">"
+                             "<tr style=\"visibility: collapse\"><td>one</td></tr>"
+                             "<tr><td>two</td></tr>"
+                             "<tr><td>three</td></tr></table>"))))
+  (is (= [[:table 0 74] [:tbody 10 54] [:tr 10 22] [:tr 42 22] [:tr 64 0]]
+         (collapse-rows (str "<table style=\"border-spacing: 10px\">"
+                             "<tr><td>one</td></tr><tr><td>two</td></tr>"
+                             "<tr style=\"visibility: collapse\"><td>three</td></tr></table>")))
+      (str "CONTROL: a collapsed LAST row drops the gap BEFORE it, and comes to the same "
+           "total -- Brave 82 with rows at 10/46/72, this frame 74 with rows at 10/42/64")))
