@@ -5260,3 +5260,252 @@
     (is (= "center" (:style/align-items attrs)))
     (is (nil? (:style/align-self attrs)))
     (is (nil? (:style/align-content attrs)))))
+;; ---- the third table this namespace cannot derive, gated the same way ----
+
+(deftest text-decoration-line-keywords-matches-what-the-renderer-draws
+  ;; `text-decoration-line-keywords` is the ONLY value table in
+  ;; `cssom.core` that is a copy. The branch that actually paints a
+  ;; decoration lives in dom-gpu's `.cljs` renderers, which a `.cljc`
+  ;; namespace cannot require without breaking the JVM path -- so the copy
+  ;; gets the same treatment `layout-read-properties` gets: re-extract the
+  ;; `case` keys from the renderer and fail if the two ever disagree.
+  ;;
+  ;; The extraction is deliberately over BOTH renderers: `webgl.cljs` and
+  ;; `webgpu.cljs` carry the same helper, and a table that matched one but
+  ;; not the other would be a real divergence rather than a stale copy.
+  ;;
+  ;; `none` is in the table and in neither `case`, because a renderer
+  ;; implements it by drawing nothing.
+  (let [renderer (fn [f]
+                   (let [path (str "../dom-gpu/src/kotoba/wasm/host/" f)]
+                     (when (.exists (java.io.File. path)) (slurp path))))
+        sources (keep renderer ["webgpu.cljs" "webgl.cljs"])
+        drawn (fn [source]
+                ;; anchored on the `case` and not on the `defn`, because
+                ;; the docstring between them is longer than the code.
+                (let [start (str/index-of source "(case decoration")
+                      body (subs source start (+ start 400))]
+                  (set (map second (re-seq #"\"([a-z-]+)\" \(" body)))))
+        table @#'css/text-decoration-line-keywords]
+    (is (= 2 (count sources))
+        "both renderers have to be readable for this gate to mean anything")
+    (doseq [source sources]
+      (is (seq (drawn source)) "the extraction itself has to find something")
+      (is (= (disj table "none") (drawn source))
+          (str "cssom.core/text-decoration-line-keywords and the renderer's own "
+               "case keys disagree: " (sort (drawn source)))))))
+
+;; ---- complex selector arguments: `:is()`/`:not()`/`:where()` ----
+;;
+;; Every assertion here is a row of the measurement block above
+;; `parse-simple-selector`, read out of headless Brave 151.1.93.129 one
+;; probe page per probe on 2026-08-06. Eleven of the twenty-two shapes
+;; measured diverged before this landed.
+
+(deftest is-holds-a-complex-selector-and-matches-it-structurally
+  ;; The row that makes this a MATCHING change and not only a specificity
+  ;; one: `.wA .wB` and `.wA.wB` select different elements.
+  (let [red (fn [html css]
+              (:style/color (cascaded-style css html "t")))]
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(.wA .wB) span { color: #ff0000 }"))
+        "Brave: RED -- the argument is a descendant relationship")
+    (is (nil? (red "<div class=\"wA wB\"><span id=\"t\">s</span></div>"
+                   ":is(.wA .wB) span { color: #ff0000 }"))
+        "Brave: black -- and NOT both classes on one element")
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(.wA > .wB) span { color: #ff0000 }")))
+    (is (nil? (red "<div class=\"wA\"><div><div class=\"wB\"><span id=\"t\">s</span></div></div></div>"
+                   ":is(.wA > .wB) span { color: #ff0000 }"))
+        "Brave: black -- the `>` is real, not decoration")
+    (is (= "#ff0000" (red "<div class=\"wA\"></div><div class=\"wB\"><span id=\"t\">s</span></div>"
+                          ":is(.wA + .wB) span { color: #ff0000 }")))
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(:is(.wA .wB)) span { color: #ff0000 }"))
+        "Brave: RED -- a complex argument nests")
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(:not(.q) .wB) span { color: #ff0000 }"))
+        "Brave: RED -- and holds a functional pseudo-class in one compound")
+    (is (nil? (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                   ":is(> .wB) span { color: #ff0000 }"))
+        "Brave: black -- a RELATIVE selector is invalid in :is(), unlike :has()")
+    (is (= "#ff0000" (red "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                          ":is(%%bad, .wA .wB) span { color: #ff0000 }"))
+        "Brave: RED -- :is() is forgiving; one bad arm is dropped")))
+
+(deftest a-complex-is-argument-contributes-its-summed-specificity
+  ;; The list's contribution is still the MAXIMUM over its arms; a complex
+  ;; arm's own specificity is the SUM over its compounds. Three rows, and
+  ;; the second is the control that a change raising every `:is()` would
+  ;; turn red.
+  (let [c (fn [css] (:style/color
+                     (cascaded-style css
+                                     "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                                     "t")))]
+    (is (= "#ff0000" (c ":is(.wA .wB) span { color: #ff0000 } div.wB span { color: #0000ff }"))
+        "(0,2,1) beats (0,1,2)")
+    (is (= "#0000ff" (c ":is(.wA .wB) span { color: #ff0000 } div.wA .wB span { color: #0000ff }"))
+        "...and loses to (0,2,2)")
+    (is (= "#ff0000" (c ":is(#zz, .wA .wB) span { color: #ff0000 } div.wA .wB span { color: #0000ff }"))
+        "the maximum includes an arm that matches nothing")
+    (is (= "#0000ff" (c ":is(.wA .wB) span { color: #ff0000 } .wA .wB span { color: #0000ff }"))
+        "equal specificity: source order decides")
+    (is (= "#ff0000" (c ".wA .wB span { color: #0000ff } :is(.wA .wB) span { color: #ff0000 }"))
+        "...both ways round")
+    (is (= "#0000ff" (c ":where(.wA .wB) span { color: #ff0000 } span { color: #0000ff }"))
+        ":where() is still always zero")))
+
+(deftest not-takes-a-complex-argument-too
+  ;; One rule read from both sides. The first says the `:not()` matched
+  ;; (so the red rule did NOT apply); the control says it did not.
+  (let [c (fn [css] (:style/color
+                     (cascaded-style css
+                                     "<div class=\"wA\"><div class=\"wB\"><span id=\"t\">s</span></div></div>"
+                                     "t")))]
+    (is (= "#0000ff" (c "span { color: #0000ff } span:not(.wA .wB span) { color: #ff0000 }")))
+    (is (= "#ff0000" (c "span { color: #0000ff } span:not(.wQ .wB span) { color: #ff0000 }")))))
+
+(deftest an-ampersand-with-a-complex-parent-carries-the-lists-maximum
+  ;; `&` is `:is(<parent list>)`, and until `:is()` could hold a complex
+  ;; selector a parent list with one complex arm fell back to one expansion
+  ;; per parent -- exact matching, per-arm specificity. All three rows
+  ;; measured; the third is the control that keeps the fix from raising
+  ;; every multi-parent nested rule.
+  (let [c (fn [html css] (:style/color (cascaded-style css html "t")))]
+    (is (= "#ff0000" (c "<div class=\"a\"><div class=\"b\"><span id=\"t\">s</span></div></div>"
+                        "#zz, .a .b { & span { color: #ff0000 } } div.a .b span { color: #0000ff }"))
+        "Brave: RED -- `&` is (1,0,0) from an arm that matches nothing")
+    (is (= "#ff0000" (c "<div class=\"q\"><span id=\"t\">s</span></div>"
+                        ".q, .a .b { & span { color: #ff0000 } } div.q span { color: #0000ff }"))
+        "Brave: RED -- the maximum comes from the COMPLEX arm, which did not match")
+    (is (= "#0000ff" (c "<div class=\"a\"><div class=\"b\"><span id=\"t\">s</span></div></div>"
+                        ".a .b, .c .d { & span { color: #ff0000 } } div.a .b span { color: #0000ff }"))
+        "Brave: BLUE -- no id anywhere, so the maximum is (0,2,0) and loses")
+    (is (= "#ff0000" (c "<div class=\"a\"><div class=\"b\"><span id=\"t\">s</span></div></div>"
+                        ".a .b { & span { color: #ff0000 } }"))
+        "one complex parent still matches...")
+    (is (nil? (c "<div class=\"b\"><span id=\"t\">s</span></div>"
+                 ".a .b { & span { color: #ff0000 } }"))
+        "...and does not overreach")))
+
+;; ---- `@property`'s `syntax` descriptor is a grammar ----
+
+(deftest an-unknown-syntax-component-drops-the-whole-registration
+  ;; The row that had to be measured rather than reasoned about. An unset
+  ;; REGISTERED property reports its initial value; an unset UNregistered
+  ;; one reports the empty string -- so `unset` is what tells "the syntax
+  ;; is not enforced" apart from "the registration was dropped". Brave:
+  ;; `<flurb>` and `<length>|<flurb>` both report the empty string.
+  (let [w (fn [syntax]
+            (:style/width
+             (cascaded-style
+              (str "@property --pq { syntax: \"" syntax "\"; inherits: false; initial-value: 60px }"
+                   " #a { width: var(--pq) }")
+              "<div><div id=\"a\">w</div></div>" "a")))]
+    (is (= "" (w "<flurb>")) "an unknown component name is not a well-formed <syntax>")
+    (is (= "" (w "<length>|<flurb>")) "...and one unknown alternative poisons the list")
+    ;; the controls: the same registration with a known syntax, with an
+    ;; alternation, with a literal ident, and with each multiplier.
+    (is (= 60 (w "<length>")))
+    (is (= 60 (w "<length> | <percentage>")))
+    (is (= 60 (w "auto | <length>")))))
+
+(deftest a-multiplied-syntax-registers-and-is-checked-per-repetition
+  ;; `<length>+` and `<length>#` register in Brave with a multi-value
+  ;; initial, which a whole-value absolute-length check reads as one
+  ;; unparseable string.
+  (let [reg (fn [syntax initial]
+              (get (@#'css/parse-property-registrations
+                    (str "@property --pm { syntax: \"" syntax "\"; initial-value: " initial " }"))
+                   :--pm))]
+    (is (some? (reg "<length>+" "1px 2px")))
+    (is (some? (reg "<length>#" "1px, 2px")))
+    (is (some? (reg "<integer>+" "1 2")))
+    ;; ...and the boundary is still there per repetition: `2em` is not
+    ;; computationally independent, so Brave drops the registration.
+    (is (nil? (reg "<length>+" "1px 2em")))
+    (is (nil? (reg "<length>" "2em")))))
+
+(deftest an-invalid-value-for-a-registered-color-becomes-its-initial
+  ;; The scope cut round forty-nine measured and declined:
+  ;; `@property --c { syntax: "<color>"; initial-value: red }` with
+  ;; `--c: 7` is `red` in Brave and was `7` here.
+  (let [c (fn [declared]
+            (:style/color
+             (cascaded-style
+              (str "@property --pc { syntax: \"<color>\"; inherits: false; initial-value: red }"
+                   " #a { --pc: " declared "; color: var(--pc) }")
+              "<div><div id=\"a\">w</div></div>" "a")))]
+    (is (= "red" (c "7")) "a number is not a colour")
+    (is (= "red" (c "flurb")) "...nor is an unknown identifier")
+    (is (= "red" (c "#zzz")) "...nor is hex that does not parse")
+    ;; the controls that must NOT move: real colours, and a colour
+    ;; FUNCTION this engine does not implement, which the browser does.
+    (is (= "blue" (c "blue")))
+    (is (= "#00ff00" (c "#00ff00")))
+    (is (= "oklch(0.5 0.1 20)" (c "oklch(0.5 0.1 20)"))
+        "an unimplemented colour function is fail-OPEN, not rejected")))
+
+(deftest a-registered-custom-ident-and-string-reject-a-number
+  (let [v (fn [syntax initial declared]
+            (:style/width
+             (cascaded-style
+              (str "@property --pu { syntax: \"" syntax "\"; inherits: false; initial-value: " initial " }"
+                   " #a { --pu: " declared "; width: var(--pu) }")
+              "<div><div id=\"a\">w</div></div>" "a")))]
+    (is (= "foo" (v "<custom-ident>" "foo" "7")) "Brave: the initial")
+    (is (= "bar" (v "<custom-ident>" "foo" "bar")) "...and a real ident stands")
+    (is (= "a" (v "<string>" "'a'" "7")) "Brave: the initial")))
+
+;; ---- the `@supports` value oracle now speaks for colours ----
+
+(deftest supports-answers-for-a-colour-with-the-grammar-it-actually-has
+  ;; `cssom.layout` never parses a colour -- it threads the string onto the
+  ;; draw-op -- so this needed a `require` of the parser one layer below,
+  ;; not a table mirrored across a one-directional dependency. Every row
+  ;; measured in Brave 151 on 2026-08-06.
+  (let [s (fn [c] (css/supports-condition-matches? c))]
+    (is (not (s "(color: #zzz)")) "Brave: black")
+    (is (not (s "(color: flurb)")))
+    (is (not (s "(color: 7)")))
+    (is (not (s "(color: 0)")))
+    (is (not (s "(background-color: #zzz)")))
+    (is (not (s "(border-top-color: flurb)")))
+    (is (not (s "(outline-color: #zzz)")))
+    ;; the controls, without which a `false` proves nothing
+    (is (s "(color: red)"))
+    (is (s "(color: #f00)"))
+    (is (s "(color: #ff000080)"))
+    (is (s "(color: currentcolor)"))
+    (is (s "(color: transparent)"))
+    (is (s "(color: rgb(1,2,3))"))
+    (is (s "(color: hsl(10, 20%, 30%))"))
+    (is (s "(background-color: red)"))
+    ;; ...and the fail-OPEN arm, which is a measurement and not a hedge:
+    ;; these are all RED in Brave and this engine implements none of them.
+    (is (s "(color: oklch(0.5 0.1 20))"))
+    (is (s "(color: lab(50% 20 30))"))
+    (is (s "(color: color-mix(in srgb, red, blue))"))
+    (is (s "(color: light-dark(red, blue))"))))
+
+(deftest supports-answers-for-text-decoration-per-component
+  (let [s (fn [c] (css/supports-condition-matches? c))]
+    (is (not (s "(text-decoration: flurb)")) "Brave: black")
+    (is (not (s "(text-decoration: 7)")))
+    (is (s "(text-decoration: underline)"))
+    (is (s "(text-decoration: line-through)"))
+    (is (s "(text-decoration: overline)"))
+    (is (s "(text-decoration: none)"))
+    (is (s "(text-decoration: underline dotted red)")
+        "Brave: red -- a multi-component value, and every token is known")))
+
+(deftest supports-still-fails-open-where-the-value-space-is-open
+  ;; The control on the whole colour/text-decoration change: three
+  ;; properties whose value space genuinely admits an arbitrary
+  ;; identifier. Brave says all three ARE supported, and an oracle that
+  ;; enumerated its way to `(color: flurb)` being false would have taken
+  ;; these with it.
+  (let [s (fn [c] (css/supports-condition-matches? c))]
+    (is (s "(font-family: flurb)"))
+    (is (s "(list-style-type: flurb)"))
+    (is (s "(will-change: flurb)"))))

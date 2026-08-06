@@ -6020,4 +6020,97 @@
   ;; and grid items and to nothing else. Brave: the two blocks in document
   ;; order at y=0 and y=20.
   :html "<div><div style=\"order: 2\">aa</div><div>bb</div></div>"}
+ {:id :selector/is-holds-a-complex-selector
+  :group :selector
+  ;; `:is()` takes a COMPLEX selector, and this is a matching fact before
+  ;; it is a specificity one: `.cs-a .cs-b` and `.cs-a.cs-b` select
+  ;; different elements. Both are on the page because only the pair
+  ;; measures it -- a compound-only parser reads the argument as "both
+  ;; classes on ONE element" and gets each of them exactly backwards.
+  ;; Brave: the nested span RED, the one-element span BLACK.
+  :html "<div class=\"cs-a\"><div class=\"cs-b\"><span id=\"cs1\">s</span></div></div><div class=\"cs-a cs-b\"><span id=\"cs2\">t</span></div>"
+  :css ":is(.cs-a .cs-b) span { color: #ff0000 }"}
+
+ {:id :selector/a-complex-is-argument-carries-its-summed-specificity
+  :group :selector
+  ;; A complex argument's specificity is the SUM over its own compounds,
+  ;; so `:is(.cq-a .cq-b) span` is (0,2,1) and beats `div.cq-b span`'s
+  ;; (0,1,2). Brave: RED.
+  :html "<div class=\"cq-a\"><div class=\"cq-b\"><span id=\"cq1\">s</span></div></div>"
+  :css ":is(.cq-a .cq-b) span { color: #ff0000 } div.cq-b span { color: #0000ff }"}
+
+ {:id :selector/a-complex-is-argument-still-loses-to-a-longer-selector
+  :group :selector
+  ;; The control the row above needs: the SUM is not a promotion.
+  ;; `:is(.cr-a .cr-b) span` is (0,2,1) and `div.cr-a .cr-b span` is
+  ;; (0,2,2). Brave: BLUE.
+  :html "<div class=\"cr-a\"><div class=\"cr-b\"><span id=\"cr1\">s</span></div></div>"
+  :css ":is(.cr-a .cr-b) span { color: #ff0000 } div.cr-a .cr-b span { color: #0000ff }"}
+
+ {:id :nesting/an-ampersand-with-a-complex-parent-carries-the-lists-maximum
+  :group :nesting
+  ;; The third arity of `&`, and the one round forty-nine measured and
+  ;; left open. `.nq-q, .nq-a .nq-b` is a parent list with one COMPLEX
+  ;; arm; `&` is `:is()` of the list, so its specificity is the maximum
+  ;; over the arms -- (0,2,0), from the arm that matches NOTHING on this
+  ;; page. `& span` is therefore (0,2,1) and beats `div.nq-q span`'s
+  ;; (0,1,2). Brave: RED. Expanding the list one parent at a time, which
+  ;; is what this engine did until complex `:is()` arguments landed, gives
+  ;; `.nq-q span` = (0,1,1) and loses.
+  :html "<div class=\"nq-q\"><span id=\"nq1\">s</span></div>"
+  :css ".nq-q, .nq-a .nq-b { & span { color: #ff0000 } } div.nq-q span { color: #0000ff }"}
+
+ {:id :nesting/two-complex-parents-do-not-raise-a-nested-rule
+  :group :nesting
+  ;; ...and the control, which a change that simply raised every
+  ;; multi-parent nested rule would turn red. Both arms complex, no id
+  ;; anywhere: the maximum is (0,2,0), `& span` is (0,2,1), and
+  ;; `div.np-a .np-b span` is (0,2,2). Brave: BLUE. This case agrees on
+  ;; both sides of the change and is here for that reason.
+  :html "<div class=\"np-a\"><div class=\"np-b\"><span id=\"np1\">s</span></div></div>"
+  :css ".np-a .np-b, .np-c .np-d { & span { color: #ff0000 } } div.np-a .np-b span { color: #0000ff }"}
+
+ {:id :cascade/a-registered-custom-ident-rejects-a-number
+  :group :cascade
+  ;; `@property`'s `syntax` is a grammar, not three special cases. A `7`
+  ;; is not a `<custom-ident>`, so the declaration is invalid for the
+  ;; registration and the property falls back to its registered INITIAL --
+  ;; `center`, which `text-align` is one of the fourteen properties the
+  ;; computed-style axis compares. Brave: `text-align: center`. An engine
+  ;; that only checks `<length>`/`<number>`/`<integer>` keeps the 7 and
+  ;; lands on `text-align: 7`.
+  :html "<div><p id=\"pa1\">text</p></div>"
+  :css "@property --paz { syntax: \"<custom-ident>\"; inherits: false; initial-value: center } #pa1 { --paz: 7; text-align: var(--paz) }"}
+
+ {:id :cascade/a-registration-with-an-unknown-syntax-component-is-dropped
+  :group :cascade
+  ;; An unknown component NAME does not degrade to "syntax unchecked" --
+  ;; it makes the whole at-rule invalid, so the property is not registered
+  ;; at all and `var(--pfz)` has nothing to resolve to. Brave: 800 wide
+  ;; (the declaration is invalid at computed-value time and `width` is
+  ;; `auto`). Its control is
+  ;; `:cascade/a-registered-custom-property-has-an-initial-value`, the same
+  ;; shape with `<length>`, which must stay 60.
+  :html "<div><p id=\"pf1\">w</p></div>"
+  :css "@property --pfz { syntax: \"<flurb>\"; inherits: false; initial-value: 60px } #pf1 { width: var(--pfz) }"}
+
+ {:id :supports/a-colour-this-engine-cannot-parse-is-not-supported
+  :group :supports
+  ;; The value half of the `@supports` oracle now speaks for colours,
+  ;; because the colour grammar turned out to live one layer BELOW
+  ;; `cssom.core` (in dom-gpu) rather than above it in `cssom.layout`.
+  ;; Both halves on one page because a condition that correctly reports
+  ;; false proves nothing without a true one beside it. Brave: the first
+  ;; paragraph BLACK, the second RED.
+  :html "<div><p id=\"sz1\">a</p><p id=\"sz2\">b</p></div>"
+  :css "@supports (color: #zzz) { #sz1 { color: #ff0000 } } @supports (color: #f00) { #sz2 { color: #ff0000 } }"}
+
+ {:id :supports/text-decoration-is-answered-component-by-component
+  :group :supports
+  ;; The other row the oracle used to name as a scope cut. `flurb` is not
+  ;; a decoration component; `underline dotted red` is three of them, and
+  ;; a per-component walk is what tells them apart without answering
+  ;; `false` for a real declaration. Brave: BLACK then RED.
+  :html "<div><p id=\"sd1\">a</p><p id=\"sd2\">b</p></div>"
+  :css "@supports (text-decoration: flurb) { #sd1 { color: #ff0000 } } @supports (text-decoration: underline dotted red) { #sd2 { color: #ff0000 } }"}
 ]
