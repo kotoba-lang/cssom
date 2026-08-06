@@ -3289,6 +3289,20 @@
    ;; fill a definite cross size rather than moving within it -- see
    ;; layout-flex-wrap-row.
    :align-content (or (style node :align-content) "stretch")
+   ;; The same two properties AS AUTHORED -- nil when the author declared
+   ;; nothing. The two keys above carry flexbox's initial values, which is
+   ;; what layout-flex wants and what every reader had; a GRID container
+   ;; needs to tell an authored value from an absent one, because CSS Grid
+   ;; §12.8 stretches `auto` tracks only when the content distribution is
+   ;; `normal`/`stretch` and leaves them at max-content under anything
+   ;; else. Measured in Brave: `grid-template-columns: auto auto` in a
+   ;; 300px grid holding "xx" and "yyyy" gives 140.84/159.16 unauthored
+   ;; and 17.16/35.47 under `justify-content: start` -- and `start` is
+   ;; exactly what `:justify-content`'s own \"flex-start\" default looks
+   ;; like from inside layout-grid, which is why the distinction cannot be
+   ;; recovered from it.
+   :justify-content/authored (style node :justify-content)
+   :align-content/authored (style node :align-content)
    :flex-grow (parse-dbl (style node :flex-grow) 0.0)
    :flex-shrink (parse-dbl (style node :flex-shrink) 1.0)
    ;; Left as the RAW cascade value (a length, `auto`, a percentage, or
@@ -3318,9 +3332,9 @@
    ;; `grid-auto-flow` picks which axis auto-placement fills FIRST: `row`
    ;; (the initial value) fills a row left-to-right before wrapping down,
    ;; `column` fills a column top-to-bottom before wrapping right. Read
-   ;; raw -- layout-grid only ever asks whether it names `column`, and the
-   ;; `dense` packing keyword (which may appear alongside it) is a
-   ;; documented non-goal there.
+   ;; raw -- layout-grid asks whether it names `column` and whether it
+   ;; names `dense`, which is the whole of the `[ row | column ] || dense`
+   ;; grammar it has to answer.
    :grid-auto-flow (style node :grid-auto-flow)
    ;; The track sizes IMPLICIT tracks take -- the ones auto-placement
    ;; creates beyond whatever grid-template-rows/-columns declared. Left
@@ -5040,9 +5054,61 @@
 
 ;; ---- flexbox main-axis distribution / cross-axis alignment ----
 
+(defn- alignment-keyword
+  "Splits a `justify-content`/`align-content` value into its optional
+   OVERFLOW-ALIGNMENT prefix and the keyword itself: `[safe? kw]`.
+
+   CSS Box Alignment 3 §5.3 lets a positional keyword be written `safe
+   center` or `unsafe center`; the prefix decides only what happens when
+   the alignment subject is BIGGER than the container, and everywhere
+   else the two are identical. Measured in Brave 151 on 2026-08-06, three
+   120px tracks in a 300px grid (free space -60px, so the question is
+   real):
+
+   | declaration                       | tracks at |
+   |-----------------------------------|-----------|
+   | `justify-content: center`         | -30/90/210 |
+   | `justify-content: unsafe center`  | -30/90/210 |
+   | `justify-content: safe center`    | 0/120/240  |
+   | `justify-content: end`            | -60/60/180 |
+   | `justify-content: safe end`       | 0/120/240  |
+
+   So **a bare positional keyword is `unsafe`** -- it overflows the START
+   edge, which is data loss the author asked for -- and `safe` falls back
+   to start packing instead. Both readings were measured rather than
+   taken from the grammar, because the spec's own default is stated as
+   \"unspecified\" behaviour that a UA may choose.
+
+   `left`/`right` are the physical forms of `start`/`end` and are
+   resolved as such here: measured, `justify-content: left` packs at 0/60
+   and `right` at 180/240, identical to `start`/`end` in this corpus's
+   left-to-right frame. Named cut: in a right-to-left or vertical writing
+   mode they would part company with `start`/`end`, and this engine does
+   not distinguish them there."
+  [justify]
+  (let [s (str/trim (str/lower-case (str justify)))]
+    (cond
+      (str/starts-with? s "safe ") [true (str/trim (subs s 5))]
+      (str/starts-with? s "unsafe ") [false (str/trim (subs s 7))]
+      :else [false s])))
+
 (defn- place-main-axis
   [justify sizes gap container-size]
-  (let [n (count sizes)]
+  (let [[safe? justify] (alignment-keyword justify)
+        ;; `right` is `end` and `left` is `start` in this engine's frame --
+        ;; see alignment-keyword for the measurement and for the writing-
+        ;; mode cut that goes with it. `end` (CSS Box Alignment's own
+        ;; keyword, which a GRID container is normally written with) means
+        ;; what `flex-end` (flexbox's) means, and Brave honours BOTH on
+        ;; BOTH box types: measured, `justify-content: end` on a flex row
+        ;; of two 60px items in 300px puts them at 180/240, exactly where
+        ;; `flex-end` does. Before this, `end` fell through to the
+        ;; start-packing `:else` on a flex container too.
+        justify (case justify
+                  ("right" "flex-end") "end"
+                  ("left" "flex-start") "start"
+                  justify)
+        n (count sizes)]
     (cond
       (zero? n) []
 
@@ -5067,9 +5133,19 @@
             offsets
             (recur (inc i) (+ pos (nth sizes i) step) (conj offsets pos)))))
 
-      (contains? #{"center" "flex-end"} justify)
+      ;; The two POSITIONAL keywords, and the one place `safe` is not a
+      ;; no-op. `free` is deliberately NOT clamped at zero here (the three
+      ;; distribution branches around it still are): a bare `center`/`end`
+      ;; is `unsafe`, so when the subject overflows it hangs off the START
+      ;; edge rather than snapping back to it -- measured, three 120px
+      ;; tracks in a 300px grid sit at -30/90/210 under `center` and
+      ;; -60/60/180 under `end`, and flexbox agrees to the pixel on the
+      ;; same shape. Clamping was this engine's behaviour before and is
+      ;; exactly what `safe` asks for, which is why the clamp is now
+      ;; spelled as the `safe?` fallback rather than deleted.
+      (contains? #{"center" "end"} justify)
       (let [total (+ (reduce + 0 sizes) (* gap (max 0 (dec n))))
-            free (max 0 (- container-size total))
+            free (cond-> (- container-size total) safe? (max 0))
             lead (if (= justify "center") (quot free 2) free)]
         (loop [i 0 pos lead offsets []]
           (if (= i n)
@@ -5983,18 +6059,30 @@
        `auto 1fr` leaves the auto track at exactly its 41.625px
        max-content, while `auto 100px` stretches the auto track to 300px.
 
-   Scope cut, deliberately: §12.8 stretches auto tracks only when
-   `justify-content`/`align-content` is `normal`/`stretch`, and an authored
-   `justify-content: start` leaves them at max-content (measured:
-   41.625/145.312 rather than 148.156/251.844). This engine does not
-   implement `justify-content` on a grid container at all — layout-grid
-   hardcodes flex-start track placement — so there is no value here to
-   condition the stretch on, and node-style's own `:justify-content`
-   default of \"flex-start\" cannot be told apart from an authored one.
-   Stretching unconditionally matches the initial value, which is what
-   nearly every real grid has."
-  ([tracks gap definite-total] (track-sizes tracks gap definite-total []))
-  ([tracks gap definite-total intrinsics]
+   `stretch-auto?` is §12.8's own condition on that last step, and it is
+   why the step is a parameter rather than a constant: an auto track is
+   stretched past max-content ONLY when the axis's content distribution is
+   `normal`/`stretch`, and an authored `justify-content: start` leaves it
+   at max-content. Measured in Brave on 2026-08-06, `grid-template-
+   columns: auto auto` in a 300px grid holding \"xx\" and \"yyyy\":
+
+   | declaration                     | tracks         |
+   |---------------------------------|----------------|
+   | (nothing)                       | 140.84/159.16  |
+   | `justify-content: stretch`      | 140.84/159.16  |
+   | `justify-content: start`        | 17.16/35.47    |
+   | `justify-content: center`       | 17.16/35.47, at x=123.7 |
+
+   The default is `true`, which is what every caller that is not a grid
+   axis wants and what this function did unconditionally before -- the
+   initial value of both properties really is the stretching one.
+
+   `fr` tracks are NOT affected: they absorb the free space themselves,
+   so there is none left for a distribution to move. Measured, `1fr 1fr`
+   under `justify-content: center` is still 150/150 at 0/150."
+  ([tracks gap definite-total] (track-sizes tracks gap definite-total [] true))
+  ([tracks gap definite-total intrinsics] (track-sizes tracks gap definite-total intrinsics true))
+  ([tracks gap definite-total intrinsics stretch-auto?]
    (let [n (count tracks)
          gap-total (* gap (max 0 (dec n)))
          auto-idxs (filterv #(= :auto (:type (nth tracks %))) (range n))
@@ -6012,7 +6100,7 @@
            (let [grown (distribute-equally-with-caps
                         base auto-idxs intrinsic-max
                         (- definite-total (reduce + 0 base) gap-total))]
-             (if has-fr?
+             (if (or has-fr? (not stretch-auto?))
                grown
                (distribute-equally-with-caps
                 grown auto-idxs (constantly nil)
@@ -6050,7 +6138,7 @@
 ;; (`grid-column: 1 / 3`), and `<start> / span <n>` (`grid-column: 2 / span
 ;; 2`) -- see parse-grid-placement for the exact per-form grammar and
 ;; resolve-grid-line for how a negative line number resolves. Explicitly out
-;; of scope: the `-start`/`-end` longhand properties, dense packing, and
+;; of scope: the `-start`/`-end` longhand properties and
 ;; implicit track creation for an out-of-range line (see clamp-col-range for
 ;; the fallback used instead). `grid-template-areas`/`grid-area` named-area
 ;; placement is a separate, THIRD placement mechanism (see the
@@ -6433,6 +6521,22 @@
         check keeps advancing until it finds a free cell, so it can't get
         stuck, but it also can't go backwards).
 
+     3. `dense?` (`grid-auto-flow: row dense` / `column dense`) is exactly
+        the negation of that last sentence, and nothing else: every auto
+        item restarts its scan at the origin, so one small enough to fit a
+        hole an earlier explicit placement left goes BACK and fills it.
+        Measured in Brave on 2026-08-06, in a three-column grid holding an
+        item locked to column 2, a two-column spanner, and a plain item:
+        dense puts the third item at (0,0) where sparse puts it at
+        (120,24), and the spanner is at (0,24) either way -- the pair
+        differs in exactly one box, which is what makes it a measurement
+        of `dense` rather than of placement in general. Two more shapes
+        measured, both agreeing: with the locked item in column 3 the
+        spanner itself backfills row 0 (0,0)-(120,0) under dense, and a
+        `grid-row: span 2` item in column 1 followed by three plain ones
+        gives the IDENTICAL four boxes both ways -- a control, because
+        nothing is ever left behind for a backfill to find.
+
    When there are NO explicitly-placed items at all, this degenerates to
    exactly the row-major scan every auto item always got before this
    feature existed (the cursor never encounters an already-occupied cell,
@@ -6449,7 +6553,7 @@
    difference. Measured in Brave, `grid-auto-flow: column` with three items
    and no template puts them at x=0/70/140 in one row, where this engine
    stacked them vertically at the container's full width."
-  [theme children n-cols n-row-tracks areas flow-column?]
+  [theme children n-cols n-row-tracks areas flow-column? dense?]
   (let [n (count children)
         requests (cond->> (mapv #(item-grid-placement theme % n-cols n-row-tracks areas) children)
                    flow-column? (mapv (fn [r] {:col (:row r) :row (:col r)})))
@@ -6538,8 +6642,21 @@
                           ;; (the grid grows implicit rows), so unlike the
                           ;; column span this one is not clamped to the
                           ;; declared track count.
-                          row-span (max 1 (or (:span (:row req)) 1))]
-                      (loop [r cursor-row c cursor-col]
+                          row-span (max 1 (or (:span (:row req)) 1))
+                          ;; ---- grid-auto-flow: dense ----
+                          ;; The ONE difference between sparse and dense
+                          ;; packing, and it is where the scan STARTS, not
+                          ;; what it does: dense restarts every auto item
+                          ;; from the origin, so an item small enough to
+                          ;; fit a hole an earlier explicit placement left
+                          ;; goes back and fills it. Sparse keeps the
+                          ;; shared forward-only cursor above. Everything
+                          ;; else -- the span, the wrap, the
+                          ;; whole-rectangle occupancy test -- is
+                          ;; identical, which is why this is two bindings
+                          ;; rather than a second placement pass.
+                          [r0 c0] (if dense? [0 0] [cursor-row cursor-col])]
+                      (loop [r r0 c c0]
                         (cond
                           (> (+ c span) n-cols) (recur (inc r) 0)
                           ;; every cell of the whole rectangle has to be
@@ -11223,7 +11340,7 @@
    `<start> / span <n>` (`grid-column: 2 / span 2`) are all supported for
    both axes. A negative line/index (`grid-column: -1`, 'the last column')
    is also supported as a deliberately pragmatic stretch goal. NOT
-   supported: the `-start`/`-end` longhand properties and dense packing (see
+   supported: the `-start`/`-end` longhand properties (see
    parse-grid-placement's own docstring for the precise grammar/arithmetic).
    An out-of-range column line (e.g. `grid-column: 5` with only 3 declared
    column tracks) does NOT implicitly create a new column track the way real
@@ -11297,6 +11414,30 @@
    one-character item at x=55.4 with a 9.2px box, where filling the track
    gave 0 and 120.
 
+   Content distribution: `justify-content` places the whole COLUMN TRACK
+   LIST in the container's content box and `align-content` the row track
+   list, via the same place-main-axis flexbox distributes its items with —
+   they are the same properties, and every keyword was measured to agree
+   between the two box types. The two compose with item alignment rather
+   than replacing it: measured, `justify-content: center; justify-items:
+   end` on two 60px tracks in 300px puts the tracks at 90/150 and each
+   item at its own track's right edge, and `align-content: end; align-
+   items: center` puts two 40px rows at 120/160 in a 200px grid with the
+   24px items centred inside them at 128/168. Both also condition CSS Grid
+   §12.8's `auto`-track stretch — see track-sizes.
+
+   Two scope cuts in that family, with the numbers a fix needs. A grid
+   that declares NO columns at all gets one full-container-width column
+   here (see col-tracks below), where a browser gives it an `auto` track:
+   measured, `display: grid; width: 300px; justify-content: center` with
+   two one-character items puts both at x=145.6 in an 8.875px column,
+   where this engine centres a 300px column and so moves nothing. And a
+   grid whose columns come from `grid-template-areas` alone gets `1fr`
+   tracks here and `auto` ones in a browser, which has the same effect
+   under a non-default `justify-content` (measured: `grid-template-areas:
+   'a b'` in a 300px grid centres at 141.3/149.8, where `1fr` tracks fill
+   the container and leave nothing to centre).
+
    Absolute-positioned children are NOT taken out of flow here — this
    matches layout-flex's current behavior (today only layout-children-block
    takes out-of-flow children out); a position:absolute child inside a grid
@@ -11308,13 +11449,11 @@
    parse-track-list/parse-track-token/track-sizes. Explicitly out of scope:
    percentage tracks, `min-content`/`max-content`/`fit-content()` as track
    keywords (only bare `auto` is recognised; the others still degrade to a
-   0px track), `repeat(auto-fill|auto-fit, ...)`, dense packing, the
+   0px track), `repeat(auto-fill|auto-fit, ...)`, the
    grid-column-start/grid-column-end/grid-row-start/grid-row-end longhand
    properties (only the grid-column/grid-row shorthand is parsed), the
    4-value grid-area longhand shorthand (only a bare area-name reference is
-   parsed, see above), `justify-content`/`align-content` on the container
-   (tracks are always placed from the start edge — see track-sizes for what
-   that costs the `auto` stretch step), and implicit COLUMN creation in row
+   parsed, see above), and implicit COLUMN creation in row
    flow: an out-of-range `grid-column` is still clamped into the declared
    range (clamp-col-range) rather than growing the grid, so
    `grid-auto-columns` only reaches the implicit tracks `grid-auto-flow:
@@ -11322,7 +11461,26 @@
    `grid-column: 2` item and `grid-auto-columns: 90px` makes a second 90px
    column where this engine puts the item back in the first one."
   [theme x y avail-width opacity inherited st node in-flow]
-  (let [;; A grid item's containing block is this grid area, not whatever
+  (let [;; `order` is not a flexbox property: it modifies the order a GRID
+        ;; container's auto-placement consumes its items in, and their
+        ;; paint order with it. Measured in Brave on 2026-08-06, two items
+        ;; in a two-column grid with `order: 2` on the first: they come out
+        ;; at x=60 and x=0, i.e. swapped, exactly as they do in a flex row.
+        ;; A negative one sorts ahead of unauthored siblings without any of
+        ;; them being renumbered (measured, three items with `order: -1` on
+        ;; the second: 60/0/120). This is the same reorder layout-flex
+        ;; already does, called from the same place in the pipeline -- once,
+        ;; before anything is measured or placed -- so nothing downstream
+        ;; knows the difference. Named cut, measured: an item with an
+        ;; explicit `grid-column` still jumps ahead of every auto item in
+        ;; this engine's two-phase placement (see place-grid-items), where a
+        ;; browser runs it in §8.5's step 4 alongside them, so `order` on
+        ;; such an item is honoured in the sort but not in the phase. Brave
+        ;; on `grid-column: 2; order: 3` before a two-column spanner and a
+        ;; plain item gives (60,24)/(0,0)/(120,0); this gives the spanner
+        ;; row 1 instead.
+        in-flow (order-flex-items theme in-flow)
+        ;; A grid item's containing block is this grid area, not whatever
         ;; block set the percentage-height basis on the way in -- same
         ;; reasoning, and same honest `auto`, as layout-flex's own dissoc.
         inherited (dissoc inherited :block/containing-height)
@@ -11347,6 +11505,30 @@
         row-gap-0 (gap-for-intrinsic-size st :row)
         col-gap-0 (gap-for-intrinsic-size st :column)
         flow-column? (str/includes? (str/lower-case (str (:grid-auto-flow st))) "column")
+        ;; `dense` is the second, independent half of `grid-auto-flow`'s
+        ;; grammar (`[ row | column ] || dense`), so it is read the same
+        ;; way `column` is rather than by parsing the pair -- see
+        ;; place-grid-items for what it changes.
+        dense? (str/includes? (str/lower-case (str (:grid-auto-flow st))) "dense")
+        ;; ---- content distribution, both axes ----
+        ;; The initial value of both is `normal` (measured: a bare
+        ;; `display: grid` reports `normal / normal` from
+        ;; getComputedStyle, not flexbox's `flex-start` / `stretch`), so
+        ;; these read the AUTHORED value and default to it rather than to
+        ;; `:justify-content`/`:align-content`, whose defaults are
+        ;; flexbox's. `normal` reaches place-main-axis's start-packing
+        ;; `:else`, so an unauthored grid is placed exactly where it was.
+        justify-content (or (:justify-content/authored st) "normal")
+        align-content (or (:align-content/authored st) "normal")
+        ;; ...and CSS Grid §12.8's stretch step for `auto` tracks is
+        ;; conditioned on the same value -- see track-sizes for the
+        ;; measurements. `stretch` and `normal` are the stretching values;
+        ;; every other keyword leaves an auto track at max-content, which
+        ;; is what gives a `justify-content: center` grid of auto columns
+        ;; anything to centre in the first place.
+        distribution-stretches? (fn [v] (contains? #{"normal" "stretch"} (str/trim (str/lower-case (str v)))))
+        stretch-cols? (distribution-stretches? justify-content)
+        stretch-rows? (distribution-stretches? align-content)
         template-areas (parse-grid-template-areas (:grid-template-areas st))
         explicit-cols (parse-track-list (:grid-template-columns st))
         auto-col-tracks (parse-track-list (:grid-auto-columns st))
@@ -11362,7 +11544,7 @@
                         template-areas (vec (repeat (:col-count template-areas) {:type :fr :size 1.0}))
                         :else [])
         placements (place-grid-items theme in-flow (max 1 (count declared-cols))
-                                     n-row-tracks (:areas template-areas) flow-column?)
+                                     n-row-tracks (:areas template-areas) flow-column? dense?)
         total-rows (if (seq placements) (apply max 0 (map :row-end placements)) 0)
         ;; IMPLICIT columns exist only under `grid-auto-flow: column`, where
         ;; the column axis is the one that grows (in row flow the column
@@ -11417,8 +11599,30 @@
         ;; -- `avail-cw` for a block-level grid, and the shrink-to-fit
         ;; width just computed with a zero gap for an inline-level one.
         col-gap (used-gap st :column cw)
-        col-widths (track-sizes col-tracks col-gap cw col-intrinsics)
-        col-offsets (place-main-axis "flex-start" col-widths col-gap 0)
+        col-widths (track-sizes col-tracks col-gap cw col-intrinsics stretch-cols?)
+        ;; ---- justify-content: the TRACKS in the leftover inline space ----
+        ;; The whole track list is one alignment subject, placed in the
+        ;; container's content box by the same helper flexbox distributes
+        ;; its items with -- and it is the same PROPERTY, so sharing the
+        ;; helper is the point rather than a shortcut. Every keyword was
+        ;; measured on two 60px tracks in a 300px grid (free space 180) on
+        ;; 2026-08-06, and grid agrees with flex on all of them:
+        ;;
+        ;;   start/left/flex-start/normal/stretch  0/60
+        ;;   end/right/flex-end                    180/240
+        ;;   center                                90/150
+        ;;   space-between                         0/240
+        ;;   space-around                          45/195
+        ;;   space-evenly                          60/180
+        ;;
+        ;; With `column-gap: 20px` the gap stays a FLOOR the distribution
+        ;; adds to rather than a fallback it replaces (0/240, 40/200,
+        ;; 53.3/186.7, 80/160 for the same four), which is what
+        ;; place-main-axis already did for flexbox. Unauthored, the value
+        ;; is `normal`, which is place-main-axis's start-packing `:else`
+        ;; and byte-identical to the `"flex-start"` constant this passed
+        ;; before.
+        col-offsets (place-main-axis justify-content col-widths col-gap cw)
         explicit-h (resolve-height st)
         ;; Every row has a track now: whatever grid-template-rows declared,
         ;; then grid-auto-rows for the implicit ones beyond it, then `auto`
@@ -11473,7 +11677,8 @@
         row-gap-definite (when explicit-h (used-gap st :row (clamp-height st explicit-h)))
         row-track-fr-sizes (when explicit-h
                              (track-sizes all-row-tracks row-gap-definite explicit-h
-                                          (mapv (fn [h] {:min h :max h}) row-content-h)))
+                                          (mapv (fn [h] {:min h :max h}) row-content-h)
+                                          stretch-rows?))
         row-heights (mapv (fn [row-idx]
                             (let [track (nth all-row-tracks row-idx)]
                               (cond
@@ -11514,7 +11719,20 @@
         ;; scrollHeight is 44.
         row-gap (or row-gap-definite
                     (used-gap st :row (clamp-height st (reduce + 0 row-heights))))
-        row-offsets (place-main-axis "flex-start" row-heights row-gap 0)
+        ;; ---- align-content: the same distribution, block axis ----
+        ;; The container size the rows are distributed IN is the used
+        ;; content height, which is not always the declared one: measured,
+        ;; `min-height: 100px` on a grid of two 20px rows under
+        ;; `align-content: end` reports a 100-tall box with its rows at
+        ;; y=60/80, so a min/max clamp makes free space just as an explicit
+        ;; `height` does. With neither, the container is sized BY its rows
+        ;; and there is nothing to distribute -- measured, an auto-height
+        ;; grid under `align-content: center` or `space-between` leaves its
+        ;; rows at 0/20 in a 40px box, which is what this expression gives
+        ;; for free (`rows-extent` IS the container size, so free = 0).
+        rows-extent (+ (reduce + 0 row-heights) (* row-gap (max 0 (dec (count row-heights)))))
+        block-size (clamp-height st (or explicit-h rows-extent))
+        row-offsets (place-main-axis align-content row-heights row-gap block-size)
         ;; Aligned by MARGIN box within the track (so `justify-items: center`
         ;; centres the margin box, not the border box), then the border box
         ;; sits one leading margin inside it.
@@ -14987,10 +15205,78 @@
               rtl? (and (= "rtl" (:direction inherited))
                         (nil? (real-text-child child))
                         (not (generated-node? child)))
+              ;; ---- box alignment is not grid-only ----
+              ;;
+              ;; `justify-self` on an ordinary BLOCK-LEVEL child of an
+              ;; ordinary block container places it in the inline axis,
+              ;; and a spec reading gets this wrong: CSS Box Alignment 3
+              ;; §6 really does define `justify-self` for block-level
+              ;; boxes, where `align-self` in the same position does
+              ;; nothing at all. Measured in Brave 151 on 2026-08-06, a
+              ;; 60px child of a 300px parent:
+              ;;
+              ;; | `justify-self`  |   x |
+              ;; |-----------------|-----|
+              ;; | `start`         |   0 |
+              ;; | `center`        | 120 |
+              ;; | `end`           | 240 |
+              ;; | `stretch`/none  |   0, and 300 wide |
+              ;; | `align-self: end` | 0 -- the block axis has no such rule |
+              ;;
+              ;; Four boundaries, all measured, all encoded below.
+              ;; **An auto margin WINS**: `justify-self: end` with
+              ;; `margin: 0 auto` comes out CENTRED at 120, and
+              ;; `justify-self: start` with `margin-left: auto` at 240 --
+              ;; so this sits after both auto-margin branches rather than
+              ;; before them. It applies to BLOCK-level boxes only: on an
+              ;; `inline-block` child, and on a float, `justify-self:
+              ;; center` moves nothing (x=0 for both). A declared margin
+              ;; is respected and the alignment happens in what is left:
+              ;; `center` with `margin-left: 40px` gives 140, not 120.
+              ;; And it is UNSAFE, like every bare positional keyword
+              ;; (see alignment-keyword): a 300px child of a 200px parent
+              ;; under `center` sits at **-50**, where the same box under
+              ;; `margin: 0 auto` stays at 0 -- which is why `free*` here
+              ;; is the unclamped counterpart of `free` above.
+              ;;
+              ;; Named cut, measured: `justify-items` on the CONTAINER
+              ;; does the same job (`justify-items: center` on the 300px
+              ;; parent puts the same child at 120) and is not read here,
+              ;; because layout-children-block is handed the container's
+              ;; content box and not its style map -- reaching it means
+              ;; threading a new argument through five arities and every
+              ;; call site. `justify-self: auto` -- the initial value --
+              ;; defers to that property, whose own initial value is
+              ;; `normal`, so the DEFAULT answer is right either way;
+              ;; what is missing is only an authored one.
+              ;; Second cut, measured: with `width: auto` a non-stretch
+              ;; `justify-self` also makes the box SHRINK-TO-FIT, which
+              ;; is a size decision this branch is downstream of -- Brave
+              ;; puts a one-character auto-width child at x=145.7 in an
+              ;; 8.578px box, where this engine leaves it 300 wide and
+              ;; therefore finds no free space to move it in. That is the
+              ;; same answer it gave before, not a new divergence.
+              jself (let [v (when (and cst
+                                       (not= "inline" (:display cst))
+                                       (not (contains? inline-atomic-displays (:display cst))))
+                              (:justify-self cst))
+                          [_ kw] (alignment-keyword v)
+                          ;; `start`/`end` are writing-mode relative and
+                          ;; `left`/`right` physical: measured,
+                          ;; `justify-self: start` in a `direction: rtl`
+                          ;; parent puts the child at the RIGHT edge (240).
+                          kw (if rtl? (case kw "start" "end" "end" "start" kw) kw)]
+                      (when (contains? #{"start" "center" "end" "left" "right" "flex-start" "flex-end"} kw)
+                        kw))
+              free* (- content-w ml mr child-w)
               auto-dx (cond
                         (and ml-auto? mr-auto?) (quot free 2)
                         ml-auto? free
                         mr-auto? 0
+                        jself (case jself
+                                "center" (quot free* 2)
+                                ("end" "right" "flex-end") free*
+                                0)
                         rtl? free
                         :else 0)
               ;; second pass: see `lay` above. The band is expressed relative

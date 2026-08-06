@@ -1951,7 +1951,16 @@
                                 :align-content "space-between"}
                                [{:width 120 :height 20} {:width 120 :height 20}])]
     (is (= [0 100] (mapv second boxes))
-        "two 20px lines in a 120px container: one at each end")))
+        "two 20px lines in a 120px container: one at each end"))
+  ;; `end` is CSS Box Alignment's own spelling of `flex-end` and reaches
+  ;; the cross axis by the same helper -- measured in Brave on 2026-08-06,
+  ;; two 20px lines in a 200px `flex-wrap: wrap` container under
+  ;; `align-content: end` sit at y=160/180. It fell through to start
+  ;; packing here before place-main-axis learned the keyword.
+  (let [boxes (flex-item-boxes {:width 100 :height 200 :flex-wrap "wrap" :gap 0
+                                :align-content "end"}
+                               [{:width 100 :height 20} {:width 100 :height 20}])]
+    (is (= [160 180] (mapv second boxes)))))
 
 (deftest flex-align-content-stretch-grows-the-lines-themselves
   (let [boxes (flex-item-boxes {:width 200 :height 80 :flex-wrap "wrap" :gap 0}
@@ -13498,3 +13507,279 @@
   (is (= ["A" "lpha" "beta"]
          (fl-texts "#f::first-letter { font-size: 40px }"
                    "<p id=\"f\"><span><b>Alpha</b></span> beta</p>"))))
+
+;; ---- content distribution: justify-content / align-content on a GRID ----
+;;
+;; Every number below was measured in Brave 151 over CDP on 2026-08-06,
+;; one probe page per probe, before any of the code that produces it was
+;; written. The rules and the whole measured tables live at
+;; `alignment-keyword`, `track-sizes` and `layout-grid` in cssom.layout.
+;; The corpus's own coordinates are the browser's minus the 8px body
+;; margin, which is why 8/68 there reads as 0/60 here.
+
+(deftest grid-justify-content-places-the-track-list-in-the-leftover-space
+  ;; Two 60px tracks in a 300px grid: 180px of free space, distributed
+  ;; six different ways. Before this the tracks were always packed at the
+  ;; start edge and every one of these read 0/60.
+  (let [tracks (fn [jc] (let [[a b] (grid-item-boxes
+                                     (cond-> {:grid-template-columns "60px 60px" :width 300}
+                                       jc (assoc :justify-content jc))
+                                     [[:div {} "x"] [:div {} "y"]])]
+                          [(:x a) (:x b)]))]
+    ;; the CONTROL, and it is the one that must not move: unauthored, the
+    ;; initial value is `normal`, which packs at the start exactly as the
+    ;; hardcoded "flex-start" this used to pass did
+    (is (= [0 60] (tracks nil)) "unauthored: packed at the start edge")
+    (is (= [0 60] (tracks "start")))
+    (is (= [0 60] (tracks "normal")))
+    (is (= [0 60] (tracks "stretch")) "a fixed track cannot stretch, so `stretch` is start packing")
+    (is (= [0 60] (tracks "flex-start")))
+    (is (= [0 60] (tracks "left")))
+    (is (= [180 240] (tracks "end")))
+    (is (= [180 240] (tracks "flex-end")))
+    (is (= [180 240] (tracks "right")))
+    (is (= [90 150] (tracks "center")))
+    (is (= [0 240] (tracks "space-between")))
+    (is (= [45 195] (tracks "space-around")))
+    (is (= [60 180] (tracks "space-evenly")))))
+
+(deftest grid-justify-content-adds-to-the-gap-rather-than-replacing-it
+  ;; Measured with `column-gap: 20px` on the same two 60px tracks: the gap
+  ;; stays a MINIMUM the distribution is added to, which is the rule
+  ;; place-main-axis already had for flexbox and which this inherits by
+  ;; sharing it.
+  (let [tracks (fn [jc] (let [[a b] (grid-item-boxes
+                                     {:grid-template-columns "60px 60px" :column-gap 20
+                                      :width 300 :justify-content jc}
+                                     [[:div {} "x"] [:div {} "y"]])]
+                          [(:x a) (:x b)]))]
+    (is (= [0 240] (tracks "space-between")))
+    (is (= [40 200] (tracks "space-around")))
+    (is (= [80 160] (tracks "center")))
+    (is (= [160 240] (tracks "end")))))
+
+(deftest grid-align-content-places-the-row-track-list-in-a-definite-height
+  ;; The block-axis half: two 20px rows in a 100px-tall grid, 60px free.
+  (let [rows (fn [ac] (let [[a b] (grid-item-boxes
+                                   (cond-> {:grid-template-rows "20px 20px" :height 100 :width 300}
+                                     ac (assoc :align-content ac))
+                                   [[:div {} "x"] [:div {} "y"]])]
+                        [(:y a) (:y b)]))]
+    (is (= [0 20] (rows nil)) "the control: unauthored rows start at the top edge")
+    (is (= [0 20] (rows "start")))
+    (is (= [0 20] (rows "stretch")) "a fixed row track cannot stretch either")
+    (is (= [60 80] (rows "end")))
+    (is (= [60 80] (rows "flex-end")))
+    (is (= [30 50] (rows "center")))
+    (is (= [0 80] (rows "space-between")))
+    (is (= [15 65] (rows "space-around")))
+    (is (= [20 60] (rows "space-evenly")))))
+
+(deftest grid-align-content-has-no-free-space-without-a-definite-block-size
+  ;; The container is sized BY its rows when nothing else says otherwise,
+  ;; so there is nothing to distribute -- measured, an auto-height grid
+  ;; under `center` or `space-between` leaves its rows at 0/20 in a 40px
+  ;; box, exactly where they were.
+  (doseq [ac ["center" "space-between" "end"]]
+    (let [[c a b] (grid-boxes-with-container
+                   {:grid-template-rows "20px 20px" :width 300 :align-content ac}
+                   [[:div {} "x"] [:div {} "y"]])]
+      (is (= 40 (:h c)) (str ac ": the box is still its rows' own height"))
+      (is (= [0 20] [(:y a) (:y b)]) (str ac ": and the rows have not moved")))))
+
+(deftest grid-align-content-reads-a-min-or-max-height-clamp-as-definite
+  ;; A clamp makes free space just as an explicit `height` does. Measured:
+  ;; `min-height: 100px` on two 20px rows under `align-content: end` gives
+  ;; a 100-tall box with its rows at 60/80.
+  (let [[c a b] (grid-boxes-with-container
+                 {:grid-template-rows "20px 20px" :min-height 100 :width 300
+                  :align-content "end"}
+                 [[:div {} "x"] [:div {} "y"]])]
+    (is (= 100 (:h c)))
+    (is (= [60 80] [(:y a) (:y b)])))
+  ;; and from the other side: `max-height: 40px` on two 60px rows makes the
+  ;; free space NEGATIVE, and `end` hangs the rows off the top edge --
+  ;; measured at -80 and -20 in a 40px box.
+  (let [[c a b] (grid-boxes-with-container
+                 {:grid-template-rows "60px 60px" :max-height 40 :width 300
+                  :align-content "end"}
+                 [[:div {} "x"] [:div {} "y"]])]
+    (is (= 40 (:h c)))
+    (is (= [-80 -20] [(:y a) (:y b)]))))
+
+(deftest an-authored-content-distribution-stops-auto-tracks-stretching
+  ;; CSS Grid 12.8's own condition on its last step, and the reason
+  ;; `justify-content: center` on auto tracks has anything to centre.
+  ;; Brave, `auto auto` in a 400px grid holding `short` (max-content
+  ;; 41.6px) and `a much longer cell` (145.3px): 148.2/251.8 unauthored
+  ;; and 41.6/145.3 under `justify-content: start`.
+  (let [widths (fn [jc] (mapv :w (grid-item-boxes
+                                  (cond-> {:grid-template-columns "auto auto" :width 400}
+                                    jc (assoc :justify-content jc))
+                                  [[:div {} "short"] [:div {} "a much longer cell"]])))]
+    ;; the two CONTROLS: both stretching values must keep filling the grid
+    (is (= 400 (reduce + (widths nil))) "unauthored still fills the container")
+    (is (= 400 (reduce + (widths "stretch"))))
+    (is (= 400 (reduce + (widths "normal"))))
+    (is (> 400 (reduce + (widths "start"))) "an authored `start` leaves them at max-content")
+    (is (= (widths "start") (widths "center")) "and so does every other keyword")
+    (is (= (widths "start") (widths "space-between"))))
+  ;; an `fr` track absorbs the free space itself, so there is none left for
+  ;; a distribution to move -- measured, `1fr 1fr` under `center` is still
+  ;; 150/150 at 0/150 in a 300px grid
+  (let [[a b] (grid-item-boxes {:grid-template-columns "1fr 1fr" :width 300
+                                :justify-content "center"}
+                               [[:div {} "x"] [:div {} "y"]])]
+    (is (= [0 150] [(:x a) (:w a)]))
+    (is (= [150 150] [(:x b) (:w b)])))
+  ;; the same condition on the BLOCK axis: auto rows in a 100px-tall grid
+  ;; stretch to 50 each unauthored (measured) and stay at their content
+  ;; height under an authored `align-content`
+  (let [[a b] (grid-item-boxes {:height 100 :width 300}
+                               [[:div {} "x"] [:div {} "y"]])]
+    (is (= [50 50] [(:h a) (:h b)]) "the control: unauthored rows share the height"))
+  (let [[a b] (grid-item-boxes {:height 100 :width 300 :align-content "start"}
+                               [[:div {} "x"] [:div {} "y"]])]
+    (is (= 20 (:h a)) "an authored `start` leaves the row at its content height")
+    (is (= [0 20] [(:y a) (:y b)]))))
+
+(deftest an-overflowing-track-list-hangs-off-the-start-edge-unless-it-is-safe
+  ;; Three 120px tracks in a 300px grid: 60px of NEGATIVE free space, and
+  ;; what each keyword does with it was measured rather than reasoned
+  ;; about. A bare positional keyword is UNSAFE and overflows; `safe`
+  ;; falls back to start packing; and all three DISTRIBUTION keywords fall
+  ;; back to start too, which is the answer this engine already gave by
+  ;; clamping.
+  (let [tracks (fn [jc] (mapv :x (grid-item-boxes
+                                  {:grid-template-columns "120px 120px 120px" :width 300
+                                   :justify-content jc}
+                                  [[:div {} "x"] [:div {} "y"] [:div {} "z"]])))]
+    (is (= [-30 90 210] (tracks "center")))
+    (is (= [-30 90 210] (tracks "unsafe center")))
+    (is (= [0 120 240] (tracks "safe center")))
+    (is (= [-60 60 180] (tracks "end")))
+    (is (= [0 120 240] (tracks "safe end")))
+    ;; the three controls, all unchanged from before this round
+    (is (= [0 120 240] (tracks "space-between")))
+    (is (= [0 120 240] (tracks "space-around")))
+    (is (= [0 120 240] (tracks "space-evenly")))))
+
+(deftest justify-content-end-is-honoured-on-a-flex-container-too
+  ;; `end` and `flex-end` are the same keyword to a browser on both box
+  ;; types -- measured, two 60px items in a 300px flex row sit at 180/240
+  ;; under either. `end` used to fall through to start packing here, so a
+  ;; grid-flavoured spelling on a flex container was silently ignored.
+  (is (= [180 240] (mapv first (flex-item-boxes {:width 300 :justify-content "end"}
+                                                [{:width 60 :height 10} {:width 60 :height 10}])))) 
+  (is (= [180 240] (mapv first (flex-item-boxes {:width 300 :justify-content "flex-end"}
+                                                [{:width 60 :height 10} {:width 60 :height 10}])))
+      "the control: the flexbox spelling was already right and must stay so")
+  ;; and a flex row overflows exactly like a grid does -- three 120px
+  ;; unshrinkable items in 300px sit at -30/90/210 under `center`
+  (is (= [-30 90 210] (mapv first (flex-item-boxes {:width 300 :justify-content "center"}
+                                                   (repeat 3 {:width 120 :height 10 :flex-shrink 0}))))))
+
+(deftest grid-auto-flow-dense-backfills-a-hole-an-explicit-item-left
+  ;; Measured in a three-column grid holding an item locked to column 2, a
+  ;; two-column spanner, and a plain item: dense sends the third item back
+  ;; to (0,0), sparse leaves it at (120,20). The pair differs in exactly
+  ;; one box, which is what makes it a measurement of `dense`.
+  (let [specs [[:div {:grid-column "2"} "1"] [:div {:grid-column "span 2"} "2"] [:div {} "3"]]
+        xy (fn [b] [(:x b) (:y b)])]
+    (let [[a b c] (grid-item-boxes {:grid-template-columns "60px 60px 60px"
+                                    :grid-auto-flow "row dense"} specs)]
+      (is (= [60 0] (xy a)))
+      (is (= [0 20] (xy b)))
+      (is (= [0 0] (xy c)) "the plain item goes BACK into the hole"))
+    ;; the control, identical but for the keyword
+    (let [[a b c] (grid-item-boxes {:grid-template-columns "60px 60px 60px"} specs)]
+      (is (= [60 0] (xy a)))
+      (is (= [0 20] (xy b)))
+      (is (= [120 20] (xy c)) "sparse: the cursor only ever moves forward")))
+  ;; a second shape, where it is the SPANNER that backfills: with the
+  ;; explicit item in column 3, Brave puts the two-column item at (0,0)
+  (let [[a b c d] (grid-item-boxes {:grid-template-columns "60px 60px 60px"
+                                    :grid-auto-flow "row dense"}
+                                   [[:div {:grid-column "3"} "1"] [:div {:grid-column "span 2"} "2"]
+                                    [:div {} "3"] [:div {} "4"]])]
+    (is (= [[120 0] [0 0] [0 20] [60 20]]
+           (mapv (fn [b] [(:x b) (:y b)]) [a b c d]))))
+  ;; ...and a control where dense changes NOTHING, because nothing is ever
+  ;; left behind: measured, the four boxes are identical either way
+  (let [specs [[:div {:grid-row "span 2"} "1"] [:div {} "2"] [:div {} "3"] [:div {} "4"]]
+        boxes (fn [flow] (mapv (fn [b] [(:x b) (:y b)])
+                               (grid-item-boxes (cond-> {:grid-template-columns "60px 60px"}
+                                                  flow (assoc :grid-auto-flow flow))
+                                                specs)))]
+    (is (= (boxes nil) (boxes "row dense")))
+    (is (= [[0 0] [60 0] [60 20] [0 40]] (boxes "row dense")))))
+
+(deftest order-reorders-a-grids-auto-placement-and-its-paint-order
+  ;; `order` is not a flex property. Measured: two items in a two-column
+  ;; grid with `order: 2` on the first come out at x=60 and x=0.
+  ;;
+  ;; The two items are given DIFFERENT heights on purpose. With identical
+  ;; ones the assertion cannot see the reorder at all -- the boxes come
+  ;; out at 0 and 60 either way, because the draw order follows the
+  ;; reordered children and the first-drawn box is at x=0 in both. That is
+  ;; a test that passes on the base commit, which is a test that measures
+  ;; nothing; the height is what ties a box back to the element it is.
+  (let [boxes (grid-item-boxes {:grid-template-columns "40px 80px"}
+                               [[:div {:order 2 :height 30} "aa"]
+                                [:div {:height 10} "bb"]])]
+    (is (= [[0 10] [40 30]] (mapv (juxt :x :h) boxes))
+        "the `order: 2` item (30 tall) is placed in the SECOND track and painted second"))
+  ;; the control: the identical markup with no `order`
+  (let [boxes (grid-item-boxes {:grid-template-columns "40px 80px"}
+                               [[:div {:height 30} "aa"] [:div {:height 10} "bb"]])]
+    (is (= [[0 30] [40 10]] (mapv (juxt :x :h) boxes))))
+  ;; a negative one sorts ahead of unauthored siblings without renumbering
+  ;; them -- measured at 60/0/120
+  (let [boxes (grid-item-boxes {:grid-template-columns "60px 60px 60px"}
+                               [[:div {} "aa"] [:div {:order -1} "bb"] [:div {} "cc"]])]
+    (is (= [0 60 120] (mapv :x boxes)))))
+
+(deftest justify-self-places-a-block-level-child-in-the-inline-axis
+  ;; Box alignment is not grid-only, and this is the one in the family a
+  ;; spec reading gets wrong. Measured on a 60px child of a 300px block.
+  (let [x (fn [child-style]
+            (let [[p doc] (dom/create-element dom/empty-document :div)
+                  doc (dom/set-root doc p)
+                  doc (dom/set-style doc p {:width 300})
+                  doc (build-inline-children doc p [[:div child-style "x"]])
+                  [_ doc] (dom/consume-ops doc)
+                  ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+                  boxes (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
+              [(:x (second boxes)) (:w (second boxes))]))]
+    (is (= [0 300] (x {})) "the control: no rule, and the child fills its container")
+    (is (= [0 60] (x {:width 60})) "the second control: a declared width alone moves nothing")
+    (is (= [120 60] (x {:width 60 :justify-self "center"})))
+    (is (= [240 60] (x {:width 60 :justify-self "end"})))
+    (is (= [0 60] (x {:width 60 :justify-self "start"})))
+    (is (= [0 300] (x {:justify-self "stretch"})) "stretch is the default behaviour")
+    ;; the BLOCK axis has no such rule -- `align-self: end` moves nothing
+    (is (= [0 60] (x {:width 60 :align-self "end"})))
+    ;; an auto margin WINS: `justify-self: end` with `margin: 0 auto` is
+    ;; centred at 120, and `start` with `margin-left: auto` is at 240
+    (is (= [120 60] (x {:width 60 :justify-self "end" :margin-left "auto" :margin-right "auto"})))
+    (is (= [240 60] (x {:width 60 :justify-self "start" :margin-left "auto"})))
+    ;; a declared margin is respected and the alignment happens in what is
+    ;; left over: `center` with `margin-left: 40px` gives 140, not 120
+    (is (= [140 60] (x {:width 60 :justify-self "center" :margin-left 40})))
+    ;; and it is UNSAFE: a 300px child of a 200px block sits at -50 under
+    ;; `center`, where `margin: 0 auto` would leave it at 0
+    (is (= [0 60] (x {:width 60 :display "inline-block" :justify-self "center"}))
+        "an inline-level child is not a block-level box and is not aligned")))
+
+(deftest justify-self-on-a-block-child-is-unsafe-when-it-overflows
+  ;; Measured: `justify-self: center` on a 300px child of a 200px parent
+  ;; puts it at -50, where the same box under `margin: 0 auto` stays at 0
+  ;; (which is what `free`'s own clamp above it already encodes).
+  (let [[p doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc p)
+        doc (dom/set-style doc p {:width 200})
+        doc (build-inline-children doc p [[:div {:width 300 :justify-self "center"} "x"]])
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc) {:width 400 :theme {:padding 0 :gap 0}})
+        boxes (filterv #(and (= :node (:draw/op %)) (= :div (:tag %))) ops)]
+    (is (= -50 (:x (second boxes))))))
