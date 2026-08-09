@@ -6344,4 +6344,148 @@
   ;; win. Brave: red.
   :html "<div><div class=\"sc-far5\"><div class=\"sc-near5\"><p>text</p></div></div></div>"
   :css "@scope (.sc-near5) { p { color: #ff0000 !important } } @scope (.sc-far5) { p { color: #0000ff !important } }"}
+ ;; ---- content distribution, round fifty-three ----
+ ;; Every number below was read out of a real headless Brave 151.1.93.129
+ ;; over CDP on 2026-08-06, one probe page per probe, before the case was
+ ;; written. Coordinates here are the browser's minus the 8px body margin.
+
+ {:id :grid/justify-content-space-around-and-evenly-are-not-the-same
+  :group :grid
+  ;; Two tracks cannot tell `space-around` from `space-evenly` apart from
+  ;; the lead, so this is the three-track shape where they separate.
+  ;; Brave, three 60px tracks in a 300px grid: around at 20/120/220
+  ;; (each track gets a full free/n share, split half-lead half-trail) and
+  ;; evenly at 30/120/210 (free split into n+1 equal gaps).
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px 60px; width: 300px; justify-content: space-around\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div><div style=\"height: 20px\">z</div></div>"}
+
+ {:id :grid/justify-content-space-evenly-splits-the-free-space-n-plus-one-ways
+  :group :grid
+  ;; Its pair. Brave: 30/120/210.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px 60px; width: 300px; justify-content: space-evenly\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div><div style=\"height: 20px\">z</div></div>"}
+
+ {:id :grid/justify-content-adds-to-the-gap-rather-than-replacing-it
+  :group :grid
+  ;; `column-gap` stays a MINIMUM the distribution is added to, not a
+  ;; fallback for when free space runs out. Brave: 0/240 -- the same two
+  ;; positions the gapless grid gives, because space-between puts
+  ;; everything at the two edges either way, which is exactly why the
+  ;; case that distinguishes the two readings is the CENTRE one beside it.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; column-gap: 20px; width: 300px; justify-content: space-between\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div></div>"}
+
+ {:id :grid/justify-content-center-counts-the-gap-as-part-of-the-subject
+  :group :grid
+  ;; ...and here it does: 140px of tracks-and-gap in 300px leaves 160,
+  ;; so the pair sits at 80/160. Reading `gap` as a fallback would give
+  ;; 90/150, which is this case's whole point.
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; column-gap: 20px; width: 300px; justify-content: center\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div></div>"}
+
+ {:id :grid/an-overflowing-track-list-is-unsafe-by-default
+  :group :grid
+  ;; NEGATIVE free space, which is where the alignment keywords stop
+  ;; agreeing with their own names. A bare positional keyword is UNSAFE:
+  ;; Brave puts three 120px tracks in a 300px grid at -30/90/210 under
+  ;; `center`, hanging the first off the start edge.
+  :html "<div style=\"display: grid; grid-template-columns: 120px 120px 120px; width: 300px; justify-content: center\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div><div style=\"height: 20px\">z</div></div>"}
+
+ {:id :grid/safe-center-falls-back-to-start-when-it-overflows
+  :group :grid
+  ;; The `safe` prefix on the identical shape, and it is the only thing
+  ;; that differs. Brave: 0/120/240.
+  :html "<div style=\"display: grid; grid-template-columns: 120px 120px 120px; width: 300px; justify-content: safe center\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div><div style=\"height: 20px\">z</div></div>"}
+
+ {:id :grid/space-between-falls-back-to-start-when-it-overflows
+  :group :grid
+  ;; And the distribution keywords are safe WITHOUT the prefix -- their
+  ;; fallback alignment is a safe one. Brave: 0/120/240, i.e. nothing
+  ;; spread at all, which is not what the name suggests.
+  :html "<div style=\"display: grid; grid-template-columns: 120px 120px 120px; width: 300px; justify-content: space-between\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div><div style=\"height: 20px\">z</div></div>"}
+
+ {:id :grid/an-authored-justify-content-stops-auto-tracks-stretching
+  :group :grid
+  ;; CSS Grid 12.8 stretches `auto` tracks only under `normal`/`stretch`,
+  ;; and that condition is what gives a non-default `justify-content`
+  ;; anything to distribute. Brave: two `auto` tracks holding 60px items
+  ;; in a 300px grid are 60 wide each and land at 90/150.
+  :html "<div style=\"display: grid; grid-template-columns: auto auto; width: 300px; justify-content: center\"><div style=\"width: 60px; height: 20px\">x</div><div style=\"width: 60px; height: 20px\">y</div></div>"}
+
+ {:id :grid/auto-tracks-stretch-when-nothing-is-authored
+  :group :grid
+  ;; Its control, identical but for the declaration: the tracks share the
+  ;; container and the second item starts at the halfway line. Brave:
+  ;; x=0 and x=150, both items still 60 wide.
+  :html "<div style=\"display: grid; grid-template-columns: auto auto; width: 300px\"><div style=\"width: 60px; height: 20px\">x</div><div style=\"width: 60px; height: 20px\">y</div></div>"}
+
+ {:id :grid/an-authored-align-content-stops-auto-rows-stretching
+  :group :grid
+  ;; The same condition on the block axis. Brave: two auto rows in a
+  ;; 100px-tall grid under `align-content: start` are 20 tall and sit at
+  ;; y=0/20.
+  :html "<div style=\"display: grid; width: 300px; height: 100px; align-content: start\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div></div>"}
+
+ {:id :grid/auto-rows-stretch-when-nothing-is-authored
+  :group :grid
+  ;; Its control. Brave: the rows are 50 each, so the second item starts
+  ;; at y=50 while staying 20 tall.
+  :html "<div style=\"display: grid; width: 300px; height: 100px\"><div style=\"height: 20px\">x</div><div style=\"height: 20px\">y</div></div>"}
+
+ {:id :grid/align-content-reads-a-min-height-clamp-as-a-definite-size
+  :group :grid
+  ;; A clamp makes free space just as a declared `height` does -- the
+  ;; container size align-content distributes in is the USED one. Brave:
+  ;; a 100-tall box with its two 20px rows at y=60/80.
+  :html "<div style=\"display: grid; grid-template-rows: 20px 20px; min-height: 100px; width: 300px; align-content: end\"><div>x</div><div>y</div></div>"}
+
+ {:id :grid/align-content-has-no-free-space-in-an-auto-height-grid
+  :group :grid
+  ;; Its opposite: with no definite block size the container is sized BY
+  ;; its rows, so there is nothing to distribute. Brave: a 40px box with
+  ;; its rows still at y=0/20, despite the declaration.
+  :html "<div style=\"display: grid; grid-template-rows: 20px 20px; width: 300px; align-content: space-between\"><div>x</div><div>y</div></div>"}
+
+ {:id :flex/justify-content-end-means-flex-end
+  :group :flex
+  ;; `end` and `flex-end` are the same keyword to a browser, on a flex
+  ;; container as much as on a grid. Brave: two 60px items in a 300px row
+  ;; at 180/240 under either spelling.
+  :html "<div style=\"display: flex; width: 300px; justify-content: end\"><div style=\"width: 60px; height: 20px\">x</div><div style=\"width: 60px; height: 20px\">y</div></div>"}
+
+ {:id :flex/an-overflowing-line-is-unsafe-by-default
+  :group :flex
+  ;; And the overflow rule is the same one, to the pixel: three
+  ;; unshrinkable 120px items in a 300px row sit at -30/90/210, exactly
+  ;; where the three grid tracks beside them do.
+  :html "<div style=\"display: flex; width: 300px; justify-content: center\"><div style=\"width: 120px; height: 20px; flex-shrink: 0\">x</div><div style=\"width: 120px; height: 20px; flex-shrink: 0\">y</div><div style=\"width: 120px; height: 20px; flex-shrink: 0\">z</div></div>"}
+
+ {:id :grid/auto-flow-dense-backfills-with-a-spanner
+  :group :grid
+  ;; The second dense shape, where it is the two-column SPANNER that goes
+  ;; back rather than a single cell: with the explicit item locked to
+  ;; column 3, Brave puts the spanner at (0,0) and the two plain items at
+  ;; (0,20) and (60,20).
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px 60px; grid-auto-flow: row dense\"><div style=\"grid-column: 3; height: 20px\">1</div><div style=\"grid-column: span 2; height: 20px\">2</div><div style=\"height: 20px\">3</div><div style=\"height: 20px\">4</div></div>"}
+
+ {:id :grid/dense-changes-nothing-when-no-hole-is-left
+  :group :grid
+  ;; Its control, and it is a control because `dense` is only ever a
+  ;; difference in where the scan STARTS: a `grid-row: span 2` item in
+  ;; column 1 followed by three plain ones gives the identical four boxes
+  ;; either way. Brave: (0,0) (60,0) (60,20) (0,40).
+  :html "<div style=\"display: grid; grid-template-columns: 60px 60px; grid-auto-flow: row dense\"><div style=\"grid-row: span 2; height: 20px\">1</div><div style=\"height: 20px\">2</div><div style=\"height: 20px\">3</div><div style=\"height: 20px\">4</div></div>"}
+
+ {:id :box/justify-items-on-a-block-container
+  :group :box
+  ;; The container-side half of `justify-self`, and this engine does NOT
+  ;; read it -- layout-children-block is handed the container's content
+  ;; box and not its style map. Brave: the 60px child at x=120, i.e.
+  ;; centred, exactly as `justify-self: center` on the child itself is.
+  :html "<div style=\"width: 300px; justify-items: center\"><div style=\"width: 60px; height: 20px\">x</div></div>"}
+
+ {:id :box/justify-self-on-an-auto-width-block-shrinks-to-fit
+  :group :box
+  ;; The other half this engine leaves open: a non-stretch `justify-self`
+  ;; on an AUTO-width block is a size decision as well as a position one.
+  ;; Brave: the child shrink-wraps to 8.578px and sits at x=291.4, where
+  ;; this engine leaves it 300 wide at x=0 and so finds no free space to
+  ;; move it in.
+  :html "<div style=\"width: 300px\"><div style=\"justify-self: end\">x</div></div>"}
 ]
