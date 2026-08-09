@@ -6326,4 +6326,95 @@
   ;; win. Brave: red.
   :html "<div><div class=\"sc-far5\"><div class=\"sc-near5\"><p>text</p></div></div></div>"
   :css "@scope (.sc-near5) { p { color: #ff0000 !important } } @scope (.sc-far5) { p { color: #0000ff !important } }"}
+
+ ;; ---- `::marker`, and the percentage a math function needs a layout for
+ ;;      (appended 2026-08-06) ----
+
+ {:id :generated/marker-line-height-grows-the-item-by-half-the-excess
+  :group :generated
+  ;; The oracle cannot read a marker's text -- no Range reaches generated
+  ;; content -- so only the LINE score is blind here.
+  :oracle/blind true
+  ;; The rule the font-size cases beside this one cannot find: an outside
+  ;; marker reaches ABOVE the line's baseline and never BELOW it. A
+  ;; `line-height` on the marker isolates that, and no font metric enters
+  ;; the answer -- Brave is exactly `20 + (line-height - 20)/2` across
+  ;; 24/30/40/50/80px (22/25/30/35/50). Here: the <li> and the <ul> are
+  ;; 800x30 against 800x20 without the rule. An engine taking the union
+  ;; over BOTH sides of the marker's box reports 40.
+  :html "<ul><li>one</li></ul>"
+  :css "li::marker { line-height: 40px }"}
+
+ {:id :generated/marker-content-none-removes-the-marker
+  :group :generated
+  :oracle/blind true
+  ;; Half of a discriminating PAIR with the case below. `content: none` is
+  ;; honoured: Brave reports 800x20 even though the same rule carries a
+  ;; `font-size: 40px` that would otherwise make it 800x29. Without that
+  ;; second declaration the case would pass for an engine that honoured
+  ;; nothing at all.
+  :html "<ul><li>one</li></ul>"
+  :css "li::marker { content: none; font-size: 40px }"}
+
+ {:id :generated/marker-display-none-is-inert
+  :group :generated
+  :oracle/blind true
+  ;; The other half, and the one a spec reading gets wrong: `display` does
+  ;; NOT apply to a `::marker` in Blink. Brave reports 800x29 -- the marker
+  ;; is still there, still 40px, still growing the line -- where the
+  ;; identical rule with `content: none` reports 800x20.
+  :html "<ul><li>one</li></ul>"
+  :css "li::marker { display: none; font-size: 40px }"}
+
+ {:id :generated/marker-font-size-grows-an-inside-markers-advance
+  :group :generated
+  :oracle/blind true
+  ;; The third observable half, and the one that says the marker's own font
+  ;; size reaches the ADVANCE and not only the line: an inside bullet's
+  ;; advance is `font-size + ceil(2*(font-size+2)/7)` (measured exact at
+  ;; every integer size 6-40), so at 40px it is 52 rather than 19. Brave
+  ;; shrink-wraps this inline-block to 73x29 against 40x20 without the rule.
+  :html "<div style=\"display: inline-block\"><ul style=\"list-style-position: inside; margin: 0; padding: 0\"><li>one</li></ul></div>"
+  :css "li::marker { font-size: 40px }"}
+
+ {:id :math/a-percentage-in-a-margin-inside-a-comparison-function
+  :group :math
+  ;; A percentage inside a math function resolves against the same basis a
+  ;; bare percentage would in that property: for a margin that is the
+  ;; containing block's INLINE size on all four sides. 10% of 800 is 80,
+  ;; which beats nothing and loses to nothing -- Brave puts the box at x=80
+  ;; with a 720px width.
+  :html "<div><div id=\"mm1\">w</div></div>"
+  :css "#mm1 { margin-left: min(10%, 300px) }"}
+
+ {:id :math/clamp-with-percentage-bounds
+  :group :math
+  ;; Percentages at BOTH ends of a clamp(), so neither bound can be the
+  ;; answer by accident: 10% of 800 is 80 and 20% is 160, and the preferred
+  ;; 50px is below the floor. Brave: 80x20.
+  :html "<div><div id=\"mm2\">w</div></div>"
+  :css "#mm2 { width: clamp(10%, 50px, 20%) }"}
+
+ {:id :math/a-percentage-comparison-nested-in-calc
+  :group :math
+  ;; The two nest in both directions once the percentage resolves: 50% of
+  ;; 800 is 400, the 100px cap wins, and the outer calc() adds 10. Brave:
+  ;; 110x20.
+  :html "<div><div id=\"mm3\">w</div></div>"
+  :css "#mm3 { width: calc(min(50%, 100px) + 10px) }"}
+
+ {:id :math/a-math-function-mixing-a-percentage-and-an-em
+  :group :math
+  ;; KNOWN DIVERGENCE, recorded rather than hidden. The two relative units
+  ;; in a math function are resolved at different TIMES: `em` by the
+  ;; cascade, which knows the font size, and `%` by layout, which knows the
+  ;; containing block. A value carrying both resolves on neither side --
+  ;; the cascade declines it for the `%` and layout declines it for the
+  ;; `em` -- so it degrades to a raw string and the box falls back to the
+  ;; available width. Brave: 28x20 (2em of the page's 14px beats 400).
+  ;; This engine: 800x20. Closing it means the cascade rewriting the `em`
+  ;; operands to px IN THE TEXT and handing layout a `%`-only expression;
+  ;; see cssom.core's resolve-math-length.
+  :html "<div><div id=\"mm4\">w</div></div>"
+  :css "#mm4 { width: min(50%, 2em) }"}
 ]

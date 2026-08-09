@@ -492,21 +492,46 @@
 
 (defn- calc-number-at
   "Attempts to match a numeric literal -- optionally decimal, optionally
-   with an immediately-following `px` unit (no space allowed between the
-   number and its unit, matching real CSS) -- starting at index `idx` of
-   calc() tokenizer input `s`. Returns `[token next-idx]`, or nil if `idx`
-   isn't the start of one -- signalling to `tokenize-calc-expr` that
-   whatever is at `idx` isn't part of this engine's constant-calc()
-   subset at all (a `%`/`em`/any other unit, or stray text), the same
+   with an immediately-following `px`/`em`/`rem` unit (no space allowed
+   between the number and its unit, matching real CSS) -- starting at index
+   `idx` of calc() tokenizer input `s`. Returns `[token next-idx]`, or nil
+   if `idx` isn't the start of one -- signalling to `tokenize-calc-expr`
+   that whatever is at `idx` isn't part of this engine's constant-calc()
+   subset at all (a `%`/any other unit, or stray text), the same
    'stop, don't guess' contract every other token-matching helper in this
-   namespace already uses (e.g. `content-attr-pattern`)."
-  [s idx]
+   namespace already uses (e.g. `content-attr-pattern`).
+
+   `env` is `{:em <px> :rem <px>}` -- the element's own computed font size
+   and the root's -- or nil where the caller has neither. An `em`/`rem`
+   operand is resolved to px HERE, at the leaf, exactly the way
+   `cssom.layout`'s own `calc-number-at` resolves a `%` against its
+   `basis`: the whole point of a relative length is that it IS a length as
+   soon as its reference is known, and resolving it here keeps
+   `eval-calc-node`'s same-unit `+`/`-` rule (the rule that makes
+   `calc(100px + 2)` invalid) exactly as it was. `env` nil means no font
+   size is known at this point in the pipeline -- which is the case for
+   every declaration at PARSE time (`parse-style-value`) -- so an `em`
+   there fails to tokenize and the whole value degrades to a raw string,
+   which is precisely what leaves it for `resolve-relative-lengths` to
+   resolve later, once the cascade has computed the font size.
+
+   `%` is still rejected at every `env`, and that is the one boundary this
+   namespace does not move: a percentage's reference is the containing
+   BLOCK, which no part of the cascade knows. See `resolve-math-length`."
+  [s idx env]
   (when-let [num-str (re-find #"^\d+(?:\.\d+)?" (subs s idx))]
     (let [after (+ idx (count num-str))
-          px? (and (<= (+ after 2) (count s)) (= "px" (subs s after (+ after 2))))
-          end (if px? (+ after 2) after)
-          value #?(:clj (Double/parseDouble num-str) :cljs (js/parseFloat num-str))]
-      [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value value} end])))
+          rest-s (subs s after)
+          unit (some (fn [u] (when (str/starts-with? (str/lower-case rest-s) u) u))
+                     ["px" "rem" "em"])
+          end (if unit (+ after (count unit)) after)
+          value #?(:clj (Double/parseDouble num-str) :cljs (js/parseFloat num-str))
+          basis (case unit "em" (:em env) "rem" (:rem env) nil)]
+      (cond
+        (nil? unit) [{:calc/type :operand :calc/unit :number :calc/value value} end]
+        (= "px" unit) [{:calc/type :operand :calc/unit :px :calc/value value} end]
+        (some? basis) [{:calc/type :operand :calc/unit :px :calc/value (* value basis)} end]
+        :else nil))))
 
 (defn- calc-matching-paren
   "Index of the `)` closing the `(` at `open` in `s`, or nil if unbalanced.
@@ -569,18 +594,22 @@
    operand tokens (`calc-number-at`) and nested function-call tokens
    (`calc-function-at`) -- for `parse-calc-level`, skipping whitespace.
    Returns nil if any character isn't part of one of those recognized
-   tokens (e.g. a `%`/`em`/other unit anywhere in the expression, an
-   unsupported function name, or any other unrecognized character) --
-   signalling 'not this engine's constant subset' all the way up to
-   `parse-calc`, which then degrades the whole value exactly like any
-   other unparseable value in this namespace degrades (see
-   parse-style-value).
+   tokens (e.g. a `%` anywhere in the expression, an `em`/`rem` with no
+   `env` to resolve it against, an unsupported function name, or any other
+   unrecognized character) -- signalling 'not this engine's constant
+   subset' all the way up to `parse-calc`, which then degrades the whole
+   value exactly like any other unparseable value in this namespace
+   degrades (see parse-style-value).
+
+   `env` is the relative-length environment `calc-number-at` resolves an
+   `em`/`rem` operand against; nil at parse time and a real one at
+   computed-value time (see `resolve-math-length`).
 
    A function call is tried BEFORE a number, which matters for no input
    this engine accepts today but keeps the two matchers unambiguous: a
    function name never starts with a digit and a number never starts with
    a letter, so the order is documentation rather than a tie-break."
-  [s]
+  [s env]
   (let [n (count s)]
     (loop [idx 0 tokens []]
       (cond
@@ -596,7 +625,7 @@
           \) (recur (inc idx) (conj tokens {:calc/type :rparen}))
           (if-let [[call next-idx] (calc-function-at s idx)]
             (recur next-idx (conj tokens call))
-            (if-let [[operand next-idx] (calc-number-at s idx)]
+            (if-let [[operand next-idx] (calc-number-at s idx env)]
               (recur next-idx (conj tokens operand))
               nil)))))))
 
@@ -627,14 +656,14 @@
    associativity (each level's own `loop` folds left, so
    `calc(10px - 5px - 2px)` parses as `(10px - 5px) - 2px`, not
    `10px - (5px - 2px)`)."
-  [tokens level]
+  [tokens level env]
   (if (= level 2)
     (when (seq tokens)
       (let [t (first tokens)]
         (case (:calc/type t)
-          :minus (when-let [[node toks] (parse-calc-level (rest tokens) 2)]
+          :minus (when-let [[node toks] (parse-calc-level (rest tokens) 2 env)]
                    [{:calc/op :neg :calc/arg node} toks])
-          :plus (parse-calc-level (rest tokens) 2)
+          :plus (parse-calc-level (rest tokens) 2 env)
           :operand [{:calc/op :num :calc/unit (:calc/unit t) :calc/value (:calc/value t)}
                     (rest tokens)]
           ;; A nested `calc()`/`min()`/`max()`/`clamp()`: each top-level
@@ -645,24 +674,24 @@
           ;; nil, which is this pipeline's one and only 'not our subset'
           ;; signal.
           :fncall (let [args (mapv (fn [arg]
-                                     (when-let [toks (tokenize-calc-expr arg)]
-                                       (when-let [[node rest-toks] (parse-calc-level toks 0)]
+                                     (when-let [toks (tokenize-calc-expr arg env)]
+                                       (when-let [[node rest-toks] (parse-calc-level toks 0 env)]
                                          (when (empty? rest-toks) node))))
                                    (calc-split-arguments (:calc/text t)))]
                     (when (and (seq args) (every? some? args))
                       [{:calc/op :fn :calc/name (:calc/name t) :calc/args args}
                        (rest tokens)]))
-          :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
+          :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0 env)]
                     (when (and (seq toks) (= :rparen (:calc/type (first toks))))
                       [node (rest toks)]))
           nil)))
     (let [ops (if (= level 0) #{:plus :minus} #{:star :slash})
           op->ast (fn [op] (case op :plus :add :minus :sub :star :mul :slash :div))]
-      (when-let [[left toks] (parse-calc-level tokens (inc level))]
+      (when-let [[left toks] (parse-calc-level tokens (inc level) env)]
         (loop [left left toks toks]
           (if (and (seq toks) (contains? ops (:calc/type (first toks))))
             (let [op (:calc/type (first toks))]
-              (if-let [[right toks2] (parse-calc-level (rest toks) (inc level))]
+              (if-let [[right toks2] (parse-calc-level (rest toks) (inc level) env)]
                 (recur {:calc/op (op->ast op) :calc/left left :calc/right right} toks2)
                 nil))
             [left toks]))))))
@@ -673,9 +702,9 @@
    isn't a well-formed expression in this engine's constant-calc() subset
    (tokenization failed, parsing failed, or leftover unconsumed tokens
    remained -- a malformed trailing fragment)."
-  [expr-text]
-  (when-let [tokens (tokenize-calc-expr expr-text)]
-    (when-let [[node toks] (parse-calc-level tokens 0)]
+  [expr-text env]
+  (when-let [tokens (tokenize-calc-expr expr-text env)]
+    (when-let [[node toks] (parse-calc-level tokens 0 env)]
       (when (empty? toks) node))))
 
 (defn- eval-calc-node
@@ -771,10 +800,33 @@
    -- or a malformed expression), so callers (`parse-style-value`) treat it
    exactly like every other unparseable value in this namespace: the
    declaration falls through/degrades rather than guessing a number."
-  [expr-text]
-  (when-let [node (parse-calc-ast expr-text)]
+  [expr-text env]
+  (when-let [node (parse-calc-ast expr-text env)]
     (when-let [[value _unit] (eval-calc-node node)]
       (calc-result->number value))))
+
+(defn- parse-math-value
+  "A WHOLE value that is one math function call (see `calc-pattern`),
+   resolved to the single plain number it comes out as, or nil when it is
+   not one or does not resolve in this engine's subset.
+
+   The one entry point both callers go through, so the re-wrapping below
+   is written once: a top-level `min(...)`/`max(...)`/`clamp(...)` is
+   handed to the parser as the ARGUMENT of an outer expression, which is
+   how ONE parser handles both the top-level call and a nested one rather
+   than a second entry point that would drift from it.
+
+   Two callers, and the difference between them is the whole of the
+   `em`/`rem` boundary: `parse-style-value` passes `env` nil because at
+   declaration-parse time no font size exists yet, and
+   `resolve-math-length` passes the element's own computed size once the
+   cascade has one."
+  [v env]
+  (when-let [[_ fname inner] (re-matches calc-pattern (str/trim (str v)))]
+    (parse-calc (if (= "calc" (str/lower-case fname))
+                  inner
+                  (str fname "(" inner ")"))
+                env)))
 
 (defn- parse-style-value
   "Parses a single declaration's raw value string into a number when it is
@@ -800,18 +852,7 @@
       (re-matches #"-?\d+" v) #?(:clj (Long/parseLong v) :cljs (js/parseInt v 10))
       (re-matches #"-?\d+px" v) #?(:clj (Long/parseLong (subs v 0 (- (count v) 2)))
                                    :cljs (js/parseInt v 10))
-      :else
-      (if-let [[_ fname inner] (re-matches calc-pattern v)]
-        (or (parse-calc (if (= "calc" (str/lower-case fname))
-                          inner
-                          ;; A whole-value `min(...)`/`max(...)`/`clamp(...)`
-                          ;; is re-wrapped as the argument of an outer
-                          ;; expression so ONE parser handles both the
-                          ;; top-level call and a nested one, rather than a
-                          ;; second entry point that would drift from it.
-                          (str fname "(" inner ")")))
-            v)
-        v))))
+      :else (or (parse-math-value v nil) v))))
 
 (def ^:private content-literal-pattern
   "Matches a single quoted string literal, double- or single-quoted --
@@ -2247,18 +2288,27 @@
   #":([A-Za-z_][-A-Za-z0-9_]*)")
 
 (def pseudo-element-pattern
-  "Matches `::before`/`::after`/`::first-letter` and their legacy
-   single-colon spellings. Deliberately narrower than a generic `::foo`
-   pattern -- these are the three this engine resolves. `::first-line`,
-   `::marker`, `::selection` and the rest are deliberately absent, so a
-   rule naming one still resolves to a nil pseudo-element and therefore
-   never applies to the real element by accident.
+  "Matches `::before`/`::after`/`::first-letter`/`::marker` and their
+   legacy single-colon spellings. Deliberately narrower than a generic
+   `::foo` pattern -- these are the four this engine resolves.
+   `::first-line`, `::selection`, `::placeholder`, `::backdrop` and the
+   rest are deliberately absent, so a rule naming one still resolves to a
+   nil pseudo-element and therefore never applies to the real element by
+   accident.
 
-   `::first-letter` is not generated content like the other two -- it
+   `::first-letter` is not generated content like the first two -- it
    restyles a slice of the element's OWN first text (see
    `cssom.layout/with-first-letter`) -- but it reaches the cascade the same
-   way, as a pseudo-element the resolution is asked for separately."
-  #"(?i)::?(before|after|first-letter)\b")
+   way, as a pseudo-element the resolution is asked for separately.
+
+   `::marker` is the fourth, and it is neither: it styles the list marker
+   `cssom.layout/with-implicit-list-markers` synthesizes, which is a box
+   that exists only in that file. This namespace's job is to resolve it and
+   hand it over under `:pseudo/marker`; which of its properties actually do
+   anything is that file's, and is measured there. A `p::marker` on a
+   non-list element resolves here and is read by nobody, which is exactly
+   what a browser does with it."
+  #"(?i)::?(before|after|first-letter|marker)\b")
 
 (def functional-pseudo-class-pattern
   "Matches a single `:not(...)` / `:is(...)` / `:where(...)` / `:has(...)`
@@ -7679,6 +7729,42 @@
           (when-let [n (parse-number n)]
             (as-length (if (= "em" unit) (* n own-px) (* n root-px)))))))))
 
+(defn- resolve-math-length
+  "`v` as an absolute number of px when it is a whole-value math function
+   (`calc()`/`min()`/`max()`/`clamp()`) whose every operand resolves once
+   `em`/`rem` are known, nil otherwise -- the math-function sibling of
+   `resolve-em-length`, and the reason it exists is that the two halves of
+   a relative length are known at DIFFERENT times.
+
+   `parse-style-value` runs at declaration-parse time, where no font size
+   exists, so `max(10px, 2em)` cannot resolve and is correctly left a raw
+   string. This runs at computed-value time, where `own-px`/`root-px` are
+   exactly the two numbers `em` and `rem` mean -- so the same value
+   resolves here, through the same parser, with no second grammar.
+
+   Measured in Brave 151 on 2026-08-06, on the corpus's own 14px page:
+
+     margin-left: max(10px, 2em)   ->  28px  (the box at x=28, 772 wide)
+     width:       min(30em, 100px) ->  100px
+     width:       min(3rem, 500px) ->   48px (the root is 16px)
+
+   What this does NOT resolve, and the boundary is unmoved: a `%` operand
+   anywhere inside. A percentage's reference is the containing BLOCK,
+   which is a LAYOUT fact and not a cascade one -- `min(50%, 300px)` stays
+   the raw string it has always been and is resolved by
+   `cssom.layout/resolve-constant-calc`, which has the basis. The one
+   shape neither side resolves is a math function mixing the two
+   (`min(50%, 2em)`): the cascade declines it for the `%` and layout
+   declines it for the `em`. Measured, so a future fix has the number:
+   Brave puts `width: min(50%, 2em)` on the corpus page at **28px** (2em
+   of 14 beats 400) and this engine leaves it auto at 800. Closing it
+   means the cascade rewriting the `em` operands to px IN THE TEXT and
+   handing layout a `%`-only expression, which is a different change from
+   this one."
+  [v own-px root-px]
+  (when (string? v)
+    (parse-math-value v {:em own-px :rem root-px})))
+
 (def ^:private em-resolvable-properties
   "The properties whose value is a LENGTH, and so whose `em`/`rem` this
    step resolves. Enumerated rather than inferred from the value's shape
@@ -7742,7 +7828,8 @@
     [(reduce-kv (fn [m k v]
                   (if (and (not= :font-size k)
                            (contains? em-resolvable-properties k))
-                    (if-let [px (resolve-em-length v own root)]
+                    (if-let [px (or (resolve-em-length v own root)
+                                    (resolve-math-length v own root))]
                       (assoc m k px)
                       m)
                     m))
@@ -8356,9 +8443,19 @@
    spellings of each are the same keyword by the time
    `parse-simple-selector` is done with it.
 
-   `::first-line`/`::first-letter`/`::marker` are absent because this
-   engine produces no box for them, which is the same reason the
-   conformance corpus calls the first two unscorable."
+   `::first-line`/`::first-letter`/`::marker` are absent, and for two
+   different reasons now. `::first-line` this engine genuinely does not
+   implement. The other two it DOES -- `::first-letter` through
+   `cssom.layout/with-first-letter` and `::marker` through
+   with-implicit-list-markers -- so `@supports selector(li::marker)` is
+   false here and true in Brave 151, and this set is behind them.
+
+   Deliberately not corrected in the round that added `::marker`: no
+   corpus case measures `@supports selector()` on ANY pseudo-element (the
+   two `:supports/*` selector cases use `:has()` and a nonsense
+   pseudo-CLASS), so moving it would be a change no measurement covers,
+   and it would have to answer the same question for `::first-letter` at
+   the same time. Adding a case for each is the honest way in."
   #{:before :after})
 
 (defn- supports-selector?
@@ -8969,9 +9066,21 @@
             {}
             (group-by :property sorted))]
      [(if (contains? m :content)
-        (let [resolved (resolve-content-value node counters (:content m))]
+        (let [raw (:content m)
+              resolved (resolve-content-value node counters raw)]
           (if (nil? resolved)
-            (dissoc m :content)
+            (cond-> (dissoc m :content)
+              ;; `content: none` and `content` never declared are the same
+              ;; absence to a `::before`/`::after` -- both generate no box
+              ;; -- and are NOT the same to a `::marker`, whose box exists
+              ;; unless something removes it. Measured in Brave 151 on
+              ;; 2026-08-06: `li::marker { content: none; font-size: 40px }`
+              ;; leaves the `<li>` 800x20, where the same rule without the
+              ;; `content` makes it 800x29. So the DECLARATION has to
+              ;; survive the resolution to nil, which is what this flag is.
+              ;; Read only by cssom.layout's marker-style-overrides.
+              (and (map? raw) (contains? raw :content/none))
+              (assoc :content/none? true))
             (assoc m :content resolved)))
         m)
       flow])))
@@ -9008,11 +9117,13 @@
    (let [base (resolve-style-for document rules node nil)
          before (resolve-style-for document rules node :before)
          after (resolve-style-for document rules node :after)
-         first-letter (resolve-style-for document rules node :first-letter)]
+         first-letter (resolve-style-for document rules node :first-letter)
+         marker (resolve-style-for document rules node :marker)]
      (cond-> base
        (seq before) (assoc :pseudo/before before)
        (seq after) (assoc :pseudo/after after)
-       (seq first-letter) (assoc :pseudo/first-letter first-letter)))))
+       (seq first-letter) (assoc :pseudo/first-letter first-letter)
+       (seq marker) (assoc :pseudo/marker marker)))))
 
 (defn pseudo-element-style-for
   "Cascade-resolved style map for `node`'s `pseudo-element` (:before or
@@ -9338,10 +9449,19 @@
         ;; the same reason the other two do.
         first-letter (resolve-style-for document rules node :first-letter
                                         node-counters container-ctx node-flow)
+        ;; ...and `::marker`, which takes no counters either -- the number
+        ;; an `<ol>` marker displays is cssom.layout's own positional count
+        ;; (see with-implicit-list-markers), deliberately not this
+        ;; namespace's counter namespace. It CAN declare `content`, which
+        ;; is why it goes through the identical path rather than a
+        ;; property-filtered one.
+        marker (resolve-style-for document rules node :marker
+                                  node-counters container-ctx node-flow)
         style (cond-> base
                 (seq before) (assoc :pseudo/before before)
                 (seq after) (assoc :pseudo/after after)
-                (seq first-letter) (assoc :pseudo/first-letter first-letter))]
+                (seq first-letter) (assoc :pseudo/first-letter first-letter)
+                (seq marker) (assoc :pseudo/marker marker))]
     [style node-counters node-flow])))
 
 (def ^:private current-color-keys
@@ -9539,7 +9659,7 @@
   (let [node (get-in document [:nodes node-id])
         [style node-counters node-flow]
         (style-with-counters document rules node inherited-counters container-ctx parent-flow)
-        pseudo-keys #{:pseudo/before :pseudo/after :pseudo/first-letter}
+        pseudo-keys #{:pseudo/before :pseudo/after :pseudo/first-letter :pseudo/marker}
         regular (into {} (remove (fn [[k _]] (contains? pseudo-keys k))) style)
         pseudo (select-keys style pseudo-keys)
         custom (into {} (filter (fn [[k _]] (custom-property? k))) regular)

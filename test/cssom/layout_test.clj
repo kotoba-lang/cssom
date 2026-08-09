@@ -3801,6 +3801,68 @@
     (is (number? (:w div-op))
         "layout never crashes on the unresolved raw string")))
 
+;; ---- a PERCENTAGE inside min()/max()/clamp(), resolved at layout time ----
+;;
+;; The half of a math function the cascade structurally cannot do: a
+;; percentage's reference is the containing BLOCK. cssom.core leaves such a
+;; value the raw string it has always been (see its own
+;; a-percentage-inside-a-math-function-still-does-not-resolve-in-the-cascade)
+;; and resolve-constant-calc resolves it here, against the basis the caller
+;; already supplies for a plain `calc(50% - 10px)`.
+;;
+;; Measured in Brave 151 on 2026-08-06, on the corpus's own 800px page --
+;; every number below is one of those rows, scaled to this test's 480:
+;;   min(50%, 300px) -> 300 | min(50%, 500px) -> 400 | max(50%, 300px) -> 400
+;;   clamp(10%, 50px, 20%) -> 80 | calc(min(50%, 100px) + 10px) -> 110
+
+(defn- math-width-op
+  "The `<div class=box>`'s draw op after `css` runs through the real
+   parse-rules -> apply-cascade -> draw-ops pipeline at `avail` px."
+  [css avail]
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules css)
+        doc (css/apply-cascade doc rules)
+        [_ doc] (dom/consume-ops doc)
+        tree (dom/tree doc)
+        ops (layout/draw-ops tree {:width avail})]
+    (some #(and (= :node (:draw/op %)) (= :div (:tag %)) %) ops)))
+
+(deftest a-percentage-inside-a-comparison-function-resolves-against-the-containing-block
+  (is (= 300 (:w (math-width-op ".box { width: min(50%, 300px) }" 800)))
+      "50% of 800 is 400, so the 300px cap wins")
+  (is (= 400 (:w (math-width-op ".box { width: min(50%, 500px) }" 800)))
+      "...and the other way round, so neither answer is the constant")
+  (is (= 400 (:w (math-width-op ".box { width: max(50%, 300px) }" 800)))
+      "max() takes the larger")
+  (is (= 80 (:w (math-width-op ".box { width: clamp(10%, 50px, 20%) }" 800)))
+      "clamp() with percentages at BOTH ends: 50 is below the 80px floor")
+  (is (= 110 (:w (math-width-op ".box { width: calc(min(50%, 100px) + 10px) }" 800)))
+      "a comparison function nested inside calc(), percentage and all")
+  (is (= 300 (:w (math-width-op ".box { width: min(calc(50% - 100px), 500px) }" 800)))
+      "and calc() nested inside a comparison function -- one parser")
+  (is (= 100 (:w (math-width-op ".box { width: min(50%, 300px) }" 200)))
+      "the SAME declaration against a different containing block, which is
+       what says the basis is read rather than a constant matched"))
+
+(deftest a-comparison-function-still-degrades-when-it-cannot-be-resolved
+  ;; The controls. Each of these passes identically before and after this
+  ;; round, and each is beside one above that does not.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        doc (css/apply-cascade doc (css/parse-rules ".box { width: min(10px, 2) }"))]
+    (is (= "min(10px, 2)" (get-in doc [:nodes div :attrs :style/width]))
+        "a length and a bare number do not compare -- invalid, not 2"))
+  (is (= 800 (:w (math-width-op ".box { width: min(50%, 2vw) }" 800)))
+      "a unit outside px/em/rem/% is not this engine's subset on EITHER
+       side, so the box falls back to the available width")
+  (is (= 800 (:w (math-width-op ".box { width: min(50%, 2em) }" 800)))
+      "and the one shape neither side resolves: the cascade declines the
+       %, layout declines the em. Brave says 28px -- see cssom.core's
+       resolve-math-length for what closing it would take"))
+
 (deftest malformed-calc-width-does-not-crash-the-real-pipeline
   (let [[div doc] (dom/create-element dom/empty-document :div)
         doc (dom/set-root doc div)
@@ -6679,6 +6741,228 @@
          padding, which is where `list-style-position: outside` puts it")
     (is (= (:y marker) (:y content))
         "on the item's first line, not on a line of its own")))
+
+;; ---- `::marker`, the pseudo-element with no box of its own ----
+;;
+;; A `::marker` produces nothing `getBoundingClientRect` can return, which
+;; is why round fifty-one called it unscorable and was half right: its
+;; EFFECT reaches the item's box, in three independent ways, and all three
+;; are measured. Every number below is headless Brave 151 over CDP on
+;; 2026-08-06, on the corpus's own page -- 800px, 14px monospace,
+;; `line-height: 20px` -- whose bare `<ul><li>one</li></ul>` is 800x20 with
+;; the item's text at y=2.
+;;
+;;   li::marker { font-size: 40px }                  li 800x29 (<ol> too)
+;;   li::marker { line-height: 40px }                li 800x30
+;;   li::marker { content: 'XXXX ' }        the INSIDE item 56 wide vs 40
+;;   li::marker { content: none; font-size: 40px }   li 800x20
+;;   li::marker { display: none; font-size: 40px }   li 800x29  -- inert
+;;
+;; The last two are a PAIR, and only the pair is evidence: `display: none`
+;; on a `::marker` is ignored by Blink where `content: none` is honoured,
+;; so a marker that vanished for either reason would be indistinguishable
+;; from one that vanished for the wrong one. See marker-properties for the
+;; full applies/does-not-apply table this is the discriminating end of.
+;;
+;; These tests supply a `:font-metrics` hook, because a line box IS its
+;; participants' ascents and descents: without one, inline-line-metrics
+;; keeps this file's documented no-metrics approximation (line box = the
+;; tallest line-height, baseline one font-size down) and no marker could
+;; move it. The hook is the oracle's own face, read off a canvas at 100px
+;; in the same browser session as every number above: `100px monospace` is
+;; fontBoundingBoxAscent 86, descent 19.
+
+(defn- oracle-monospace-metrics
+  "Ascent/descent scaled linearly from the oracle's own measured monospace
+   face -- what the conformance harness hands the engine, in the one shape
+   this file's `:font-metrics` hook takes. Linear scaling is the harness's
+   approximation too, and is the whole of the 1px residual the tests below
+   allow for: Blink rounds ascent and descent to integers at EACH size."
+  [font-size _weight _style _family]
+  {:ascent (* 0.86 font-size) :descent (* 0.19 font-size)})
+
+(defn- marker-ul-ops
+  "`<ul><li>one</li></ul>` under `css`, through the real parse-rules ->
+   apply-cascade -> draw-ops pipeline, inside a wrapper that reproduces the
+   conformance page's own text context (`font-size: 14px; line-height:
+   20px`) because that is where every Brave number above was measured and a
+   marker's whole effect is on the line box those two build.
+
+   `inside?` puts the list at `list-style-position: inside`, where the
+   marker takes real inline space, and shrink-wraps a middle box so the
+   item's WIDTH becomes observable -- which is the only way a marker's
+   `content` is visible at all."
+  [css & {:keys [inside? width] :or {width 480}}]
+  (let [[root doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc root)
+        [wrap doc] (dom/create-element doc :section)
+        doc (dom/append-child doc root wrap)
+        [ul doc] (dom/create-element doc :ul)
+        doc (dom/append-child doc wrap ul)
+        [li doc] (dom/create-element doc :li)
+        doc (dom/append-child doc ul li)
+        [t doc] (dom/create-text-node doc "one")
+        doc (dom/append-child doc li t)
+        doc (css/apply-cascade
+             doc (css/parse-rules
+                  (str "div, section { font-size: 14px; line-height: 20px } "
+                       "ul { margin: 0; padding: 0 } "
+                       (when inside?
+                         "section { display: inline-block } ul { list-style-position: inside } ")
+                       css)))
+        [_ doc] (dom/consume-ops doc)]
+    (layout/draw-ops (dom/tree doc)
+                     {:width width
+                      :theme {:padding 0 :gap 0 :font-metrics oracle-monospace-metrics}})))
+
+(defn- marker-li-box
+  [ops] (first (filter #(and (= :node (:draw/op %)) (= :li (:tag %))) ops)))
+
+(defn- marker-li-height
+  [css] (:h (marker-li-box (marker-ul-ops css))))
+
+(deftest a-marker-font-size-grows-the-items-line-by-the-ordinary-union
+  ;; The marker is one more participant on the item's first line, with its
+  ;; own font -- not a marker-specific constant. The sweep is what says so:
+  ;; every size below is Brave's own answer for that size, and the engine
+  ;; reaches them through inline-line-metrics with no marker branch in it.
+  (is (= 20 (marker-li-height nil))
+      "the control: no ::marker rule at all")
+  (doseq [[fs brave] [[12 20] [14 20] [15 21] [16 21] [18 22] [19 22] [20 22]
+                      [21 23] [24 24] [26 24] [28 25] [30 26] [32 26] [36 28]
+                      [40 29] [48 32] [56 34] [60 36] [72 40]]]
+    (is (<= (dec brave) (marker-li-height (str "li::marker { font-size: " fs "px }")) brave)
+        (str "font-size " fs "px on the marker: Brave says " brave
+             ", and this engine is that or one less -- Blink rounds the
+              face's ascent and descent to integers at each SIZE where the
+              host here scales one reference measurement. 19 of these 19
+              sizes land within 1px, and the harness's tolerance is 2")))
+  (is (< 20 (marker-li-height "li::marker { font-size: 40px }"))
+      "and it really does grow -- stated separately so the sweep above
+       cannot be satisfied by an engine that never moves at all"))
+
+(deftest an-outside-marker-grows-the-line-ABOVE-the-baseline-only
+  ;; The rule the font-size sweep could not find, because there the
+  ;; marker's descent is always NEGATIVE (a big font under a small
+  ;; line-height) and never wins the max anyway. `line-height` alone on the
+  ;; marker isolates it, and no font metric enters the answer -- it is
+  ;; exactly `20 + (line-height - 20)/2` in Brave, i.e. HALF the excess.
+  (doseq [[lh brave] [[0 20] [4 20] [10 20] [14 20] [20 20]
+                      [24 22] [30 25] [40 30] [50 35] [80 50]]]
+    (is (= brave (marker-li-height (str "li::marker { line-height: " lh "px }")))
+        (str "line-height " lh "px on the marker: Brave says " brave
+             ". A union over BOTH sides of the marker's box would give the
+              marker's own line-height for every row past 20")))
+  ;; ...and the discriminating shape, which is the only one that tells
+  ;; "only above" from "only half the excess": a SMALL font under a large
+  ;; line-height puts the marker's ascent BELOW the strut's and its descent
+  ;; well above it. A union reports a 24px line here. Brave reports 20.
+  (is (= 20 (marker-li-height "li::marker { font-size: 6px; line-height: 24px }"))
+      "Brave: 800x20, text still at y=2")
+  (is (= 20 (marker-li-height "li::marker { font-size: 8px; line-height: 24px }"))
+      "Brave: 800x20")
+  (is (= 21 (marker-li-height "li::marker { font-size: 6px; line-height: 26px }"))
+      "Brave: 800x21 -- the same shape one pixel past the crossing, so the
+       pair is a boundary and not a floor")
+  (is (= 23 (marker-li-height "li::marker { font-size: 6px; line-height: 30px }"))
+      "Brave: 800x23"))
+
+(deftest a-marker-content-replaces-what-an-inside-marker-advances
+  ;; The one half of `::marker` a shrink-to-fit box reads directly: an
+  ;; inside BULLET's advance is a function of the font size alone
+  ;; (symbol-marker-advance, which is why Blink is not laying the string
+  ;; out), and a marker with its own `content` is its string again.
+  (let [plain (:w (marker-li-box (marker-ul-ops nil :inside? true)))
+        xed (:w (marker-li-box (marker-ul-ops "li::marker { content: \"XXXX \" }"
+                                              :inside? true)))
+        text (fn [ops] (mapv :text (filter #(= :text (:draw/op %)) ops)))]
+    (is (< plain xed)
+        "the item is wider with the longer content -- Brave: 56 against 40")
+    (is (= ["XXXX one"] (text (marker-ul-ops "li::marker { content: \"XXXX \" }"
+                                             :inside? true)))
+        "and what it draws is the declared content, in the item's own line")
+    ;; ...and by exactly the right amount, stated so it holds whatever this
+    ;; host's per-character advance is. The bullet item is `19 + 3a` wide
+    ;; (the symbol advance plus "one"), so `a` is recoverable from it, and
+    ;; the `content` item must be `8a` -- five characters of "XXXX " plus
+    ;; three of "one", with no symbol advance left in it at all. With the
+    ;; oracle's own 7px monospace advance that is 40 and 56, which is the
+    ;; pair Brave reports and the corpus case
+    ;; `:generated/marker-content-widens-a-shrink-to-fit-item` scores.
+    (let [a (/ (- plain 19) 3)]
+      (is (== xed (* 8 a))
+          "the shrink-to-fit item is exactly its own text wide -- the
+           marker no longer reserves the bullet's font-size-derived
+           advance, which is the whole of the difference"))))
+
+(deftest a-marker-font-size-grows-an-inside-markers-advance-too
+  ;; The inside marker's advance is `font-size + ceil(2*(font-size+2)/7)`
+  ;; (symbol-marker-advance, measured exact at every integer size 6-40), and
+  ;; the `::marker` font-size is what it now reads. Measured in Brave:
+  ;; `list-style-position: inside` with `li::marker { font-size: 40px }`
+  ;; puts the item's content 52px in, against 19px at the inherited 14 --
+  ;; and 52 is exactly what that formula gives for 40.
+  (let [x-of (fn [css] (let [ops (marker-ul-ops css :inside? true)
+                             li (marker-li-box ops)
+                             txt (first (filter #(and (= :text (:draw/op %))
+                                                      (= "one" (:text %))) ops))]
+                         (- (:x txt) (:x li))))]
+    (is (== 19 (x-of nil))
+        "the control, at the inherited 14px: Brave puts the content 19px in")
+    (is (== 52 (x-of "li::marker { font-size: 40px }"))
+        "and 52 at 40px, which is Brave's own number for the same markup")))
+
+(deftest marker-content-none-removes-the-marker-and-display-none-does-not
+  ;; The discriminating pair. Both rules also carry `font-size: 40px`, so
+  ;; the two answers are 20 and 29 rather than 20 and 20 -- without that, an
+  ;; engine honouring NEITHER declaration would pass both halves.
+  (is (= 20 (marker-li-height "li::marker { content: none; font-size: 40px }"))
+      "content: none removes the marker box outright -- Brave: 800x20")
+  (is (= ["one"] (mapv :text (filter #(= :text (:draw/op %))
+                                     (marker-ul-ops "li::marker { content: none }"))))
+      "and nothing is drawn for it -- the item's own text is the only text
+       op on the line")
+  (is (< 20 (marker-li-height "li::marker { display: none; font-size: 40px }"))
+      "display: none on a ::marker is INERT in Blink -- measured, the item
+       is still 800x29 with both declarations on the same rule"))
+
+(deftest a-marker-rule-does-not-restyle-the-item-itself
+  ;; The failure mode every pseudo-element in this engine is the other side
+  ;; of: an unrecognised `::foo` becomes an unrecognised pseudo-CLASS and
+  ;; matches nothing (fail-closed). A RECOGNISED one must not leak onto the
+  ;; element either -- `li::marker { font-size: 40px }` must not make the
+  ;; item's own TEXT 40px, which would grow the line for the wrong reason
+  ;; and by a different amount.
+  (let [ops (marker-ul-ops "li::marker { font-size: 40px }")
+        text (first (filter #(and (= :text (:draw/op %)) (= "one" (:text %))) ops))
+        marker (first (filter #(and (= :text (:draw/op %)) (not= "one" (:text %))) ops))]
+    (is (= 14 (:font-size text))
+        "the item's own text keeps the inherited 14px")
+    (is (= 40 (:font-size marker))
+        "and the marker alone takes the 40")))
+
+(deftest a-marker-rule-on-a-non-list-element-changes-nothing
+  ;; `::marker` applies to a `display: list-item` box, and this engine reads
+  ;; `:pseudo/marker` in exactly one place -- the function that synthesizes
+  ;; a list marker. A `p::marker` therefore resolves in the cascade and is
+  ;; read by nobody, which is what a browser does with it.
+  (let [[p doc] (dom/create-element dom/empty-document :p)
+        doc (dom/set-root doc p)
+        [t doc] (dom/create-text-node doc "one")
+        doc (dom/append-child doc p t)
+        doc (css/apply-cascade doc (css/parse-rules
+                                    (str "p { font-size: 14px; line-height: 20px } "
+                                         "p::marker { font-size: 40px }")))
+        [_ doc] (dom/consume-ops doc)
+        ops (layout/draw-ops (dom/tree doc)
+                             {:width 480
+                              :theme {:padding 0 :gap 0
+                                      :font-metrics oracle-monospace-metrics}})
+        p-op (first (filter #(and (= :node (:draw/op %)) (= :p (:tag %))) ops))]
+    (is (= 20 (:h p-op))
+        "no marker box, so nothing to grow the line")
+    (is (= 1 (count (filter #(= :text (:draw/op %)) ops)))
+        "and no generated text of any kind")))
 
 (deftest table-emits-row-and-cell-node-ops-for-hit-testing
   (let [ops (table-ops [[:tr {} [:td {} "a"] [:td {} "b"]]])]

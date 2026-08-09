@@ -3251,8 +3251,6 @@
   (is (= "min(50%, 300px)" (calc-probe "width" "min(50%, 300px)"))
       "a percentage needs the containing block, exactly the boundary
        calc() already draws -- degrades to the raw string, never a guess")
-  (is (= "max(10px, 2em)" (calc-probe "margin-left" "max(10px, 2em)"))
-      "and so does an em, which needs the element's own font size")
   (is (= "min(10px, 2)" (calc-probe "width" "min(10px, 2)"))
       "real CSS requires every argument to be the same TYPE; a length and
        a bare number do not compare, so this is invalid rather than 2")
@@ -3263,6 +3261,61 @@
   (is (= "round(10px, 3px)" (calc-probe "width" "round(10px, 3px)"))
       "a math function OUTSIDE math-function-names is an unrecognized
        name, not a silently-accepted one"))
+
+;; ---- em/rem INSIDE a math function, resolved at computed-value time ----
+;;
+;; The two halves of a relative length are known at different times, and
+;; that -- not the grammar -- is why `max(10px, 2em)` used to degrade:
+;; `parse-style-value` runs before any font size exists. `em`/`rem` are now
+;; resolved by `resolve-math-length`, from `resolve-relative-lengths`,
+;; which is the step that already resolves a bare `2em`. The `%` boundary
+;; is UNMOVED and every test above that draws it still draws it.
+;;
+;; Measured in Brave 151 on 2026-08-06, corpus page at 14px, root 16px:
+;;   margin-left: max(10px, 2em) -> 28px, box at x=28, 772 wide
+;;   width: min(30em, 100px)     -> 100px
+;;   width: min(3rem, 500px)     -> 48px
+
+(deftest an-em-inside-a-math-function-resolves-against-the-elements-font-size
+  (is (= 28 (calc-probe "margin-left" "max(10px, 2em)"))
+      "2em of the 14px default base size is 28, which beats the 10px floor")
+  (is (= 100 (calc-probe "width" "min(30em, 100px)"))
+      "and the other way round: 30em is 420, so the 100px cap wins")
+  (is (= 42 (calc-probe "width" "min(3rem, 500px)"))
+      "rem is the ROOT's size, which on a document declaring none is the
+       same base size -- see default-base-font-size")
+  (is (= 38 (calc-probe "width" "calc(2em + 10px)"))
+      "the same for plain calc(), which is one parser with the functions")
+  (is (= 28 (calc-probe "width" "min(calc(1em + 1em), 40px)"))
+      "and nested, in both directions"))
+
+(deftest an-em-inside-a-math-function-resolves-against-the-elements-OWN-size
+  ;; The reference is the element's own computed size, not the parent's --
+  ;; the same rule `resolve-em-length` already follows for a bare `2em`,
+  ;; and the one a "resolve everything against one number" design gets
+  ;; wrong. `font-size: 2em` of the 14px base is 28, so `margin-left:
+  ;; max(1px, 1em)` on the SAME element is 28 and not 14.
+  (let [[div doc] (dom/create-element dom/empty-document :div)
+        doc (dom/set-root doc div)
+        doc (dom/set-attribute doc div :class "box")
+        rules (css/parse-rules ".box { font-size: 2em; margin-left: max(1px, 1em) }")
+        doc (css/apply-cascade doc rules)]
+    (is (= 28 (get-in doc [:nodes div :attrs :style/font-size])))
+    (is (= 28 (get-in doc [:nodes div :attrs :style/margin-left])))))
+
+(deftest a-percentage-inside-a-math-function-still-does-not-resolve-in-the-cascade
+  ;; The control beside the two above, and the boundary this round did NOT
+  ;; move: a percentage's reference is the containing BLOCK, which is a
+  ;; layout fact. cssom.layout resolves it (see the layout tests); the
+  ;; cascade must leave it alone rather than guess.
+  (is (= "min(50%, 300px)" (calc-probe "width" "min(50%, 300px)")))
+  (is (= "calc(100% - 20px)" (calc-probe "width" "calc(100% - 20px)")))
+  (is (= "min(50%, 2em)" (calc-probe "width" "min(50%, 2em)"))
+      "and a math function mixing the two resolves on NEITHER side -- the
+       cascade declines it for the %, layout declines it for the em. Brave
+       says 28px; see resolve-math-length for what closing it would take")
+  (is (= "min(10px, 2vw)" (calc-probe "width" "min(10px, 2vw)"))
+      "a unit outside px/em/rem is still not this engine's subset"))
 
 ;; ---- :has() relational pseudo-class ----
 ;;
