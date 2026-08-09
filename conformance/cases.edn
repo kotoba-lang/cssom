@@ -5472,7 +5472,10 @@
   ;; `:out-of-range` DO keep their disabled test and Brave agrees they
   ;; should, which is what makes this a rule about `:required` rather than
   ;; about disabledness; `:form/in-range-does-not-match-a-disabled-control`
-  ;; is the control that says so, and it agrees.
+  ;; is the control that says so, and it agrees. Closed on 2026-08-06:
+  ;; `:required`/`:optional` now decide on the attribute and on whether it
+  ;; APPLIES (`required-capable-control?`, measured across twenty-two input
+  ;; types), and on nothing else.
   :html "<p><input required disabled><input required></p>"
   :css "input:required { color: #ff0000 } input:optional { color: #0000ff }"}
 
@@ -5489,12 +5492,13 @@
   ;; only" reads like. Brave: margin-left 30px on the disabled input and
   ;; margin-right 30px on the enabled one -- so the disabled control is
   ;; `:read-only` and not `:read-write`, and an engine that asks only about
-  ;; the `readonly` attribute gives it neither -- which is what this one
-  ;; does, so the case is RED. Measured and deliberately not closed: see the
-  ;; comment block above `matches-pseudo?` in src/cssom/core.cljc for the
-  ;; one-predicate rule the six measured rows want and for why closing it
-  ;; is a cross-repo change (kotoba-lang/browser's query-selector suite
-  ;; asserts the current answers in three places).
+  ;; the `readonly` attribute gives it neither. Closed on 2026-08-06 by
+  ;; `user-alterable?` -- ONE predicate of which `:read-write` is the whole
+  ;; and `:read-only` is the complement. It was measured and written by
+  ;; round fifty-one and REVERTED there, because kotoba-lang/browser's
+  ;; query-selector suite asserted the old answers; both halves landed
+  ;; together, and that repo's assertions carry the measurement that says
+  ;; what each encoded.
   :html "<p><input disabled><input></p>"
   :css "input:read-only { margin-left: 30px } input:read-write { margin-right: 30px }"}
 
@@ -5502,9 +5506,11 @@
   :group :form
   ;; The other side of the same rule: `:read-write` reaches a
   ;; `contenteditable` element, which is not a form control at all. Brave:
-  ;; the editable paragraph red, the plain one black. RED here -- this
-  ;; engine's `:read-write` requires a form control, so it matches neither.
-  ;; Same cross-repo blocker as the case above.
+  ;; the editable paragraph red, the plain one black. This engine's
+  ;; `:read-write` used to require a form control and so matched neither;
+  ;; `user-alterable?`'s second clause is the nearest-`contenteditable`
+  ;; walk that closes it (and stops at a `contenteditable="false"`, which
+  ;; is measured separately).
   :html "<p contenteditable=\"true\">edit</p><p>plain</p>"
   :css "p:read-write { color: #ff0000 }"}
 
@@ -5573,9 +5579,14 @@
 
  {:id :form/indeterminate-on-a-progress-with-no-value
   :group :form
-  ;; A `<progress>` with no `value` is indeterminate -- the one shape of
-  ;; `:indeterminate` reachable without scripting. Brave: margin-left 30px
-  ;; then 0px.
+  ;; A `<progress>` with no `value` ATTRIBUTE is indeterminate. Presence is
+  ;; the whole test -- measured, `value=""` and `value="abc"` are both
+  ;; determinate. Brave: margin-left 30px then 0px. NOT the only shape
+  ;; reachable without scripting, which the radio case below is: what is
+  ;; unreachable is the CHECKBOX, whose indeterminacy is an IDL property
+  ;; with no content attribute behind it (measured -- neither
+  ;; `<input type=checkbox indeterminate>` nor `indeterminate="true"`
+  ;; matches in Brave).
   :html "<p><progress></progress><progress value=\"0.5\"></progress></p>"
   :css "progress:indeterminate { margin-left: 30px }"}
 
@@ -5851,7 +5862,14 @@
   ;; `padding: 20px` on the button, against 253x27 without -- and 253 is the
   ;; `ceil(34 x advance("0"))` term round forty-five implemented, which is
   ;; correct exactly while it wins. A fix needs the shadow tree, not a
-  ;; wider constant.
+  ;; wider constant. Measured in full on 2026-08-06 -- twelve declarations
+  ;; on the pseudo-element, the control's box and the button's own box
+  ;; beside each -- and deliberately still not implemented: see the `file`
+  ;; branch of `atomic-intrinsic-width` in src/cssom/layout.cljc for the
+  ;; table and for the split it turns on. The HEIGHT is derivable from
+  ;; numbers this engine already has; the WIDTH's second term is the two
+  ;; localized UA strings (92.656 + 119.313 here, in Japanese), so writing
+  ;; it would encode this machine's UI language.
   :html "<p><input type=\"file\"></p>"
   :css "input::file-selector-button { padding: 20px }"}
 

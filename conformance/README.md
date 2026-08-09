@@ -835,6 +835,306 @@ out of the item's width. That property is named as out of scope in
 `with-implicit-list-markers`, and the honest fix is that property, not a
 wider cell.
 
+### Round fifty-three: the form-control cluster, and the cross-repo half round fifty-one had to revert
+
+Round fifty-one ended with a fix it had written, measured and then thrown
+away:
+
+> **`:read-only` is not a second list, it is `(not :read-write)`** … it was
+> written, and it passed, and the corpus went green on three more cases.
+> It is not in this round, and the reason is not doubt about the
+> measurement. **`:read-only` and `:optional` are consumed by
+> `kotoba-lang/browser`'s `query-selector`, and that repo's suite asserts
+> the answers this engine gives today.**
+
+This round lands both halves. Every expected value was re-measured from
+scratch in a real headless Brave 151.1.93.129 over CDP on 2026-08-06, one
+probe page per probe, through `Element.matches()` rather than through a
+colour — so the browser's own selector engine answers, and this side is not
+also relying on being right about the cascade.
+
+| axis | before | after |
+|---|---|---|
+| line structure | 800/805 | **800/805** |
+| geometry (boxes) | 2676/2714 | **2688/2714** |
+| geometry (clean cases) | 812/835 | **818/835** |
+| paint order (points) | 20767/20837 | **20780/20837** |
+| paint order (clean cases) | 816/834 | **818/834** |
+| computed style (values) | 38166/38191 | **38175/38191** |
+| computed style (cases clean) | 817/835 | **825/835** |
+| cascade-attributed residual | 17 | **9** |
+
+**`--dump-ops` diffed corpus-wide: exactly six cases' box lists changed,
+every one of them TO the browser's number, and the other 829 are
+byte-identical. `--dump-style` diffed as well, because a cascade change is a
+colour the ops dump cannot see: exactly eight cases changed, every one of
+them from a divergence to full agreement, and no case lost a value.**
+
+| case | base | after | Brave |
+|---|---|---|---|
+| `:form/read-only-matches-a-disabled-input` | input x 0, 153 | **30, 183** | 30, 183 |
+| `:form/default-on-a-checked-checkbox` | 4, 24 | **30, 50** | 30, 50 |
+| `:form/indeterminate-on-a-radio-group-with-none-checked` | 5, 26 | **30, 76** | 30, 76 |
+| `:form/indeterminate-on-a-progress-with-no-value` | progress x 0, 140 | **30, 170** | 30, 170 |
+| `:form/in-range-and-out-of-range` | input 153 wide at 0, 153 | **42 at 0, 42** | 42 at 0, 42 |
+| `:form/in-range-does-not-match-a-disabled-control` | 153 at 0, 183 | **42 at 0, 72** | 42 at 0, 72 |
+
+The style dump's eight are those six minus the two `:in-range` ones (whose
+divergence was a box and not a value), plus
+`:form/read-write-matches-a-contenteditable`,
+`:form/required-still-matches-a-disabled-control`,
+`:form/placeholder-shown` and `:form/default-on-the-first-submit-button`.
+
+#### One predicate, and the row the previous round's table got wrong
+
+`user-alterable?`: a text-entry control that is neither `readonly` nor
+`disabled`, OR any element in an editable `contenteditable` subtree.
+`:read-write` is the whole of it and `:read-only` is the complement, which
+is what puts a `<p>`, a `<button>`, an `<option>`, a `<legend>`, a
+`<progress>` and a `<fieldset>` all in `:read-only` — measured, all six.
+
+The two halves do **not** compose, and that had to be measured rather than
+assumed. Inside a `<div contenteditable="true">`, a `readonly` input and a
+`disabled` input are both `:read-only` and only a plain one is
+`:read-write`: a control's own state wins over an editable ancestor. And the
+walk stops at the nearest `contenteditable`, not at any editable ancestor —
+a `<p>` nested inside a `contenteditable="false"` inside an editable div is
+`:read-only`.
+
+**Re-measuring found one row of round fifty-one's table wrong, and it is the
+row that said "same".** That table lumped a checkbox with `<button>` and
+`<select>`:
+
+> | `<button>`/`<select>`/a checkbox | read-only | same |
+
+`<button>` and `<select>` were same. A checkbox was **not**:
+`editable-form-control?` is every `<input>` bar `hidden` and `file`, so this
+engine reported `input[type=checkbox]` `:read-write` where Brave reports
+`:read-only`. Nineteen types were measured one at a time this round
+(`text-entry-input-types`): twelve are `:read-write` and seven are not, and
+the twelve are exactly HTML's own "the `readonly` attribute applies to"
+list.
+
+`editable-form-control?` is still right where it is *used*, and that is a
+second measurement rather than an assumption: `readonly` bars a control from
+constraint validation whether or not the attribute applies to its type.
+`<input type="checkbox" readonly required>` is `:required` and **not**
+`:invalid`, while `<select readonly required>` **is** `:invalid` because
+`readonly` reaches no `<select>` at all. So the two sets answer different
+questions and both are now stated.
+
+#### `:required`/`:optional` were not "the attribute alone" either
+
+The part round fifty-one named *is* the attribute alone: `disabled` and
+`readonly` do not touch either pseudo-class, where they do take a control
+out of `:valid`/`:invalid`/`:in-range`/`:out-of-range` and Brave agrees that
+they should. The part it did not name is that the attribute has to
+**apply**, and that is a measured set across twenty-two input types:
+
+| | Brave |
+|---|---|
+| `text search url tel email password date month week time datetime-local number checkbox radio file` + `required` | `:required` |
+| `hidden range color submit image reset button` + `required` | `:optional` |
+| `<button required>` | `:optional` — never `:required` |
+| `<select required>` / `<textarea required>` | `:required` |
+| `<fieldset>` / `<output>` / `<object>` / `<p>` | neither |
+
+`file` being in the first row closes half of the scope cut round fifty-one
+recorded at `matches-pseudo?`. The other half is deliberately still open and
+is written there with its number: Brave reports `<input type="file"
+required>` `:invalid` as well, and closing that means deciding what a file
+input's VALUE is, which this file has no reader for.
+
+#### `:indeterminate` is three elements, three rules, and one of them is unreachable
+
+The one everybody names first cannot be reached from static markup at all,
+and saying so is the finding:
+
+| markup | Brave |
+|---|---|
+| `<input type=checkbox indeterminate>` | **no** |
+| `<input type=checkbox indeterminate="true">` | **no** |
+| `<progress>` | yes |
+| `<progress value="">` / `<progress value="abc">` | **no** |
+| two `<input type=radio name=g>`, neither checked | **both** |
+| the same with one `checked` | neither |
+| `<input type=radio>` with no `name` | yes |
+| `<input type=radio name=x disabled>` beside an unchecked sibling | yes |
+
+A checkbox's indeterminacy is an IDL property with no content attribute
+behind it, so both attribute spellings match nothing. That is asserted as a
+gate — `an-indeterminate-attribute-on-a-checkbox-is-not-a-browser-behaviour`
+— because writing that clause would be inventing a browser behaviour, which
+is the same mistake the three downstream assertions this round corrects were
+making. A `<progress>` is indeterminate iff it has no `value` **attribute**;
+presence is the whole test, and an unparseable value is still determinate. A
+radio's is a property of its **group**, scoped by the same real form
+ownership `:required` already uses.
+
+#### `:placeholder-shown` and `:default`, and the two rows a spec reading gets wrong
+
+`:placeholder-shown` is attribute presence plus an **empty** value, over
+seven types. `placeholder=""` still shows a placeholder — the test is that
+the attribute is there, not that it says anything — and a value of a single
+space hides one, so the placeholder is hidden by whitespace the reader
+cannot see. `type=date` is `:read-write` and never shows a placeholder,
+which is why that set is its own and not `text-entry-input-types` reused.
+
+`:default` is three unrelated rules: a `checked` checkbox/radio, a
+`selected` `<option>`, and the form's first submit button in **document**
+order (a button nested three elements deep still wins over a shallower later
+one). The pair that says it is three rules and not one: a checked checkbox
+with no form at all **is** `:default`, and a `<button>` with no form is
+**not**.
+
+A `<textarea>`'s value now comes from its **text** rather than from a
+`value` attribute HTML does not give it. `:placeholder-shown` needed it, and
+it fixes a second thing on the way: `<textarea required>typed</textarea>` is
+`:valid` in Brave and this engine called it invalid, because
+`control-value` fell through to an attribute that can never exist.
+
+#### A bounded number field is as wide as the longest number it can hold
+
+Round fifty-one recorded this as a pre-existing gap it had surfaced without
+being about — the two `:in-range` cases reporting an `<input type="number">`
+at 153 where Brave says 42. It is a control's own sizing rule, and `size`
+never reaches it: `<input type=number size=2>` and `size=40` are both the
+same width as one with no `size` at all.
+
+All widths in the corpus frame are `7n + 28` — `n` characters of the control
+face, plus the box (8), one glyph's slack (5) and the spin buttons (15):
+
+| attributes | Brave | n | longest rendering |
+|---|---|---|---|
+| none | 153 | 20 | — (`size`) |
+| `min=1 max=9` | 35 | 1 | `9` |
+| `min=1 max=10` | 42 | 2 | `10` |
+| `min=-999 max=999` | 56 | 4 | `-999` |
+| `min=1 max=1000000000000` | 119 | 13 | thirteen digits |
+| `min=0.5 max=1.5` | 49 | 3 | `0.5` |
+| `min=1 max=10 step=0.01` | 63 | 5 | `10.00` |
+| `min=0 max=100 step=1.0` | 63 | 5 | `100.0` |
+| `min=-100.25 max=0` | 77 | 7 | `-100.25` |
+| `max=100` alone / `min=0` alone | 153 | 20 | — |
+| `min=1 max=10 step=any` | 153 | 20 | — |
+
+Three things fall out that a spec reading does not give. **Both** bounds are
+needed. The fraction is the widest of the step's, the min's and the max's
+own **written literals** — `min=0.5 max=1.5` carries no step and is still
+three characters, and `step=1.0` widens `min=0 max=100` from three to five —
+which is why the rule reads literals and not parsed doubles. And `step=any`
+opts out entirely while a non-numeric `step` is merely ignored.
+
+The 15px of spin buttons is a constant, and that is measured rather than
+assumed: a bounded number field against `<input type=text size=2>` in the
+same font is 15px wider at all seven font/size pairs tried (Arial 10/13.3333
+/20/40, monospace 20/28, serif 13.3333). It is a fixed-size platform widget
+like `select-arrow-width`'s 20, not a multiple of the em — which is why a
+40px number field is 15 wider and not 45. It is also **not** charged to an
+unbounded one: `<input type=number>` is 153, exactly a text field, so the
+decoration enters the width precisely when the bounds do.
+
+One divergence this **introduces** rather than closes, named at
+`strict-number-attr`: `min=0 max=1e3` is 35 in Brave and is 153 here, the
+same scientific-notation cut `cssom.core/parse-number` already documents for
+`min`/`max` validation, arriving by a second route. Two other rejections
+agree with Brave for the same reason and are controls: `min=" 1 "` and
+`max=+50` are both 153 on both sides.
+
+#### `::file-selector-button`: measured in full, deliberately not implemented
+
+Twelve declarations on the pseudo-element, with the control's box and the
+button's own box beside each:
+
+| declaration | control | button |
+|---|---|---|
+| (none) | 253×27 | 108.656×27 |
+| `padding: 0` | 253×25 | 96.656×25 |
+| `padding: 5px` | 253×35 | 114.656×35 |
+| `padding: 20px` | **261×65** | 136.656×65 |
+| `padding: 40px` | 301×105 | 176.656×105 |
+| `padding: 0 20px` | 261×25 | 136.656×25 |
+| `border: 5px` | 253×33 | 114.656×33 |
+| `margin: 12px` | 253×51 | 108.656×27 |
+| `font-size: 30px` | 349×51 | 224.5×51 |
+| `width: 300px` | **253**×27 | 300×27 |
+| `height: 80px` | 253×80 | 108.656×80 |
+| `display: none` | 253×**21** | — |
+
+Both of the control's dimensions are computed from that button:
+
+```
+width  = max(ceil(34 × advance("0")), ceil(button border box) + 4 + ceil(label))
+height = max(button MARGIN box, the label's 21px line)
+```
+
+Two of those rows are rules a spec reading misses. A `margin` on the button
+counts toward the control's **height** and not toward its width. And an
+explicit `width` on the button does not reach the control's intrinsic width
+at all — the button simply overflows.
+
+The height half is derivable from numbers this engine already has (27 is its
+own 21px button box). **The width half is not, and that is why neither is
+in.** Its second term is `ceil(92.656 + padding + border) + 4 +
+ceil(119.313)`, and those two numbers are this machine's Japanese UA strings
+— `ファイルを選択` and `選択されていません`. Writing them down is the measurement of
+a UI language, which is exactly what round forty-five refused for this same
+control and for the same reason. Implementing only the height would leave
+the case red on `input w` anyway. `:form/file-selector-button-padding-grows-
+the-control` therefore stays at 253×27 against Brave's 261×65 — `input w`
+−8, `input h` −38, `p h` −38 and 15 paint points, all of them one case, and
+the table above is at the `file` branch of `atomic-intrinsic-width` for
+whoever closes it.
+
+#### The three downstream assertions, and what they actually encoded
+
+Round fifty-one named three. There are seven answers, in three deftests, and
+the extra four are the same rules reaching further — the landed fix also
+corrects `:required` for a file input and `:read-only` for a checkbox, and
+both of those inputs are the FIRST input in their markup, so the
+document-order answers move together.
+
+| test | assertion | was | is |
+|---|---|---|---|
+| `dom_bridge_test` | `input:required` | `"required"` | `"file-required"` |
+| | `input:optional` | `"checked"` | `"disabled"` |
+| | `input:read-only` | `"readonly"` | `"disabled"` |
+| | `input:read-write` | `"checked"` | `"required"` |
+| | `#file-required:required` | `nil` | the node |
+| `quickjs_execution_test` | the same four, as positions 4/6/7/13 of one vector | | |
+| `css_test` | `#file-required` padding | `not= 4` | `4` |
+
+The sharpest of them is `input:read-write` returning `"checked"`: that
+assertion said a **checkbox is read-WRITE**. And the `css_test` one gave its
+reason as "a file input with a value is `:valid`, so `input:required` must
+not apply", which conflates two pseudo-classes — `:required` asks about the
+attribute, not about validity. Each is corrected with its own measurement
+written beside it, and the quickjs vector gains a twenty-eighth query,
+`#readonly:read-only`, which answers the same on both sides: a control that
+says the predicate was rewritten rather than merely inverted.
+
+#### One stale test, corrected with the reason
+
+`length-constraints-do-not-apply-to-non-text-like-controls` asserted
+`maxlength` against a `<textarea value="12345">`. Measured, that textarea's
+`.value` is `""` — HTML gives a `<textarea>` no `value` attribute — so the
+string it was written to constrain was never in the control at all. It uses
+a real text child now. Recorded beside it, pre-existing and **not** this
+change's: Brave applies `maxlength`/`minlength` only once a control's dirty
+value flag is set, so `<input type=text value=12345 maxlength=3>` and
+`<textarea maxlength=3>12345</textarea>` are both `:valid` there and both
+invalid here. Closing that means modelling the dirty flag.
+
+#### Verification
+
+1082 unit tests / 2952 assertions, 0 failures; lint 0 errors and 22
+warnings, all in `test/` — one fewer than this branch started with, because
+`control-value`'s unused `type` binding went with the rewrite. **Fourteen
+new `deftest`s, of which twelve fail on the base commit (36 assertions) and
+pass after**; the other two are pure controls that pass on both sides.
+Downstream, all against this branch's cssom: `browser` **754/0** (with its
+own `agent/form-controls`), `dom-gpu` **130/0**, `htmldom` **180/0**.
+
 ### Round fifty-two: `@scope`, and the seventh key in the cascade sort
 
 Round forty-four measured `@scope` and left it. Round forty-nine measured
@@ -1345,6 +1645,11 @@ extending one:
   disagreed with itself: a bare `<option>` was neither.
 
 #### The rule that was written, measured, and then REVERTED
+
+> **Closed in round fifty-three**, which could land both halves. What that
+> round found by re-measuring rather than re-reading is below: one row of
+> the table in this section is wrong.
+
 
 **`:read-only` is not a second list, it is `(not :read-write)`**, and
 `:required`/`:optional` decide on the attribute alone. One predicate —

@@ -4895,14 +4895,38 @@
   (some #(truthy-attr? (get-in document [:nodes % :attrs :checked]))
         (radio-group-node-ids document node)))
 
+(defn- textarea-default-value
+  "A `<textarea>`'s value when nothing has typed into it: its own text
+   CHILDREN, which is where HTML puts a textarea's default value -- it has
+   no `value` attribute at all.
+
+   Read here because `control-value` fell through to a `value` attribute
+   that can never exist on a `<textarea>` and so answered `\"\"` for every
+   one of them. Measured in Brave 151 on 2026-08-06 (probe
+   `65-placeholder-whitespace-value`): `<textarea placeholder=h>typed</textarea>`
+   reports `value` `\"typed\"` and does NOT match `:placeholder-shown`,
+   where `<textarea placeholder=h></textarea>` reports `\"\"` and does.
+
+   The one HTML detail that is not \"join the text children\": a single
+   newline immediately after the open tag is stripped by the parser, so
+   `<textarea>\\n</textarea>` has value `\"\"` -- measured, and it is the
+   difference between that textarea showing its placeholder and not.
+
+   Reads through `text-content` and so needs the `document`: a node's
+   `:children` are node-IDS, not inline maps, which is the same reason
+   `option-value` next door takes one."
+  [document node]
+  (let [raw (if document (text-content document (:node/id node)) "")]
+    (if (str/starts-with? raw "\n") (subs raw 1) raw)))
+
 (defn- control-value
   [document node]
-  (let [type (str/lower-case (str (or (get-in node [:attrs :type]) "text")))]
-    (str (or (get-in node [:attrs :text/value])
-             (if (= :select (:tag node))
-               (select-value document node)
-               (get-in node [:attrs :value]))
-             ""))))
+  (str (or (get-in node [:attrs :text/value])
+           (case (:tag node)
+             :select (select-value document node)
+             :textarea (textarea-default-value document node)
+             (get-in node [:attrs :value]))
+           "")))
 
 (defn- validation-barred-control?
   [node]
@@ -5478,53 +5502,179 @@
        (map unquote-lang-range)
        (remove str/blank?)))
 
-;; ---- `:read-only`/`:read-write` and `:required`/`:optional`: measured in
-;; full, deliberately NOT changed, and this is where a fix starts.
+;; ---- `:read-only`/`:read-write` and `:required`/`:optional` ------------
 ;;
-;; The four clauses in `matches-pseudo?` below are two lists where real CSS
-;; has one predicate and its complement, and the overlap is where they and a
-;; real browser part company. Measured in Brave 151 over CDP on 2026-08-06,
-;; one probe page per probe, in the conformance corpus's own frame:
+;; These were two pairs of LISTS where real CSS has one predicate and its
+;; complement, and the overlap was where they and a real browser parted
+;; company. Round fifty-one measured the whole table, wrote the fix, and
+;; reverted it, because `kotoba-lang/browser`'s `query-selector` suite
+;; asserted the answers this file gave then. Both halves land together
+;; here; the three downstream assertions are corrected in that repo, each
+;; with the measurement that says what it encoded.
 ;;
-;;   | markup                                     | Brave      | here    |
-;;   |--------------------------------------------|------------|---------|
-;;   | `<p>text</p>`                              | read-only  | same    |
-;;   | `<input>` / `<textarea>`                   | read-write | same    |
-;;   | `<input readonly>` / `<textarea readonly>` | read-only  | same    |
-;;   | `<button>`/`<select>`/a checkbox           | read-only  | same    |
-;;   | `<input type=file>` / `<input type=hidden>`| read-only  | same    |
-;;   | `<input disabled>`                         | read-only  | NEITHER |
-;;   | `<p contenteditable="true">`               | read-write | NEITHER |
-;;   | a plain `<p>` inside that one              | read-write | NEITHER |
+;; Re-measured from scratch in Brave 151.1.93.129 over CDP on 2026-08-06,
+;; one probe page per probe (`conformance/probe.cljs`), reading
+;; `Element.matches()` rather than a colour, so the browser's own selector
+;; engine answers rather than a cascade this file also has to be right
+;; about. The eleven rows round fifty-one recorded, confirmed:
+;;
+;;   | markup                                     | Brave      | was here  |
+;;   |--------------------------------------------|------------|-----------|
+;;   | `<p>text</p>`                              | read-only  | same      |
+;;   | `<input>` / `<textarea>`                   | read-write | same      |
+;;   | `<input readonly>` / `<textarea readonly>` | read-only  | same      |
+;;   | `<button>`/`<select>`/a checkbox           | read-only  | CHECKBOX  |
+;;   | `<input type=file>` / `<input type=hidden>`| read-only  | same      |
+;;   | `<input disabled>`                         | read-only  | NEITHER   |
+;;   | `<p contenteditable="true">`               | read-write | NEITHER   |
+;;   | a plain `<p>` inside that one              | read-write | NEITHER   |
 ;;   | `<p contenteditable="false">` inside it    | read-only  | read-only |
-;;   | `<input required disabled>`                | :required  | NEITHER |
-;;   | `<input disabled>`                         | :optional  | NEITHER |
+;;   | `<input required disabled>`                | :required  | NEITHER   |
+;;   | `<input disabled>`                         | :optional  | NEITHER   |
 ;;
-;; The rule the last six rows want is one predicate -- an editable form
-;; control that is neither `readonly` nor `disabled`, OR any element in a
-;; `contenteditable` subtree -- with `:read-only` as its complement, and
-;; `:required`/`:optional` deciding on the attribute alone (disabling a
-;; control takes it out of constraint validation, which is why
-;; `:valid`/`:invalid`/`:in-range`/`:out-of-range` all keep their disabled
-;; test and Brave agrees that they should).
+;; One correction to that table, found by re-measuring rather than reading
+;; it: the checkbox in row four was NOT "same". `editable-form-control?` is
+;; every `<input>` that is not `hidden`/`file`, so a checkbox came out
+;; `:read-write` here where Brave says `:read-only` -- the row lumped it
+;; with `<button>`/`<select>`, which this file does get right. See
+;; `text-entry-input-types` for the set that decides it and for the twelve
+;; types measured one at a time.
 ;;
-;; It was written, and reverted, and the reason is not doubt about the
-;; measurement. `:read-only` and `:optional` are consumed by
-;; `kotoba-lang/browser`'s `query-selector`, whose own suite asserts the
-;; answers this file gives TODAY: `dom_bridge_test`'s
-;; `query-selector-supports-form-state-pseudo-classes` requires
-;; `input:read-only` to skip a disabled input and return the `readonly` one,
-;; and `input:optional` to skip it too, and
-;; `quickjs_execution_test`'s `quickjs-dom-query-uses-shared-form-state-
-;; pseudo-classes` pins the same node ids. Three assertions, all of them
-;; encoding a browser answer that does not exist. Closing this is therefore
-;; a CROSS-REPO change and belongs in a round that can land both halves.
+;; `:required`/`:optional` were also more than "the attribute alone", and
+;; the extra half is a second measured set rather than a second guess --
+;; see `required-capable-control?`. What IS the attribute alone is the part
+;; the round named: `disabled` and `readonly` do not touch either
+;; pseudo-class, where they do take a control out of `:valid`/`:invalid`/
+;; `:in-range`/`:out-of-range` and Brave agrees that they should.
 ;;
-;; Four corpus cases carry it in the meantime, red, with these numbers:
-;; `:form/read-only-matches-a-disabled-input`,
-;; `:form/read-write-matches-a-contenteditable`,
+;; The four corpus cases that carried this red -- `:form/read-only-matches-
+;; a-disabled-input`, `:form/read-write-matches-a-contenteditable`,
 ;; `:form/required-still-matches-a-disabled-control`, and its control
-;; `:form/read-only-matches-a-non-editable-element`, which already agrees.
+;; `:form/read-only-matches-a-non-editable-element` -- are green together.
+
+(def ^:private text-entry-input-types
+  "The `<input>` types a user can TYPE into, which is the set `:read-write`
+   reaches and is exactly HTML's own \"the `readonly` attribute applies
+   to\" list.
+
+   Measured one type at a time in Brave 151 on 2026-08-06 (probe
+   `12-input-types-readwrite`, nineteen `<input>`s in one document, each
+   asked `matches(':read-write')`): text, password, number, date, email,
+   url, search, tel, time, month, week and datetime-local are
+   `:read-write`; color, range, submit, image, button, reset, radio and
+   checkbox are `:read-only`, and so are file and hidden.
+
+   NOT `editable-form-control?`, which is every `<input>` bar `hidden` and
+   `file` and is what this file used to ask. That predicate is right where
+   it is used -- `readonly` bars a control from constraint validation
+   whether or not the attribute APPLIES to its type, measured on
+   `<input type=\"checkbox\" readonly required>`: Brave reports it
+   `:required` and NOT `:invalid`, while `<select readonly required>` IS
+   `:invalid` because `readonly` reaches no `<select>` at all. So the two
+   sets are genuinely different questions and this is the narrower one."
+  #{"text" "search" "url" "tel" "email" "password"
+    "date" "month" "week" "time" "datetime-local" "number"})
+
+(defn- contenteditable-truthy?
+  "Whether a `contenteditable` attribute VALUE makes its element editable.
+   Measured in Brave 151 on 2026-08-06: `contenteditable=\"true\"`, a bare
+   `contenteditable`, `contenteditable=\"\"` and
+   `contenteditable=\"plaintext-only\"` are all `:read-write`;
+   `contenteditable=\"false\"` is `:read-only`. That is `truthy-attr?`'s
+   own rule, named here so the `false` row is visible at the call site."
+  [v]
+  (and (some? v) (truthy-attr? v)))
+
+(defn- in-contenteditable-subtree?
+  "Whether `node` is inside (or is) an editable `contenteditable` subtree --
+   the NEAREST `contenteditable` attribute from `node` upwards decides, and
+   an intervening `contenteditable=\"false\"` stops the walk rather than
+   being skipped over.
+
+   Measured in Brave 151 on 2026-08-06 (probes `07-contenteditable-tree`
+   and `08-contenteditable-false-subtree`), on
+   `<div contenteditable=\"true\"><p>edit</p><p contenteditable=\"false\">no</p>
+   <span>s</span></div><p>outside</p>`: the div, its `<p>` and its `<span>`
+   are `:read-write`; the `contenteditable=\"false\"` paragraph is
+   `:read-only`, and so is a `<p>` nested INSIDE that one -- so this is a
+   nearest-ancestor lookup and not \"any ancestor is editable\".
+
+   Walks `parent-node-id` node by node, the same ancestor chain
+   `computed-lang` and `disabled-by-fieldset?` already use. With no
+   `document` only `node`'s own attribute is readable, which is the same
+   restriction `:root` and the structural pseudo-classes already carry."
+  [document node]
+  (loop [current node]
+    (if-let [v (get-in current [:attrs :contenteditable])]
+      (contenteditable-truthy? v)
+      (when document
+        (when-let [parent (get-in document [:nodes (parent-node-id document (:node/id current))])]
+          (recur parent))))))
+
+(defn- user-alterable?
+  "ONE predicate, of which `:read-write` is the whole and `:read-only` is
+   the complement: an element is user-alterable when it is a text-entry
+   form control (`text-entry-input-types`, plus every `<textarea>`) that
+   is neither `readonly` nor `disabled`, OR when it sits in an editable
+   `contenteditable` subtree.
+
+   The two halves do not compose -- a control's own state WINS over an
+   editable ancestor. Measured on
+   `<div contenteditable=\"true\"><input readonly><input disabled><input></div>`
+   (probe `14-readonly-inside-contenteditable`): the first two are
+   `:read-only` and only the third is `:read-write`, so the
+   `contenteditable` clause reaches non-controls and not controls.
+
+   `:read-only` being `(not this)` is what puts a plain `<p>`, a
+   `<button>`, an `<option>`, a `<legend>`, a `<progress>` and a
+   `<fieldset>` all in it -- measured, all seven elements of probe
+   `15-nonelement-and-oddballs` are `:read-only` and none is
+   `:read-write`. `:read-only` is not a form-control pseudo-class."
+  [document node]
+  (if (or (and (= :input (:tag node))
+               (contains? text-entry-input-types (input-type node)))
+          (= :textarea (:tag node)))
+    (and (not (truthy-attr? (get-in node [:attrs :readonly])))
+         (not (disabled-control? document node)))
+    (boolean (in-contenteditable-subtree? document node))))
+
+(def ^:private required-capable-input-types
+  "The `<input>` types the `required` attribute APPLIES to: every
+   text-entry type, plus the three that are answered by a click rather
+   than by typing.
+
+   Measured in Brave 151 on 2026-08-06 (probe `20-required-across-types`,
+   twenty-two `<input required>`s in one document): text, search, url,
+   tel, email, password, date, month, week, time, datetime-local, number,
+   checkbox, radio and file all match `:required`; hidden, range, color,
+   submit, image, reset and button match `:optional` INSTEAD -- the
+   attribute is on them and is simply not their attribute.
+
+   `file` is in this set, which closes the scope cut round fifty-one
+   recorded at `matches-pseudo?`: `validation-barred-control?` declined a
+   `type=\"file\"` input from BOTH pseudo-classes, where Brave reports
+   `<input type=\"file\" required>` as `:required`. `hidden` stays out of
+   `:required` for a reason the same measurement gives -- it is
+   `:optional` even with the attribute -- so the two are not one barred
+   set after all."
+  (into #{"checkbox" "radio" "file"} text-entry-input-types))
+
+(defn- required-capable-control?
+  "Whether the `required` attribute applies to `node` at all -- what
+   separates `:required` from `:optional` once the attribute is present.
+
+   `<select>` and `<textarea>` always; an `<input>` by its type
+   (`required-capable-input-types`); a `<button>` never. Measured on
+   `<button required>`: Brave reports it `:optional`, exactly as a bare
+   `<button>` is. The SUBJECT set of the pair is wider than this -- every
+   `<button>`, `<input>`, `<select>` and `<textarea>` matches one of the
+   two -- and `<fieldset>`, `<output>`, `<object>` and `<p>` match
+   neither, measured in probe `22-required-optional-other-tags`."
+  [node]
+  (case (:tag node)
+    :input (contains? required-capable-input-types (input-type node))
+    (:select :textarea) true
+    false))
 
 (defn- checked-control?
   "Whether `node` is CHECKED, in the sense `:checked` means for the control
@@ -5551,6 +5701,185 @@
     :input (and (contains? #{"checkbox" "radio"} (input-type node))
                 (truthy-attr? (get-in node [:attrs :checked])))
     :option (truthy-attr? (get-in node [:attrs :selected]))
+    false))
+
+(defn- indeterminate-control?
+  "Whether `node` is `:indeterminate`. THREE elements have three different
+   rules for it, and one of the three is not reachable from static markup
+   at all -- which is the finding, because it is the one everybody names
+   first.
+
+   Measured in Brave 151 on 2026-08-06, one probe page per probe:
+
+   | markup                                          | Brave |
+   |-------------------------------------------------|-------|
+   | `<input type=checkbox>`                          | no    |
+   | `<input type=checkbox indeterminate>`            | NO    |
+   | `<input type=checkbox indeterminate=\"true\">`     | NO    |
+   | `<progress>`                                     | yes   |
+   | `<progress value=\"0.5\">`                         | no    |
+   | `<progress value=\"\">` / `<progress value=\"abc\">` | no    |
+   | two `<input type=radio name=g>`, neither checked | BOTH  |
+   | the same with one `checked`                      | neither |
+   | `<input type=radio>` with no `name`              | yes   |
+   | `<input type=text>` / `<select>`                 | no    |
+
+   - **A CHECKBOX cannot be indeterminate from markup.** `indeterminate` is
+     an IDL property with no content attribute behind it, so the two
+     attribute spellings above match nothing; only `el.indeterminate = true`
+     sets it, and this engine has no script. Named rather than implemented:
+     an `indeterminate` ATTRIBUTE clause would be a rule a browser does not
+     have, which is the same mistake the three `browser` assertions this
+     round corrects were making.
+   - **A `<progress>` is indeterminate iff it has no `value` ATTRIBUTE.**
+     Not \"no parseable value\": `value=\"abc\"` and `value=\"\"` are both
+     determinate, so the test is presence and nothing else.
+   - **A RADIO is indeterminate when no member of its GROUP is checked**,
+     which is a property of the group and not of the element -- both radios
+     of an unchecked pair match, and checking either clears both. Reuses
+     `radio-group-node-ids`, so the same real form-ownership rule that
+     scopes `:required`/`:invalid` scopes this: two same-named radios in two
+     different `<form>`s are two groups, and a radio with a blank `name` is
+     a group of one (measured -- `<input type=radio name=\"\">` twice, both
+     indeterminate).
+
+   `disabled` does NOT bar it: measured on `<input type=radio name=x disabled>`
+   beside an enabled sibling, both are indeterminate."
+  [document node]
+  (case (:tag node)
+    :progress (nil? (get-in node [:attrs :value]))
+    :input (and (= "radio" (input-type node))
+                (some? document)
+                (not (radio-required-satisfied? document node)))
+    false))
+
+(def ^:private placeholder-input-types
+  "The `<input>` types the `placeholder` attribute applies to, and so the
+   only ones `:placeholder-shown` can reach. Measured in Brave 151 on
+   2026-08-06 (probe `63-placeholder-type-set`, seventeen types each
+   carrying `placeholder=h`): text, search, url, tel, email, password and
+   number match; date, month, week, time, datetime-local, color, range,
+   file, hidden and submit do NOT.
+
+   Narrower than `text-entry-input-types` by exactly the five date/time
+   types, which is why it is its own set rather than that one reused: a
+   `<input type=date placeholder=h>` is `:read-write` and is not
+   `:placeholder-shown`."
+  #{"text" "search" "url" "tel" "email" "password" "number"})
+
+(defn- placeholder-shown?
+  "Whether `node` is showing placeholder text: it carries a `placeholder`
+   attribute, the attribute applies to it, and its value is the EMPTY
+   string.
+
+   Measured in Brave 151 on 2026-08-06:
+
+   | markup                                | Brave |
+   |---------------------------------------|-------|
+   | `<input placeholder=hint>`            | yes   |
+   | `<input placeholder=hint value=typed>`| no    |
+   | `<input>`                             | no    |
+   | `<input placeholder=\"\">`              | YES   |
+   | `<input placeholder=hint value=\" \">`  | NO    |
+   | `<textarea placeholder=hint>`         | yes   |
+   | `<textarea placeholder=hint>typed`    | no    |
+   | `<input placeholder=hint disabled>`   | yes   |
+   | `<input placeholder=hint readonly>`   | yes   |
+
+   Two rows are the ones a spec reading gets wrong. An EMPTY placeholder
+   still shows one -- the test is that the attribute is present, not that
+   it says anything -- and a value of a single SPACE is not empty, so the
+   placeholder is hidden by whitespace the reader cannot see. Neither
+   `disabled` nor `readonly` touches it."
+  [document node]
+  (and (some? (get-in node [:attrs :placeholder]))
+       (case (:tag node)
+         :textarea true
+         :input (contains? placeholder-input-types (input-type node))
+         false)
+       (= "" (control-value document node))))
+
+(defn- submit-button?
+  "Whether `node` is a SUBMIT button -- what `:default` looks for inside a
+   form. Measured in Brave 151 on 2026-08-06 (probe
+   `60-default-submit-kinds`, one form per kind): `<input type=submit>`,
+   `<input type=image>`, `<button type=submit>` and a bare `<button>` (whose
+   missing type IS submit) each match `:default` when alone in a form;
+   `<button type=button>`, `<input type=reset>` and `<input type=button>`
+   do not."
+  [node]
+  (case (:tag node)
+    :button (contains? #{"submit" nil} (some-> (get-in node [:attrs :type]) str str/lower-case))
+    :input (contains? #{"submit" "image"} (input-type node))
+    false))
+
+(defn- default-submit-button?
+  "Whether `node` is its form's DEFAULT button -- the first submit button
+   in TREE ORDER inside the form that owns it, i.e. the one Enter would
+   press.
+
+   Measured in Brave 151 on 2026-08-06: in
+   `<form><button>one</button><button>two</button></form>` only the first
+   matches; in `<form><input type=text><input type=submit><button>later</button></form>`
+   only the `<input type=submit>` does; and a submit button nested three
+   elements deep still wins over a shallower LATER one, so it is document
+   order and not child order.
+
+   Form ownership is `ancestor-form-id`, which already honours the `form=`
+   ATTRIBUTE as well as the ancestor chain -- so
+   `<form id=f1></form><button form=f1>owned</button>` is `:default` here
+   as it is in Brave (measured). That is the same ownership notion
+   `radio-group-node-ids` uses for `:required`/`:invalid`, which is why
+   two forms cannot steal each other's default button."
+  [document node]
+  (boolean
+   (when-let [form-id (and document (ancestor-form-id document (:node/id node)))]
+     ;; Walked from the DOCUMENT root rather than from the form, because
+     ;; `form=` ownership reaches outside the form's own subtree -- a
+     ;; `<button form=f1>` beside `<form id=f1>` is its default button, and
+     ;; a subtree walk cannot see it. `descendant-node-ids` yields document
+     ;; order either way, which is the order the answer is defined in.
+     (let [scan (if-let [root (:root document)]
+                  (cons root (descendant-node-ids document root))
+                  (descendant-node-ids document form-id))]
+       (= (:node/id node)
+          (first (filter (fn [id]
+                           (let [candidate (get-in document [:nodes id])]
+                             (and (submit-button? candidate)
+                                  (= form-id (ancestor-form-id document id)))))
+                         scan)))))))
+
+(defn- default-control?
+  "Whether `node` is `:default` -- \"the state the control was born in\",
+   which is three unrelated rules and not one.
+
+   Measured in Brave 151 on 2026-08-06:
+
+   | markup                                   | Brave |
+   |------------------------------------------|-------|
+   | `<input type=checkbox checked>`          | yes   |
+   | `<input type=checkbox>`                  | no    |
+   | `<input type=radio checked>`             | yes   |
+   | `<option selected>`                      | yes   |
+   | `<option>`                               | no    |
+   | first `<button>` of a form               | yes   |
+   | second `<button>` of the same form       | no    |
+   | `<button>` with no form at all           | NO    |
+   | `<input type=checkbox checked>`, no form | YES   |
+
+   The last two rows are the pair that says this is three rules: a checked
+   checkbox needs no form and a default button is meaningless without one.
+   Checkedness is read off the ATTRIBUTE, which is what \"born in\" means --
+   the same distinction `checked-control?` draws for `:checked`, and the
+   reason the two pseudo-classes are not synonyms once script has run."
+  [document node]
+  (case (:tag node)
+    :option (truthy-attr? (get-in node [:attrs :selected]))
+    :input (let [t (input-type node)]
+             (if (contains? #{"checkbox" "radio"} t)
+               (truthy-attr? (get-in node [:attrs :checked]))
+               (and (submit-button? node) (default-submit-button? document node))))
+    :button (and (submit-button? node) (default-submit-button? document node))
     false))
 
 (defn- link-control?
@@ -5629,12 +5958,19 @@
    family below uses, and for the same reason: `matches-simple?` calls this
    function, so this function cannot name it.
 
-   Four clauses delegate rather than decide, each to a predicate whose own
-   docstring carries the browser measurements behind it: `:checked` to
-   `checked-control?` (which control's state the word names -- `checked`
-   on a checkbox, `selected` on an `<option>`), `:read-only`/`:read-write`
-   to `user-alterable?` (ONE predicate and its complement, which is what
-   the two of them are), and `:link`/`:any-link` to `link-control?`.
+   Most of the form-state clauses delegate rather than decide, each to a
+   predicate whose own docstring carries the browser measurements behind
+   it: `:checked` to `checked-control?` (which control's state the word
+   names -- `checked` on a checkbox, `selected` on an `<option>`),
+   `:read-only`/`:read-write` to `user-alterable?` (ONE predicate and its
+   complement, which is what the two of them are), `:required`/`:optional`
+   to `required-capable-control?` and the attribute (`disabled` and
+   `readonly` do not touch either, where they DO take a control out of
+   `:valid`/`:invalid`/`:in-range`/`:out-of-range`),
+   `:indeterminate` to `indeterminate-control?` (three elements, three
+   rules, and a checkbox's is not reachable from markup at all),
+   `:placeholder-shown` to `placeholder-shown?`, `:default` to
+   `default-control?`, and `:link`/`:any-link` to `link-control?`.
 
    `:enabled` asks `disabled-capable-control?`, not `form-control?`: the
    two pseudo-classes are complements over the set of elements that CAN be
@@ -5645,13 +5981,16 @@
    the pair used to disagree with itself -- a bare `<option>` was neither
    `:enabled` nor `:disabled`.
 
-   One more scope cut in the same family, with its number: `:required`/
-   `:optional` decline a `type=\"file\"` input via
-   `validation-barred-control?`, where Brave reports
-   `<input type=\"file\" required>` as BOTH `:required` and `:invalid` --
-   only `type=\"hidden\"` is really barred from constraint validation. No
-   corpus case covers it, and narrowing that set would silently change
-   `:valid`/`:invalid` for file inputs as well, which is not measured."
+   The `:required` half of that cut is closed: `required-capable-input-types`
+   includes `file`, so `<input type=\"file\" required>` is `:required` here
+   as it is in Brave. The `:valid`/`:invalid` half is NOT, and its number
+   is the same measurement: Brave reports that input `:invalid` as well,
+   where `validation-barred-control?` still declines it. Closing that one
+   means deciding what a file input's VALUE is (Brave: no files selected is
+   an empty value, hence the `required` failure), which this file has no
+   reader for, and it would move `:valid` for every unrequired file input
+   at the same time -- measured, `<input type=\"file\">` is `:valid` in
+   Brave and is `:valid` here already, so only the required shape moves."
   [document node selector-pseudo arg match-fn]
   (case selector-pseudo
     :disabled (disabled-control? document node)
@@ -5659,19 +5998,16 @@
                   (not (disabled-control? document node)))
     :checked (checked-control? node)
     :required (and (form-control? node)
-                   (not (disabled-control? document node))
-                   (not (validation-barred-control? node))
+                   (required-capable-control? node)
                    (truthy-attr? (get-in node [:attrs :required])))
     :optional (and (form-control? node)
-                   (not (disabled-control? document node))
-                   (not (validation-barred-control? node))
-                   (not (truthy-attr? (get-in node [:attrs :required]))))
-    :read-only (and (not (validation-barred-control? node))
-                    (or (not (editable-form-control? node))
-                        (truthy-attr? (get-in node [:attrs :readonly]))))
-    :read-write (and (editable-form-control? node)
-                     (not (truthy-attr? (get-in node [:attrs :readonly])))
-                     (not (disabled-control? document node)))
+                   (not (and (required-capable-control? node)
+                             (truthy-attr? (get-in node [:attrs :required])))))
+    :read-only (not (user-alterable? document node))
+    :read-write (user-alterable? document node)
+    :indeterminate (indeterminate-control? document node)
+    :placeholder-shown (placeholder-shown? document node)
+    :default (default-control? document node)
     :link (link-control? node)
     :any-link (link-control? node)
     :invalid (and (form-control? node)
@@ -8344,6 +8680,7 @@
    history and answering it would be inventing a fact about the user."
   #{:disabled :enabled :checked :required :optional :read-only :read-write
     :invalid :valid :in-range :out-of-range :focus :focus-within
+    :indeterminate :placeholder-shown :default
     :first-child :last-child :only-child :first-of-type :last-of-type
     :only-of-type :link :any-link
     :nth-child :nth-of-type :nth-last-child :nth-last-of-type
