@@ -41,7 +41,7 @@
             ["node:os" :as os]
             ["node:path" :as path]
             [clojure.edn :as edn]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [cssom.core :as css]
             [cssom.layout :as layout]
             [htmldom.core :as html]
@@ -702,7 +702,7 @@
                            (conj out
                                  (cond
                                    (and at-name (contains? conditional-group-at-rules
-                                                           (str/lower-case at-name)))
+                                                           (str/lower at-name)))
                                    (str prelude " {"
                                         (or (scope-css body
                                                        (if (rooted-scope-prelude? prelude) nil scope))
@@ -875,7 +875,7 @@
   ;; transformed text) while a real browser leaves the DOM text alone and
   ;; upper-cases at paint time. Both are correct, and comparing them
   ;; case-sensitively would score a correct engine as wrong.
-  (-> (str s) (str/replace #"\s+" " ") str/trim str/lower-case))
+  (-> (str s) (str/replace #"\s+" " ") str/trim str/lower))
 
 (defn- cluster-lines
   "Groups measured WORDS into line boxes by vertical overlap, then reads
@@ -1524,7 +1524,7 @@
    to `[r g b a]`. nil when this harness cannot parse it -- the caller
    turns that into an explicit exclusion rather than a mismatch."
   [v]
-  (let [s (str/lower-case (str/trim (str v)))
+  (let [s (str/lower (str/trim (str v)))
         hex1 (fn [h i] (let [d (js/parseInt (subs h i (inc i)) 16)] (+ d (* 16 d))))
         hex2 (fn [h i] (js/parseInt (subs h i (+ i 2)) 16))]
     (cond
@@ -1586,13 +1586,13 @@
       (cond
         (number? v) {:v v}
         (re-matches #"[0-9]+" s) {:v (js/parseFloat s)}
-        (= "normal" (str/lower-case s)) {:v 400}
-        (= "bold" (str/lower-case s)) {:v 700}
+        (= "normal" (str/lower s)) {:v 400}
+        (= "bold" (str/lower s)) {:v 700}
         ;; `lighter`/`bolder` are relative to the PARENT's computed weight,
         ;; which is a resolution step the cascade does not perform.
         :else {:excluded :relative-font-weight})
 
-      :else {:v (str/lower-case s)})))
+      :else {:v (str/lower s)})))
 
 (defn- resolve-cascaded-style
   "The engine's answer for one element: for every compared property, the
@@ -1648,7 +1648,7 @@
                                     (conj acc {:tag tag
                                                ;; mirror of the oracle's own probeKey()
                                                :key (if (= "input" tag)
-                                                      (str "input:" (str/lower-case
+                                                      (str "input:" (str/lower
                                                                      (str (get-in child [:attrs :type] "text"))))
                                                       tag)
                                                :style resolved})))))
@@ -1732,10 +1732,10 @@
 
                                    (and (= :display prop)
                                         (or (contains? #{"flex" "grid" "inline-flex" "inline-grid"}
-                                                       (str/lower-case (str (:parentDisplay ob))))
-                                            (not (contains? #{"none" ""} (str/lower-case (str (:cssFloat ob)))))
+                                                       (str/lower (str (:parentDisplay ob))))
+                                            (not (contains? #{"none" ""} (str/lower (str (:cssFloat ob)))))
                                             (contains? #{"absolute" "fixed"}
-                                                       (str/lower-case (str (:position ob)))))
+                                                       (str/lower (str (:position ob)))))
                                         (contains? #{"block" "flex" "grid" "table"} (:v no)))
                                    :blockified
 
