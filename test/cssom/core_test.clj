@@ -2,7 +2,7 @@
   (:require [cssom.core :as css]
             [cssom.layout :as layout]
             [clojure.set]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
@@ -3805,7 +3805,7 @@
          sheet (->> decls
                     (map-indexed (fn [i d] (when d (str ".l" i " { " d " }"))))
                     (remove nil?)
-                    (clojure.string/join "\n"))
+                    (str/join "\n"))
          doc (css/apply-cascade doc (css/parse-rules sheet) opts)]
      (mapv (fn [id]
              (into {} (keep (fn [[k v]] (when (= "style" (namespace k)) [(keyword (name k)) v])))

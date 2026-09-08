@@ -405,7 +405,7 @@
      into `:attr/case-insensitive?` (true only for `i`/`I`; `s`/`S` needs
      no special handling beyond parsing successfully), and
      `matches-simple?`'s attribute clause honors it by lower-casing BOTH
-     `actual` and `value` before comparing -- the same `str/lower-case`
+     `actual` and `value` before comparing -- the same `str/lower`
      convention `:lang()`'s subtag matching already established above --
      for EVERY operator this engine supports (`=`/`~=`/`^=`/`$=`/`*=`/
      `|=`, and the presence-only no-operator case, which the flag is
@@ -431,7 +431,7 @@
      match off by one trailing character to let it double as the flag)
      the moment a mandatory-whitespace requirement isn't there to forbid
      it."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.wasm.dom :as dom]
             ;; The `<color>` grammar. It is NOT a copy and NOT a table
             ;; mirrored across a one-directional dependency: this engine's
@@ -553,12 +553,12 @@
    touching the precedence-climbing parser that handles `+`/`-`/`*`/`/`."
   [s idx]
   (when-let [name (re-find #"^[A-Za-z-]+" (subs s idx))]
-    (when (contains? math-function-names (str/lower-case name))
+    (when (contains? math-function-names (str/lower name))
       (let [after (+ idx (count name))]
         (when (and (< after (count s)) (= \( (nth s after)))
           (when-let [close (calc-matching-paren s after)]
             [{:calc/type :fncall
-              :calc/name (str/lower-case name)
+              :calc/name (str/lower name)
               :calc/text (subs s (inc after) close)}
              (inc close)]))))))
 
@@ -802,7 +802,7 @@
                                    :cljs (js/parseInt v 10))
       :else
       (if-let [[_ fname inner] (re-matches calc-pattern v)]
-        (or (parse-calc (if (= "calc" (str/lower-case fname))
+        (or (parse-calc (if (= "calc" (str/lower fname))
                           inner
                           ;; A whole-value `min(...)`/`max(...)`/`clamp(...)`
                           ;; is re-wrapped as the argument of an outer
@@ -909,7 +909,7 @@
    `resolve-content-value` turns the marker back into nil, so every reader
    downstream sees exactly what it saw before -- an absent `:content`."
   [v]
-  (when (contains? #{"none" "normal"} (str/lower-case (str/trim (str v))))
+  (when (contains? #{"none" "normal"} (str/lower (str/trim (str v))))
     {:content/none true}))
 
 (def ^:private content-quote-keywords
@@ -928,7 +928,7 @@
   "A `content` term that is one of the four quote keywords, as a
    `{:content/quote <kw>}` marker, or nil."
   [v]
-  (when-let [kw (get content-quote-keywords (str/lower-case (str/trim (str v))))]
+  (when-let [kw (get content-quote-keywords (str/lower (str/trim (str v))))]
     {:content/quote kw}))
 
 (defn- parse-content-term
@@ -1092,7 +1092,7 @@
    `counter-increment` value) -- callers drop the declaration entirely in
    that case rather than storing an unusable value."
   [k v]
-  (let [k-lower (str/lower-case k)]
+  (let [k-lower (str/lower k)]
     (cond
       (= "content" k-lower) (parse-content-value v)
       (= "counter-reset" k-lower) (parse-counter-property v 0)
@@ -1190,7 +1190,7 @@
   [tok]
   (boolean (or (re-matches #"-?\d+" tok)
                (re-matches #"-?\d+px" tok)
-               (contains? line-width-keywords (str/lower-case tok)))))
+               (contains? line-width-keywords (str/lower tok)))))
 
 (defn- expand-border-shorthand
   "Parses a `border` shorthand value (real CSS's own order-independent
@@ -1219,7 +1219,7 @@
   [v]
   (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
     (reduce (fn [result tok]
-              (let [lower (str/lower-case tok)]
+              (let [lower (str/lower tok)]
                 (cond
                   (and (not (contains? result :border-width))
                        (border-shorthand-width-token? tok))
@@ -1313,7 +1313,7 @@
    how every other keyword value in this file is compared."
   [value]
   (when (string? value)
-    (get css-wide-keywords (str/lower-case (str/trim value)))))
+    (get css-wide-keywords (str/lower (str/trim value)))))
 
 (defn- expand-box-side-shorthand
   "Expands a `margin`/`padding` shorthand into its four per-side longhands
@@ -1410,7 +1410,7 @@
                             (re-matches calc-pattern %)
                             (re-matches var-ref-pattern %)
                             (and (= "margin" prop)
-                                 (= "auto" (str/lower-case %)))
+                                 (= "auto" (str/lower %)))
                             ;; A CSS-wide keyword is admitted as the SOLE
                             ;; token, which is the only place real CSS
                             ;; allows one: `margin: 1px revert` is invalid,
@@ -1476,7 +1476,7 @@
                             (re-matches percentage-pattern %)
                             (re-matches calc-pattern %)
                             (re-matches var-ref-pattern %)
-                            (= "auto" (str/lower-case %)))
+                            (= "auto" (str/lower %)))
                        tokens))
       {:top (parse-style-value t)
        :right (parse-style-value r)
@@ -1540,7 +1540,7 @@
                               (re-matches percentage-pattern %)
                               (re-matches calc-pattern %)
                               (re-matches var-ref-pattern %)
-                              (and auto-ok? (= "auto" (str/lower-case %)))
+                              (and auto-ok? (= "auto" (str/lower %)))
                               (and (= 1 n) (css-wide-keyword %)))
                          tokens))
         {start (parse-style-value (tokens 0))
@@ -1674,7 +1674,7 @@
   [prop v]
   (when-let [token-ok?
              (get {"border-width" border-shorthand-width-token?
-                   "border-style" #(contains? border-style-keywords (str/lower-case %))
+                   "border-style" #(contains? border-style-keywords (str/lower %))
                    "border-color" #(not (str/blank? %))}
                   prop)]
     (let [tokens (box-shorthand-tokens v)
@@ -1735,7 +1735,7 @@
    was to cancel it."
   [v]
   (let [v (str/trim (str v))]
-    (if (or (str/blank? v) (= "none" (str/lower-case v)))
+    (if (or (str/blank? v) (= "none" (str/lower v)))
       {:text-shadow-color "none"}
       (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
         (reduce (fn [result tok]
@@ -1800,7 +1800,7 @@
    shadow's own real, PRESENT `{:text-shadow-color \"none\"}` sentinel."
   [v]
   (let [v (str/trim (str v))]
-    (if (or (str/blank? v) (= "none" (str/lower-case v)))
+    (if (or (str/blank? v) (= "none" (str/lower v)))
       {}
       (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
         (reduce (fn [result tok]
@@ -1859,7 +1859,7 @@
   [v]
   (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
     (reduce (fn [result tok]
-              (let [lower (str/lower-case tok)]
+              (let [lower (str/lower tok)]
                 (cond
                   (and (not (contains? result :outline-width))
                        (border-shorthand-width-token? tok))
@@ -1928,7 +1928,7 @@
    is confined to that keyword; recognising it means a real
    `<self-position>` grammar, which is a larger change than this table."
   [k v]
-  (when-let [[align justify] (get place-shorthands (str/lower-case (str k)))]
+  (when-let [[align justify] (get place-shorthands (str/lower (str k)))]
     (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
       (case (count tokens)
         1 {align (first tokens) justify (first tokens)}
@@ -1971,7 +1971,7 @@
         ;; defined by the spec as an exact grow/shrink/basis triple.
         named (when (= 1 n) (get {"none" [0 0 "auto"] "auto" [1 1 "auto"]
                                   "initial" [0 1 "auto"]}
-                                 (str/lower-case (first tokens))))]
+                                 (str/lower (first tokens))))]
     (cond
       named {:flex-grow (named 0) :flex-shrink (named 1) :flex-basis (named 2)}
 
@@ -1982,7 +1982,7 @@
            ;; A lone token that is neither a number nor a resolvable length
            ;; (`flex: содержимое`) is not a basis this engine can use.
            (every? #(or (re-matches #"-?\d+(\.\d+)?(px)?" %)
-                        (= "auto" (str/lower-case %))
+                        (= "auto" (str/lower %))
                         (re-matches calc-pattern %)
                         (str/ends-with? % "%"))
                    bases))
@@ -2063,7 +2063,7 @@
   [v]
   (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))
         [leading remaining] (split-with (fn [tok]
-                                           (let [lower (str/lower-case tok)]
+                                           (let [lower (str/lower tok)]
                                              (or (contains? font-shorthand-style-keywords lower)
                                                  (contains? font-shorthand-weight-keywords lower)
                                                  (contains? font-shorthand-skip-keywords lower))))
@@ -2072,8 +2072,8 @@
       {}
       (let [size-token (first remaining)
             family (str/join " " (rest remaining))
-            style-tok (some #(when (contains? font-shorthand-style-keywords (str/lower-case %)) %) leading)
-            weight-tok (some #(when (contains? font-shorthand-weight-keywords (str/lower-case %)) %) leading)
+            style-tok (some #(when (contains? font-shorthand-style-keywords (str/lower %)) %) leading)
+            weight-tok (some #(when (contains? font-shorthand-weight-keywords (str/lower %)) %) leading)
             [size-part lh-part] (str/split size-token #"/" 2)]
         (cond-> {:font-size (parse-style-value size-part)
                  :font-family family}
@@ -2118,13 +2118,13 @@
                      (let [important? (boolean (re-find #"(?i)!important\s*$" v))
                            value (str/replace v #"(?i)\s*!important\s*$" "")]
                        (cond
-                         (and (contains? #{"margin" "padding"} (str/lower-case k))
-                              (some? (expand-box-side-shorthand (str/lower-case k) value)))
+                         (and (contains? #{"margin" "padding"} (str/lower k))
+                              (some? (expand-box-side-shorthand (str/lower k) value)))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
-                              (expand-box-side-shorthand (str/lower-case k) value))
+                              (expand-box-side-shorthand (str/lower k) value))
 
-                         (and (= "inset" (str/lower-case k))
+                         (and (= "inset" (str/lower k))
                               (some? (expand-inset-shorthand value)))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
@@ -2135,53 +2135,53 @@
                          ;; which physical side each lands on is not known
                          ;; until the element's own `direction` is
                          ;; resolved, which happens in `resolve-style-for`.
-                         (some? (expand-logical-side-shorthand (str/lower-case k) value))
+                         (some? (expand-logical-side-shorthand (str/lower k) value))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
-                              (expand-logical-side-shorthand (str/lower-case k) value))
+                              (expand-logical-side-shorthand (str/lower k) value))
 
-                         (some? (expand-logical-border-shorthand (str/lower-case k) value))
+                         (some? (expand-logical-border-shorthand (str/lower k) value))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
-                              (expand-logical-border-shorthand (str/lower-case k) value))
+                              (expand-logical-border-shorthand (str/lower k) value))
 
-                         (some? (expand-border-side-shorthand (str/lower-case k) value))
+                         (some? (expand-border-side-shorthand (str/lower k) value))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
-                              (expand-border-side-shorthand (str/lower-case k) value))
+                              (expand-border-side-shorthand (str/lower k) value))
 
-                         (some? (expand-border-box-shorthand (str/lower-case k) value))
+                         (some? (expand-border-box-shorthand (str/lower k) value))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
-                              (expand-border-box-shorthand (str/lower-case k) value))
+                              (expand-border-box-shorthand (str/lower k) value))
 
-                         (and (= "border" (str/lower-case k))
+                         (and (= "border" (str/lower k))
                               (some? (expand-border-shorthand-with-sides value)))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-border-shorthand-with-sides value))
 
-                         (= "text-shadow" (str/lower-case k))
+                         (= "text-shadow" (str/lower k))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-text-shadow-shorthand value))
 
-                         (= "box-shadow" (str/lower-case k))
+                         (= "box-shadow" (str/lower k))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-box-shadow-shorthand value))
 
-                         (= "outline" (str/lower-case k))
+                         (= "outline" (str/lower k))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-outline-shorthand value))
 
-                         (= "font" (str/lower-case k))
+                         (= "font" (str/lower k))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
                               (expand-font-shorthand value))
 
-                         (and (= "flex" (str/lower-case k))
+                         (and (= "flex" (str/lower k))
                               (some? (expand-flex-shorthand value)))
                          (map (fn [[longhand longhand-value]]
                                 [longhand {:value longhand-value :important? important?}])
@@ -2710,7 +2710,7 @@
                                :selector/parts (selector-parts tokens parse-simple-selector)})))
         parse-group (fn [kind]
                       (->> functional-matches
-                           (filter (fn [[_ fn-name _]] (= kind (str/lower-case fn-name))))
+                           (filter (fn [[_ fn-name _]] (= kind (str/lower fn-name))))
                            (mapv (fn [[_ _ arg]]
                                    ;; `:is()` is FORGIVING: an arm it cannot
                                    ;; parse is dropped and the rest of the
@@ -2733,11 +2733,11 @@
                             ;; `has-group-matches?` actually dispatches on.
                             :has/direct-child? (= ">" combinator)}))
         has-groups (->> functional-matches
-                        (filter (fn [[_ fn-name _]] (= "has" (str/lower-case fn-name))))
+                        (filter (fn [[_ fn-name _]] (= "has" (str/lower fn-name))))
                         (mapv (fn [[_ _ arg]] (mapv parse-has-item (split-selector-list arg)))))
         nth-args (into {}
                        (map (fn [[_ pseudo-name arg]]
-                              [(keyword (str/lower-case pseudo-name)) (str/trim arg)]))
+                              [(keyword (str/lower pseudo-name)) (str/trim arg)]))
                        (re-seq nth-pseudo-class-pattern raw))
         lang-args (into {}
                         (map (fn [[_ arg]] [:lang (str/trim arg)]))
@@ -2745,7 +2745,7 @@
         s (str/replace raw functional-pseudo-class-pattern "")
         selector-without-attrs (str/replace s attribute-selector-pattern "")
         pseudo-element (some-> (re-find pseudo-element-pattern selector-without-attrs)
-                                second str/lower-case keyword)
+                                second str/lower keyword)
         selector-sans-pseudo-element (str/replace selector-without-attrs pseudo-element-pattern "")
         selector-without-pseudos (str/replace selector-sans-pseudo-element pseudo-class-pattern "")
         tag (second (re-find #"^([A-Za-z][A-Za-z0-9_-]*)" selector-without-attrs))
@@ -2753,10 +2753,10 @@
         classes (mapv second (re-seq #"\.([A-Za-z_][-A-Za-z0-9_]*)" selector-without-pseudos))
         attrs (mapv parse-attribute-selector
                     (re-seq attribute-selector-pattern s))
-        pseudos (mapv (comp keyword str/lower-case second)
+        pseudos (mapv (comp keyword str/lower second)
                       (re-seq pseudo-class-pattern selector-sans-pseudo-element))]
     {:selector/raw raw
-     :selector/tag (when (seq tag) (keyword (str/lower-case tag)))
+     :selector/tag (when (seq tag) (keyword (str/lower tag)))
      :selector/id id
      :selector/classes classes
      :selector/attrs (filterv some? attrs)
@@ -3384,7 +3384,7 @@
 
 (defn- at-rule-name
   [prelude]
-  (some-> (re-find #"^\s*@([A-Za-z-]+)" (str prelude)) second str/lower-case))
+  (some-> (re-find #"^\s*@([A-Za-z-]+)" (str prelude)) second str/lower))
 
 (defn- amp-positions
   "Indexes of every `&` in `sel` that is not inside a string literal or a
@@ -3580,7 +3580,7 @@
         (keep (fn [decl]
                 (let [[k v] (map str/trim (str/split decl #":" 2))]
                   (when (and (seq k) (seq v))
-                    [(str/lower-case k) (str/replace (str/trim v) #"^[\"']|[\"']$" "")]))))
+                    [(str/lower k) (str/replace (str/trim v) #"^[\"']|[\"']$" "")]))))
         (str/split (str body) #";")))
 
 ;; ---------------------------------------------------------------------
@@ -3670,7 +3670,7 @@
    function genuinely might be."
   [value]
   (let [v (str/trim (str value))
-        lower (str/lower-case v)]
+        lower (str/lower v)]
     (cond
       (str/blank? v) :no
       (= "currentcolor" lower) :yes
@@ -3703,9 +3703,9 @@
   [name literal value]
   (let [numeric value
         v (str/trim (str value))
-        lower (str/lower-case v)
+        lower (str/lower v)
         [_ magnitude unit] (re-matches dimension-pattern v)
-        unit (some-> unit str/lower-case)
+        unit (some-> unit str/lower)
         bare-number? (some? (re-matches #"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$" v))
         zero? (some? (re-matches #"^[-+]?0*\.?0*$" v))
         math? (some? (re-find math-function-pattern v))
@@ -3775,8 +3775,8 @@
                          [_ type-name] (re-matches #"^<([a-zA-Z-]+)>$" (str body))]
                      (cond
                        (some? type-name)
-                       (when (contains? syntax-component-names (str/lower-case type-name))
-                         {:syntax/name (str/lower-case type-name)
+                       (when (contains? syntax-component-names (str/lower type-name))
+                         {:syntax/name (str/lower type-name)
                           :syntax/literal nil
                           :syntax/multiplier (case multiplier "+" :plus "#" :hash nil)})
 
@@ -3939,7 +3939,7 @@
                                             (computationally-independent? syntax initial))))
                           [(keyword name)
                            {:registration/syntax (str/trim syntax)
-                            :registration/inherits? (= "true" (str/lower-case (str inherits)))
+                            :registration/inherits? (= "true" (str/lower (str inherits)))
                             :registration/initial initial}])))))
             (css-chunks s)))))
 
@@ -4050,7 +4050,7 @@
     value
     (str/replace value env-ref-pattern
                  (fn [[_ name fallback]]
-                   (or (get env-variables (str/lower-case (str/trim (str name))))
+                   (or (get env-variables (str/lower (str/trim (str name))))
                        (some-> fallback str/trim not-empty)
                        "")))))
 
@@ -4306,7 +4306,7 @@
   [s]
   (when-let [[_ number unit] (re-matches media-length-pattern (str/trim (str s)))]
     (let [n (parse-media-number number)]
-      (case (some-> unit str/lower-case)
+      (case (some-> unit str/lower)
         "px" n
         ("em" "rem") (* n media-em-px)
         nil (when (zero? n) 0.0)))))
@@ -4377,7 +4377,7 @@
             (= ch \)) (recur (inc idx) start (max 0 (dec depth)) out)
             (and (zero? depth)
                  (<= (+ idx w) n)
-                 (= word (str/lower-case (subs s idx (+ idx w))))
+                 (= word (str/lower (subs s idx (+ idx w))))
                  (or (zero? idx) (some? (re-matches #"[\s)]" (str (nth s (dec idx))))))
                  (or (= (+ idx w) n) (some? (re-matches #"[\s(]" (str (nth s (+ idx w)))))))
             (recur (+ idx w) (+ idx w) depth (conj out (subs s start idx)))
@@ -4390,7 +4390,7 @@
   [s word]
   (let [w (count word)]
     (when (and (>= (count s) w)
-               (= word (str/lower-case (subs s 0 w)))
+               (= word (str/lower (subs s 0 w)))
                (or (= (count s) w) (some? (re-matches #"[\s(]" (str (nth s w))))))
       (str/trim (subs s w)))))
 
@@ -4450,7 +4450,7 @@
   [text viewport-width color-scheme condition-fn]
   (let [inner (str/trim (subs text 1 (dec (count text))))
         feature-of (fn [name]
-                     (case (str/lower-case (str/trim (str name)))
+                     (case (str/lower (str/trim (str name)))
                        ("width" "min-width" "max-width") :width
                        "prefers-color-scheme" :color-scheme
                        nil))
@@ -4498,13 +4498,13 @@
       (let [[name value] (map str/trim (str/split inner #":" 2))]
         (case (feature-of name)
           :width (if-let [n (parse-media-length value)]
-                   (case (str/lower-case name)
+                   (case (str/lower name)
                      "min-width" (>= viewport-width n)
                      "max-width" (<= viewport-width n)
                      "width" (== viewport-width n))
                    ::invalid)
-          :color-scheme (if (contains? #{"light" "dark"} (str/lower-case value))
-                          (= (str/lower-case value) (str/lower-case (str color-scheme)))
+          :color-scheme (if (contains? #{"light" "dark"} (str/lower value))
+                          (= (str/lower value) (str/lower (str color-scheme)))
                           ::invalid)
           true))
 
@@ -4557,7 +4557,7 @@
         ;; condition, and `media-condition-matches*` will say so
         type? (and (seq head) (some? (re-matches #"[A-Za-z][A-Za-z0-9-]*" head)))
         result (if type?
-                 (let [type-ok (contains? media-types (str/lower-case head))
+                 (let [type-ok (contains? media-types (str/lower head))
                        rest-vals (map #(media-condition-matches* % viewport-width color-scheme)
                                       (rest parts))]
                    (if (some #{::invalid} rest-vals)
@@ -4670,7 +4670,7 @@
             (every? (fn [part]
                       (when-let [[_ kind value] (re-matches container-feature-pattern part)]
                         (let [n (parse-media-width value)]
-                          (case (str/lower-case kind)
+                          (case (str/lower kind)
                             "min-width" (>= known-width n)
                             "max-width" (<= known-width n)
                             "width" (= known-width n)
@@ -4687,7 +4687,7 @@
       (= "" v)
       (and (string? v)
            (not (str/blank? v))
-           (not= "false" (str/lower-case v)))))
+           (not= "false" (str/lower v)))))
 
 (defn- parse-int
   [v]
@@ -4723,7 +4723,7 @@
 
 (defn- input-type
   [node]
-  (str/lower-case (str (or (get-in node [:attrs :type]) "text"))))
+  (str/lower (str (or (get-in node [:attrs :type]) "text"))))
 
 (defn- hidden-input-control?
   [node]
@@ -4882,7 +4882,7 @@
     (->> (:nodes document)
          (keep (fn [[id candidate]]
                  (when (and (= :input (:tag candidate))
-                            (= "radio" (str/lower-case (str (or (get-in candidate [:attrs :type]) "text"))))
+                            (= "radio" (str/lower (str (or (get-in candidate [:attrs :type]) "text"))))
                             (if named?
                               (and (= group-name (get-in candidate [:attrs :name]))
                                    (= group-form-id (ancestor-form-id document id)))
@@ -5002,7 +5002,7 @@
        (not (str/blank? value))
        (when-let [n (parse-number value)]
          (let [raw-step (:step attrs)]
-           (when-not (and raw-step (= "any" (str/lower-case (str raw-step))))
+           (when-not (and raw-step (= "any" (str/lower (str raw-step))))
              (let [step (let [parsed (parse-number raw-step)]
                           (if (and parsed (pos? parsed)) parsed 1.0))
                    base (or (parse-number (:min attrs)) 0.0)
@@ -5096,7 +5096,7 @@
 (defn- constraint-invalid?
   [document node]
   (let [attrs (:attrs node)
-        type (str/lower-case (str (or (:type attrs) "text")))
+        type (str/lower (str (or (:type attrs) "text")))
         value (control-value document node)
         length (count value)
         minlength (parse-int (:minlength attrs))
@@ -5148,7 +5148,7 @@
 (defn- in-range?
   [document node]
   (let [attrs (:attrs node)
-        type (str/lower-case (str (or (:type attrs) "text")))
+        type (str/lower (str (or (:type attrs) "text")))
         value (control-value document node)]
     (and (= :input (:tag node))
          (form-control? node)
@@ -5160,7 +5160,7 @@
 (defn- out-of-range?
   [document node]
   (let [attrs (:attrs node)
-        type (str/lower-case (str (or (:type attrs) "text")))
+        type (str/lower (str (or (:type attrs) "text")))
         value (control-value document node)]
     (and (= :input (:tag node))
          (form-control? node)
@@ -5250,7 +5250,7 @@
    guessing."
   [s]
   (let [s (str/trim (str s))
-        lower (str/lower-case s)]
+        lower (str/lower s)]
     (cond
       (= lower "even") [2 0]
       (= lower "odd") [2 1]
@@ -5457,7 +5457,7 @@
 
 (defn- lang-tag-subtags
   [tag]
-  (str/split (str/lower-case (str tag)) #"-"))
+  (str/split (str/lower (str tag)) #"-"))
 
 (defn- lang-range-matches-tag?
   "Whether a single already-unquoted `:lang()` comma-list item `range` (see
@@ -5809,7 +5809,7 @@
    do not."
   [node]
   (case (:tag node)
-    :button (contains? #{"submit" nil} (some-> (get-in node [:attrs :type]) str str/lower-case))
+    :button (contains? #{"submit" nil} (some-> (get-in node [:attrs :type]) str str/lower))
     :input (contains? #{"submit" "image"} (input-type node))
     false))
 
@@ -6324,8 +6324,8 @@
         (every? (fn [{:attr/keys [name operator value case-insensitive?]}]
                   (let [actual (get-in node [:attrs name])]
                     (and (some? actual)
-                         (let [actual-str (cond-> (str actual) case-insensitive? str/lower-case)
-                               value (cond-> value case-insensitive? str/lower-case)]
+                         (let [actual-str (cond-> (str actual) case-insensitive? str/lower)
+                               value (cond-> value case-insensitive? str/lower)]
                            (case operator
                              nil true
                              "=" (= actual-str value)
@@ -6593,7 +6593,7 @@
 
 (defn- container-type-of
   [document node-id]
-  (some-> (get-in document [:nodes node-id :attrs :style/container-type]) str str/lower-case))
+  (some-> (get-in document [:nodes node-id :attrs :style/container-type]) str str/lower))
 
 (defn- container-names-of
   "An element's own `container-name` declaration, split on whitespace into a
@@ -7990,14 +7990,14 @@
       (some->
        (or (when-let [[_ n unit] (re-matches absolute-length-pattern s)]
              (when-let [n (parse-number n)]
-               (case (str/lower-case unit)
+               (case (str/lower unit)
                  "px" n
                  "em" (* n parent-px)
                  "rem" (* n root-px))))
            (when-let [[_ n] (re-matches percentage-pattern s)]
              (when-let [n (parse-number n)]
                (* (/ n 100.0) parent-px)))
-           (case (str/lower-case s)
+           (case (str/lower s)
              "smaller" (/ parent-px font-size-scale-step)
              "larger" (* parent-px font-size-scale-step)
              nil))
@@ -8010,7 +8010,7 @@
   [v own-px root-px]
   (when (string? v)
     (when-let [[_ n unit] (re-matches absolute-length-pattern (str/trim v))]
-      (let [unit (str/lower-case unit)]
+      (let [unit (str/lower unit)]
         (when (not= "px" unit)
           (when-let [n (parse-number n)]
             (as-length (if (= "em" unit) (* n own-px) (* n root-px)))))))))
@@ -8575,7 +8575,7 @@
    it deliberately does not answer."
   [property value]
   (let [v (str/trim (str value))
-        lower (str/lower-case v)]
+        lower (str/lower v)]
     (cond
       (str/blank? v) false
       ;; a custom property takes anything, in every browser and here
@@ -8616,7 +8616,7 @@
         (boolean
          (and (seq tokens)
               (every? (fn [token]
-                        (let [t (str/lower-case token)]
+                        (let [t (str/lower token)]
                           (or (contains? text-decoration-line-keywords t)
                               (contains? text-decoration-style-keywords t)
                               (not= :no (color-value-support token))
@@ -8651,7 +8651,7 @@
                                (map str/trim (str/split text #":" 2)))]
     (when (and (seq name) (seq value)
                (some? (re-matches #"(?i)^(--)?[A-Za-z_][-A-Za-z0-9_]*$" name)))
-      (let [property (keyword (str/lower-case name))]
+      (let [property (keyword (str/lower name))]
         (boolean (and (or (str/starts-with? name "--")
                           (contains? @engine-properties property))
                       (supports-value? property value)))))))
@@ -8848,7 +8848,7 @@
       (nil? declared) (or inherited fallback)
       (contains? #{:inherit :unset} kw) (or inherited fallback)
       (some? kw) fallback
-      :else (let [s (str/lower-case (str/trim (str declared)))]
+      :else (let [s (str/lower (str/trim (str declared)))]
               (if (seq s) s fallback)))))
 
 (defn- resolve-style-and-flow
@@ -9716,7 +9716,7 @@
     (if-not color
       final-style
       (reduce (fn [m k]
-                (if (and (contains? m k) (= "currentcolor" (str/lower-case (str (get m k)))))
+                (if (and (contains? m k) (= "currentcolor" (str/lower (str (get m k)))))
                   (assoc m k color)
                   m))
               final-style
@@ -9778,7 +9778,7 @@
    ` absolute ` have to answer the same as their lower-case selves."
   [v]
   (when (some? v)
-    (let [s (str/lower-case (str/trim (str v)))]
+    (let [s (str/lower (str/trim (str v)))]
       (when (seq s) s))))
 
 (defn- blockified?
