@@ -281,7 +281,7 @@
    which is the half an author sees; a `<p>` is a block and so is atomic.
 
    Moved out of kotoba-lang/wasm-ui into kotoba-lang/cssom (ADR-2607051140)."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [cssom.core :as css]))
 
 (def default-theme
@@ -328,7 +328,7 @@
    `:border-*-color` entries in `node-style` for why that is dropped rather
    than painted."
   [v]
-  (when-not (and (string? v) (= "currentcolor" (str/lower-case (str/trim v))))
+  (when-not (and (string? v) (= "currentcolor" (str/lower (str/trim v))))
     v))
 
 (defn- border-px
@@ -343,7 +343,7 @@
   [v]
   (cond
     (number? v) (long v)
-    (string? v) (or (get line-width-keyword-px (str/lower-case (str/trim v)))
+    (string? v) (or (get line-width-keyword-px (str/lower (str/trim v)))
                     (parse-int v nil))
     :else nil))
 
@@ -393,7 +393,7 @@
       (= "" value)
       (and (string? value)
            (not (str/blank? value))
-           (not= "false" (str/lower-case value)))))
+           (not= "false" (str/lower value)))))
 
 (defn- listeners [node]
   (let [ls (:listeners node)]
@@ -1048,9 +1048,9 @@
   [text-transform text]
   (let [text (str text)]
     (case text-transform
-      "uppercase" (str/upper-case text)
-      "lowercase" (str/lower-case text)
-      "capitalize" (str/replace text #"\b\w" str/upper-case)
+      "uppercase" (str/upper text)
+      "lowercase" (str/lower text)
+      "capitalize" (str/replace text #"\b\w" str/upper)
       text)))
 
 (defn- ellipsize
@@ -2305,7 +2305,7 @@
     (cond
       (and (= :input tag)
            (contains? #{"checkbox" "radio"}
-                      (str/lower-case (str (or (get-in node [:attrs :type]) "text")))))
+                      (str/lower (str (or (get-in node [:attrs :type]) "text")))))
       ;; Its own margins (Chrome's UA `margin: 3px 3px 3px 4px`, the gap a
       ;; reader sees between the box and the label beside it) are in
       ;; cssom.core's UA stylesheet with every other cascadable UA
@@ -2372,7 +2372,7 @@
    ordinary derived one."
   [node h]
   (when (= :input (:tag node))
-    (let [t (str/lower-case (str (or (get-in node [:attrs :type]) "text")))]
+    (let [t (str/lower (str (or (get-in node [:attrs :type]) "text")))]
       (when-let [{:keys [from-top from-bottom]} (get ua-control-baseline t)]
         (if from-top from-top (max 0 (- h from-bottom)))))))
 
@@ -2487,7 +2487,7 @@
    (`overflow: hidden; overflow-x: visible`, measured `auto|hidden`), and
    guessing the other way would break the idiom rather than a typo."
   [raw-shorthand raw-x raw-y]
-  (let [norm (fn [v] (let [v (some-> v str str/trim str/lower-case)]
+  (let [norm (fn [v] (let [v (some-> v str str/trim str/lower)]
                        (cond (or (nil? v) (= "" v)) nil
                              (= "overlay" v) "auto"
                              :else v)))
@@ -2593,7 +2593,7 @@
   "Normalises a cascaded `writing-mode` value, defaulting to
    `horizontal-tb` for nil and for anything unrecognised."
   [v]
-  (let [s (some-> v str str/trim str/lower-case)]
+  (let [s (some-> v str str/trim str/lower)]
     (if (contains? writing-mode-values s) s "horizontal-tb")))
 
 (defn- vertical-writing-mode?
@@ -2918,7 +2918,7 @@
                                            (get ua side-style)
                                            (get ua :border-style)
                                            (when (pos? ua-border) "solid"))
-                                       str str/lower-case str/trim)]
+                                       str str/lower str/trim)]
             (if (or (nil? declared-style)
                     (contains? #{"none" "hidden"} declared-style))
               0
@@ -2938,11 +2938,11 @@
    ;; this key carries is "did this element declare one", which is exactly
    ;; the question that decides whether an orthogonal-flow boundary starts
    ;; here.
-   :writing-mode (some-> (style node :writing-mode) str str/trim str/lower-case)
+   :writing-mode (some-> (style node :writing-mode) str str/trim str/lower)
    ;; Read for one value only -- `upright`, which changes what a character
    ;; advances along the inline axis. See glyph-advance for the
    ;; measurements, and for why `mixed` and `sideways` need nothing here.
-   :text-orientation (some-> (style node :text-orientation) str str/trim str/lower-case)
+   :text-orientation (some-> (style node :text-orientation) str str/trim str/lower)
    :left (style node :left)
    :top (style node :top)
    :right (style node :right)
@@ -2958,7 +2958,7 @@
    ;; the 5. Measured in Brave 151 on exactly that pair -- `section` for
    ;; the first, `article` for the second, at all 20 interior sample
    ;; points. See stacking-context?/stack-level.
-   :z-index/declared (when-not (= "auto" (some-> (style node :z-index) str str/trim str/lower-case))
+   :z-index/declared (when-not (= "auto" (some-> (style node :z-index) str str/trim str/lower))
                        (parse-int (style node :z-index) nil))
    ;; ---- the properties that make an element a STACKING CONTEXT ----
    ;;
@@ -3070,7 +3070,7 @@
    ;; The containing block's inline-axis START edge. Read here, resolved
    ;; and inherited by layout-node -- see the `:direction` entry it adds to
    ;; the inherited map for what part of `rtl` this engine implements.
-   :direction (some-> (style node :direction) str str/lower-case str/trim)
+   :direction (some-> (style node :direction) str str/lower str/trim)
    ;; Real CSS's `border-spacing` defaults to 2px in every browser: cells
    ;; are separated by it AND the table is inset by it on all four sides.
    ;; Measured against Chrome, its absence was the single reason table/tr
@@ -3090,14 +3090,14 @@
    ;; Both read only by layout-table. `border-collapse`'s initial value is
    ;; `separate` and `table-layout`'s is `auto`, so absent means "what this
    ;; engine already did".
-   :border-collapse (some-> (style node :border-collapse) str/lower-case)
-   :table-layout (some-> (style node :table-layout) str/lower-case)
+   :border-collapse (some-> (style node :border-collapse) str/lower)
+   :table-layout (some-> (style node :table-layout) str/lower)
    ;; `caption-side` is an INHERITED property in real CSS, so layout-table
    ;; reads it as `(or (:caption-side st) (:caption-side inherited))` --
    ;; measured in Brave 151 (2026-08-05), `<div style="caption-side:
    ;; bottom"><table><caption>Cap</caption>...` puts the caption at the
    ;; BOTTOM even though the `<table>` declares nothing.
-   :caption-side (some-> (style node :caption-side) str/lower-case str/trim)
+   :caption-side (some-> (style node :caption-side) str/lower str/trim)
    :margin (parse-int (style node :margin) 0)
    ;; Real CSS resolves the USED border width through `border-style`,
    ;; whose initial value is `none`: a `none`/`hidden` border is 0px wide
@@ -3129,7 +3129,7 @@
    ;; collapsed-table edge resolver). The four per-side used widths are
    ;; the entry below it.
    :border-width (let [ua-border (get ua-box :border 0)
-                       border-style (or (some-> (style node :border-style) str/lower-case)
+                       border-style (or (some-> (style node :border-style) str/lower)
                                         (when (pos? ua-border) "solid"))]
                    (if (or (nil? border-style)
                            (contains? #{"none" "hidden"} border-style))
@@ -3267,7 +3267,7 @@
    ;; suppresses it, and `auto` adds the browser's own dictionary on top --
    ;; see inline-line-breaker's `shy` pass, which implements the first two
    ;; and measures the third as a scope cut.
-   :hyphens (some-> (style node :hyphens) str str/lower-case str/trim)
+   :hyphens (some-> (style node :hyphens) str str/lower str/trim)
    ;; CSS Color Module Level 4's `opacity`: "Opacity values outside the
    ;; range [0,1]... are clamped to the range [0,1] in computed values."
    ;; Previously read raw via parse-dbl with no clamp -- an author value
@@ -3576,7 +3576,7 @@
   (cond
     (number? v) true
     (nil? v) false
-    :else (let [s (str/trim (str/lower-case (str v)))]
+    :else (let [s (str/trim (str/lower (str v)))]
             (and (seq s) (not= s initial)))))
 
 (defn- positioned?
@@ -3649,15 +3649,15 @@
        (non-initial? (:clip-path st) "none")
        (non-initial? (:perspective st) "none")
        (non-initial? (:view-transition-name st) "none")
-       (= "preserve-3d" (some-> (:transform-style st) str str/lower-case str/trim))
-       (= "isolate" (some-> (:isolation st) str str/lower-case str/trim))
+       (= "preserve-3d" (some-> (:transform-style st) str str/lower str/trim))
+       (= "isolate" (some-> (:isolation st) str str/lower str/trim))
        (non-initial? (:mix-blend-mode st) "normal")
        (contains? #{"auto" "hidden"}
-                  (some-> (:content-visibility st) str str/lower-case str/trim))
+                  (some-> (:content-visibility st) str str/lower str/trim))
        (some containment-stacking-values
-             (some-> (:contain st) str str/lower-case (str/split #"\s+") set))
+             (some-> (:contain st) str str/lower (str/split #"\s+") set))
        (some will-change-stacking-properties
-             (some-> (:will-change st) str str/lower-case (str/split #"\s*,\s*")
+             (some-> (:will-change st) str str/lower (str/split #"\s*,\s*")
                      (->> (map str/trim)) set)))))
 
 (defn- stack-level
@@ -4158,7 +4158,7 @@
    0, which is what margin-side below already gives it.)"
   [st side]
   (let [v (get st (keyword "margin" (str "raw-" (name side))))]
-    (and (string? v) (= "auto" (str/lower-case (str/trim v))))))
+    (and (string? v) (= "auto" (str/lower (str/trim v))))))
 
 (defn- margin-side
   "One side's margin AS A LENGTH: the per-side value when present (author or
@@ -4390,7 +4390,7 @@
     (cond
       (number? v) (when (pos? v) (double v))
       (string? v)
-      (let [terms (->> (str/split (str/replace (str/lower-case v) #"auto" " ") #"/")
+      (let [terms (->> (str/split (str/replace (str/lower v) #"auto" " ") #"/")
                        (map str/trim)
                        (remove str/blank?)
                        (mapv #(parse-dbl % nil)))]
@@ -5086,7 +5086,7 @@
    mode they would part company with `start`/`end`, and this engine does
    not distinguish them there."
   [justify]
-  (let [s (str/trim (str/lower-case (str justify)))]
+  (let [s (str/trim (str/lower (str justify)))]
     (cond
       (str/starts-with? s "safe ") [true (str/trim (subs s 5))]
       (str/starts-with? s "unsafe ") [false (str/trim (subs s 7))]
@@ -5910,7 +5910,7 @@
     ;; placeholder below, so `grid-template-columns: auto auto` produced two
     ;; ZERO-width tracks and every item in them collapsed -- measured in
     ;; Brave as 154.5/245.5 against this engine's 0/0.
-    (= "auto" (str/lower-case tok))
+    (= "auto" (str/lower tok))
     [{:type :auto}]
 
     :else
@@ -8063,7 +8063,7 @@
   [node]
   (let [attrs (:attrs node)
         step (some-> (:step attrs) str)]
-    (when-not (and step (= "any" (str/lower-case step)))
+    (when-not (and step (= "any" (str/lower step)))
       (let [mn (strict-number-attr (some-> (:min attrs) str))
             mx (strict-number-attr (some-> (:max attrs) str))]
         (when (and mn mx)
@@ -8387,7 +8387,7 @@
           content-w
 
           (= :input tag)
-          (let [input-type (str/lower-case (str (or (get-in child [:attrs :type]) "text")))]
+          (let [input-type (str/lower (str (or (get-in child [:attrs :type]) "text")))]
             (cond
               (contains? #{"checkbox" "radio"} input-type)
               13
@@ -9175,7 +9175,7 @@
    map lookup on the hot path and nothing else."
   [v]
   (when (string? v)
-    (get intrinsic-width-keywords (str/lower-case (str/trim v)))))
+    (get intrinsic-width-keywords (str/lower (str/trim v)))))
 
 (defn- resolve-intrinsic-width
   "The USED CONTENT width of a box whose `width` is `min-content`,
@@ -11669,12 +11669,12 @@
         ;; gap-for-intrinsic-size and used-gap for the measurements.
         row-gap-0 (gap-for-intrinsic-size st :row)
         col-gap-0 (gap-for-intrinsic-size st :column)
-        flow-column? (str/includes? (str/lower-case (str (:grid-auto-flow st))) "column")
+        flow-column? (str/includes? (str/lower (str (:grid-auto-flow st))) "column")
         ;; `dense` is the second, independent half of `grid-auto-flow`'s
         ;; grammar (`[ row | column ] || dense`), so it is read the same
         ;; way `column` is rather than by parsing the pair -- see
         ;; place-grid-items for what it changes.
-        dense? (str/includes? (str/lower-case (str (:grid-auto-flow st))) "dense")
+        dense? (str/includes? (str/lower (str (:grid-auto-flow st))) "dense")
         ;; ---- content distribution, both axes ----
         ;; The initial value of both is `normal` (measured: a bare
         ;; `display: grid` reports `normal / normal` from
@@ -11691,7 +11691,7 @@
         ;; every other keyword leaves an auto track at max-content, which
         ;; is what gives a `justify-content: center` grid of auto columns
         ;; anything to centre in the first place.
-        distribution-stretches? (fn [v] (contains? #{"normal" "stretch"} (str/trim (str/lower-case (str v)))))
+        distribution-stretches? (fn [v] (contains? #{"normal" "stretch"} (str/trim (str/lower (str v)))))
         stretch-cols? (distribution-stretches? justify-content)
         stretch-rows? (distribution-stretches? align-content)
         template-areas (parse-grid-template-areas (:grid-template-areas st))
@@ -15961,7 +15961,7 @@
                                   (inset-side st :top) (inset-side st :bottom))))
         value (attr node :value)
         checked (truthy-attr? (attr node :checked))
-        input-type (str/lower-case (str (or (attr node :type) "text")))
+        input-type (str/lower (str (or (attr node :type) "text")))
         has-value? (boolean (seq (str value)))
         placeholder (attr node :placeholder)
         control-text (case tag
@@ -17735,7 +17735,7 @@
                    (str/blank? (reduce (fn [acc [whole _ _]] (str/replace acc whole "")) s ms)))
           (reduce (fn [acc [_ fname argstr]]
                     (if-let [m (transform-function-matrix
-                                (str/lower-case fname)
+                                (str/lower fname)
                                 (mapv str/trim (str/split (str/trim argstr) #","))
                                 w h)]
                       (matrix* acc m)
@@ -17759,7 +17759,7 @@
   [v w h]
   (let [toks (->> (str/split (str/trim (str v)) #"\s+")
                   (remove str/blank?)
-                  (map str/lower-case)
+                  (map str/lower)
                   vec)
         horiz #{"left" "right"}
         vert #{"top" "bottom"}
@@ -18674,7 +18674,7 @@
                ;; this element in any case (`content-visibility: hidden`
                ;; is itself a stacking context, measured) but it can move
                ;; within it.
-               laid (if (= "hidden" (some-> (:content-visibility st) str str/lower-case str/trim))
+               laid (if (= "hidden" (some-> (:content-visibility st) str str/lower str/trim))
                       (update laid :draw #(skip-painted-contents % (:node/id node)))
                       laid)
                laid (if (stacking-context? st)
