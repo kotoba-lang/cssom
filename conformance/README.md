@@ -7,7 +7,7 @@ Brave/Chrome, and compares three axes: **line structure**, **geometry**,
 and **computed style**.
 
 ```bash
-nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljk \
+kbb --backend sci --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljk \
   [--browser "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"] \
   [--width 800] [--only inline/] [--ledger path/to/ledger.edn] \
   [--debug-geometry] [--debug-style] [--debug-paint] \
@@ -17,7 +17,7 @@ nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljk \
 A second script drives one-off probes rather than the corpus:
 
 ```bash
-nbb conformance/probe.cljk <probes.edn> [browser]
+kbb --backend sci conformance/probe.cljk <probes.edn> [browser]
 ```
 
 where `probes.edn` is `[{:id … :html "…" :js "…"} …]`. Each probe is written

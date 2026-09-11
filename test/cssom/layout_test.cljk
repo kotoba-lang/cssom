@@ -6112,16 +6112,16 @@
   ;; runs being the closing padding, so nothing else can explain the move.
   (let [run (fn [span-style]
               (let [t (text-draw-ops
-                       (inline-ops ["aa " [:span span-style "bb cc dd"] " ee"]
+                       (inline-ops ["aa " [:span span-style "kbb -M:cc dd"] " ee"]
                                    {} {:width 128}))]
                 (mapv (fn [y] (mapv :text (filter #(= y (:y %)) t)))
                       (sort (distinct (mapv :y t))))))]
-    (is (= [["aa" "bb cc dd"] ["ee"]]
+    (is (= [["aa" "kbb -M:cc dd"] ["ee"]]
            (run {:padding-left "24px"}))
         "`dd` ends exactly at the 112px content edge and stays on line one
          (the span's three words share one merged draw-op, as they always
          have -- see inline-line-breaker)")
-    (is (= [["aa" "bb cc"] ["dd" "ee"]]
+    (is (= [["aa" "kbb -M:cc"] ["dd" "ee"]]
            (run {:padding-left "24px" :padding-right "24px"}))
         "adding 24px of padding AFTER `dd` moves `dd` itself to line two --
          the closing edge is charged to the wrap test one token early,
@@ -9607,12 +9607,12 @@
   ;; <br> at x=279 -- the LEFT end of a line whose only word runs
   ;; 279..300. In ltr the same box is at the line's right end.
   (let [br-x (fn [style]
-               (->> (inline-ops ["aaa" [:br {}] "bb cc"] style
+               (->> (inline-ops ["aaa" [:br {}] "kbb -M:cc"] style
                                 {:width 300 :theme {:padding 0 :gap 0}})
                     (filterv #(and (= :node (:draw/op %)) (= :br (:tag %))))
                     first :x))
         first-line-x (fn [style]
-                       (->> (text-draw-ops (inline-ops ["aaa" [:br {}] "bb cc"] style
+                       (->> (text-draw-ops (inline-ops ["aaa" [:br {}] "kbb -M:cc"] style
                                                        {:width 300 :theme {:padding 0 :gap 0}}))
                             first :x))]
     (is (= (+ (first-line-x {}) 24) (br-x {}))
