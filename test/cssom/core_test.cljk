@@ -3698,7 +3698,7 @@
 ;;
 ;; Every expectation below was measured in Brave 151 on 2026-08-05, in the
 ;; conformance corpus's own 14px page -- see `css-wide-keywords` in
-;; src/cssom/core.cljc for the table those measurements produced.
+;; src/cssom/core.cljk for the table those measurements produced.
 
 (defn- wide-keyword-doc
   "A <div> parent carrying `parent-decls` and a <p> child carrying
@@ -4934,7 +4934,7 @@
   ;; the source and fails if the table has fallen behind. Whole-line
   ;; comments are dropped first -- one of them contains the illustrative
   ;; `(or (style node :x) <ua default>)`.
-  (let [source (slurp "src/cssom/layout.cljc")
+  (let [source (slurp "src/cssom/layout.cljk")
         code (->> (str/split-lines source)
                   (remove #(str/starts-with? (str/triml %) ";"))
                   (str/join "\n"))
@@ -4954,7 +4954,7 @@
   ;; Same shape of gate for the selector half of the support oracle:
   ;; `implemented-pseudo-classes` says it is `matches-pseudo?`'s own `case`
   ;; keys plus the four functional forms, and this is what keeps that true.
-  (let [source (slurp "src/cssom/core.cljc")
+  (let [source (slurp "src/cssom/core.cljk")
         start (str/index-of source "(defn- matches-pseudo?")
         body (subs source start (str/index-of source "\n;; ---- :has()" start))
         case-start (str/index-of body "(case selector-pseudo")
