@@ -8345,10 +8345,10 @@
    this namespace cannot ask it. `cssom.core-test`'s
    `layout-read-properties-covers-every-property-layout-actually-reads`
    closes that gap the only way a one-directional dependency allows: it
-   re-extracts the call sites from `src/cssom/layout.cljc` and fails if the
+   re-extracts the call sites from `src/cssom/layout.cljk` and fails if the
    two ever disagree. Regenerate with
 
-     grep -o '(style [a-z-]* :[a-z0-9-]*' src/cssom/layout.cljc | sed 's/.*://' | sort -u"
+     grep -o '(style [a-z-]* :[a-z0-9-]*' src/cssom/layout.cljk | sed 's/.*://' | sort -u"
   #{:align-content :align-items :align-self :aspect-ratio :backdrop-filter
     :background :background-color :border-bottom-color :border-collapse
     :border-color :border-left-color :border-right-color :border-spacing
