@@ -14738,7 +14738,7 @@
                  ;; `keep <span style="display:none">gone</span> this` split
                  ;; into TWO one-child runs (neither reaching the two-child
                  ;; threshold), so `keep` and `this` stacked on separate
-                 ;; lines -- found by conformance/run.cljs differential
+                 ;; lines -- found by conformance/run.cljk differential
                  ;; testing against a real Blink browser, which puts them on
                  ;; one line. Dropping them also removes the stray inter-row
                  ;; `gap` each one used to contribute to block flow.

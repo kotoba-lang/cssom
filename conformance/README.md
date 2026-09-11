@@ -7,7 +7,7 @@ Brave/Chrome, and compares three axes: **line structure**, **geometry**,
 and **computed style**.
 
 ```bash
-nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljs \
+nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljk \
   [--browser "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"] \
   [--width 800] [--only inline/] [--ledger path/to/ledger.edn] \
   [--debug-geometry] [--debug-style] [--debug-paint] \
@@ -17,7 +17,7 @@ nbb --classpath "src:../dom-gpu/src:../htmldom/src" conformance/run.cljs \
 A second script drives one-off probes rather than the corpus:
 
 ```bash
-nbb conformance/probe.cljs <probes.edn> [browser]
+nbb conformance/probe.cljk <probes.edn> [browser]
 ```
 
 where `probes.edn` is `[{:id … :html "…" :js "…"} …]`. Each probe is written
@@ -1868,7 +1868,7 @@ against this checkout of `cssom`: `browser` 754/0, `dom-gpu` 130/0,
 #### One probe page per probe, enforced by a script this time
 
 Round forty-nine wrote down the rule after a shared page gave it four wrong
-answers. This round has `conformance/probe.cljs`: an EDN file of
+answers. This round has `conformance/probe.cljk`: an EDN file of
 `{:id :html :js}` probes, each written to its own file and opened in its own
 browser TAB, evaluated, closed. A fresh target is a fresh document, so the
 leak is structurally impossible rather than remembered.
@@ -4089,9 +4089,9 @@ Both of those already had a home. The geometry axis compares
 paint axis compares `elementFromPoint` against that op's `:hit` rects —
 a pair this engine needed once before, for a **wrapped inline box**, and
 for exactly the same reason. So the engine emits the union as the box and
-the fragments as `:hit`, and `conformance/run.cljs` is byte-identical to
-what it was: `git status` on the landing commit lists `src/cssom/layout.cljc`,
-`test/cssom/layout_test.clj` and `conformance/cases.edn` and nothing else.
+the fragments as `:hit`, and `conformance/run.cljk` is byte-identical to
+what it was: `git status` on the landing commit lists `src/cssom/layout.cljk`,
+`test/cssom/layout_test.cljk` and `conformance/cases.edn` and nothing else.
 There is no thumb on the scale to disprove, because there is no harness
 change to disprove it about.
 
@@ -5044,7 +5044,7 @@ it always had**, which for an `<img>` is 0x0. `cssom.layout` runs on hosts
 that have no images at all (the JVM test suite is one), so that absence is
 part of the API and
 `replaced-image-without-an-image-size-hook-is-unchanged` in
-`test/cssom/layout_test.clj` asserts it — including that a hook returning
+`test/cssom/layout_test.cljk` asserts it — including that a hook returning
 `nil`, or a zero size, is indistinguishable from no hook.
 
 Every number below was measured in Brave 151 over CDP on 2026-08-06, on

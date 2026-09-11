@@ -5865,7 +5865,7 @@
   ;; wider constant. Measured in full on 2026-08-06 -- twelve declarations
   ;; on the pseudo-element, the control's box and the button's own box
   ;; beside each -- and deliberately still not implemented: see the `file`
-  ;; branch of `atomic-intrinsic-width` in src/cssom/layout.cljc for the
+  ;; branch of `atomic-intrinsic-width` in src/cssom/layout.cljk for the
   ;; table and for the split it turns on. The HEIGHT is derivable from
   ;; numbers this engine already has; the WIDTH's second term is the two
   ;; localized UA strings (92.656 + 119.313 here, in Japanese), so writing

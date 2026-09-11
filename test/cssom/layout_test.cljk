@@ -6220,7 +6220,7 @@
     (is (= {:text "hello world" :x 8 :y 8 :font-size 14} (select-keys (first t) [:text :x :y :font-size])))))
 
 (deftest a-display-none-element-does-not-split-an-inline-run
-  ;; Found by conformance/run.cljs differential testing against a real
+  ;; Found by conformance/run.cljk differential testing against a real
   ;; Blink browser, not by hand: `keep <span style="display:none">gone
   ;; </span> this` used to produce TWO one-child inline runs (neither
   ;; reaching inline-runs' two-child threshold), so the two visible words
@@ -6891,7 +6891,7 @@
 ;; ---- floats: placement, stacking, margins, clear, containment ----
 ;;
 ;; Every number asserted below was read out of a real headless Brave 151
-;; over CDP FIRST (conformance/cdp_dump.cljs, one isolating case per
+;; over CDP FIRST (conformance/cdp_dump.cljk, one isolating case per
 ;; behaviour) and only then implemented. Where the browser's own figure
 ;; differs from the one here it is because the browser's default font is
 ;; 16px and this suite's line box is 20px; the RELATIONSHIPS -- which edge,
@@ -8409,7 +8409,7 @@
 ;; ---- replaced elements: the default object size ----
 ;;
 ;; Everything in this section is measured in Brave 151 on 2026-08-06,
-;; through `conformance/run.cljs`'s own page shape (a 400px block inside an
+;; through `conformance/run.cljk`'s own page shape (a 400px block inside an
 ;; 800px page, `line-height: 20px`), and the same measurements are recorded
 ;; at `replaced-content-size`, `default-object-size` and
 ;; `replaced-default-size` in cssom.layout, and at the `progress`/`meter`

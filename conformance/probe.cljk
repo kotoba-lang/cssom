@@ -12,7 +12,7 @@
    markup, and that hazard is a SHARED DOCUMENT one. A fresh target is a
    fresh document. It costs one navigation instead of one browser launch.
 
-   Usage: nbb conformance/probe.cljs <probes.edn> [browser]"
+   Usage: nbb conformance/probe.cljk <probes.edn> [browser]"
   (:require ["node:child_process" :as cp]
             ["node:fs" :as fs]
             ["node:os" :as os]

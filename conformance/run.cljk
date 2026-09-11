@@ -32,7 +32,7 @@
    this repo's own smoke checks avoid a driver.
 
    Usage:
-     nbb --classpath \"src:<dom-gpu>/src:<htmldom>/src\" conformance/run.cljs \\
+     nbb --classpath \"src:<dom-gpu>/src:<htmldom>/src\" conformance/run.cljk \\
        [--browser <path to Brave/Chrome binary>] [--width 800] \\
        [--only <id substring>] [--debug-geometry] [--debug-style] \\
        [--debug-paint] [--ledger <path to append a result entry to>]"
@@ -740,7 +740,7 @@
 
 (defn- run-cdp!
   "Reads the measurement block by driving the browser over the DevTools
-   protocol (see conformance/cdp_dump.cljs for why, and for what Brave 151
+   protocol (see conformance/cdp_dump.cljk for why, and for what Brave 151
    does to `--dump-dom`). Run as a child nbb process on purpose: CDP is
    inherently async and this script is synchronous end to end, so the
    alternative was making the whole harness promise-shaped to accommodate
@@ -755,7 +755,7 @@
    (202/202 blocks), as they should be: same engine."
   [browser file]
   (let [out-file (path/join (fs/mkdtempSync (path/join (os/tmpdir) "kotoba-cdp-out-")) "block.html")
-        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljs" browser file out-file]
+        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljk" browser file out-file]
                           #js {:encoding "utf8" :timeout 240000})
         out (if (fs/existsSync out-file) (fs/readFileSync out-file "utf8") "")]
     (when-not (str/includes? out "kotoba-conformance-out")
