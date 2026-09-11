@@ -32,7 +32,7 @@ docstrings over any prose that disagrees with them.
 | | |
 |---|---|
 | Role | ui-substrate |
-| Tests | `clojure -M:test` (497 tests / 1004 assertions) |
+| Tests | `kbb -M:test` (497 tests / 1004 assertions) |
 | Box model | padding/border/margin, min/max-width, `content-box`/`border-box` |
 | Block flow | implemented |
 | Inline flow | implemented (`layout-inline-run`) — text and inline-level elements share line boxes, wrap as one unit, collapse whitespace across fragments, share one baseline |
@@ -47,5 +47,5 @@ docstrings over any prose that disagrees with them.
 ## Test
 
 ```bash
-clojure -M:test
+kbb -M:test
 ```

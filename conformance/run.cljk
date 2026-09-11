@@ -32,7 +32,7 @@
    this repo's own smoke checks avoid a driver.
 
    Usage:
-     nbb --classpath \"src:<dom-gpu>/src:<htmldom>/src\" conformance/run.cljk \\
+     kbb --backend sci --classpath \"src:<dom-gpu>/src:<htmldom>/src\" conformance/run.cljk \\
        [--browser <path to Brave/Chrome binary>] [--width 800] \\
        [--only <id substring>] [--debug-geometry] [--debug-style] \\
        [--debug-paint] [--ledger <path to append a result entry to>]"
