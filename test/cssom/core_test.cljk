@@ -5463,7 +5463,7 @@
   (let [renderer (fn [f]
                    (let [path (str "../dom-gpu/src/kotoba/wasm/host/" f)]
                      (when (.exists (java.io.File. path)) (slurp path))))
-        sources (keep renderer ["webgpu.cljs" "webgl.cljs"])
+        sources (keep renderer ["webgpu.cljk" "webgl.cljk"])
         drawn (fn [source]
                 ;; anchored on the `case` and not on the `defn`, because
                 ;; the docstring between them is longer than the code.
