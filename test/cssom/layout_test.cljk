@@ -1,6 +1,6 @@
 (ns cssom.layout-test
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [are deftest is]]
+            [kotoba.test :refer [are deftest is]]
             [cssom.core :as css]
             [cssom.layout :as layout]
             [htmldom.core :as html]

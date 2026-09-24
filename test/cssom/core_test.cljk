@@ -3,7 +3,7 @@
             [cssom.layout :as layout]
             [clojure.set]
             [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 
