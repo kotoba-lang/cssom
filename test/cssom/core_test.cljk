@@ -1,7 +1,7 @@
 (ns cssom.core-test
-  (:require [cssom.core :as css]
+  (:require [kotoba.io :as kio] [cssom.core :as css]
             [cssom.layout :as layout]
-            [clojure.set]
+            [kotoba.lang.coll]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
             [htmldom.core :as html]
@@ -4943,12 +4943,12 @@
                              set)
         table @#'css/layout-read-properties]
     (is (seq read-properties) "the extraction itself has to find something")
-    (is (empty? (clojure.set/difference read-properties table))
+    (is (empty? (kotoba.lang.coll/difference read-properties table))
         (str "cssom.layout reads properties cssom.core/layout-read-properties does not list: "
-             (sort (clojure.set/difference read-properties table))))
-    (is (empty? (clojure.set/difference table read-properties))
+             (sort (kotoba.lang.coll/difference read-properties table))))
+    (is (empty? (kotoba.lang.coll/difference table read-properties))
         (str "cssom.core/layout-read-properties lists properties cssom.layout no longer reads: "
-             (sort (clojure.set/difference table read-properties))))))
+             (sort (kotoba.lang.coll/difference table read-properties))))))
 
 (deftest implemented-pseudo-classes-matches-the-case-keys-it-claims-to-be
   ;; Same shape of gate for the selector half of the support oracle:
@@ -5462,7 +5462,7 @@
   ;; implements it by drawing nothing.
   (let [renderer (fn [f]
                    (let [path (str "../dom-gpu/src/kotoba/wasm/host/" f)]
-                     (when (.exists (java.io.File. path)) (slurp path))))
+                     (when (kio/exists? (kio/file path)) (slurp path))))
         sources (keep renderer ["webgpu.cljk" "webgl.cljk"])
         drawn (fn [source]
                 ;; anchored on the `case` and not on the `defn`, because
