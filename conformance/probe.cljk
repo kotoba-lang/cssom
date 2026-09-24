@@ -17,7 +17,7 @@
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]
-            [clojure.edn :as edn]))
+            [kotoba.lang.edn :as edn]))
 
 (def ^:private default-browser
   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
