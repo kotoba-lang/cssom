@@ -719,35 +719,39 @@
    whole value degrades to a raw string unchanged."
   #?(:kotoba (typed-set-new [:set :string] "calc" "min" "max" "clamp") :default #{"calc" "min" "max" "clamp"}))
 
+(defn- calc-name-parts
+  "One function name's whole-call match for `calc-pattern-parts` (below)."
+  [#?@(:kotoba [value :string name :string] :default [value name])] #?@(:kotoba [[:option [:vector [:string :string]]]])
+  (let [s (str value)
+        length (s-len s)
+        name-length (s-len name)]
+    (when (and (> length (+ name-length 1))
+               (= "(" (s-sub s name-length (inc name-length)))
+               (= ")" (s-sub s (dec length) length))
+               (= name (str/ascii-lower (s-sub s 0 name-length))))
+      [name (s-sub s (inc name-length) (dec length))])))
+
 (defn- calc-pattern-parts
   "Returns `[function-name inner-text]` for a whole supported CSS math call.
-   The function-name set is closed above; this scanner replaces the old
-   host-regex capture, whose grouping syntax is outside bounded-regex."
-  [value]
-  (let [s (str value)
-        length (count s)]
-    (loop [names ["calc" "min" "max" "clamp"]]
-      (if (empty? names)
-        nil
-        (let [name (first names)
-              name-length (count name)
-              parts (when (and (> length (+ name-length 1))
-                               (= "(" (subs s name-length (inc name-length)))
-                               (= ")" (subs s (dec length) length))
-                               (= name (str/ascii-lower (subs s 0 name-length)))
-                               (contains? math-function-names name))
-                      [name (subs s (inc name-length) (dec length))])]
-          (if parts parts (recur (rest names))))))))
+   The four names below mirror `math-function-names` (edit both together).
+   This scanner replaced the old host-regex capture, whose grouping syntax
+   is outside bounded-regex; the chain form replaced the names-vector loop
+   so the kotoba route needs no vector-of-strings literal (2026-10-19)."
+  [#?@(:kotoba [value :string] :default [value])] #?@(:kotoba [[:option [:vector [:string :string]]]])
+  (or (calc-name-parts value "calc")
+      (calc-name-parts value "min")
+      (calc-name-parts value "max")
+      (calc-name-parts value "clamp")))
 
 #?(:kotoba
    (defn- css-decimal-f64 [s] :f64
-     (loop [idx (if (and (> (count s) 0)
+     (loop [idx (if (and (> (s-len s) 0)
                          (or (= "+" (subs s 0 1)) (= "-" (subs s 0 1)))) 1 0)
             value 0.0
             scale 0.1
             fractional? false]
-       (if (>= idx (count s))
-         (if (and (> (count s) 0) (= "-" (subs s 0 1))) (f64-neg value) value)
+       (if (>= idx (s-len s))
+         (if (and (> (s-len s) 0) (= "-" (subs s 0 1))) (f64-neg value) value)
          (let [ch (subs s idx (inc idx))]
            (if (= ch ".")
              (recur (inc idx) value scale true)
@@ -762,7 +766,12 @@
                         scale false)))))))))
 
 
-(defn- calc-number-at
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- calc-number-at [s idx] nil)
+   :default
+   (defn- calc-number-at
   "Attempts to match a numeric literal -- optionally decimal, optionally
    with an immediately-following `px` unit (no space allowed between the
    number and its unit, matching real CSS) -- starting at index `idx` of
@@ -795,9 +804,14 @@
             value #?(:kotoba (css-decimal-f64 number)
                      :clj (Double/parseDouble number)
                      :cljs (js/parseFloat number))]
-        [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value value} end]))))
+        [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value value} end])))))
 
-(defn- calc-matching-paren
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- calc-matching-paren [s open] nil)
+   :default
+   (defn- calc-matching-paren
   "Index of the `)` closing the `(` at `open` in `s`, or nil if unbalanced.
    Used to lift a nested math function's whole argument list out as one
    token (see `calc-function-at`) rather than trying to model commas in
@@ -808,9 +822,14 @@
       (>= i (count s)) nil
       (= "(" (subs s i (inc i))) (recur (inc i) (inc depth))
       (= ")" (subs s i (inc i))) (if (= 1 depth) i (recur (inc i) (dec depth)))
-      :else (recur (inc i) depth))))
+      :else (recur (inc i) depth)))))
 
-(defn- calc-split-arguments
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- calc-split-arguments [s] nil)
+   :default
+   (defn- calc-split-arguments
   "Splits a math function's argument text at TOP-LEVEL commas -- commas
    inside a nested call (`min(10px, max(2px, 3px))`) belong to that call,
    not to this one. Returns a vector of trimmed argument strings; a
@@ -825,9 +844,14 @@
         (= ")" (subs s i (inc i))) (recur (inc i) (dec depth) start out)
         (and (= "," (subs s i (inc i))) (zero? depth))
         (recur (inc i) depth (inc i) (conj out (str/trim (subs s start i))))
-        :else (recur (inc i) depth start out)))))
+        :else (recur (inc i) depth start out))))))
 
-(defn- calc-function-at
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- calc-function-at [s idx] nil)
+   :default
+   (defn- calc-function-at
   "Attempts to match a nested math function CALL -- one of
    `math-function-names` immediately followed by a parenthesized
    argument list -- starting at index `idx` of tokenizer input `s`.
@@ -856,9 +880,14 @@
             [{:calc/type :fncall
               :calc/name (str/ascii-lower name)
               :calc/text (subs s (inc after) close)}
-             (inc close)])))))))
+             (inc close)]))))))))
 
-(defn- tokenize-calc-expr
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- tokenize-calc-expr [s] nil)
+   :default
+   (defn- tokenize-calc-expr
   "Tokenizes the inside of a math function call (see calc-pattern) into a
    flat token vector -- bare operator/paren tokens (`:calc/type` one of
    `:plus`/`:minus`/`:star`/`:slash`/`:lparen`/`:rparen`), number-or-px
@@ -894,9 +923,14 @@
             (recur next-idx (conj tokens call))
             (if-let [[operand next-idx] (calc-number-at s idx)]
               (recur next-idx (conj tokens operand))
-              nil)))))))
+              nil))))))))
 
-(defn- parse-calc-level
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- parse-calc-level [tokens level] nil)
+   :default
+   (defn- parse-calc-level
   "Parses a calc() token vector (see tokenize-calc-expr) into an AST node
    (`:calc/op` one of `:num`/`:neg`/`:add`/`:sub`/`:mul`/`:div`, see
    eval-calc-node) via PRECEDENCE CLIMBING, `level` 0 = lowest precedence
@@ -961,9 +995,14 @@
               (if-let [[right toks2] (parse-calc-level (rest toks) (inc level))]
                 (recur {:calc/op (op->ast op) :calc/left left :calc/right right} toks2)
                 nil))
-            [left toks]))))))
+            [left toks])))))))
 
-(defn- parse-calc-ast
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- parse-calc-ast [expr-text] nil)
+   :default
+   (defn- parse-calc-ast
   "Tokenizes and parses a `calc(...)` call's inner text (see
    tokenize-calc-expr/parse-calc-level) into a full AST, or nil if it
    isn't a well-formed expression in this engine's constant-calc() subset
@@ -972,9 +1011,14 @@
   [expr-text]
   (when-let [tokens (tokenize-calc-expr expr-text)]
     (when-let [[node toks] (parse-calc-level tokens 0)]
-      (when (empty? toks) node))))
+      (when (empty? toks) node)))))
 
-(defn- eval-calc-node
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- eval-calc-node [node] nil)
+   :default
+   (defn- eval-calc-node
   "Evaluates a parsed calc() AST node (see parse-calc-ast) into a
    `[value unit]` pair, `unit` one of `:number` (a plain, dimensionless
    number) or `:px` (a resolved pixel length) -- or nil if this node (or
@@ -1042,9 +1086,14 @@
              (when (and (= ru :number) (not (zero? rv)))
                [(/ lv rv) lu])))
 
-    nil))
+    nil)))
 
-(defn- calc-result->number
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- calc-result->number [value] nil)
+   :default
+   (defn- calc-result->number
   "Normalizes an evaluated calc() result (see eval-calc-node) to a plain
    number in this namespace's own convention: an exact integer (matching
    parse-style-value's existing Long/parseLong coercion for a literal
@@ -1054,9 +1103,14 @@
    `calc(100px / 3)`."
   [value]
   (let [truncated (long value)]
-    (if (== value truncated) truncated value)))
+    (if (== value truncated) truncated value))))
 
-(defn- parse-calc
+#?(:kotoba
+   ;; kotoba route: not yet migrated (see the parse-style-value GAP
+   ;; note) -- calc() evaluation degrades to the raw string there.
+   (defn- parse-calc [expr-text] nil)
+   :default
+   (defn- parse-calc
   "Parses a whole-value CSS `calc(...)` expression's already-extracted
    inner text (see calc-pattern) into the single plain number it resolves
    to, for the bounded, ALWAYS layout-independent subset this engine
@@ -1070,7 +1124,7 @@
   [expr-text]
   (when-let [node (parse-calc-ast expr-text)]
     (when-let [[value _unit] (eval-calc-node node)]
-      (calc-result->number value))))
+      (calc-result->number value)))))
 
 (defn- css-signed-integer-token? [s]
   (let [text (str s)
@@ -1112,20 +1166,22 @@
    completely unchanged as a trimmed raw string rather than guessing,
    exactly this namespace's existing 'degrade, don't crash' posture for
    every other unparseable value."
-  [v]
+  [#?@(:kotoba [v :string] :default [v])] #?@(:kotoba [[:result :f64 :string]])
   (let [v (str/trim (str v))]
     #?(:kotoba
-       (let [px? (str/ends-with? v "px")
-             number (if px? (subs v 0 (- (count v) 2)) v)]
-         (if (css-signed-integer-token? number)
-           (css-parse-integer number)
-           (if-let [[fname inner] (calc-pattern-parts v)]
-             (or (parse-calc (if (= "calc" (str/ascii-lower fname))
-                               inner
-                               (str fname "(" inner ")")))
-                 v)
-             v)))
-       :default
+        ;; KOTOBA ROUTE GAP (2026-10-19): a whole-value calc() call DEGRADES
+        ;; to the raw string here -- this namespace's own "degrade, don't
+        ;; crash" posture -- until the calc AST pipeline (calc-number-at ..
+        ;; parse-calc) returns typed values on the kotoba route. Removal
+        ;; condition: parse-calc answers [:option :f64] and this branch folds
+        ;; it into the ok case. The raw form is preserved in the err case, so
+        ;; nothing is guessed and the hosted route keeps exact behavior.
+        (let [px? (str/ends-with? v "px")
+              number (if px? (s-sub v 0 (- (s-len v) 2)) v)]
+          (if (css-signed-integer-token? number)
+            (result-ok-of [:result :f64 :string] (css-decimal-f64 number))
+            (result-err-of [:result :f64 :string] v)))
+               :default
        (cond
          (re-matches #"-?\d+" v) #?(:clj (Long/parseLong v) :cljs (js/parseInt v 10))
          (re-matches #"-?\d+px" v) #?(:clj (Long/parseLong (subs v 0 (- (count v) 2)))
@@ -2073,8 +2129,15 @@
                               (and auto-ok? (= "auto" (str/ascii-lower %)))
                               (and (= 1 n) (css-wide-keyword %)))
                          tokens))
-        {start (parse-style-value (tokens 0))
-         end (parse-style-value (get tokens 1 (tokens 0)))}))))
+        #?(:kotoba
+           (typed-map-assoc [:map :keyword [:result :f64 :string]]
+             (typed-map-assoc [:map :keyword [:result :f64 :string]]
+               (typed-map-new [:map :keyword [:result :f64 :string]])
+               start (parse-style-value (tokens 0)))
+             end (parse-style-value (get tokens 1 (tokens 0))))
+           :default
+           {start (parse-style-value (tokens 0))
+            end (parse-style-value (get tokens 1 (tokens 0)))})))))
 
 (def ^:private logical-border-shorthand-sides
   "The flow-relative `border-*` shorthands, and the logical SIDES each one
@@ -2461,8 +2524,20 @@
   (when-let [[align justify] (get place-shorthands (str/ascii-lower (str k)))]
     (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))]
       (case (count tokens)
-        1 {align (first tokens) justify (first tokens)}
-        2 {align (first tokens) justify (second tokens)}
+        1 #?(:kotoba
+             (typed-map-assoc [:map :keyword :string]
+               (typed-map-assoc [:map :keyword :string]
+                 (typed-map-new [:map :keyword :string])
+                 align (first tokens))
+               justify (first tokens))
+             :default {align (first tokens) justify (first tokens)})
+        2 #?(:kotoba
+             (typed-map-assoc [:map :keyword :string]
+               (typed-map-assoc [:map :keyword :string]
+                 (typed-map-new [:map :keyword :string])
+                 align (first tokens))
+               justify (second tokens))
+             :default {align (first tokens) justify (second tokens)})
         nil))))
 
 (defn- expand-flex-shorthand
