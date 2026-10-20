@@ -92,6 +92,18 @@ typed-map conversion as the string sets -- an automated regex attempt
 broke the reader (unmatched paren), so convert these FOUR by hand:
 `(contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :a true :b true) :default #{:a :b}) x)`.
 
+## map-presence :i64 receiver -- identified 2026-10-20
+
+The failing contains? receiver is the variable `result` (sema message
+patched with recv=). Source: the SHARED (non-split) shorthand expander
+reducers -- expand-text-shadow-shorthand (2598), the box-shadow twin
+(2665) and the outline twin (2721) use `(reduce (fn [result tok] ...))`
+where the fn-literal parameter types poison to :i64. Fix: route-split
+each into a typed loop fold (the established pattern); note their
+result maps mix :string and RVS values ({:x-color "none"} vs
+(parse-style-value ...)) -- the map value type needs the union carrier
+or a string-normalized representation.
+
 ## Known remaining wall
 
 `:kotoba.error/loop-exit-type` (no span): one loop exits with a
