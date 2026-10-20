@@ -6720,17 +6720,47 @@
                node-id))
            (:nodes document))))
 
+(defn- dom-node-at
+  "Typed-route get-in (document [:nodes id]) with an empty-node fallback."
+  [document id :string]
+  (option-value-of [:option [:ref :cssom/dom-node]]
+    (typed-map-get [:map :string [:ref :cssom/dom-node]] (:nodes document) id)
+    (record-new [:record :cssom/dom-node [[:node/id :string] [:node/type :keyword] [:tag [:option :keyword]] [:attrs [:map :keyword :string]] [:children [:list :string]]]] "" :none (option-none-of [:option :keyword]) (typed-map-new [:map :keyword :string]) (typed-list-new [:list :string]))))
+
 (defn- descendant-or-self?
   [document ancestor-id node-id]
+  #?(:kotoba
+     (if (= ancestor-id node-id)
+       true
+       (let [children (:children (dom-node-at document ancestor-id))]
+         (loop [j 0]
+           (if (>= j (vector-count children))
+             false
+             (if (descendant-or-self? document (typed-list-nth [:list :string] children j) node-id)
+               true
+               (recur (inc j)))))))
+     :default
   (or (= ancestor-id node-id)
       (some (fn [child-id]
               (descendant-or-self? document child-id node-id))
-            (get-in document [:nodes ancestor-id :children]))))
+            (get-in document [:nodes ancestor-id :children])))))
 
 (defn- first-legend-child-id
   [document fieldset-id]
+  #?(:kotoba
+     (let [children (:children (dom-node-at document fieldset-id))]
+       (loop [j 0]
+         (if (>= j (vector-count children))
+           (option-none-of [:option :string])
+           (let [cid (typed-list-nth [:list :string] children j)
+                 tag (:tag (dom-node-at document cid))]
+             (if (and (option-some?-of [:option :keyword] tag)
+                      (= (option-value-of [:option :keyword] tag :none) :legend))
+               (option-some-of [:option :string] cid)
+               (recur (inc j)))))))
+     :default
   (first (filter #(= :legend (get-in document [:nodes % :tag]))
-                 (get-in document [:nodes fieldset-id :children]))))
+                 (get-in document [:nodes fieldset-id :children])))))
 
 (defn- disabled-by-fieldset?
   [document node]
@@ -6769,7 +6799,7 @@
       :element (str/join "" (map #(text-content document %) (:children node)))
       "")))
 
-(defn- option-value
+(defn- option-control-value
   [document option-id]
   (let [attrs (get-in document [:nodes option-id :attrs])]
     (str (if (contains? attrs :value)
@@ -6791,14 +6821,27 @@
 (defn- select-value
   [document node]
   (when-let [option-id (and document (selected-option-id document (:node/id node)))]
-    (option-value document option-id)))
+    (option-control-value document option-id)))
 
 (defn- node-by-dom-id
   [document dom-id]
+  #?(:kotoba
+     (let [nodes (:nodes document)]
+       (loop [i 0]
+         (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes))
+           (option-none-of [:option :string])
+           (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i)
+                 candidate (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i)
+                 id-attr (typed-map-get [:map :keyword :string] (:attrs candidate) :id)]
+             (if (and (option-some?-of [:option :string] id-attr)
+                      (= dom-id (option-value-of [:option :string] id-attr "")))
+               (option-some-of [:option :string] node-id)
+               (recur (inc i)))))))
+     :default
   (some (fn [[node-id candidate]]
           (when (= dom-id (get-in candidate [:attrs :id]))
             node-id))
-        (:nodes document)))
+        (:nodes document))))
 
 (defn- ancestor-form-id
   "The owning <form>'s node-id for node-id: an explicit `form=\"...\"`
@@ -6868,7 +6911,7 @@
 
    Reads through `text-content` and so needs the `document`: a node's
    `:children` are node-IDS, not inline maps, which is the same reason
-   `option-value` next door takes one."
+   `option-control-value` next door takes one."
   [document node]
   (let [raw (if document (text-content document (:node/id node)) "")]
     (if (str/starts-with? raw "\n") (subs raw 1) raw)))
