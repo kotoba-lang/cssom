@@ -509,7 +509,7 @@
 ;; ---- leaves (decimal_text.cljk idiom) ----
 
 (defn- s-len [#?@(:kotoba [s :string] :default [s])] #?@(:kotoba [:i64])
-  #?(:kotoba (string-length s) :default (count s)))
+  #?(:kotoba (string-length s) :default (string-byte-length s)))
 
 (defn- s-sub [#?@(:kotoba [s :string a :i64 b :i64] :default [s a b])] #?@(:kotoba [:string])
   #?(:kotoba (string-substring s a b) :default (subs s a b)))
@@ -836,14 +836,14 @@
    namespace already uses (e.g. `content-attr-pattern`)."
   [s idx]
   (let [integer-end (loop [end idx]
-                      (if (and (< end (count s))
+                      (if (and (< end (string-byte-length s))
                                (str/includes? "0123456789" (str (string-substring s end (inc end)))))
                         (recur (inc end))
                         end))
-        dot? (and (< integer-end (count s)) (= "." (subs s integer-end (inc integer-end))))
+        dot? (and (< integer-end (string-byte-length s)) (= "." (subs s integer-end (inc integer-end))))
         fraction-end (if dot?
                        (loop [end (inc integer-end)]
-                         (if (and (< end (count s))
+                         (if (and (< end (string-byte-length s))
                                   (str/includes? "0123456789" (str (string-substring s end (inc end)))))
                            (recur (inc end))
                            end))
@@ -852,7 +852,7 @@
         number (when (> integer-end idx) (subs s idx number-end))]
     (when number
       (let [after (+ idx (count number))
-            px? (and (<= (+ after 2) (count s)) (= "px" (subs s after (+ after 2))))
+            px? (and (<= (+ after 2) (string-byte-length s)) (= "px" (subs s after (+ after 2))))
             end (if px? (+ after 2) after)
             value #?(:kotoba (css-decimal-f64 number)
                      :clj (Double/parseDouble number)
@@ -872,7 +872,7 @@
   [s open]
   (loop [i (inc open) depth 1]
     (cond
-      (>= i (count s)) nil
+      (>= i (string-byte-length s)) nil
       (= "(" (subs s i (inc i))) (recur (inc i) (inc depth))
       (= ")" (subs s i (inc i))) (if (= 1 depth) i (recur (inc i) (dec depth)))
       :else (recur (inc i) depth)))))
@@ -889,7 +889,7 @@
    trailing or doubled comma yields a blank argument, which the caller
    rejects when it fails to parse."
   [s]
-  (let [n (count s)]
+  (let [n (string-byte-length s)]
     (loop [i 0 depth 0 start 0 out []]
       (cond
         (= i n) (conj out (str/trim (subs s start)))
@@ -919,7 +919,7 @@
    touching the precedence-climbing parser that handles `+`/`-`/`*`/`/`."
   [s idx]
   (let [name-end (loop [end idx]
-                   (if (and (< end (count s))
+                   (if (and (< end (string-byte-length s))
                             (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str (string-substring s end (inc end))))
                                 (= "-" (subs s end (inc end)))))
                      (recur (inc end))
@@ -928,7 +928,7 @@
    (when name
     (when (contains? math-function-names (str/ascii-lower name))
       (let [after name-end]
-        (when (and (< after (count s)) (= "(" (subs s after (inc after))))
+        (when (and (< after (string-byte-length s)) (= "(" (subs s after (inc after))))
           (when-let [close (calc-matching-paren s after)]
             [{:calc/type :fncall
               :calc/name (str/ascii-lower name)
@@ -959,7 +959,7 @@
    function name never starts with a digit and a number never starts with
    a letter, so the order is documentation rather than a tie-break."
   [s]
-  (let [n (count s)]
+  (let [n (string-byte-length s)]
     (loop [idx 0 tokens []]
       (cond
         (= idx n) tokens
@@ -1268,7 +1268,7 @@
       (str/includes? "0123456789-" (str ch))))
 
 (defn- css-ident? [s]
-  (let [n (count s)]
+  (let [n (string-byte-length s)]
     (and (> n 0)
          (css-ident-start? (nth s 0))
          (loop [idx 1]
@@ -1279,7 +1279,7 @@
 
 (defn- simple-css-function-argument [value function-name]
   (let [s (str/trim (str value))
-        n (count s)
+        n (string-byte-length s)
         name-length (count function-name)]
     (when (and (> n (+ name-length 1))
                (= function-name (subs s 0 name-length))
@@ -1290,7 +1290,7 @@
 
 (defn- quoted-css-content [value]
   (let [s (str/trim (str value))
-        n (count s)]
+        n (string-byte-length s)]
     (when (>= n 2)
       (let [first-char (nth s 0)
             last-char (nth s (dec n))]
@@ -1557,7 +1557,7 @@
                :else (recur (inc idx) start depth out))))))
      :default
   (let [s (str s)
-        n (count s)]
+        n (string-byte-length s)]
     (loop [idx 0 start 0 depth 0 out []]
       (if (= idx n)
         (into [] (remove (fn [x] (str/blank? x))) (conj out (str/trim (subs s start idx))))
@@ -1575,7 +1575,7 @@
   [s sep]
   (let [s (str s)
         sep (str sep)
-        n (count s)]
+        n (string-byte-length s)]
     (loop [idx 0]
       (cond
         (= idx n) [s]
@@ -1670,7 +1670,7 @@
       :else (parse-style-value v))))
 
 (defn- matching-var-close [s open]
-  (let [n (count s)]
+  (let [n (string-byte-length s)]
     (loop [idx open depth 0]
       (if (>= idx n)
         nil
@@ -1684,7 +1684,7 @@
 
 (defn- parse-var-reference [value]
   (let [s (str/trim (str value))
-        n (count s)]
+        n (string-byte-length s)]
     (when (and (> n 4)
                (= "var(" (subs s 0 4))
                (= ")" (str (nth s (dec n)))))
@@ -1700,7 +1700,7 @@
               [name (when (= (count parts) 2) (second parts))])))))))
 
 (defn- css-decimal-token? [s]
-  (let [n (count s)
+  (let [n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)]
     (loop [idx start before 0 after 0 dot? 0]
       (if (>= idx n)
@@ -1720,12 +1720,12 @@
 
 (defn- css-digits-end [s start]
   (loop [idx start]
-    (if (and (< idx (count s)) (css-digit? (string-substring s idx (inc idx))))
+    (if (and (< idx (string-byte-length s)) (css-digit? (string-substring s idx (inc idx))))
       (recur (inc idx))
       idx)))
 
 (defn- css-number-end [s]
-  (let [n (count s)
+  (let [n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)
         integer-end (css-digits-end s start)
         dot? (and (< integer-end n) (= "." (str (nth s integer-end))))
@@ -1743,16 +1743,16 @@
         end))))
 
 (defn- css-number-token? [s]
-  (and (some? (css-number-end s)) (= (count s) (css-number-end s))))
+  (and (some? (css-number-end s)) (= (string-byte-length s) (css-number-end s))))
 
 (defn- css-integer-token? [s]
-  (let [n (count s)
+  (let [n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)
         end (css-digits-end s start)]
     (and (> end start) (= end n))))
 
 (defn- css-zero-token? [s]
-  (let [n (count s)
+  (let [n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)]
     (loop [idx start dot? 0]
       (if (>= idx n)
@@ -1764,7 +1764,7 @@
             :else false))))))
 
 (defn- css-ident-token? [s]
-  (let [n (count s)
+  (let [n (string-byte-length s)
         start (if (and (> n 0) (= "-" (str (nth s 0)))) 1 0)]
     (and (< start n)
          (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" (str (string-substring s start (inc start)))))
@@ -1776,7 +1776,7 @@
 
 (defn- css-ascii-name-chars? [s allow-hyphen?]
   (loop [idx 0]
-    (if (>= idx (count s)) true
+    (if (>= idx (string-byte-length s)) true
       (let [ch (string-substring s idx (inc idx))
             allowed? (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str ch))
                          (and allow-hyphen? (= "-" (str ch))))]
@@ -1790,7 +1790,7 @@
          (or (= name "calc") (= name "min") (= name "max") (= name "clamp")))))
 
 (defn- css-function-shape? [s]
-  (let [n (count s)
+  (let [n (string-byte-length s)
         open (str/index-of s "(")
         name (when open (subs s 0 open))]
     (and open (> n (inc open)) (= ")" (str (nth s (dec n))))
@@ -1806,7 +1806,7 @@
 
 (defn- css-dimension-parts [s]
   (let [number-end (css-number-end s)]
-    (when (and number-end (< number-end (count s)))
+    (when (and number-end (< number-end (string-byte-length s)))
       (let [unit (subs s number-end)
             letters? (css-ascii-name-chars? unit false)]
         (when (or (= "%" unit) (and (seq unit) letters?))
@@ -1814,7 +1814,7 @@
 
 (defn- percentage-number [value]
   (let [s (str value)
-        n (count s)]
+        n (string-byte-length s)]
     (when (and (> n 1) (str/ends-with? s "%"))
       (let [number (subs s 0 (dec n))]
         (when (css-decimal-token? number) number)))))
@@ -3200,10 +3200,10 @@
 (defn- selector-ident-end
   "Returns the end offset of an ASCII CSS identifier beginning at `start`."
   [s start]
-  (if (or (>= start (count s)) (not (css-ident-start? (string-substring s start (inc start)))))
+  (if (or (>= start (string-byte-length s)) (not (css-ident-start? (string-substring s start (inc start)))))
     start
     (loop [idx (inc start)]
-      (if (and (< idx (count s)) (css-ident-rest? (string-substring s idx (inc idx))))
+      (if (and (< idx (string-byte-length s)) (css-ident-rest? (string-substring s idx (inc idx))))
         (recur (inc idx))
         idx))))
 
@@ -3224,7 +3224,7 @@
   [text]
   #?(:kotoba
      (let [s (str/trim (str text))
-           n (count s)]
+           n (string-byte-length s)]
        (when (and (> n 2) (= "[" (str (nth s 0))) (= "]" (str (nth s (dec n)))))
          (let [inside (str/trim (subs s 1 (dec n)))
                name-end (selector-ident-end inside 0)
@@ -3437,19 +3437,18 @@
    whitespace INSIDE either kind of nesting never splits a token -- e.g.
    `.card:is(.a, .b) > p` must tokenize as `[\".card:is(.a, .b)\" \">\" \"p\"]`,
    not split again at the space after the comma inside the parens."
-  [selector]
-  (let [s (str selector)
-        n (count s)]
+  [#?@(:kotoba [selector :string] :default [selector])] #?@(:kotoba [[:list :string]])
+  (let [s (str selector)]
     (loop [idx 0
            start 0
            bracket-depth 0
            paren-depth 0
            qc-a ""
            tokens (typed-list-new [:list :string])]
-      (if (= idx n)
+      (if (>= idx (string-byte-length s))
         (append-token tokens (str/trim (subs s start idx)))
         (let [ch (string-substring s idx (inc idx))
-              escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))
+              escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))
               nesting-depth (+ bracket-depth paren-depth)]
           (cond
             (and (not= "" qc-a) (= ch qc-a) (not escaped?))
@@ -3494,34 +3493,52 @@
             :else
             (recur (inc idx) start bracket-depth paren-depth qc-a tokens)))))))
 
-(defn split-selector-list
-  "Splits a comma-separated selector list (`\"sel1, sel2\"`, as in a
-   top-level `sel1, sel2 { ... }` rule, or a `:not(...)`/`:is(...)`/
-   `:where(...)` functional pseudo-class's own argument -- see
-   `parse-simple-selector`, which reuses this exact function for that
-   argument rather than reinventing comma-splitting) into its trimmed,
-   non-blank parts. Tracks BOTH `[...]` bracket-depth (so a comma inside an
-   attribute selector's value, e.g. `[data-label=\"a,b\"]`, doesn't split)
-   and `(...)` paren-depth (so a comma inside a functional pseudo-class's
-   own argument, e.g. `:not(.a, .b)` appearing inside a larger top-level
-   selector list, doesn't split there either -- mirrors `selector-tokens`'s
-   own paren-depth tracking, for the same reason)."
-  [selector-list]
-  (let [s (str selector-list)
-        n (count s)]
+(defn split-selector-list [#?@(:kotoba [selector-list :string] :default [selector-list])] #?@(:kotoba [[:list :string]])
+  #?(:kotoba
+     (if (>= idx (string-byte-length s)) (let [all (typed-list-conj [:list :string] selectors (subs s start idx)) m (vector-count all)] (loop [k 0 out (typed-list-new [:list :string])] (if (>= k m) out (let [t (str/trim (typed-list-nth [:list :string] all k))] (recur (inc k) (if (str/blank? t) out (typed-list-conj [:list :string] out t))))))) (let [ch (string-substring s idx (inc idx))
+                escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
+            (cond
+              (and (not= "" quote-char) (= ch quote-char) (not escaped?))
+              (recur (inc idx) start bracket-depth paren-depth "" selectors)
+
+              (not= "" quote-char)
+              (recur (inc idx) start bracket-depth paren-depth quote-char selectors)
+
+              (or (= ch "\"") (= ch "'"))
+              (recur (inc idx) start bracket-depth paren-depth ch selectors)
+
+              (= ch "[")
+              (recur (inc idx) start (inc bracket-depth) paren-depth quote-char selectors)
+
+              (= ch "]")
+              (recur (inc idx) start (max 0 (dec bracket-depth)) paren-depth quote-char selectors)
+
+              (= ch "(")
+              (recur (inc idx) start bracket-depth (inc paren-depth) quote-char selectors)
+
+              (= ch ")")
+              (recur (inc idx) start bracket-depth (max 0 (dec paren-depth)) quote-char selectors)
+
+              (and (= ch ",") (zero? bracket-depth) (zero? paren-depth))
+              (recur (inc idx) (inc idx) bracket-depth paren-depth quote-char (typed-list-conj [:list :string] selectors (subs s start idx)))
+
+              :else
+              (recur (inc idx) start bracket-depth paren-depth quote-char selectors))))
+     :default
+  (let [s (str selector-list)]
     (loop [idx 0
            start 0
            bracket-depth 0
            paren-depth 0
            quote-char ""
-           selectors []]
-      (if (= idx n)
+           selectors (typed-list-new [:list :string])]
+      (if (>= idx (string-byte-length s))
         (->> (conj selectors (subs s start idx))
              (map (fn [x] (str/trim x)))
              (remove (fn [x] (str/blank? x)))
              vec)
         (let [ch (string-substring s idx (inc idx))
-              escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
+              escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
           (cond
             (and (not= "" quote-char) (= ch quote-char) (not escaped?))
             (recur (inc idx) start bracket-depth paren-depth nil selectors)
@@ -3548,7 +3565,7 @@
             (recur (inc idx) (inc idx) bracket-depth paren-depth quote-char (conj selectors (subs s start idx)))
 
             :else
-            (recur (inc idx) start bracket-depth paren-depth quote-char selectors)))))))
+            (recur (inc idx) start bracket-depth paren-depth quote-char selectors))))))))
 
 (defn- selector-parts
   "The `:selector/parts` vector for an already-tokenized selector: one
@@ -3607,41 +3624,41 @@
 (defn- selector-quoted-end [s open]
   (let [quote-char (string-substring s open (inc open))]
     (loop [idx (inc open)]
-      (if (>= idx (count s)) -1
+      (if (>= idx (string-byte-length s)) -1
         (let [ch (string-substring s idx (inc idx))
-              escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
+              escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
           (if (and (= ch quote-char) (not escaped?))
             (inc idx)
             (recur (inc idx))))))))
 
 (defn- selector-bracket-end [s open]
   (loop [idx (inc open) quote-char ""]
-    (if (>= idx (count s)) -1
+    (if (>= idx (string-byte-length s)) -1
       (let [ch (string-substring s idx (inc idx))
-            escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
+            escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
         (cond
           (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) "")
           (not= "" quote-char) (recur (inc idx) quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) ch)
           (= ch "]") (inc idx)
-          :else (recur (inc idx) nil))))))
+          :else (recur (inc idx) ""))))))
 
 (defn- selector-paren-end [s open]
   (loop [idx open depth 0 quote-char ""]
-    (if (>= idx (count s)) -1
+    (if (>= idx (string-byte-length s)) -1
       (let [ch (string-substring s idx (inc idx))
-            escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
+            escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
         (cond
           (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) depth "")
           (not= "" quote-char) (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
-          (= ch "(") (recur (inc idx) (inc depth) nil)
-          (= ch ")") (if (= depth 1) idx (recur (inc idx) (dec depth) nil))
-          :else (recur (inc idx) depth nil))))))
+          (= ch "(") (recur (inc idx) (inc depth) "")
+          (= ch ")") (if (= depth 1) idx (recur (inc idx) (dec depth) ""))
+          :else (recur (inc idx) depth ""))))))
 
 (defn- selector-function-spans [s]
   (loop [idx 0 spans []]
-    (if (>= idx (count s)) spans
+    (if (>= idx (string-byte-length s)) spans
       (let [ch (string-substring s idx (inc idx))]
         (cond
           (or (= ch "\"") (= ch "'"))
@@ -3650,9 +3667,9 @@
           (= ch "[")
           (let [end (selector-bracket-end s idx)]
             (recur (if (pos? end) end (inc idx)) spans))
-          (and (= ch ":") (or (zero? idx) (not= ":" (nth s (dec idx))))
+          (and (= ch ":") (or (zero? idx) (not= ":" (string-substring s (dec idx) idx)))
                (let [name-end (selector-ident-end s (inc idx))]
-                 (and (> name-end (inc idx)) (< name-end (count s))
+                 (and (> name-end (inc idx)) (< name-end (string-byte-length s))
                       (= "(" (nth s name-end)))))
           (let [name-end (selector-ident-end s (inc idx))
                 end (selector-paren-end s name-end)]
@@ -3681,7 +3698,7 @@
 
 (defn- selector-attribute-spans [s]
   (loop [idx 0 spans []]
-    (if (>= idx (count s)) spans
+    (if (>= idx (string-byte-length s)) spans
       (let [ch (string-substring s idx (inc idx))]
         (cond
           (or (= ch "\"") (= ch "'"))
@@ -3695,13 +3712,13 @@
 
 (defn- selector-pseudo-element-spans [s]
   (loop [idx 0 spans []]
-    (if (>= idx (count s)) spans
+    (if (>= idx (string-byte-length s)) spans
       (let [ch (string-substring s idx (inc idx))
-            double-colon? (and (= ch ":") (< (inc idx) (count s)) (= ":" (nth s (inc idx))))
+            double-colon? (and (= ch ":") (< (inc idx) (string-byte-length s)) (= ":" (nth s (inc idx))))
             name-start (+ idx (if double-colon? 2 1))
             name-end (if (= ch ":") (selector-ident-end s name-start) name-start)
             name (if (> name-end name-start) (str/ascii-lower (subs s name-start name-end)) "")
-            next-char (when (< name-end (count s)) (nth s name-end))
+            next-char (when (< name-end (string-byte-length s)) (nth s name-end))
             word-continuation? (and next-char
                                     (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_" (str next-char)))
             supported? (or (= name "before") (= name "after") (= name "first-letter"))]
@@ -3711,21 +3728,21 @@
 
 (defn- selector-simple-parts [s]
   (loop [idx 0 ids [] classes [] pseudos []]
-    (if (>= idx (count s)) [ids classes pseudos]
+    (if (>= idx (string-byte-length s)) [ids classes pseudos]
       (let [ch (string-substring s idx (inc idx)) name-start (inc idx) name-end (selector-ident-end s name-start)]
         (cond
           (and (= ch "#") (> name-end name-start))
           (recur name-end (conj ids (subs s name-start name-end)) classes pseudos)
           (and (= ch ".") (> name-end name-start))
           (recur name-end ids (conj classes (subs s name-start name-end)) pseudos)
-          (and (= ch ":") (or (zero? idx) (not= ":" (nth s (dec idx))))
+          (and (= ch ":") (or (zero? idx) (not= ":" (string-substring s (dec idx) idx)))
                (> name-end name-start))
           (recur name-end ids classes
                  (conj pseudos (keyword (str/ascii-lower (subs s name-start name-end)))))
           :else (recur (inc idx) ids classes pseudos))))))
 
 (defn- selector-tag-name [s]
-  (if (or (zero? (count s))
+  (if (or (zero? (string-byte-length s))
           (not (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str (nth s 0)))))
     ""
     (subs s 0 (selector-ident-end s 0))))
@@ -4256,7 +4273,7 @@
    (so a `@media { selector { decls } }` block's outer `}` isn't mistaken for
    the inner rule's `}`)."
   [s open-idx]
-  (let [n (count s)]
+  (let [n (string-byte-length s)]
     (loop [idx (inc open-idx) depth 1]
       (when (< idx n)
         (let [ch (string-substring s idx (inc idx))]
@@ -4374,7 +4391,7 @@
    none or it is unbalanced. Depth-aware, because a scope root is a
    SELECTOR and a selector may hold parens of its own (`:is(.a, .b)`)."
   [s idx]
-  (let [n (count s)]
+  (let [n (string-byte-length s)]
     (when-let [open (str/index-of s "(" idx)]
       (loop [i (inc open) depth 1]
         (cond
@@ -4543,7 +4560,7 @@
         note-layer! (fn [path] (vswap! paths into (layer-paths-with-prefixes path)))]
     (letfn
      [(walk [s ctx]
-        (let [n (count s)]
+        (let [n (string-byte-length s)]
           (loop [idx 0 out []]
             (if-let [[at-idx nm] (next-conditional-at-rule s idx)]
               (let [brace-idx (str/index-of s "{" at-idx)
@@ -4796,7 +4813,7 @@
                          (option-some-of [:option :string] (s-sub s (inc idx) body-end))))))
                  :else (recur (inc idx) start chunks)))))))
      :default
-  (let [s (str (or text "")) n (count s)]
+  (let [s (str (or text "")) n (string-byte-length s)]
     (loop [idx 0 start 0 chunks []]
       (if (>= idx n)
         (cond-> chunks
@@ -4843,7 +4860,7 @@
    substitution read this, so they can never disagree about which `&`
    counts."
   [sel]
-  (let [s (str sel) n (count s)]
+  (let [s (str sel) n (string-byte-length s)]
     (loop [idx 0 acc []]
       (if (>= idx n)
         acc
@@ -5673,7 +5690,7 @@
 (defn- css-digits-only? [s]
   (and (seq s)
        (loop [idx 0]
-         (if (>= idx (count s)) true
+         (if (>= idx (string-byte-length s)) true
            (and (css-digit? (string-substring s idx (inc idx))) (recur (inc idx)))))))
 
 (defn- env-name-token? [s]
@@ -5802,18 +5819,18 @@
 
 (defn- split-css-call-arguments [s]
   (loop [idx 0 depth 0 quote-char ""]
-    (if (>= idx (count s)) [s]
+    (if (>= idx (string-byte-length s)) [s]
       (let [ch (string-substring s idx (inc idx))
-            escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
+            escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
         (cond
           (and (not= "" quote-char) (= ch quote-char) (not escaped?))
-          (recur (inc idx) depth nil)
+          (recur (inc idx) depth "")
           (not= "" quote-char) (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
-          (= ch "(") (recur (inc idx) (inc depth) nil)
+          (= ch "(") (recur (inc idx) (inc depth) "")
           (= ch ")") (recur (inc idx) (max 0 (dec depth)) nil)
           (and (= ch ",") (zero? depth)) [(subs s 0 idx) (subs s (inc idx))]
-          :else (recur (inc idx) depth nil))))))
+          :else (recur (inc idx) depth ""))))))
 
 (defn- attr-reference-at [s start]
   (let [open (+ start 4)
@@ -6132,17 +6149,17 @@
 
 (defn- media-range-tokens [s]
   (loop [idx 0 tokens []]
-    (if (>= idx (count s)) tokens
+    (if (>= idx (string-byte-length s)) tokens
       (let [ch (string-substring s idx (inc idx))]
         (cond
           (str/blank? (str ch)) (recur (inc idx) tokens)
           (media-range-token? ch)
-          (let [two? (and (< (inc idx) (count s)) (= "=" (nth s (inc idx))))
+          (let [two? (and (< (inc idx) (string-byte-length s)) (= "=" (nth s (inc idx))))
                 end (+ idx (if two? 2 1))]
             (recur end (conj tokens (subs s idx end))))
           :else
           (let [end (loop [j idx]
-                      (if (or (>= j (count s))
+                      (if (or (>= j (string-byte-length s))
                               (str/blank? (str (string-substring s j (inc j))))
                               (media-range-token? (string-substring s j (inc j))))
                         j
@@ -6164,7 +6181,7 @@
    `(...)` does not split a media-query list. Returns trimmed, non-blank
    parts."
   [s sep]
-  (let [n (count s)]
+  (let [n (string-byte-length s)]
     (loop [idx 0 start 0 depth 0 out []]
       (if (>= idx n)
         (->> (conj out (subs s start))
@@ -6185,7 +6202,7 @@
    tell \"one part\" from \"several\" without re-scanning. Word-boundary
    checked on both sides, so the `and` inside `brand` never splits."
   [s word]
-  (let [n (count s)
+  (let [n (string-byte-length s)
         w (count word)]
     (loop [idx 0 start 0 depth 0 out []]
       (if (>= idx n)
@@ -6201,8 +6218,8 @@
             (and (zero? depth)
                  (<= (+ idx w) n)
                  (= word (str/ascii-lower (subs s idx (+ idx w))))
-                 (or (zero? idx) (str/blank? (str (nth s (dec idx))))
-                     (= ")" (nth s (dec idx))))
+                 (or (zero? idx) (str/blank? (str (string-substring s (dec idx) idx)))
+                     (= ")" (string-substring s (dec idx) idx)))
                  (or (= (+ idx w) n) (str/blank? (str (nth s (+ idx w))))
                      (= "(" (nth s (+ idx w)))))
             (recur (+ idx w) (+ idx w) depth (conj out (subs s start idx)))
@@ -6214,9 +6231,9 @@
    start with one."
   [s word]
   (let [w (count word)]
-    (when (and (>= (count s) w)
+    (when (and (>= (string-byte-length s) w)
                (= word (str/ascii-lower (subs s 0 w)))
-               (or (= (count s) w) (str/blank? (str (string-substring s w (inc w))))
+               (or (= (string-byte-length s) w) (str/blank? (str (string-substring s w (inc w))))
                    (= "(" (string-substring s w (inc w)))))
       (str/trim (subs s w)))))
 
@@ -6226,7 +6243,7 @@
   [s]
   (and (str/starts-with? s "(")
        (str/ends-with? s ")")
-       (let [n (count s)]
+       (let [n (string-byte-length s)]
          (loop [idx 0 depth 0]
            (if (>= idx n)
              true
@@ -7475,11 +7492,11 @@
 
 (defn- nth-of-clause-kotoba [arg]
   (let [s (str/trim (str arg))
-        n (count s)]
+        n (string-byte-length s)]
     (loop [idx 1]
       (if (>= (inc idx) n)
         [arg nil]
-        (if (and (str/blank? (str (nth s (dec idx))))
+        (if (and (str/blank? (str (string-substring s (dec idx) idx)))
                  (= "of" (str/ascii-lower (subs s idx (+ idx 2))))
                  (str/blank? (str (nth s (+ idx 2))))
                  (< (+ idx 3) n))
@@ -7683,10 +7700,10 @@
    matching quoted pair (the common bare-identifier case)."
   [s]
   (let [s (str/trim s)]
-    (if (and (>= (count s) 2)
+    (if (and (>= (string-byte-length s) 2)
              (or (and (str/starts-with? s "\"") (str/ends-with? s "\""))
                  (and (str/starts-with? s "'") (str/ends-with? s "'"))))
-      (subs s 1 (dec (count s)))
+      (subs s 1 (dec (string-byte-length s)))
       s)))
 
 (defn- parse-lang-ranges
@@ -10740,7 +10757,7 @@
 
 (defn- zero-number-token? [value]
   (let [s (str/trim (str value))
-        n (count s)
+        n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (nth s 0)) (= "-" (nth s 0)))) 1 0)
         integer-end (css-digits-end s start)]
     (and (> integer-end start)
@@ -10772,7 +10789,7 @@
         lower (str/ascii-lower s)]
     (when (and (str/starts-with? lower prefix)
                (str/ends-with? s ")"))
-      (subs s (count prefix) (dec (count s)))))
+      (subs s (count prefix) (dec (string-byte-length s)))))
 
 (defn- css-any-function? [value]
   (let [s (str value)
@@ -10962,7 +10979,7 @@
       (supports-selector? selector-arg)
 
       (parenthesised? s)
-      (let [inner (str/trim (subs s 1 (dec (count s))))]
+      (let [inner (str/trim (subs s 1 (dec (string-byte-length s))))]
         (cond
           (str/blank? inner) ::invalid
           ;; a nested condition -- `((a) or (b))`, `(not (a))`
@@ -11651,7 +11668,7 @@
 
 (defn- replace-var-references [env value]
   (let [s (str value)
-        n (count s)]
+        n (string-byte-length s)]
     (loop [idx 0 start 0 out ""]
       (if (>= idx n)
         (str out (subs s start))
@@ -11822,7 +11839,7 @@
 
 (defn- box-shorthand-length-token? [token]
   (let [s (str token)
-        s (if (str/ends-with? s "px") (subs s 0 (- (count s) 2)) s)
+        s (if (str/ends-with? s "px") (subs s 0 (- (string-byte-length s) 2)) s)
         s (if (str/starts-with? s "-") (subs s 1) s)]
     (css-digits-only? s)))
 
