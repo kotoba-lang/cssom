@@ -1181,7 +1181,7 @@
     (when-let [[value _unit] (eval-calc-node node)]
       (calc-result->number value)))))
 
-(defn- css-signed-integer-token? [s]
+(defn- css-signed-integer-token? [#?@(:kotoba [s :string] :default [s])]
   (let [text (str s)
         body (if (str/starts-with? text "-") (string-substring text 1 (string-byte-length text)) text)]
     (and (seq body)
@@ -1190,7 +1190,7 @@
              (and (str/includes? "0123456789" (str (nth body idx)))
                   (recur (inc idx))))))))
 
-(defn- css-parse-integer [s]
+(defn- css-parse-integer [#?@(:kotoba [s :string] :default [s])]
   (when (css-signed-integer-token? s)
     (let [text (str s)
           negative? (str/starts-with? text "-")
@@ -1701,7 +1701,7 @@
             (when (css-ident? custom-name)
               [name (when (= (count parts) 2) (second parts))])))))))
 
-(defn- css-decimal-token? [s]
+(defn- css-decimal-token? [#?@(:kotoba [s :string] :default [s])] #?@(:kotoba [:bool])
   (let [n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (str (string-substring s 0 (inc 0)))) (= "-" (str (string-substring s 0 (inc 0)))))) 1 0)]
     (loop [idx start before 0 after 0 dot? 0]
@@ -1717,16 +1717,16 @@
             (recur (inc idx) before after 1)
             :else false))))))
 
-(defn- css-digit? [ch]
+(defn- css-digit? [#?@(:kotoba [ch :string] :default [ch])]
   (str/includes? "0123456789" (str ch)))
 
-(defn- css-digits-end [s start]
+(defn- css-digits-end [#?@(:kotoba [s :string start :i64] :default [s start])]
   (loop [idx start]
     (if (and (< idx (string-byte-length s)) (css-digit? (string-substring s idx (inc idx))))
       (recur (inc idx))
       idx)))
 
-(defn- css-number-end [s]
+(defn- css-number-end [#?@(:kotoba [s :string] :default [s])]
   (let [n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (str (string-substring s 0 (inc 0)))) (= "-" (str (string-substring s 0 (inc 0)))))) 1 0)
         integer-end (css-digits-end s start)
@@ -1753,7 +1753,7 @@
         end (css-digits-end s start)]
     (and (> end start) (= end n))))
 
-(defn- css-zero-token? [s]
+(defn- css-zero-token? [#?@(:kotoba [s :string] :default [s])]
   (let [n (string-byte-length s)
         start (if (and (> n 0) (or (= "+" (str (string-substring s 0 (inc 0)))) (= "-" (str (string-substring s 0 (inc 0)))))) 1 0)]
     (loop [idx start dot? 0]
@@ -1765,7 +1765,7 @@
             (and (= "." (str ch)) (= 0 dot?)) (recur (inc idx) 1)
             :else false))))))
 
-(defn- css-ident-token? [s]
+(defn- css-ident-token? [#?@(:kotoba [s :string] :default [s])]
   (let [n (string-byte-length s)
         start (if (and (> n 0) (= "-" (str (string-substring s 0 (inc 0))))) 1 0)]
     (and (< start n)
@@ -1776,7 +1776,7 @@
                (if (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789-" (str ch)))
                  (recur (inc idx)) false)))))))
 
-(defn- css-ascii-name-chars? [s allow-hyphen?]
+(defn- css-ascii-name-chars? [#?@(:kotoba [s :string allow-hyphen? :bool] :default [s allow-hyphen?])]
   (loop [idx 0]
     (if (>= idx (string-byte-length s)) true
       (let [ch (string-substring s idx (inc idx))
@@ -1791,7 +1791,7 @@
     (and open
          (or (= name "calc") (= name "min") (= name "max") (= name "clamp")))))
 
-(defn- css-function-shape? [s]
+(defn- css-function-shape? [#?@(:kotoba [s :string] :default [s])]
   (let [n (string-byte-length s)
         open (str/index-of s "(")
         name (when open (string-substring s 0 open))]
@@ -5666,13 +5666,13 @@
    parser would silently read as `auto`."
   #?(:kotoba nil :default #"(?i)env\(\s*([A-Za-z-][A-Za-z0-9-]*(?:\s+\d+)*)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)"))
 
-(defn- css-digits-only? [s]
+(defn- css-digits-only? [#?@(:kotoba [s :string] :default [s])]
   (and (seq s)
        (loop [idx 0]
          (if (>= idx (string-byte-length s)) true
            (and (css-digit? (string-substring s idx (inc idx))) (recur (inc idx)))))))
 
-(defn- env-name-token? [s]
+(defn- env-name-token? [#?@(:kotoba [s :string] :default [s])]
   (let [parts (split-value-components (str/trim s) " ")
         first-part (first parts)
         n (count first-part)
