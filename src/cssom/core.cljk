@@ -493,7 +493,9 @@
                                                      [:order :i64]
                                                      [:decl-index :i64]
                                                      [:rule/order :i64]]]
-    :cssom/rule [:record :cssom/rule [[:rule/declarations [:map :keyword [:result :f64 :string]]]]]}))
+    :cssom/rule [:record :cssom/rule [[:rule/declarations [:map :keyword [:result :f64 :string]]]]]
+    :cssom/document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]]
+                                              [:root [:option :string]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -4198,7 +4200,7 @@
 
 
 (defn specificity
-  [selector]
+  [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
   #?(:kotoba
      (let [parts (if (option-some?-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector))
                     (:selector/parts selector)
@@ -8611,11 +8613,11 @@
   (parts-match? document parents node-id parts matches-simple?))
 
 (defn matches?
-  ([node selector]
+  ([#?@(:kotoba [node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [node selector])]
    (matches-simple? node (if (:selector/parts selector)
                            (last (:selector/parts selector))
                            selector)))
-  ([document node selector]
+  ([#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]]]] node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [document node selector])]
    (let [selector (if (:selector/parts selector)
                     selector
                     {:selector/parts [selector]})
@@ -10040,7 +10042,7 @@
    does not apply (see `ua-style-of`). Handed a document, this takes the
    general path and answers correctly for the nested-list rule too."
   ([node] (ua-style-for nil node))
-  ([document node]
+  ([#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
    (let [style-by-tag (when (nil? document) (ua-style-by-tag))]
      (if (and style-by-tag
               (not-any? #(contains? (:attrs node) %) (ua-conditional-attrs)))
