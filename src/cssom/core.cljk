@@ -1101,7 +1101,7 @@
        min(val, max))`, which is the spec's own definition and is what
        makes `clamp(90px, 5px, 300px)` come out 90 rather than 5.
        A wrong argument count is rejected rather than tolerated."
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (case (:calc/op node)
     :num [(:calc/value node) (:calc/unit node)]
 
@@ -4508,7 +4508,7 @@
    literal `:scope` inside an attribute selector's quoted value
    (`[data-x=\":scope\"]`) would be mistaken for the pseudo-class. No
    stylesheet this engine parses does that."
-  [selector]
+  [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
   (scope-pseudo? (str (:selector/raw selector))))
 
 (defn- scope-selector
@@ -4519,7 +4519,7 @@
    Done at parse time rather than at match time so that `specificity`,
    `pseudo-element-of` and `matches?` all read one selector value and can
    never disagree about which one they got."
-  [selector]
+  [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
   (if (names-scope? selector)
     selector
     (let [parts (vec (:selector/parts selector))]
@@ -6744,7 +6744,7 @@
                (get-in document [:nodes node-id :children]))))))
 
 (defn- parent-node-id
-  [document child-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] child-id] :default [document child-id])]
   #?(:kotoba
      (let [nodes (:nodes document)]
        (loop [i 0]
@@ -6767,13 +6767,13 @@
 
 (defn- dom-node-at
   "Typed-route get-in (document [:nodes id]) with an empty-node fallback."
-  [document id :string]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] id :string] :default [document id :string])]
   (option-value-of [:option [:ref :cssom/dom-node]]
     (typed-map-get [:map :string [:ref :cssom/dom-node]] (:nodes document) id)
     (record-new [:record :cssom/dom-node [[:node/id :string] [:node/type :keyword] [:tag [:option :keyword]] [:attrs [:map :keyword :string]] [:children [:list :string]]]] "" :none (option-none-of [:option :keyword]) (typed-map-new [:map :keyword :string]) (typed-list-new [:list :string]))))
 
 (defn- descendant-or-self?
-  [document ancestor-id node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] ancestor-id node-id] :default [document ancestor-id node-id])]
   #?(:kotoba
      (if (= ancestor-id node-id)
        true
@@ -6791,7 +6791,7 @@
             (get-in document [:nodes ancestor-id :children])))))
 
 (defn- first-legend-child-id
-  [document fieldset-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] fieldset-id] :default [document fieldset-id])]
   #?(:kotoba
      (let [children (:children (dom-node-at document fieldset-id))]
        (loop [j 0 nchildren (vector-count children)]
@@ -6837,7 +6837,7 @@
            (disabled-by-optgroup? document node))))
 
 (defn- text-content
-  [document node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   (let [node (get-in document [:nodes node-id])]
     (case (:node/type node)
       :text (:text node)
@@ -6845,14 +6845,14 @@
       "")))
 
 (defn- option-control-value
-  [document option-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] option-id] :default [document option-id])]
   (let [attrs (get-in document [:nodes option-id :attrs])]
     (str (if (contains? attrs :value)
            (:value attrs)
            (text-content document option-id)))))
 
 (defn- selected-option-id
-  [document select-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] select-id] :default [document select-id])]
   (let [options (->> (descendant-node-ids document select-id)
                      (filter #(= :option (get-in document [:nodes % :tag]))))
         selected-options (filter #(truthy-attr? (get-in document [:nodes % :attrs :selected]))
@@ -6869,7 +6869,7 @@
     (option-control-value document option-id)))
 
 (defn- node-by-dom-id
-  [document dom-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] dom-id] :default [document dom-id])]
   #?(:kotoba
      (let [nodes (:nodes document)]
        (loop [i 0]
@@ -6893,7 +6893,7 @@
    attribute pointing at a real <form> by id, else the nearest ancestor
    <form>. Mirrors browser.document-input's own already-correct
    ancestor-form-id (https://html.spec.whatwg.org/multipage/forms.html#form-owner)."
-  [document node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   #?(:kotoba
      (let [form-dom-id (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs (dom-node-at document node-id)) :form) "")]
        (if (not (str/blank? form-dom-id))
@@ -6932,7 +6932,7 @@
    :required/:invalid constraint validation across unrelated forms.
    browser.document-input's own radio-group-node-ids already gets this
    right via ancestor-form-id; this mirrors that fix."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   #?(:kotoba
      (let [node-id (:node/id node)
             group-name (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) :name) "")
@@ -7008,7 +7008,7 @@
    Reads through `text-content` and so needs the `document`: a node's
    `:children` are node-IDS, not inline maps, which is the same reason
    `option-control-value` next door takes one."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (let [raw (if document (text-content document (:node/id node)) "")]
     (if (str/starts-with? raw "\n") (string-substring raw 1 (string-byte-length raw)) raw)))
 
@@ -7251,7 +7251,7 @@
    identical gap in kotoba-lang/browser's own document_input.cljc
    validation-reason and quickjs_wasm.cljc's JS-facing
    __kotobaValidationReason."
-  [node type]
+  [#?@(:kotoba [node [:ref :cssom/dom-node] type] :default [node type])]
   (or (= :textarea (:tag node))
       (and (= :input (:tag node))
            (contains? #?(:kotoba (typed-set-new [:set :string] "text" "search" "url" "tel" "email" "password") :default #{"text" "search" "url" "tel" "email" "password"}) type))))
@@ -7345,7 +7345,7 @@
    combinators -- the structural pseudo-classes below reuse that same
    traversal approach for the FULL sibling list rather than reinventing
    it)."
-  [document parent-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] parent-id] :default [document parent-id])]
   (->> (get-in document [:nodes parent-id :children] [])
        (filter #(= :element (get-in document [:nodes % :node/type])))))
 
@@ -7362,7 +7362,7 @@
    Returns nil when `node` has no parent in `document` at all (a detached
    or root node) -- real CSS never matches any structural pseudo-class on
    an element with no parent."
-  [document node same-tag?]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] same-tag?] :default [document node same-tag?])]
   (when-let [parent-id (parent-node-id document (:node/id node))]
     (let [siblings (element-children document parent-id)]
       (if same-tag?
@@ -7621,7 +7621,7 @@
    conservatively counts as content too, the same 'don't guess, degrade
    safely' default this namespace uses everywhere else for an unrecognized
    case."
-  [document child-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] child-id] :default [document child-id])]
   (let [child (get-in document [:nodes child-id])]
     (case (:node/type child)
       :element true
@@ -7639,7 +7639,7 @@
    child node-ids populated by `kotoba.wasm.dom/append-child`) is checked
    directly -- no parent/sibling traversal needed, unlike the structural
    pseudo-classes."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (not-any? #(child-counts-as-content? document %) (:children node)))
 
 ;; ---- :lang() pseudo-class ----
@@ -7651,7 +7651,7 @@
    `lang` attribute at all, so `computed-lang` keeps walking up past it
    rather than treating `\"\"` as this element's own real (if empty)
    computed language."
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (let [lang (get-in node [:attrs :lang])]
     (when (and (string? lang) (not (str/blank? lang)))
       lang)))
@@ -7672,7 +7672,7 @@
    also unconditionally when `document` is nil -- the document-less 2-arity
    `matches-simple?` form can't walk any ancestor chain at all, the same
    restriction `:first-child` and friends already have."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (when document
     (loop [current node]
       (when current
@@ -7827,7 +7827,7 @@
    `computed-lang` and `disabled-by-fieldset?` already use. With no
    `document` only `node`'s own attribute is readable, which is the same
    restriction `:root` and the structural pseudo-classes already carry."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (loop [current node]
     (if-let [v (get-in current [:attrs :contenteditable])]
       (contenteditable-truthy? v)
@@ -7854,7 +7854,7 @@
    `<fieldset>` all in it -- measured, all seven elements of probe
    `15-nonelement-and-oddballs` are `:read-only` and none is
    `:read-write`. `:read-only` is not a form-control pseudo-class."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (if (or (and (= :input (:tag node))
                (contains? text-entry-input-types (input-type node)))
           (= :textarea (:tag node)))
@@ -7972,7 +7972,7 @@
 
    `disabled` does NOT bar it: measured on `<input type=radio name=x disabled>`
    beside an enabled sibling, both are indeterminate."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (case (:tag node)
     :progress (nil? (get-in node [:attrs :value]))
     :input (and (= "radio" (input-type node))
@@ -8018,7 +8018,7 @@
    it says anything -- and a value of a single SPACE is not empty, so the
    placeholder is hidden by whitespace the reader cannot see. Neither
    `disabled` nor `readonly` touches it."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (and (some? (get-in node [:attrs :placeholder]))
        (case (:tag node)
          :textarea true
@@ -8034,7 +8034,7 @@
    missing type IS submit) each match `:default` when alone in a form;
    `<button type=button>`, `<input type=reset>` and `<input type=button>`
    do not."
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (case (:tag node)
     :button (let [type (let [t (get-in node [:attrs :type])] (when t (str/ascii-lower (str t))))]
                (or (= "submit" type) (nil? type)))
@@ -8059,7 +8059,7 @@
    as it is in Brave (measured). That is the same ownership notion
    `radio-group-node-ids` uses for `:required`/`:invalid`, which is why
    two forms cannot steal each other's default button."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (boolean
    (when-let [form-id (and document (ancestor-form-id document (:node/id node)))]
      ;; Walked from the DOCUMENT root rather than from the form, because
@@ -8100,7 +8100,7 @@
    Checkedness is read off the ATTRIBUTE, which is what \"born in\" means --
    the same distinction `checked-control?` draws for `:checked`, and the
    reason the two pseudo-classes are not synonyms once script has run."
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (case (:tag node)
     :option (truthy-attr? (get-in node [:attrs :selected]))
     :input (let [t (input-type node)]
@@ -8324,7 +8324,7 @@
    candidate descendant with `match-fn` and SHORT-CIRCUITING (`some`) the
    instant one matches -- real `:has()` semantics only ever need ONE
    matching descendant, never proof that every descendant was checked."
-  [document node compound match-fn]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] compound match-fn] :default [document node compound match-fn])]
   #?(:kotoba
      (let [ids (descendant-node-ids document node) nids (vector-count ids)] (loop [i 0] (if (>= i nids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] ids i)) compound) true (recur (inc i))))))
      :default
@@ -8347,7 +8347,7 @@
    never going to match any compound selector, no separate filtering needed
    in this function. Short-circuits (`some`) the same way as
    `has-arg-descendant-match?`."
-  [document node compound match-fn]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] compound match-fn] :default [document node compound match-fn])]
   #?(:kotoba
      (let [kids (:children node) nkids (vector-count kids)] (loop [i 0] (if (>= i nkids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
      :default
@@ -8377,7 +8377,7 @@
 
    False when `node` has no parent, matching every other sibling-relative
    answer in this namespace."
-  [document node compound adjacent-only? match-fn]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] compound adjacent-only? match-fn] :default [document node compound adjacent-only? match-fn])]
   #?(:kotoba
      (let [siblings0 (structural-siblings document node false)] (if (not (option-some?-of [:option [:list :string]] siblings0)) false (let [siblings (option-value-of [:option [:list :string]] siblings0 (typed-list-new [:list :string])) position (sibling-position siblings (:node/id node))] (if (not (option-some?-of [:option :i64] position)) false (let [start (option-value-of [:option :i64] position 0) n (vector-count siblings) limit (if adjacent-only? (min n (inc start)) n)] (loop [i start] (if (>= i limit) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] siblings i)) compound) true (recur (inc i))))))))))
      :default
@@ -8411,7 +8411,7 @@
    this unconditionally returns false when `document` is nil rather than
    attempting a documentless walk (the documentless 2-arity `matches-simple?`
    form below passes `document` nil, so :has() never matches there either)."
-  [document node group match-fn]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] group match-fn] :default [document node group match-fn])]
   #?(:kotoba
      (when document (loop [i 0 ngrp (vector-count group)] (if (>= i ngrp) false (let [item (typed-list-nth [:list [:ref :cssom/has-item]] group i) selector (:has/selector item) combinator (:has/combinator item) direct? (:has/direct-child? item) kind (if (option-some?-of [:option :keyword] combinator) (option-value-of [:option :keyword] combinator :none) (if direct? :child :descendant))] (if (cond (= kind :child) (has-arg-child-match? document node selector match-fn) (= kind :next-sibling) (has-arg-sibling-match? document node selector true match-fn) (= kind :following-sibling) (has-arg-sibling-match? document node selector false match-fn) :else (has-arg-descendant-match? document node selector match-fn)) true (recur (inc i) ngrp))))))
      :default
@@ -8426,7 +8426,7 @@
            group)))))
 
 (defn- parent-index
-  [document]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]]] :default [document])]
   (reduce-kv
    (fn [parents parent-id node]
      (reduce (fn [parents child-id]
@@ -8468,7 +8468,7 @@
    `matches-simple?`, because `matches-simple?` needs it for a COMPLEX
    `:is()`/`:not()`/`:where()` argument, and this namespace deliberately
    avoids `declare`-based forward references."
-  [document parents node-id parts match-fn]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] parents node-id parts [:ref :cssom/compound] match-fn] :default [document parents node-id parts match-fn])]
   #?(:kotoba
      (if (> (vector-count parts) 0) (parts-match-at document parents node-id parts (dec (vector-count parts)) match-fn) false)
      :default
@@ -8515,7 +8515,7 @@
 
 (defn- selector-arm-matches?
   "Typed-route group-arm match for matches-simple? (compound or complex)."
-  [document node arm] :bool
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] arm [:ref :cssom/compound]] :default [document node arm])] :bool
   (let [parts (:selector/parts arm)] (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts) (and document (parts-match? document (parent-index document) (:node/id node) (option-value-of [:option [:list [:ref :cssom/compound]]] parts (typed-list-new [:list [:ref :cssom/compound]])) matches-simple?)) (matches-simple? document node arm))))
 
 (defn- matches-simple?
@@ -8637,7 +8637,7 @@
                 (:selector/has selector))))))
 
 (defn- matches-parts?
-  [document parents node-id parts]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] parents node-id parts [:ref :cssom/compound]] :default [document parents node-id parts])]
   (parts-match? document parents node-id parts matches-simple?))
 
 (defn matches?
@@ -8664,12 +8664,12 @@
    docstring, \"Known gap\" paragraph (now fixed) for why this has to be a
    separate attr/accessor rather than folded into `inline-style`'s own
    `{property value}` shape."
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (or (get-in node [:attrs :style-inline-important])
       #{}))
 
 (defn- clear-style-attrs
-  [document node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   #?(:kotoba
      (let [node (dom-node-at document node-id) attrs (:attrs node) n (typed-map-count [:map :keyword :string] attrs) cleaned (loop [i 0 out (typed-map-new [:map :keyword :string])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword :string] attrs) i) v (typed-list-nth [:list :string] (typed-map-vals [:map :keyword :string] attrs) i) kn (keyword-name k)] (recur (inc i) (if (or (= kn "style") (= kn "pseudo")) out (typed-map-assoc [:map :keyword :string] out k v))))))] (typed-map-assoc [:map :keyword [:map :string [:ref :cssom/dom-node]]] document :nodes (typed-map-assoc [:map :string [:ref :cssom/dom-node]] (:nodes document) node-id (record-new [:record :cssom/dom-node [[:node/id :string] [:node/type :keyword] [:tag [:option :keyword]] [:attrs [:map :keyword :string]] [:children [:list :string]]]] (:node/id node) (:node/type node) (:tag node) cleaned (:children node)))))
      :default
@@ -8806,7 +8806,7 @@
    learn to pass. That is a signature change to the whole stylesheet
    pipeline, not a scope change, which is why it is named here rather than
    guessed at."
-  [document parents spec node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] parents spec node-id] :default [document parents spec node-id])]
   #?(:kotoba
      ;; KOTOBA ROUTE GAP (2026-10-20): the limit test binds the dynamic
 ;; *scope-roots* around scope-limited?, and `binding` is not an admitted
@@ -8850,7 +8850,7 @@
    `.far > .near > .lim > p` with `@scope (.near) to (.lim)` red and
    `@scope (.far)` blue is BLUE, and the control without the `.lim`
    wrapper is RED."
-  [document parents specs selector node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] parents specs selector [:ref :cssom/compound] node-id] :default [document parents specs selector node-id])]
   #?(:kotoba
      ;; KOTOBA ROUTE GAP (2026-10-20): same dynamic-binding gap as
 ;; scope-root-ids -- this binds *scope-roots* and consumes that stub.
@@ -8880,7 +8880,7 @@
 ;; pass threads through resolve-style-for as part of `container-ctx`.
 
 (defn- container-type-of
-  [document node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   (let [t (get-in document [:nodes node-id :attrs :style/container-type])] (when t (str/ascii-lower (str t)))))
 
 (defn- container-names-of
@@ -8918,7 +8918,7 @@
    skipped (not applied as a clamp) rather than erroring, the same
    'degrade, don't crash' posture the rest of this namespace already takes
    for unparseable values."
-  [document node-id]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   (let [attrs (get-in document [:nodes node-id :attrs])
         width (:style/width attrs)]
     (when (number? width)
@@ -8943,7 +8943,7 @@
    than a number). Threaded into apply-cascade's real second pass as part of
    its container-ctx (alongside parent-index) so container-rule-matches?
    can walk from any descendant up to its nearest matching container."
-  [document]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]]] :default [document])]
   #?(:kotoba
      (let [nodes (:nodes document)] (loop [i 0 out (typed-map-new [:map :string [:ref :cssom/container]])] (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes)) out (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i) node (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i) ntype (:node/type node) ctype (typed-map-get [:map :keyword :string] (:attrs node) :container-type)] (recur (inc i) (if (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (option-some?-of [:option :string] ctype) (or (= (option-value-of [:option :string] ctype "") "inline-size") (= (option-value-of [:option :string] ctype "") "size"))) (typed-map-assoc [:map :string [:ref :cssom/container]] out node-id (record-new [:record :cssom/container [[:names [:set :string]] [:known-width [:option :f64]]]] (container-names-of document node-id) (resolvable-container-width document node-id))) out))))))
      :default
@@ -9295,7 +9295,7 @@
    Row four is why this is not simply `revert` with a layer test: with no
    `@layer` anywhere, the unlayered declarations are still a layer of their
    own and rolling back past them reaches the UA origin."
-  [document node property keyword-kind lower-entries]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] property keyword-kind lower-entries] :default [document node property keyword-kind lower-entries])]
   (case keyword-kind
     :inherit (parent-computed-value document node property)
     :initial (get (initial-values) property drop-declaration)
@@ -11753,7 +11753,7 @@
    `resolve-content-value`), and the two forms are not interchangeable.
    Custom properties are skipped too: `--x: attr(data-w px)` is legal CSS
    and unsupported here, an honest gap rather than a silent one."
-  [node style]
+  [#?@(:kotoba [node [:ref :cssom/dom-node] style [:map :keyword [:result :f64 :string]]] :default [node style])]
   #?(:kotoba
      (let [n (typed-map-count [:map :keyword [:result :f64 :string]] style)] (if (not (loop [i 0] (if (>= i n) false (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) true (recur (inc i))))))) style (let [attrs (:attrs node)] (loop [i 0 out (typed-map-new [:map :keyword [:result :f64 :string]])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (recur (inc i) (typed-map-assoc [:map :keyword [:result :f64 :string]] out k (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) (parse-style-value (resolve-attr-refs-kotoba (result-error-of [:result :f64 :string] v "") attrs)) v)))))))))
      :default
