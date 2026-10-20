@@ -6977,9 +6977,9 @@
 (defn- radio-required-satisfied?
   [document node]
   #?(:kotoba
-     (let [ids (radio-group-node-ids document node)]
+     (let [ids (radio-group-node-ids document node) nids (vector-count ids)]
        (loop [i 0]
-         (if (>= i (vector-count ids))
+         (if (>= i nids)
            false
            (let [cid (typed-list-nth [:list :string] ids i)
                  checked (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs (dom-node-at document cid)) :checked) "")]
@@ -8326,7 +8326,7 @@
    matching descendant, never proof that every descendant was checked."
   [document node compound match-fn]
   #?(:kotoba
-     (let [ids (descendant-node-ids document node)] (loop [i 0] (if (>= i (vector-count ids)) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] ids i)) compound) true (recur (inc i))))))
+     (let [ids (descendant-node-ids document node) nids (vector-count ids)] (loop [i 0] (if (>= i nids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] ids i)) compound) true (recur (inc i))))))
      :default
   (boolean
    (some (fn [descendant-id]
@@ -8349,7 +8349,7 @@
    `has-arg-descendant-match?`."
   [document node compound match-fn]
   #?(:kotoba
-     (let [kids (:children node)] (loop [i 0] (if (>= i (vector-count kids)) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
+     (let [kids (:children node) nkids (vector-count kids)] (loop [i 0] (if (>= i nkids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
      :default
   (boolean
    (some (fn [child-id]
@@ -9918,18 +9918,24 @@
    `nil` is the bucket for a selector with no tag in its subject compound
    (`[hidden]`), which has to be tried against everything."
   []
-  (reduce (fn [idx rule]
-            (reduce (fn [idx selector]
-                      (let [subject (if (:selector/parts selector)
-                                      (last (:selector/parts selector))
-                                      selector)
-                            tag (:selector/tag subject)]
-                        (update idx tag (fnil conj [])
-                                (assoc rule :rule/selectors [selector]))))
-                    idx
-                    (:rule/selectors rule)))
-          {}
-          (ua-rules)))
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): parse-rules is stubbed (the rule-
+     ;; pipeline gap) -- there are no UA rules to index yet, so the tag
+     ;; bucket is empty. Removal condition: parse-rules answers its rules.
+     (typed-map-new [:map :keyword [:list [:ref :cssom/rule]]])
+     :default
+     (reduce (fn [idx rule]
+               (reduce (fn [idx selector]
+                         (let [subject (if (:selector/parts selector)
+                                         (last (:selector/parts selector))
+                                         selector)
+                               tag (:selector/tag subject)]
+                           (update idx tag (fnil conj [])
+                                   (assoc rule :rule/selectors [selector]))))
+                       idx
+                       (:rule/selectors rule)))
+             {}
+             (ua-rules))))
 
 (defn- ua-rules-for
   "The UA rules that can possibly apply to `node` -- its tag's bucket plus
