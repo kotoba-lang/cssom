@@ -9084,8 +9084,17 @@
    same way; anything else (already a plain string, from a quoted literal,
    or nil) passes through unchanged."
   [node counters value]
-  (cond
-    (and (map? value) (contains? value :content/parts))
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): content markers are heterogeneous
+     ;; (string | {:content/...} map) -- the typed union carrier the
+     ;; parse side needs is the same one this resolution needs. No content
+     ;; box renders on the kotoba route until it lands. Removal condition:
+     ;; the typed heterogeneous content carrier lands (same as
+     ;; parse-content-value's multi-term gap).
+     nil
+     :default
+     (cond
+       (and (map? value) (contains? value :content/parts))
     (let [resolved (mapv #(resolve-content-term node counters %) (:content/parts value))]
       (when (every? (fn [x] (some? x)) resolved)
         (str/join "" resolved)))
@@ -9124,7 +9133,8 @@
    fall back to a proportional face), and a THREE-deep nest measures 147 /
    91 / 35, i.e. depth 3 reuses depth 2's pair, which is what CSS says
    happens once the list runs out."
-  [["\u201C" "\u201D"] ["\u2018" "\u2019"]])
+  [["\u201C" "\u201D"] ["\u2018" "\u2019"]]))
+
 
 (defn- quote-mark
   "The `open`/`close` character for `depth` (0-indexed), reusing the last
