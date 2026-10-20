@@ -8805,6 +8805,14 @@
    `@scope (.far)` blue is BLUE, and the control without the `.lim`
    wrapper is RED."
   [document parents specs selector node-id]
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): same dynamic-binding gap as
+;; scope-root-ids -- this binds *scope-roots* and consumes that stub.
+;; @scope proximity therefore yields NOTHING on the kotoba route.
+;; Removal condition: scope-root-ids answers and binding (or an
+;; explicit scope-roots parameter) lands.
+     (nil)
+     :default
   (let [inner (peek (vec specs))
         outer (pop (vec specs))]
     (when (every? #(seq (scope-root-ids document parents % node-id)) outer)
@@ -8812,7 +8820,7 @@
               (binding [*scope-roots* #{root-id}]
                 (when (matches-parts? document parents node-id (:selector/parts selector))
                   hops)))
-            (scope-root-ids document parents inner node-id)))))
+            (scope-root-ids document parents inner node-id))))))
 
 ;; ---- @container containers / matching ----
 ;;
