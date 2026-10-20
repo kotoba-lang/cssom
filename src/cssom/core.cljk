@@ -1270,7 +1270,7 @@
 (defn- css-ident? [s]
   (let [n (string-byte-length s)]
     (and (> n 0)
-         (css-ident-start? (nth s 0))
+         (css-ident-start? (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))
          (loop [idx 1]
            (if (>= idx n)
              true
@@ -1292,7 +1292,7 @@
   (let [s (str/trim (str value))
         n (string-byte-length s)]
     (when (>= n 2)
-      (let [first-char (nth s 0)
+      (let [first-char (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)
             last-char (nth s (dec n))]
         (when (or (and (= "\"" (str first-char)) (= "\"" (str last-char)))
                   (and (= "'" (str first-char)) (= "'" (str last-char))))
@@ -1701,7 +1701,7 @@
 
 (defn- css-decimal-token? [s]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)]
+        start (if (and (> n 0) (or (= "+" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))) (= "-" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))))) 1 0)]
     (loop [idx start before 0 after 0 dot? 0]
       (if (>= idx n)
         (or (> before 0) (> after 0))
@@ -1726,7 +1726,7 @@
 
 (defn- css-number-end [s]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)
+        start (if (and (> n 0) (or (= "+" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))) (= "-" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))))) 1 0)
         integer-end (css-digits-end s start)
         dot? (and (< integer-end n) (= "." (str (nth s integer-end))))
         fraction-start (if dot? (inc integer-end) integer-end)
@@ -1747,13 +1747,13 @@
 
 (defn- css-integer-token? [s]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)
+        start (if (and (> n 0) (or (= "+" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))) (= "-" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))))) 1 0)
         end (css-digits-end s start)]
     (and (> end start) (= end n))))
 
 (defn- css-zero-token? [s]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)]
+        start (if (and (> n 0) (or (= "+" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))) (= "-" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))))) 1 0)]
     (loop [idx start dot? 0]
       (if (>= idx n)
         true
@@ -1765,7 +1765,7 @@
 
 (defn- css-ident-token? [s]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (= "-" (str (nth s 0)))) 1 0)]
+        start (if (and (> n 0) (= "-" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)))) 1 0)]
     (and (< start n)
          (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" (str (string-substring s start (inc start)))))
          (loop [idx (inc start)]
@@ -3225,7 +3225,7 @@
   #?(:kotoba
      (let [s (str/trim (str text))
            n (string-byte-length s)]
-       (when (and (> n 2) (= "[" (str (nth s 0))) (= "]" (str (nth s (dec n)))))
+       (when (and (> n 2) (= "[" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))) (= "]" (str (nth s (dec n)))))
          (let [inside (str/trim (subs s 1 (dec n)))
                name-end (selector-ident-end inside 0)
                attr (string-substring inside 0 name-end)
@@ -3743,7 +3743,7 @@
 
 (defn- selector-tag-name [s]
   (if (or (zero? (string-byte-length s))
-          (not (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str (nth s 0)))))
+          (not (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)))))
     ""
     (subs s 0 (selector-ident-end s 0))))
 
@@ -4158,14 +4158,14 @@
                                         (:has/selector (typed-list-nth [:list [:ref :cssom/has-item]]
                                                        (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has simple) i) j))))))))))
              has-s (spec-groups-sum has-groups)]
-         [(+ (if (:selector/id simple) 1 0) (nth not-s 0) (nth is-s 0) (nth has-s 0))
+         [(+ (if (:selector/id simple) 1 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] not-s 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] is-s 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] has-s 0))
           (+ (vector-count (:selector/classes simple))
              (vector-count (:selector/attrs simple))
              (vector-count (:selector/pseudos simple))
-             (nth not-s 1) (nth is-s 1) (nth has-s 1))
+             (hetero-vector-at [:vector [:i64 :i64 :i64]] not-s 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] is-s 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] has-s 1))
           (+ (if (:selector/tag simple) 1 0)
              (if (:selector/pseudo-element simple) 1 0)
-             (nth not-s 2) (nth is-s 2) (nth has-s 2))]))
+             (hetero-vector-at [:vector [:i64 :i64 :i64]] not-s 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] is-s 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] has-s 2))]))
      :default
   (if (:selector/scope-implicit? simple)
     [0 0 0]
@@ -4214,7 +4214,7 @@
   "Typed-route helper for `simple-selector-specificity`: one :is()/:not()
    argument -- a bare compound, or a complex arg carrying :selector/parts
    whose compounds sum (see complex-selector-arguments)."
-  [arg [:ref :cssom/compound]] [:vector-i64]
+  [arg [:ref :cssom/compound]] [:vector [:i64 :i64 :i64]]
   (let [parts (:selector/parts arg)]
     (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts)
       (loop [i 0 acc [0 0 0]]
@@ -4222,11 +4222,11 @@
           acc
           (recur (inc i)
             (let [s (simple-selector-specificity (typed-list-nth [:list [:ref :cssom/compound]] parts i))]
-              [(+ (nth acc 0) (nth s 0)) (+ (nth acc 1) (nth s 1)) (+ (nth acc 2) (nth s 2))]))))
+              [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))]))))
       (simple-selector-specificity arg))))
 
 (defn- spec-most-specific
-  [group [:list [:ref :cssom/compound]]] [:vector-i64]
+  [group [:list [:ref :cssom/compound]]] [:vector [:i64 :i64 :i64]]
   (loop [i 0 best [0 0 0]]
     (if (>= i (vector-count group))
       best
@@ -4239,13 +4239,13 @@
           (if lt best c))))))
 
 (defn- spec-groups-sum
-  [groups [:list [:list [:ref :cssom/compound]]]] [:vector-i64]
+  [groups [:list [:list [:ref :cssom/compound]]]] [:vector [:i64 :i64 :i64]]
   (loop [i 0 acc [0 0 0]]
     (if (>= i (vector-count groups))
       acc
       (recur (inc i)
         (let [s (spec-most-specific (typed-list-nth [:list [:list [:ref :cssom/compound]]] groups i))]
-          [(+ (nth acc 0) (nth s 0)) (+ (nth acc 1) (nth s 1)) (+ (nth acc 2) (nth s 2))])))))
+          [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))])))))
 
 
 (defn specificity
@@ -4259,7 +4259,7 @@
            acc
            (recur (inc i)
              (let [s (simple-selector-specificity (typed-list-nth [:list [:ref :cssom/compound]] parts i))]
-               [(+ (nth acc 0) (nth s 0)) (+ (nth acc 1) (nth s 1)) (+ (nth acc 2) (nth s 2))])))))
+               [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))])))))
      :default
   (let [parts (or (:selector/parts selector) [selector])]
     (reduce (fn [[a b c] part]
@@ -10758,7 +10758,7 @@
 (defn- zero-number-token? [value]
   (let [s (str/trim (str value))
         n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (nth s 0)) (= "-" (nth s 0)))) 1 0)
+        start (if (and (> n 0) (or (= "+" (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (= "-" (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)))) 1 0)
         integer-end (css-digits-end s start)]
     (and (> integer-end start)
          (loop [idx start]
