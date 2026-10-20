@@ -3421,9 +3421,12 @@
   #?(:kotoba nil :default #"(?i):lang\(([^()]*)\)"))
 
 (defn- append-token
-  [tokens token]
-  (cond-> tokens
-    (not (str/blank? token)) (conj token)))
+  [#?@(:kotoba [tokens [:list :string] token :string] :default [tokens token])] #?@(:kotoba [[:list :string]])
+  #?(:kotoba
+     (if (str/blank? token) tokens (typed-list-conj [:list :string] tokens token))
+     :default
+     (cond-> tokens
+       (not (str/blank? token)) (conj token))))
 
 (defn selector-tokens
   "Splits `selector` into its top-level compound-selector/combinator tokens
@@ -3476,9 +3479,9 @@
                    bracket-depth
                    paren-depth
                    qc-a
-                   (-> tokens
-                       (append-token (str/trim (subs s start idx)))
-                       (conj (str ch))))
+                   (typed-list-conj [:list :string]
+                                      (append-token tokens (str/trim (subs s start idx)))
+                                      (str ch)))
 
             (and (str/blank? (str ch)) (zero? nesting-depth))
             (recur (inc idx)
