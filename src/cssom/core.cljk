@@ -470,7 +470,10 @@
                                       [:chunk/body [:option :string]]]]
     :cssom/syntax [:record :cssom/syntax [[:syntax/name [:option :string]]
                                         [:syntax/literal [:option :string]]
-                                        [:syntax/multiplier [:option :keyword]]]]}))
+                                        [:syntax/multiplier [:option :keyword]]]]
+    :cssom/registration [:record :cssom/registration [[:registration/syntax :string]
+                                                 [:registration/inherits? :bool]
+                                                 [:registration/initial [:option :string]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -4020,7 +4023,7 @@
                          (parse-attribute-selector (subs s (nth span 0) (nth span 1))))
                        attribute-spans)
            pseudo-element-spans (selector-pseudo-element-spans selector-without-attrs)
-           pseudo-element (some-> (first pseudo-element-spans) (nth 2) keyword)
+           pseudo-element (let [sp (first pseudo-element-spans)] (when sp (let [cap (hetero-vector-at [:vector [:string :string :string]] sp 2)] (when cap (keyword-from-string (str/ascii-lower cap))))))
            selector-sans-pseudo-element (selector-remove-spans selector-without-attrs
                                                                pseudo-element-spans)
            [ids classes pseudos] (selector-simple-parts selector-sans-pseudo-element)
@@ -5483,6 +5486,43 @@
    also the spec's default and the opposite of an unregistered custom
    property's behaviour."
   [css]
+  #?(:kotoba
+     (let [s (str (or css ""))]
+       (if (not (str/includes? s "@property"))
+         (typed-map-new [:map :keyword [:ref :cssom/registration]])
+         (let [chunks (css-chunks s)]
+           (loop [i 0 out (typed-map-new [:map :keyword [:ref :cssom/registration]])]
+             (if (>= i (vector-count chunks))
+               out
+               (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
+                     prelude (:chunk/prelude c)]
+                 (if (and (option-some?-of [:option :string] prelude)
+                          (= "property" (option-value-of [:option :string] (at-rule-name (option-value-of [:option :string] prelude "")) "")))
+                   (let [p (str/trim (option-value-of [:option :string] prelude ""))
+                         name (str/trim (s-sub p 8 (s-len p)))
+                         decls (parse-at-property-body (option-value-of [:option :string] (:chunk/body c) ""))
+                         syntax (typed-map-get [:map :string :string] decls "syntax")
+                         inherits (typed-map-get [:map :string :string] decls "inherits")
+                         initial (typed-map-get [:map :string :string] decls "initial-value")
+                         syntax-s (option-value-of [:option :string] syntax "")
+                         valid? (and (str/starts-with? name "--")
+                                     (not (str/blank? syntax-s))
+                                     (option-some?-of [:option [:list [:ref :cssom/syntax]]] (parse-property-syntax syntax-s))
+                                     (or (= "*" (str/trim syntax-s)) (option-some?-of [:option :string] initial))
+                                     (or (not (option-some?-of [:option :string] initial))
+                                         (and (registered-value-valid? syntax-s (option-value-of [:option :string] initial ""))
+                                              (computationally-independent? syntax-s (option-value-of [:option :string] initial "")))))]
+                     (recur (inc i)
+                       (if valid?
+                         (typed-map-assoc [:map :keyword [:ref :cssom/registration]] out
+                           (keyword-from-string name)
+                           (record-new [:record :cssom/registration [[:registration/syntax :string] [:registration/inherits? :bool] [:registration/initial [:option :string]]]]
+                             (str/trim syntax-s)
+                             (= "true" (str/ascii-lower (str (option-value-of [:option :string] inherits ""))))
+                             initial))
+                         out)))
+                   (recur (inc i) out))))))))
+     :default
   (let [s (str (or css ""))]
     (if-not (str/includes? s "@property")
       {}
@@ -5503,7 +5543,7 @@
                            {:registration/syntax (str/trim syntax)
                             :registration/inherits? (= "true" (str/ascii-lower (str inherits)))
                             :registration/initial initial}])))))
-            (css-chunks s)))))
+            (css-chunks s))))))
 
 (defn- rules-property-registry
   "The merged `@property` registry carried by `rules` (see `parse-rules`,
@@ -5519,11 +5559,23 @@
    `var-lookup` needs no new argument, because the value really is in
    scope everywhere, which is also what `getComputedStyle` reports."
   [registry]
+  #?(:kotoba
+     (loop [i 0 out (typed-map-new [:map :keyword :string])]
+       (if (>= i (typed-map-count [:map :keyword [:ref :cssom/registration]] registry))
+         out
+         (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:ref :cssom/registration]] registry) i)
+               reg (typed-list-nth [:list [:ref :cssom/registration]] (typed-map-vals [:map :keyword [:ref :cssom/registration]] registry) i)
+               initial (:registration/initial reg)]
+           (recur (inc i)
+             (if (option-some?-of [:option :string] initial)
+               (typed-map-assoc [:map :keyword :string] out k (option-value-of [:option :string] initial ""))
+               out)))))
+     :default
   (into {}
         (keep (fn [[k reg]]
                 (when-let [initial (:registration/initial reg)]
                   [k initial])))
-        registry))
+        registry)))
 
 ;; ---------------------------------------------------------------------
 ;; `env()` -- User-Agent-defined environment variables.
@@ -5632,7 +5684,7 @@
           (recur end
                  (str out (subs s offset idx)
                       (or (get env-variables (str/ascii-lower name))
-                          (some-> fallback str/trim not-empty)
+                          (let [f fallback] (when f (let [t (str/trim f)] (when (not (str/blank? t)) t))))
                           "")))
           (recur (inc idx) (str out (subs s offset (inc idx)))))
         (str out (subs s offset))))))
@@ -5660,7 +5712,7 @@
        (str/replace value env-ref-pattern
                     (fn [[_ name fallback]]
                       (or (get env-variables (str/ascii-lower (str/trim (str name))))
-                          (some-> fallback str/trim not-empty)
+                          (let [f fallback] (when f (let [t (str/trim f)] (when (not (str/blank? t)) t))))
                           ""))))))
 
 ;; ---------------------------------------------------------------------
@@ -5708,7 +5760,7 @@
    invalid in a `width` in Brave even with `data-w=\"75px\"` -- so it is
    declined here and left to `resolve-content-value`."
   [attrs name unit syntax fallback]
-  (let [raw (some-> (get attrs (keyword name)) str str/trim)
+  (let [raw (let [a (get attrs (keyword name))] (when a (str/trim (str a))))
         resolved (cond
                    (and (seq unit) raw (css-decimal-token? raw))
                    (str raw unit)
@@ -5720,7 +5772,7 @@
                    raw
 
                    :else nil)]
-    (or resolved (some-> fallback str/trim not-empty))))
+    (or resolved (let [f fallback] (when f (let [t (str/trim f)] (when (not (str/blank? t)) t)))))))
 
 (defn- split-css-call-arguments [s]
   (loop [idx 0 depth 0 quote-char nil]
@@ -8499,7 +8551,7 @@
 
 (defn- container-type-of
   [document node-id]
-  (some-> (get-in document [:nodes node-id :attrs :style/container-type]) str str/ascii-lower))
+  (let [t (get-in document [:nodes node-id :attrs :style/container-type])] (when t (str/ascii-lower (str t)))))
 
 (defn- container-names-of
   "An element's own `container-name` declaration, split on whitespace into a
@@ -11314,7 +11366,7 @@
   [env var-name fallback]
   (if (contains? env (keyword var-name))
     (get env (keyword var-name))
-    (or (some-> fallback str/trim not-empty) "")))
+    (or (let [f fallback] (when f (let [t (str/trim f)] (when (not (str/blank? t)) t)))) "")))
 
 (defn- replace-var-references [env value]
   (let [s (str value)
