@@ -8624,12 +8624,15 @@
 
 (defn- clear-style-attrs
   [document node-id]
+  #?(:kotoba
+     (let [node (dom-node-at document node-id) attrs (:attrs node) n (typed-map-count [:map :keyword :string] attrs) cleaned (loop [i 0 out (typed-map-new [:map :keyword :string])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword :string] attrs) i) v (typed-list-nth [:list :string] (typed-map-vals [:map :keyword :string] attrs) i) kn (keyword-name k)] (recur (inc i) (if (or (= kn "style") (= kn "pseudo")) out (typed-map-assoc [:map :keyword :string] out k v))))))] (typed-map-assoc [:map :keyword [:map :string [:ref :cssom/dom-node]]] document :nodes (typed-map-assoc [:map :string [:ref :cssom/dom-node]] (:nodes document) node-id (record-new [:record :cssom/dom-node [[:node/id :string] [:node/type :keyword] [:tag [:option :keyword]] [:attrs [:map :keyword :string]] [:children [:list :string]]]] (:node/id node) (:node/type node) (:tag node) cleaned (:children node)))))
+     :default
   (update-in document [:nodes node-id :attrs]
              (fn [attrs]
                (into {}
                      (remove (fn [[k _]]
                                (contains? #?(:kotoba (typed-set-new [:set :string] "style" "pseudo") :default #{"style" "pseudo"}) (namespace k))))
-                     attrs))))
+                     attrs)))))
 
 (defn- pseudo-element-of
   [selector]
