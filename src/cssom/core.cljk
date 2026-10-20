@@ -1488,6 +1488,21 @@
    the comma half of this for media queries and is defined too late in the
    file to be the one used here (and does not do whitespace at all)."
   [s sep]
+  #?(:kotoba
+     (let [s (str s) n (s-len s)]
+       (loop [idx 0 start 0 depth 0 out (typed-list-new [:list :string])]
+         (if (= idx n)
+           (let [piece (str/trim (s-sub s start idx))]
+             (if (str/blank? piece) out (typed-list-conj [:list :string] out piece)))
+           (let [ch (s-sub s idx (inc idx))]
+             (cond
+               (= "(" ch) (recur (inc idx) start (inc depth) out)
+               (= ")" ch) (recur (inc idx) start (max 0 (dec depth)) out)
+               (and (= 0 depth) (if (= sep " ") (str/blank? ch) (= ch sep)))
+               (let [piece (str/trim (s-sub s start idx))]
+                 (recur (inc idx) (inc idx) depth (if (str/blank? piece) out (typed-list-conj [:list :string] out piece))))
+               :else (recur (inc idx) start depth out))))))
+     :default
   (let [s (str s)
         n (count s)]
     (loop [idx 0 start 0 depth 0 out []]
@@ -1499,7 +1514,7 @@
             (= ")" (str ch)) (recur (inc idx) start (max 0 (dec depth)) out)
             (and (zero? depth) (if (= sep " ") (str/blank? (str ch)) (= (str ch) sep)))
             (recur (inc idx) (inc idx) depth (conj out (str/trim (subs s start idx))))
-            :else (recur (inc idx) start depth out)))))))
+            :else (recur (inc idx) start depth out))))))))
 
 
 (defn- split-first-on
@@ -1771,12 +1786,18 @@
 
 (defn- border-shorthand-width-token?
   [tok]
+  #?(:kotoba
+     (let [token (str tok)
+           number (if (str/ends-with? token "px") (s-sub token 0 (- (s-len token) 2)) token)]
+       (or (css-signed-integer-token? number)
+           (contains? line-width-keywords (str/ascii-lower token))))
+     :default
   (let [token (str tok)
         number (if (str/ends-with? token "px")
                  (subs token 0 (- (count token) 2))
                  token)]
     (boolean (or (css-signed-integer-token? number)
-                 (contains? line-width-keywords (str/ascii-lower token))))))
+                 (contains? line-width-keywords (str/ascii-lower token)))))))
 
 (defn- expand-border-shorthand
   "Parses a `border` shorthand value (real CSS's own order-independent
@@ -1803,6 +1824,27 @@
    split apart; the far more common comma syntax, `rgb(0, 0, 0)`, has no
    internal spaces and tokenizes correctly as-is)."
   [v]
+  #?(:kotoba
+     (let [raw (split-value-components (str/trim (str v)) " ")]
+       (loop [idx 0 result (typed-map-new [:map :keyword [:result :f64 :string]])]
+         (if (>= idx (vector-count raw))
+           result
+           (let [tok (typed-list-nth [:list :string] raw idx)]
+             (recur (inc idx)
+               (if (str/blank? tok)
+                 result
+                 (let [lower (str/ascii-lower tok)]
+                   (cond
+                     (and (not (contains? result :border-width))
+                          (border-shorthand-width-token? tok))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-width (parse-style-value tok))
+                     (and (not (contains? result :border-style))
+                          (contains? border-style-keywords lower))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-style (result-err-of [:result :f64 :string] tok))
+                     (not (contains? result :border-color))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-color (result-err-of [:result :f64 :string] tok))
+                     :else result))))))))
+     :default
   (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))]
     (reduce (fn [result tok]
               (let [lower (str/ascii-lower tok)]
@@ -1820,7 +1862,7 @@
 
                   :else result)))
             {}
-            tokens)))
+            tokens))))
 
 (defn- box-shorthand-tokens
   "Splits a `margin`/`padding` shorthand value into its top-level values,
@@ -2139,8 +2181,7 @@
            {start (parse-style-value (tokens 0))
             end (parse-style-value (get tokens 1 (tokens 0)))})))))
 
-(def ^:private logical-border-shorthand-sides
-  "The flow-relative `border-*` shorthands, and the logical SIDES each one
+(defn- logical-border-shorthand-sides  "The flow-relative `border-*` shorthands, and the logical SIDES each one
    sets. `border-inline`/`border-block` set both of their axis's sides from
    one `<line-width> || <line-style> || <color>` value; the four
    single-side shorthands set one.
@@ -2151,20 +2192,43 @@
    (the sub-longhands, with no shorthand anywhere) reports
    `border-left-width: 8px` -- so the sub-longhands map too, and are in
    `logical->physical-by-flow` for that reason."
-  {"border-inline-start" [:inline-start]
-   "border-inline-end" [:inline-end]
-   "border-block-start" [:block-start]
-   "border-block-end" [:block-end]
-   "border-inline" [:inline-start :inline-end]
-   "border-block" [:block-start :block-end]})
+  []
+  #?(:kotoba
+     (typed-map-assoc [:map :string [:list :keyword]]
+       (typed-map-assoc [:map :string [:list :keyword]]
+         (typed-map-assoc [:map :string [:list :keyword]]
+           (typed-map-assoc [:map :string [:list :keyword]]
+             (typed-map-assoc [:map :string [:list :keyword]]
+               (typed-map-assoc [:map :string [:list :keyword]]
+                 (typed-map-new [:map :string [:list :keyword]])
+                 "border-inline-start" (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :inline-start))
+               "border-inline-end" (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :inline-end))
+             "border-block-start" (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :block-start))
+           "border-block-end" (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :block-end))
+         "border-inline" (typed-list-conj [:list :keyword] (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :inline-start) :inline-end))
+       "border-block" (typed-list-conj [:list :keyword] (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :block-start) :block-end))
+     :default
+     {"border-inline-start" [:inline-start]
+      "border-inline-end" [:inline-end]
+      "border-block-start" [:block-start]
+      "border-block-end" [:block-end]
+      "border-inline" [:inline-start :inline-end]
+      "border-block" [:block-start :block-end]}))
 
-(def ^:private border-sides
-  "The four physical sides, in CSS's own clockwise order -- which is also
+(defn- border-sides  "The four physical sides, in CSS's own clockwise order -- which is also
    the order `expand-box-side-shorthand`'s 1-to-4 rule fills."
-  [:top :right :bottom :left])
+  []
+  #?(:kotoba
+     (typed-list-conj [:list :keyword]
+       (typed-list-conj [:list :keyword]
+         (typed-list-conj [:list :keyword]
+           (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :top)
+           :right)
+         :bottom)
+       :left)
+     :default [:top :right :bottom :left]))
 
-(def ^:private border-shorthand-initials
-  "What a `border`/`border-<side>` SHORTHAND writes for a component its
+(defn- border-shorthand-initials  "What a `border`/`border-<side>` SHORTHAND writes for a component its
    value omits. A shorthand always sets all of its longhands: the omitted
    ones are reset to their INITIAL values, not left standing.
 
@@ -2180,14 +2244,33 @@
    -- the third and fourth are the pair that pins it down: an omitted
    width is `medium` (3px, visible), and an omitted STYLE is `none`, which
    zeroes the used width however wide it was declared."
-  {:border-width "medium" :border-style "none" :border-color "currentcolor"})
+  []
+  #?(:kotoba
+     (typed-map-assoc [:map :keyword [:result :f64 :string]]
+       (typed-map-assoc [:map :keyword [:result :f64 :string]]
+         (typed-map-assoc [:map :keyword [:result :f64 :string]]
+           (typed-map-new [:map :keyword [:result :f64 :string]])
+           :border-width (result-err-of [:result :f64 :string] "medium"))
+         :border-style (result-err-of [:result :f64 :string] "none"))
+       :border-color (result-err-of [:result :f64 :string] "currentcolor"))
+     :default
+     {:border-width "medium" :border-style "none" :border-color "currentcolor"}))
 
 (defn- border-side-longhand-values
   "`parts` (whatever of `:border-width`/`:border-style`/`:border-color` a
    shorthand actually named) completed with `border-shorthand-initials`,
    so the caller can write all three longhands of a side."
   [parts]
-  (merge border-shorthand-initials parts))
+  #?(:kotoba
+     (loop [i 0 acc (border-shorthand-initials)]
+       (if (>= i (typed-map-count [:map :keyword [:result :f64 :string]] parts))
+         acc
+         (recur (inc i)
+           (typed-map-assoc [:map :keyword [:result :f64 :string]] acc
+             (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] parts) i)
+             (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] parts) i)))))
+     :default
+  (merge (border-shorthand-initials) parts)))
 
 (defn- expand-logical-border-shorthand
   "Expands one of `logical-border-shorthand-sides`' six shorthands into
@@ -2203,14 +2286,36 @@
    `border-inline-start: 5px solid #000` on a 300px block now makes it 305
    wide with its `<p>` at x=5, which is what Brave 151 renders."
   [prop v]
-  (when-let [sides (get logical-border-shorthand-sides prop)]
+  #?(:kotoba
+     (let [sides (option-value-of [:option [:list :keyword]]
+                    (typed-map-get [:map :string [:list :keyword]] (logical-border-shorthand-sides) prop)
+                    (typed-list-new [:list :keyword]))
+           lv (border-side-longhand-values (expand-border-shorthand v))]
+       (when (and (> (vector-count sides) 0)
+                  (> (typed-map-count [:map :keyword [:result :f64 :string]] lv) 0))
+         (loop [si 0 acc (typed-map-new [:map :keyword [:result :f64 :string]])]
+           (if (>= si (vector-count sides))
+             acc
+             (recur (inc si)
+               (let [side (typed-list-nth [:list :keyword] sides si)] (loop [i 0 acc2 acc]
+              (if (>= i (typed-map-count [:map :keyword [:result :f64 :string]] lv))
+                acc2
+                (recur (inc i)
+                  (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] lv) i)
+                        val (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] lv) i)
+                        sub (s-sub (keyword-name k) 7 (s-len (keyword-name k)))]
+                    (typed-map-assoc [:map :keyword [:result :f64 :string]] acc2
+                      (keyword-from-string (str "border-" (keyword-name side) "-" sub))
+                      val)))))))))))
+     :default
+  (when-let [sides (get (logical-border-shorthand-sides) prop)]
     (let [parts (expand-border-shorthand v)]
       (when (seq parts)
         (into {}
               (for [side sides
                     [k v] (border-side-longhand-values parts)
                     :let [sub (subs (name k) (count "border-"))]]
-                [(keyword (str "border-" (name side) "-" sub)) v]))))))
+                [(keyword (str "border-" (name side) "-" sub)) v])))))))
 
 (defn- expand-border-side-shorthand
   "Expands one of the four per-side `border-<side>` shorthands into that
@@ -2232,6 +2337,26 @@
    `border-top-width: 9px` standing under a later `border-top: 2px solid`,
    which Brave resolves to 2px."
   [prop v]
+  #?(:kotoba
+     (let [side (cond (= prop "border-top") :top
+                    (= prop "border-right") :right
+                    (= prop "border-bottom") :bottom
+                    (= prop "border-left") :left
+                    :else :none)]
+       (when (and (not (= side :none)) (not (css-wide-keyword v)))
+         (let [lv (border-side-longhand-values (expand-border-shorthand v))]
+           (when (> (typed-map-count [:map :keyword [:result :f64 :string]] lv) 0)
+             (loop [i 0 acc2 (typed-map-new [:map :keyword [:result :f64 :string]])]
+              (if (>= i (typed-map-count [:map :keyword [:result :f64 :string]] lv))
+                acc2
+                (recur (inc i)
+                  (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] lv) i)
+                        val (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] lv) i)
+                        sub (s-sub (keyword-name k) 7 (s-len (keyword-name k)))]
+                    (typed-map-assoc [:map :keyword [:result :f64 :string]] acc2
+                      (keyword-from-string (str "border-" (keyword-name side) "-" sub))
+                      val)))))))))
+     :default
   (when-let [side (get {"border-top" :top "border-right" :right
                         "border-bottom" :bottom "border-left" :left}
                        prop)]
@@ -2241,7 +2366,7 @@
           (into {}
                 (for [[k value] (border-side-longhand-values parts)
                       :let [sub (subs (name k) (count "border-"))]]
-                  [(keyword (str "border-" (name side) "-" sub)) value])))))))
+                  [(keyword (str "border-" (name side) "-" sub)) value]))))))))
 
 (defn- expand-border-box-shorthand
   "Expands `border-width`/`border-style`/`border-color` -- each of which is
@@ -2265,6 +2390,36 @@
    for the generic path to store raw -- the same degrade-don't-guess
    posture as every other expander here."
   [prop v]
+  #?(:kotoba
+     (let [tokens (box-shorthand-tokens v)
+           n (vector-count tokens)
+           lp (str/ascii-lower (str prop))]
+       (when (and (> n 0) (<= n 4))
+         (let [all-ok (loop [i 0 ok true]
+                        (if (>= i n)
+                          ok
+                          (let [tok (typed-list-nth [:list :string] tokens i)]
+                            (recur (inc i)
+                              (and ok (cond (= lp "border-width") (border-shorthand-width-token? tok)
+                                            (= lp "border-style") (contains? border-style-keywords (str/ascii-lower tok))
+                                            :else (not (str/blank? tok))))))))
+               t (typed-list-nth [:list :string] tokens 0)
+               r (typed-list-nth [:list :string] tokens (if (= n 1) 0 1))
+               b (typed-list-nth [:list :string] tokens (if (= n 1) 0 (if (= n 2) 0 2)))
+               l (typed-list-nth [:list :string] tokens (if (= n 1) 0 (if (= n 2) 1 (if (= n 3) 1 3))))]
+           (when all-ok
+             (loop [si 0
+                    acc (typed-map-assoc [:map :keyword [:result :f64 :string]]
+                           (typed-map-new [:map :keyword [:result :f64 :string]])
+                           (keyword-from-string (str prop)) (parse-style-value t))]
+               (if (>= si (vector-count (border-sides)))
+                 acc
+                 (recur (inc si)
+                   (let [side (typed-list-nth [:list :keyword] (border-sides) si)]
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] acc
+                       (keyword-from-string (str "border-" (keyword-name side) "-" (s-sub (str prop) 7 (s-len (str prop)))))
+                       (parse-style-value (if (= si 0) t (if (= si 1) r (if (= si 2) b l)))))))))))))
+     :default
   (when-let [token-ok?
              (get {"border-width" border-shorthand-width-token?
                    "border-style" #(contains? border-style-keywords (str/ascii-lower %))
@@ -2280,7 +2435,7 @@
                        [(keyword (str "border-" (name side) "-"
                                       (subs prop (count "border-"))))
                         (parse-style-value value)]))
-                (map vector border-sides [t r b l])))))))
+                (map vector (border-sides) [t r b l]))))))))
 
 (defn- expand-border-shorthand-with-sides
   "The `border` shorthand: the three uniform keys `expand-border-shorthand`
@@ -2294,13 +2449,31 @@
    sides (304x20.797), and the same pair in the other order is
    10/2/2/2 (304x28.797)."
   [v]
+  #?(:kotoba
+     (let [parts (expand-border-shorthand v)]
+       (when (> (typed-map-count [:map :keyword [:result :f64 :string]] parts) 0)
+         (loop [si 0 acc parts]
+           (if (>= si (vector-count (border-sides)))
+             acc
+             (recur (inc si)
+               (let [side (typed-list-nth [:list :keyword] (border-sides) si)] (loop [i 0 acc2 acc]
+              (if (>= i (typed-map-count [:map :keyword [:result :f64 :string]] parts))
+                acc2
+                (recur (inc i)
+                  (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] parts) i)
+                        val (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] parts) i)
+                        sub (s-sub (keyword-name k) 7 (s-len (keyword-name k)))]
+                    (typed-map-assoc [:map :keyword [:result :f64 :string]] acc2
+                      (keyword-from-string (str "border-" (keyword-name side) "-" sub))
+                      val)))))))))))
+     :default
   (let [parts (expand-border-shorthand v)]
     (when (seq parts)
       (into parts
-            (for [side border-sides
+            (for [side (border-sides)
                   [k value] (border-side-longhand-values parts)
                   :let [sub (subs (name k) (count "border-"))]]
-              [(keyword (str "border-" (name side) "-" sub)) value])))))
+              [(keyword (str "border-" (name side) "-" sub)) value]))))))
 
 (defn- expand-text-shadow-shorthand
   "Parses a `text-shadow` shorthand value (real CSS's own grammar,
