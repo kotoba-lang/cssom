@@ -104,6 +104,15 @@ result maps mix :string and RVS values ({:x-color "none"} vs
 (parse-style-value ...)) -- the map value type needs the union carrier
 or a string-normalized representation.
 
+## RVS resolves the shadow-shorthand value union
+
+The text/box-shadow and outline expanders' result maps mix `{:x-color
+"none"}` strings with parse-style-value RVS values. The fix is to store
+"none" as `(result-err-of [:result :f64 :string] "none")` -- the RVS
+model's err-case IS a raw string, so the map type becomes uniformly
+[:map :keyword [:result :f64 :string]] with no union. The typed loop
+fold then replaces the shared (reduce (fn [result tok] ...)) reducers.
+
 ## Known remaining wall
 
 `:kotoba.error/loop-exit-type` (no span): one loop exits with a
