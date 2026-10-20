@@ -41,6 +41,21 @@ the selector cluster. The style pipeline is gated behind explicit GAPs.
 - Diagnostic spans can be misattributed (a rename test proved the
   reported fn was not the failing one); verify by experiment.
 
+## Stub-elimination log (loop-exit-type)
+
+Ruled out by whole-fn stubbing (message persisted): css-chunks,
+find-matching-brace, selector-function-spans, selector-attribute-spans,
+selector-pseudo-element-spans, selector-remove-spans,
+selector-outer-spans, selector-simple-parts, selector-parts;
+plus earlier: balanced-paren-group, parse-simple-selector(:kotoba),
+attr-reference-at, env-reference-at, split-first-on,
+split-css-call-arguments, split-content-terms, next-conditional-at-rule,
+layer-name-path. All three libs (bounded_regex, text, string.join) check
+green standalone. The `[]`-init/conj loop class is now fully typed on
+the :kotoba route (media-range-tokens, split-top-level(-word),
+parse-counter-property, amp-positions); remaining `[]`/`conj` sites are
+:default-only (reader-stripped on --jvm-free).
+
 ## Known remaining wall
 
 `:kotoba.error/loop-exit-type` (no span): one loop exits with a
