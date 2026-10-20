@@ -5911,6 +5911,15 @@
      anyway (see `container-rule-matches?`), so a second condition would
      have nothing left to be evaluated against."
   [css]
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): depends on scan-conditional-at-rules,
+;; which is stubbed behind the same gap (volatiles + letfn walk). The
+;; whole rule pipeline (parse-rules -> apply-cascade) therefore yields
+;; nothing on the kotoba route until the scanner rewrite lands. Removal
+;; condition: scan-conditional-at-rules answers its segments shape and
+;; parse-rules returns its rule list.
+     (nil)
+     :default
   (let [css (desugar-nesting css)
         {:keys [segments layer-paths]} (scan-conditional-at-rules css)
         priority-of (layer-priority-map layer-paths)
@@ -5960,7 +5969,7 @@
                     :rule/layer nil
                     :rule/layer-priority unlayered-priority
                     :rule/order (count %)
-                    :rule/property-registry registry}))))))
+                    :rule/property-registry registry})))))))
 
 (defn- parse-media-width
   [s]
