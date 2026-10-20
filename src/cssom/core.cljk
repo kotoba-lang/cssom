@@ -8717,12 +8717,15 @@
    A limit LIST is allowed and was measured: `to (.l1, .l2)` cuts at
    either."
   [document parents limits root-id node-id]
+  #?(:kotoba
+     (loop [id (option-some-of [:option :string] node-id)] (cond (not (option-some?-of [:option :string] id)) false (= (option-value-of [:option :string] id "") root-id) false (loop [j 0] (if (>= j (vector-count limits)) false (if (matches-parts? document parents (option-value-of [:option :string] id "") (:selector/parts (typed-list-nth [:list [:ref :cssom/compound]] limits j))) true (recur (inc j))))) true :else (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] id "")))))
+     :default
   (loop [id node-id]
     (cond
       (nil? id) false
       (= id root-id) false
       (some #(matches-parts? document parents id (:selector/parts %)) limits) true
-      :else (recur (get parents id)))))
+      :else (recur (get parents id))))))
 
 (defn- scope-root-ids
   "`[hops root-id]` for every element that roots a live scope over
