@@ -38,6 +38,10 @@ the selector cluster. The style pipeline is gated behind explicit GAPs.
 - fn parameters splice as `[#?@(:kotoba [...] :default [...])]`; the
   return annotation is a standalone `#?@(:kotoba [T])`.
 - `[:vector-i64]` is outside the profile: `[:vector [:i64 :i64 :i64]]`.
+- Global regex sweeps MUST be scope-checked: a `(nth s N)` sweep matched
+  the variable name `s` in 30 sites where `s` was a string (restored) or
+  a specificity triple (restored) -- the two accessor sweeps then fought
+  each other. Audit each sweep's variable bindings after running it.
 - Diagnostic spans can be misattributed (a rename test proved the
   reported fn was not the failing one); verify by experiment.
 
