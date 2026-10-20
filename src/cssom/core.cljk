@@ -7467,18 +7467,18 @@
    whole tokens that `of` cannot be a suffix of."
   #?(:kotoba nil :default #"(?i)^(.*?)\s+of\s+(.+)$"))
 
-(defn- nth-of-clause-kotoba [arg]
+(defn- nth-of-clause-kotoba [#?@(:kotoba [arg :string] :default [arg])] #?@(:kotoba [[:vector [:string [:option :string]]]])
   (let [s (str/trim (str arg))
         n (string-byte-length s)]
     (loop [idx 1]
       (if (>= (inc idx) n)
-        [arg nil]
+        [arg (option-none-of [:option :string])]
         (if (and (str/blank? (str (string-substring s (dec idx) idx)))
                  (= "of" (str/ascii-lower (subs s idx (+ idx 2))))
                  (str/blank? (str (nth s (+ idx 2))))
                  (< (+ idx 3) n))
           [(str/trim (subs s 0 (dec idx)))
-           (str/trim (subs s (+ idx 3)))]
+           (option-some-of [:option :string] (str/trim (subs s (+ idx 3))))]
           (recur (inc idx)))))))
 
 (defn- nth-of-clause
