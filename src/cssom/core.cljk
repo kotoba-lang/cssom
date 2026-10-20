@@ -7536,6 +7536,9 @@
    False for an unparseable `arg` or a `node` with no parent, the same
    conservative defaults their own docstrings describe."
   [document node same-tag? from-end? arg match-fn]
+  #?(:kotoba
+     (let [an-b-text (if same-tag? arg (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 0)) of-text (if same-tag? (option-none-of [:option :string]) (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 1)) of-selectors (if (option-some?-of [:option :string] of-text) (let [arms (split-selector-list (option-value-of [:option :string] of-text ""))] (loop [i 0 out (typed-list-new [:list [:ref :cssom/compound]])] (if (>= i (vector-count arms)) (option-some-of [:option [:list [:ref :cssom/compound]]] out) (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (parse-simple-selector (typed-list-nth [:list :string] arms i))))))) (option-none-of [:option [:list [:ref :cssom/compound]]])) an-b (parse-nth-expression an-b-text) raw-siblings (structural-siblings document node same-tag?) siblings (if (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors) (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [i 0 out (typed-list-new [:list :string])] (if (>= i (vector-count raw-siblings)) out (let [cid (typed-list-nth [:list :string] raw-siblings i)] (recur (inc i) (if (loop [k 0] (if (>= k (vector-count sels)) false (if (match-fn document (dom-node-at document cid) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k))))) (typed-list-conj [:list :string] out cid) out)))))) (structural-siblings document node same-tag?)) position (sibling-position siblings (:node/id node)) node-matches-of (if (not (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors)) true (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [k 0] (if (>= k (vector-count sels)) false (if (match-fn document (dom-node-at document node) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k)))))))] (and (option-some?-of [:option :i64] position) node-matches-of (nth-matches? (if from-end? (- (+ (vector-count siblings) 1) (option-value-of [:option :i64] position 0)) (option-value-of [:option :i64] position 0)) an-b)))
+     :default
   (boolean
    (let [[an-b-text of-text] (if same-tag? [arg nil] (nth-of-clause arg))
          of-selectors (when of-text (mapv parse-simple-selector (split-selector-list of-text)))]
@@ -7550,7 +7553,7 @@
               (nth-matches? (if from-end?
                               (- (+ (count siblings) 1) position)
                               position)
-                            an-b)))))))
+                            an-b))))))))
 
 ;; ---- :root / :empty pseudo-classes ----
 
