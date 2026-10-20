@@ -4368,14 +4368,27 @@
    It is given a name no author can write -- `anon-id` is the scanner's own
    running counter -- so everything downstream keeps treating a layer as a
    name and nothing has to learn about anonymity."
-  [parent-path header anon-id]
+  [#?@(:kotoba [parent-path [:list :string] header :string anon-id :i64] :default [parent-path header anon-id])] #?@(:kotoba [[:list :string]])
+  #?(:kotoba
+     (let [header (str/trim (str header))]
+       (if (str/blank? header)
+         (typed-list-conj [:list :string] parent-path (str anonymous-layer-prefix anon-id))
+         (let [parts (split-value-components header ".")
+               m (vector-count parts)]
+           (loop [i 0 out parent-path]
+             (if (>= i m)
+               out
+               (let [x (str/trim (typed-list-nth [:list :string] parts i))]
+                 (recur (inc i)
+                        (if (str/blank? x) out (typed-list-conj [:list :string] out x)))))))))
+     :default
   (let [header (str/trim (str header))]
     (if (str/blank? header)
       (conj (vec parent-path) (str anonymous-layer-prefix anon-id))
       (into (vec parent-path)
             (->> (split-value-components header ".")
                  (map (fn [x] (str/trim x)))
-                 (remove (fn [x] (str/blank? x))))))))
+                 (remove (fn [x] (str/blank? x)))))))))
 
 (defn- layer-paths-with-prefixes
   "`path` preceded by every one of its own prefixes, shortest first --
