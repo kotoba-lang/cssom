@@ -3657,7 +3657,7 @@
           :else (recur (inc idx) depth ""))))))
 
 (defn- selector-function-spans [s]
-  (loop [idx 0 spans []]
+  (loop [idx 0 spans (typed-list-new [:list [:vector [:i64 :i64]]])]
     (if (>= idx (string-byte-length s)) spans
       (let [ch (string-substring s idx (inc idx))]
         (cond
@@ -3686,7 +3686,7 @@
       (let [span (first remaining) start (nth span 0) end (nth span 1)]
         (if (< start idx)
           (recur idx (rest remaining) out)
-          (recur end (rest remaining) (conj out span)))))))
+          (recur end (rest remaining) (typed-list-conj [:list [:vector [:i64 :i64]]] out span)))))))
 
 (defn- selector-remove-spans [s spans]
   (loop [span-index 0 offset 0 out ""]
@@ -3697,7 +3697,7 @@
           (recur (inc span-index) end (str out (string-substring s offset start) " ")))))))
 
 (defn- selector-attribute-spans [s]
-  (loop [idx 0 spans []]
+  (loop [idx 0 spans (typed-list-new [:list [:vector [:i64 :i64]]])]
     (if (>= idx (string-byte-length s)) spans
       (let [ch (string-substring s idx (inc idx))]
         (cond
@@ -3706,12 +3706,12 @@
             (recur (if (pos? end) end (inc idx)) spans))
           (= ch "[")
           (let [end (selector-bracket-end s idx)]
-            (if (pos? end) (recur end (conj spans [idx end]))
+            (if (pos? end) (recur end (typed-list-conj [:list [:vector [:i64 :i64]]] spans [idx end]))
               (recur (inc idx) spans)))
           :else (recur (inc idx) spans))))))
 
 (defn- selector-pseudo-element-spans [s]
-  (loop [idx 0 spans []]
+  (loop [idx 0 spans (typed-list-new [:list [:vector [:i64 :i64]]])]
     (if (>= idx (string-byte-length s)) spans
       (let [ch (string-substring s idx (inc idx))
             double-colon? (and (= ch ":") (< (inc idx) (string-byte-length s)) (= ":" (nth s (inc idx))))
