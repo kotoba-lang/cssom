@@ -11859,8 +11859,11 @@
 
 (defn- resolve-style-map
   [env m]
+  #?(:kotoba
+     (let [n (typed-map-count [:map :keyword [:result :f64 :string]] m)] (reslice-substituted-box-shorthands (loop [i 0 out (typed-map-new [:map :keyword [:result :f64 :string]])] (if (>= i n) out (recur (inc i) (typed-map-assoc [:map :keyword [:result :f64 :string]] out (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] m) i) (resolve-value env (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] m) i))))))))
+     :default
   (reslice-substituted-box-shorthands
-   (into {} (map (fn [[k v]] [k (resolve-value env v)])) m)))
+   (into {} (map (fn [[k v]] [k (resolve-value env v)])) m))))
 
 (defn- apply-counter-pairs
   "Applies `op` (:reset or :increment) over `pairs` (a `[[name amount] ...]`
@@ -11876,12 +11879,15 @@
    returns `counters` unchanged), matching a node with no
    counter-reset/counter-increment declaration at all."
   [counters op pairs]
+  #?(:kotoba
+     (if (nil? pairs) counters (let [n (vector-count pairs)] (loop [i 0 out counters] (if (>= i n) out (let [pair (typed-list-nth [:list [:list :i64]] pairs i) name (typed-list-nth [:list :string] pair 0) amount (typed-list-nth [:list :i64] pair 1)] (recur (inc i) (if (= op :reset) (typed-map-assoc [:map :string :i64] out name amount) (if (typed-map-contains? [:map :string :i64] out name) (typed-map-assoc [:map :string :i64] out name (+ (typed-map-get [:map :string :i64] out name) amount)) (typed-map-assoc [:map :string :i64] out name amount)))))))))
+     :default
   (reduce (fn [counters [name amount]]
             (case op
               :reset (assoc counters name amount)
               :increment (update counters name (fnil + 0) amount)))
           counters
-          pairs))
+          pairs)))
 
 (defn- style-with-counters
   "Like `computed-style`, but for `apply-cascade`'s own top-down tree walk:
