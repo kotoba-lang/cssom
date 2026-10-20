@@ -4172,13 +4172,14 @@
   [arg [:ref :cssom/compound]] [:vector [:i64 :i64 :i64]]
   (let [parts (:selector/parts arg)]
     (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts)
-      (loop [i 0 acc [0 0 0]]
-        (if (>= i (vector-count parts))
+      (let [nparts (vector-count parts)]
+       (loop [i 0 acc [0 0 0]]
+        (if (>= i nparts)
           acc
           (recur (inc i)
             (let [s (simple-selector-specificity (typed-list-nth [:list [:ref :cssom/compound]] parts i))]
               [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))]))))
-      (simple-selector-specificity arg))))
+      )(simple-selector-specificity arg))))
 
 (defn- spec-most-specific
   [group [:list [:ref :cssom/compound]]] [:vector [:i64 :i64 :i64]]
