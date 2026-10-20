@@ -1451,24 +1451,24 @@
   [v]
   (let [s (str v)
         n (count s)]
-    (loop [idx 0 start 0 quote-char (option-none-of [:option :string]) terms []]
+    (loop [idx 0 start 0 quote-char 0 terms []]
       (if (= idx n)
         (let [term (str/trim (subs s start idx))]
           (if (str/blank? term) terms (conj terms term)))
         (let [ch (nth s idx)]
           (cond
-            (and quote-char (= (str ch) quote-char))
-            (recur (inc idx) start (option-none-of [:option :string]) terms)
+            (and (< 0 quote-char) (= ch quote-char))
+            (recur (inc idx) start 0 terms)
 
-            quote-char
+            (< 0 quote-char)
             (recur (inc idx) start quote-char terms)
 
             (or (= "\"" (str ch)) (= "'" (str ch)))
-            (recur (inc idx) start (option-some-of [:option :string] (str ch)) terms)
+            (recur (inc idx) start ch terms)
 
             (content-ws-char? ch)
             (let [term (str/trim (subs s start idx))]
-              (recur (inc idx) (inc idx) (option-none-of [:option :string]) (if (str/blank? term) terms (conj terms term))))
+              (recur (inc idx) (inc idx) 0 (if (str/blank? term) terms (conj terms term))))
 
             :else
             (recur (inc idx) start quote-char terms)))))))
@@ -1702,17 +1702,17 @@
 (defn- css-decimal-token? [s]
   (let [n (count s)
         start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)]
-    (loop [idx start before 0 after 0 dot? false]
+    (loop [idx start before 0 after 0 dot? 0]
       (if (>= idx n)
         (or (> before 0) (> after 0))
         (let [ch (nth s idx)]
           (cond
             (str/includes? "0123456789" (str ch))
-            (if dot?
+            (if (< 0 dot?)
               (recur (inc idx) before (inc after) dot?)
               (recur (inc idx) (inc before) after dot?))
-            (and (= "." (str ch)) (not dot?))
-            (recur (inc idx) before after true)
+            (and (= "." (str ch)) (= 0 dot?))
+            (recur (inc idx) before after 1)
             :else false))))))
 
 (defn- css-digit? [ch]
@@ -1754,13 +1754,13 @@
 (defn- css-zero-token? [s]
   (let [n (count s)
         start (if (and (> n 0) (or (= "+" (str (nth s 0))) (= "-" (str (nth s 0))))) 1 0)]
-    (loop [idx start dot? false]
+    (loop [idx start dot? 0]
       (if (>= idx n)
         true
         (let [ch (nth s idx)]
           (cond
             (= "0" (str ch)) (recur (inc idx) dot?)
-            (and (= "." (str ch)) (not dot?)) (recur (inc idx) true)
+            (and (= "." (str ch)) (= 0 dot?)) (recur (inc idx) 1)
             :else false))))))
 
 (defn- css-ident-token? [s]
@@ -3446,7 +3446,7 @@
               escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))
               nesting-depth (+ bracket-depth paren-depth)]
           (cond
-            (and quote-char (= ch quote-char) (not escaped?))
+            (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
             (recur (inc idx) start bracket-depth paren-depth (option-none-of [:option :string]) tokens)
 
             quote-char
@@ -3517,7 +3517,7 @@
         (let [ch (nth s idx)
               escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
           (cond
-            (and quote-char (= ch quote-char) (not escaped?))
+            (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
             (recur (inc idx) start bracket-depth paren-depth nil selectors)
 
             quote-char
@@ -3604,7 +3604,7 @@
       (if (>= idx (count s)) -1
         (let [ch (nth s idx)
               escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
-          (if (and (= ch quote-char) (not escaped?))
+          (if (and (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
             (inc idx)
             (recur (inc idx))))))))
 
@@ -3614,7 +3614,7 @@
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and quote-char (= ch quote-char) (not escaped?)) (recur (inc idx) nil)
+          (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?)) (recur (inc idx) nil)
           quote-char (recur (inc idx) quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) ch)
           (= ch "]") (inc idx)
@@ -3626,7 +3626,7 @@
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and quote-char (= ch quote-char) (not escaped?)) (recur (inc idx) depth nil)
+          (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?)) (recur (inc idx) depth nil)
           quote-char (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
           (= ch "(") (recur (inc idx) (inc depth) nil)
@@ -5800,7 +5800,7 @@
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and quote-char (= ch quote-char) (not escaped?))
+          (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
           (recur (inc idx) depth nil)
           quote-char (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
