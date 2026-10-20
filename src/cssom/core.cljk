@@ -1451,24 +1451,24 @@
   [v]
   (let [s (str v)
         n (count s)]
-    (loop [idx 0 start 0 quote-char nil terms []]
+    (loop [idx 0 start 0 quote-char (option-none-of [:option :string]) terms []]
       (if (= idx n)
         (let [term (str/trim (subs s start idx))]
           (if (str/blank? term) terms (conj terms term)))
         (let [ch (nth s idx)]
           (cond
             (and quote-char (= (str ch) quote-char))
-            (recur (inc idx) start nil terms)
+            (recur (inc idx) start (option-none-of [:option :string]) terms)
 
             quote-char
             (recur (inc idx) start quote-char terms)
 
             (or (= "\"" (str ch)) (= "'" (str ch)))
-            (recur (inc idx) start (str ch) terms)
+            (recur (inc idx) start (option-some-of [:option :string] (str ch)) terms)
 
             (content-ws-char? ch)
             (let [term (str/trim (subs s start idx))]
-              (recur (inc idx) (inc idx) nil (if (str/blank? term) terms (conj terms term))))
+              (recur (inc idx) (inc idx) (option-none-of [:option :string]) (if (str/blank? term) terms (conj terms term))))
 
             :else
             (recur (inc idx) start quote-char terms)))))))
@@ -3438,7 +3438,7 @@
            start 0
            bracket-depth 0
            paren-depth 0
-           quote-char nil
+           quote-char (option-none-of [:option :string])
            tokens []]
       (if (= idx n)
         (append-token tokens (str/trim (subs s start idx)))
@@ -3447,13 +3447,13 @@
               nesting-depth (+ bracket-depth paren-depth)]
           (cond
             (and quote-char (= ch quote-char) (not escaped?))
-            (recur (inc idx) start bracket-depth paren-depth nil tokens)
+            (recur (inc idx) start bracket-depth paren-depth (option-none-of [:option :string]) tokens)
 
             quote-char
             (recur (inc idx) start bracket-depth paren-depth quote-char tokens)
 
             (or (= ch "\"") (= ch "'"))
-            (recur (inc idx) start bracket-depth paren-depth ch tokens)
+            (recur (inc idx) start bracket-depth paren-depth (option-some-of [:option :string] ch) tokens)
 
             (= ch "[")
             (recur (inc idx) start (inc bracket-depth) paren-depth quote-char tokens)
@@ -3507,7 +3507,7 @@
            start 0
            bracket-depth 0
            paren-depth 0
-           quote-char nil
+           quote-char (option-none-of [:option :string])
            selectors []]
       (if (= idx n)
         (->> (conj selectors (subs s start idx))
@@ -3609,7 +3609,7 @@
             (recur (inc idx))))))))
 
 (defn- selector-bracket-end [s open]
-  (loop [idx (inc open) quote-char nil]
+  (loop [idx (inc open) quote-char (option-none-of [:option :string])]
     (if (>= idx (count s)) -1
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
@@ -3621,7 +3621,7 @@
           :else (recur (inc idx) nil))))))
 
 (defn- selector-paren-end [s open]
-  (loop [idx open depth 0 quote-char nil]
+  (loop [idx open depth 0 quote-char (option-none-of [:option :string])]
     (if (>= idx (count s)) -1
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
@@ -5795,7 +5795,7 @@
     (or resolved (let [f fallback] (when f (let [t (str/trim f)] (when (not (str/blank? t)) t)))))))
 
 (defn- split-css-call-arguments [s]
-  (loop [idx 0 depth 0 quote-char nil]
+  (loop [idx 0 depth 0 quote-char (option-none-of [:option :string])]
     (if (>= idx (count s)) [s]
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
