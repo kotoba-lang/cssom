@@ -10650,8 +10650,7 @@
 
    Every one of these is a keyword-only property: a property that also
    accepts a length or a colour is either absent from this table or listed
-   in `length-valued-properties` below, never both."
-  {:position #?(:kotoba (typed-map-new [:map :string :bool] "static" true "relative" true "absolute" true "fixed" true "sticky" true) :default #{"static" "relative" "absolute" "fixed" "sticky"})
+   in `length-valued-properties` below, never both."  #?(:kotoba (typed-map-new [:map :keyword [:map :string :bool]] :position #?(:kotoba (typed-map-new [:map :string :bool] "static" true "relative" true "absolute" true "fixed" true "sticky" true) :default #{"static" "relative" "absolute" "fixed" "sticky"})
    :float #?(:kotoba (typed-map-new [:map :string :bool] "none" true "left" true "right" true "inline-start" true "inline-end" true) :default #{"none" "left" "right" "inline-start" "inline-end"})
    :clear #?(:kotoba (typed-map-new [:map :string :bool] "none" true "left" true "right" true "both" true "inline-start" true "inline-end" true) :default #{"none" "left" "right" "both" "inline-start" "inline-end"})
    :overflow #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "clip" true "scroll" true "auto" true) :default #{"visible" "hidden" "clip" "scroll" "auto"})
@@ -10687,41 +10686,43 @@
    :border-bottom-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
                           "groove" "ridge" "inset" "outset"})
    :border-left-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
-                        "groove" "ridge" "inset" "outset"})})
-
-(def ^:private length-valued-properties
-  "The properties whose value this engine reads as a LENGTH, plus the
-   keywords each of them also accepts. `em-resolvable-properties` is the
-   authority for which properties these are -- it is the same question
-   asked for a different reason -- and this table only adds the keyword
-   half, which that one has no need for.
-
-   Measured in Brave 151 on 2026-08-06: `@supports (width: 10px)` and
-   `@supports (width: calc(1px + 2px))` are red, and
-   `@supports (width: 10)` is BLACK -- a unitless non-zero number is not a
-   length, which is exactly the distinction `parse-media-length` makes for
-   the same reason one line of CSS away."
-  {:default #?(:kotoba (typed-map-new [:map :string :bool] "auto" true "inherit" true "min-content" true "max-content" true "fit-content" true "none" true "normal" true) :default #{"auto" "inherit" "min-content" "max-content" "fit-content" "none" "normal"})
-   :line-height #?(:kotoba (typed-map-new [:map :string :bool] "normal" true) :default #{"normal"})
-   :vertical-align #?(:kotoba (typed-map-new [:map :string :bool] "baseline" true "sub" true "super" true "top" true "text-top" true "middle" true "bottom" true "text-bottom" true) :default #{"baseline" "sub" "super" "top" "text-top" "middle"
-                     "bottom" "text-bottom"})
-   :letter-spacing #?(:kotoba (typed-map-new [:map :string :bool] "normal" true) :default #{"normal"})
-   :word-spacing #?(:kotoba (typed-map-new [:map :string :bool] "normal" true) :default #{"normal"})
-   :border-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
-   :border-top-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
-   :border-right-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
-   :border-bottom-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
-   :border-left-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
-   :outline-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})})
-
-(def ^:private unitless-number-properties
-  "The length-ish properties whose value may legitimately be a bare number:
-   `line-height: 2` is twice the font size (see `parse-property-value`,
-   which keeps it a string for exactly this reason) and a `flex-basis: 0`
-   is a zero of any kind. Everything else in `length-valued-properties`
-   needs a unit on a non-zero value."
-  #?(:kotoba (typed-map-new [:map :keyword :bool] :line-height true :flex-basis true) :default #{:line-height :flex-basis}))
-
+                        "groove" "ridge" "inset" "outset"})) :default {:position #?(:kotoba (typed-map-new [:map :string :bool] "static" true "relative" true "absolute" true "fixed" true "sticky" true) :default #{"static" "relative" "absolute" "fixed" "sticky"})
+   :float #?(:kotoba (typed-map-new [:map :string :bool] "none" true "left" true "right" true "inline-start" true "inline-end" true) :default #{"none" "left" "right" "inline-start" "inline-end"})
+   :clear #?(:kotoba (typed-map-new [:map :string :bool] "none" true "left" true "right" true "both" true "inline-start" true "inline-end" true) :default #{"none" "left" "right" "both" "inline-start" "inline-end"})
+   :overflow #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "clip" true "scroll" true "auto" true) :default #{"visible" "hidden" "clip" "scroll" "auto"})
+   :overflow-x #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "clip" true "scroll" true "auto" true) :default #{"visible" "hidden" "clip" "scroll" "auto"})
+   :overflow-y #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "clip" true "scroll" true "auto" true) :default #{"visible" "hidden" "clip" "scroll" "auto"})
+   :visibility #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "collapse" true) :default #{"visible" "hidden" "collapse"})
+   :box-sizing #?(:kotoba (typed-map-new [:map :string :bool] "content-box" true "border-box" true) :default #{"content-box" "border-box"})
+   :direction #?(:kotoba (typed-map-new [:map :string :bool] "ltr" true "rtl" true) :default #{"ltr" "rtl"})
+   :writing-mode #?(:kotoba (typed-map-new [:map :string :bool] "horizontal-tb" true "vertical-rl" true "vertical-lr" true "sideways-rl" true "sideways-lr" true) :default #{"horizontal-tb" "vertical-rl" "vertical-lr"
+                   "sideways-rl" "sideways-lr"})
+   :text-orientation #?(:kotoba (typed-map-new [:map :string :bool] "mixed" true "upright" true "sideways" true) :default #{"mixed" "upright" "sideways"})
+   :white-space #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "nowrap" true "pre" true "pre-wrap" true "pre-line" true "break-spaces" true) :default #{"normal" "nowrap" "pre" "pre-wrap" "pre-line" "break-spaces"})
+   :word-break #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "break-all" true "keep-all" true "break-word" true) :default #{"normal" "break-all" "keep-all" "break-word"})
+   :overflow-wrap #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "break-word" true "anywhere" true) :default #{"normal" "break-word" "anywhere"})
+   :word-wrap #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "break-word" true "anywhere" true) :default #{"normal" "break-word" "anywhere"})
+   :text-align #?(:kotoba (typed-map-new [:map :string :bool] "start" true "end" true "left" true "right" true "center" true "justify" true "match-parent" true) :default #{"start" "end" "left" "right" "center" "justify" "match-parent"})
+   :text-transform #?(:kotoba (typed-map-new [:map :string :bool] "none" true "capitalize" true "uppercase" true "lowercase" true "full-width" true) :default #{"none" "capitalize" "uppercase" "lowercase" "full-width"})
+   :font-style #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "italic" true "oblique" true) :default #{"normal" "italic" "oblique"})
+   :border-collapse #?(:kotoba (typed-map-new [:map :string :bool] "separate" true "collapse" true) :default #{"separate" "collapse"})
+   :caption-side #?(:kotoba (typed-map-new [:map :string :bool] "top" true "bottom" true) :default #{"top" "bottom"})
+   :empty-cells #?(:kotoba (typed-map-new [:map :string :bool] "show" true "hide" true) :default #{"show" "hide"})
+   :table-layout #?(:kotoba (typed-map-new [:map :string :bool] "auto" true "fixed" true) :default #{"auto" "fixed"})
+   :flex-direction #?(:kotoba (typed-map-new [:map :string :bool] "row" true "row-reverse" true "column" true "column-reverse" true) :default #{"row" "row-reverse" "column" "column-reverse"})
+   :flex-wrap #?(:kotoba (typed-map-new [:map :string :bool] "nowrap" true "wrap" true "wrap-reverse" true) :default #{"nowrap" "wrap" "wrap-reverse"})
+   :container-type #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "inline-size" true "size" true) :default #{"normal" "inline-size" "size"})
+   :list-style-position #?(:kotoba (typed-map-new [:map :string :bool] "inside" true "outside" true) :default #{"inside" "outside"})
+   :border-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                   "groove" "ridge" "inset" "outset"})
+   :border-top-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                       "groove" "ridge" "inset" "outset"})
+   :border-right-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                         "groove" "ridge" "inset" "outset"})
+   :border-bottom-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                          "groove" "ridge" "inset" "outset"})
+   :border-left-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+                        "groove" "ridge" "inset" "outset"})}))
 (defn- color-valued-property?
   "The properties whose value this engine reads as a COLOUR. DERIVED from
    `engine-properties` rather than listed, because the naming convention is
