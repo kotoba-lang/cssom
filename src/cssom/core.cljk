@@ -1615,18 +1615,20 @@
   (let [s (str/trim (str v))
         tokens (split-value-components s " ")]
     (when (seq tokens)
-      (loop [tokens tokens pairs (typed-list-new [:list [:vector [:string :i64]]])]
-        (if (empty? tokens)
-          pairs
-          (let [name (first tokens)
-                next-tok (second tokens)]
-            (if-not (css-ident? name)
-              nil
-              (if (and next-tok
-                       #?(:kotoba (css-signed-integer-token? next-tok)
-                          :default (re-matches #"-?\d+" next-tok)))
-                (recur (drop 2 tokens) (typed-list-conj [:list [:vector [:string :i64]]] pairs [name (parse-counter-amount next-tok)]))
-                (recur (rest tokens) (typed-list-conj [:list [:vector [:string :i64]]] pairs [name default-amount]))))))))))
+      (let [ntoks (vector-count tokens)]
+        (loop [i 0 pairs (typed-list-new [:list [:vector [:string :i64]]])]
+          (if (>= i ntoks)
+            pairs
+            (let [name (typed-list-nth [:list :string] tokens i)
+                  has-next (< (inc i) ntoks)
+                  next-tok (if has-next (typed-list-nth [:list :string] tokens (inc i)) "")]
+              (if-not (css-ident? name)
+                nil
+                (if (and has-next
+                         #?(:kotoba (css-signed-integer-token? next-tok)
+                            :default (re-matches #"-?\d+" next-tok)))
+                  (recur (+ i 2) (typed-list-conj [:list [:vector [:string :i64]]] pairs [name (parse-counter-amount next-tok)]))
+                  (recur (inc i) (typed-list-conj [:list [:vector [:string :i64]]] pairs [name default-amount])))))))))))
 
 (defn- parse-property-value
   "Parses a single declaration's raw value string for property `k` (still a
