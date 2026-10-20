@@ -60,6 +60,16 @@ the :kotoba route (media-range-tokens, split-top-level(-word),
 parse-counter-property, amp-positions); remaining `[]`/`conj` sites are
 :default-only (reader-stripped on --jvm-free).
 
+## Tuple scan (full-file, 2+ element literals)
+
+943 tuples inventoried: all return-position tuples are either
+:default-only (calc cluster is dual-stubbed), docstrings, let bindings,
+or typed/annotated (calc-name-parts [:string :string], nth-of-clause
+[:string :option :string], env/attr-reference [i64 name fallback]-ish).
+The [:i64 :option-i64] pair remains unlocated -- the leading theory is
+a desugar-emitted loop (mapv/keep/into over a tuple-producing fn) whose
+printed forms are truncated in the diagnostic.
+
 ## Known remaining wall
 
 `:kotoba.error/loop-exit-type` (no span): one loop exits with a
