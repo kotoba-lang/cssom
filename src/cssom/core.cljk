@@ -6726,11 +6726,11 @@
        (not (file-input-control? node))))
 
 (defn- form-control?
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (contains? form-control-tags (:tag node)))
 
 (defn- disabled-capable-control?
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (contains? disabled-capable-tags (:tag node)))
 
 (defn- descendant-node-ids
@@ -6830,7 +6830,7 @@
             (recur (parent-node-id document parent-id))))))))
 
 (defn- disabled-control?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (and (disabled-capable-control? node)
        (or (truthy-attr? (get-in node [:attrs :disabled]))
            (disabled-by-fieldset? document node)
@@ -8681,7 +8681,7 @@
                      attrs)))))
 
 (defn- pseudo-element-of
-  [selector]
+  [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
   (:selector/pseudo-element (last (:selector/parts selector))))
 
 ;; ---- @scope: a range in the tree, and PROXIMITY in the cascade ----
@@ -9940,7 +9940,7 @@
 (defn- ua-rules-for
   "The UA rules that can possibly apply to `node` -- its tag's bucket plus
    the tagless one."
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (let [by-tag (ua-rules-by-tag)]
     (concat (get by-tag (:tag node)) (get by-tag nil))))
 
