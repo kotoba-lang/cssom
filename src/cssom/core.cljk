@@ -2839,6 +2839,69 @@
    empty map rather than guessing, this file's own established degrade-
    don't-guess convention for every other malformed/incomplete value."
   [v]
+  #?(:kotoba
+     (let [raw (split-value-components (str/trim (str v)) " ")
+           nraw (vector-count raw)
+           split-i (loop [i 0]
+                     (if (>= i nraw)
+                       i
+                       (let [tok (typed-list-nth [:list :string] raw i)
+                             lower (str/ascii-lower tok)]
+                         (if (or (contains? font-shorthand-style-keywords lower)
+                                 (contains? font-shorthand-weight-keywords lower)
+                                 (contains? font-shorthand-skip-keywords lower))
+                           (recur (inc i))
+                           i))))
+           nrem (- nraw split-i)]
+       (if (or (= nrem 0) (= nrem 1))
+         (typed-map-new [:map :keyword [:result :f64 :string]])
+         (let [size-token (typed-list-nth [:list :string] raw split-i)
+               family (loop [i (inc split-i) acc ""]
+                        (if (>= i nraw)
+                          acc
+                          (recur (inc i)
+                            (str acc (if (= i (inc split-i)) "" " ")
+                                 (typed-list-nth [:list :string] raw i)))))
+               style-tok (loop [i 0]
+                           (if (>= i split-i)
+                             (option-none-of [:option :string])
+                             (let [tok (typed-list-nth [:list :string] raw i)]
+                               (if (contains? font-shorthand-style-keywords (str/ascii-lower tok))
+                                 (option-some-of [:option :string] tok)
+                                 (recur (inc i))))))
+               weight-tok (loop [i 0]
+                            (if (>= i split-i)
+                              (option-none-of [:option :string])
+                              (let [tok (typed-list-nth [:list :string] raw i)]
+                                (if (contains? font-shorthand-weight-keywords (str/ascii-lower tok))
+                                  (option-some-of [:option :string] tok)
+                                  (recur (inc i))))))
+               slash (str/index-of size-token "/")
+               size-part (if (option-some?-of [:option :i64] slash)
+                           (s-sub size-token 0 (option-value-of [:option :i64] slash 0))
+                           size-token)
+               lh-part (if (option-some?-of [:option :i64] slash)
+                         (option-some-of [:option :string]
+                           (s-sub size-token (inc (option-value-of [:option :i64] slash 0)) (s-len size-token)))
+                         (option-none-of [:option :string]))
+               base (typed-map-assoc [:map :keyword [:result :f64 :string]]
+                      (typed-map-assoc [:map :keyword [:result :f64 :string]]
+                        (typed-map-new [:map :keyword [:result :f64 :string]])
+                        :font-size (parse-style-value size-part))
+                      :font-family (result-err-of [:result :f64 :string] family))
+               m1 (if (option-some?-of [:option :string] style-tok)
+                    (typed-map-assoc [:map :keyword [:result :f64 :string]] base :font-style
+                      (parse-style-value (option-value-of [:option :string] style-tok "")))
+                    base)
+               m2 (if (option-some?-of [:option :string] weight-tok)
+                    (typed-map-assoc [:map :keyword [:result :f64 :string]] m1 :font-weight
+                      (parse-style-value (option-value-of [:option :string] weight-tok "")))
+                    m1)]
+           (if (option-some?-of [:option :string] lh-part)
+             (typed-map-assoc [:map :keyword [:result :f64 :string]] m2 :line-height
+               (parse-style-value (option-value-of [:option :string] lh-part "")))
+             m2))))
+     :default
   (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))
         [leading remaining] (split-with (fn [tok]
                                            (let [lower (str/ascii-lower tok)]
@@ -2857,7 +2920,7 @@
                  :font-family family}
           style-tok (assoc :font-style (parse-style-value style-tok))
           weight-tok (assoc :font-weight (parse-style-value weight-tok))
-          lh-part (assoc :line-height (parse-style-value lh-part)))))))
+          lh-part (assoc :line-height (parse-style-value lh-part))))))))
 
 (defn parse-declarations-with-importance
   "Parses a raw `property: value; ...` declaration-block string (e.g. a
