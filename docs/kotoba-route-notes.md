@@ -70,6 +70,21 @@ The [:i64 :option-i64] pair remains unlocated -- the leading theory is
 a desugar-emitted loop (mapv/keep/into over a tuple-producing fn) whose
 printed forms are truncated in the diagnostic.
 
+## :fn (callable) parameter recipe -- probed 2026-10-20
+
+- `[:fn [[params] result] ...]` clauses exist; an optional `{:effects #{...}}`
+  row trails the clauses.
+- A parameter type is admitted exactly when it is admitted as a closure
+  RESULT type (closure-flat-result-types plus records/options/results).
+- Measured: `:i64`, `:document` (builtin flat) and inline qualified
+  records with FEW fields pass; a TOP-LEVEL `[:ref ...]` parameter is
+  refused (`callable-parameter-type`); an inline record with many fields
+  and nested refs (the 14-field :cssom/compound) exceeds the VALUE-TYPE
+  NODE LIMIT. So a :fn param can name a small record but not the big
+  compound -- the fn-value pattern (match-fn plumbing) cannot be fully
+  typed this way and needs either a compact shadow record or direct
+  calls instead of fn values.
+
 ## Known remaining wall
 
 `:kotoba.error/loop-exit-type` (no span): one loop exits with a

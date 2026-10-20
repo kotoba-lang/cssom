@@ -8324,7 +8324,7 @@
    candidate descendant with `match-fn` and SHORT-CIRCUITING (`some`) the
    instant one matches -- real `:has()` semantics only ever need ONE
    matching descendant, never proof that every descendant was checked."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn [:fn [[:document [:record :cssom/test-rec [[:a :string]]] :i64] :bool]]] :default [document node compound match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node compound match-fn])]
   #?(:kotoba
      (let [ids (descendant-node-ids document node) nids (vector-count ids)] (loop [i 0] (if (>= i nids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] ids i)) compound) true (recur (inc i))))))
      :default
@@ -8347,7 +8347,7 @@
    never going to match any compound selector, no separate filtering needed
    in this function. Short-circuits (`some`) the same way as
    `has-arg-descendant-match?`."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn [:fn [[:document [:record :cssom/test-rec [[:a :string]]] :i64] :bool]]] :default [document node compound match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node compound match-fn])]
   #?(:kotoba
      (let [kids (:children node) nkids (vector-count kids)] (loop [i 0] (if (>= i nkids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
      :default
@@ -8377,7 +8377,7 @@
 
    False when `node` has no parent, matching every other sibling-relative
    answer in this namespace."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound adjacent-only? match-fn [:fn [[:document [:record :cssom/test-rec [[:a :string]]] :i64] :bool]]] :default [document node compound adjacent-only? match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound adjacent-only? match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node compound adjacent-only? match-fn])]
   #?(:kotoba
      (let [siblings0 (structural-siblings document node false)] (if (not (option-some?-of [:option [:list :string]] siblings0)) false (let [siblings (option-value-of [:option [:list :string]] siblings0 (typed-list-new [:list :string])) position (sibling-position siblings (:node/id node))] (if (not (option-some?-of [:option :i64] position)) false (let [start (option-value-of [:option :i64] position 0) n (vector-count siblings) limit (if adjacent-only? (min n (inc start)) n)] (loop [i start] (if (>= i limit) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] siblings i)) compound) true (recur (inc i))))))))))
      :default
@@ -8411,7 +8411,7 @@
    this unconditionally returns false when `document` is nil rather than
    attempting a documentless walk (the documentless 2-arity `matches-simple?`
    form below passes `document` nil, so :has() never matches there either)."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] group match-fn [:fn [[:document [:record :cssom/test-rec [[:a :string]]] :i64] :bool]]] :default [document node group match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] group match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node group match-fn])]
   #?(:kotoba
      (when document (loop [i 0 ngrp (vector-count group)] (if (>= i ngrp) false (let [item (typed-list-nth [:list [:ref :cssom/has-item]] group i) selector (:has/selector item) combinator (:has/combinator item) direct? (:has/direct-child? item) kind (if (option-some?-of [:option :keyword] combinator) (option-value-of [:option :keyword] combinator :none) (if direct? :child :descendant))] (if (cond (= kind :child) (has-arg-child-match? document node selector match-fn) (= kind :next-sibling) (has-arg-sibling-match? document node selector true match-fn) (= kind :following-sibling) (has-arg-sibling-match? document node selector false match-fn) :else (has-arg-descendant-match? document node selector match-fn)) true (recur (inc i) ngrp))))))
      :default
@@ -8468,7 +8468,7 @@
    `matches-simple?`, because `matches-simple?` needs it for a COMPLEX
    `:is()`/`:not()`/`:where()` argument, and this namespace deliberately
    avoids `declare`-based forward references."
-  [#?@(:kotoba [document :document parents node-id parts [:ref :cssom/compound] match-fn [:fn [[:document [:record :cssom/test-rec [[:a :string]]] :i64] :bool]]] :default [document parents node-id parts match-fn])]
+  [#?@(:kotoba [document :document parents node-id parts [:ref :cssom/compound] match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document parents node-id parts match-fn])]
   #?(:kotoba
      (if (> (vector-count parts) 0) (parts-match-at document parents node-id parts (dec (vector-count parts)) match-fn) false)
      :default
