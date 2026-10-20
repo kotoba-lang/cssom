@@ -9058,8 +9058,13 @@
    treatment as any other unsupported form. A plain string term passes
    through as itself."
   [node counters term]
-  (cond
-    (not (map? term)) (str term)
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): content terms are a string|marker
+     ;; union (same heterogeneous carrier gap as resolve-content-value).
+     nil
+     :default
+     (cond
+       (not (map? term)) (str term)
 
     (contains? term :content/attr-name)
     (str (or (get-in node [:attrs (keyword (:content/attr-name term))]) ""))
@@ -9068,7 +9073,8 @@
     (when (some? counters)
       (str (get counters (:content/counter-name term) 0)))
 
-    :else (str term)))
+    :else (str term))))
+
 
 (defn- resolve-content-value
   "Resolves a cascade-winning `content` value (see `parse-content-value`)
