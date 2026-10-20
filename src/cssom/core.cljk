@@ -1454,7 +1454,7 @@
     (loop [idx 0 start 0 quote-char "" terms (typed-list-new [:list :string])]
       (if (= idx n)
         (let [term (str/trim (subs s start idx))]
-          (if (str/blank? term) terms (typed-list-append [:list :string] terms term)))
+          (if (str/blank? term) terms (typed-list-conj [:list :string] terms term)))
         (let [ch (string-substring s idx (inc idx))]
           (cond
             (and (not= "" quote-char) (= ch quote-char))
@@ -1468,7 +1468,7 @@
 
             (content-ws-char? ch)
             (let [term (str/trim (subs s start idx))
-                  out2 (if (str/blank? term) terms (typed-list-append [:list :string] terms term))]
+                  out2 (if (str/blank? term) terms (typed-list-conj [:list :string] terms term))]
               (recur (inc idx) (inc idx) "" out2))
 
             :else
@@ -1515,7 +1515,7 @@
    no generated-content box, no crash."
   [v]
   (or (parse-content-term v)
-      (let [terms (split-content-terms v)]
+      (let [terms (split-content-terms (str v))]
         (when (> (count terms) 1)
           (let [parsed (mapv parse-content-term terms)]
             (when (every? (fn [x] (some? x)) parsed)
@@ -1928,7 +1928,7 @@
    never disagree about where one side's value ends."
   [v]
   #?(:kotoba
-     (let [s (str/trim (str v)) n (string-length s)] (loop [i 0 depth 0 start 0 out (typed-list-new [:list :string])] (if (>= i n) (let [term (str/trim (string-substring s start i))] (if (str/blank? term) out (typed-list-append [:list :string] out term))) (let [c (string-substring s i (inc i))] (cond (= "(" c) (recur (inc i) (inc depth) start out) (= ")" c) (recur (inc i) (dec depth) start out) (and (= 0 depth) (str/blank? c)) (recur (inc i) depth (inc i) (if (str/blank? (str/trim (string-substring s start i))) out (typed-list-append [:list :string] out (str/trim (string-substring s start i))))) :else (recur (inc i) depth start out))))))
+     (let [s (str/trim (str v)) n (string-length s)] (loop [i 0 depth 0 start 0 out (typed-list-new [:list :string])] (if (>= i n) (let [term (str/trim (string-substring s start i))] (if (str/blank? term) out (typed-list-conj [:list :string] out term))) (let [c (string-substring s i (inc i))] (cond (= "(" c) (recur (inc i) (inc depth) start out) (= ")" c) (recur (inc i) (dec depth) start out) (and (= 0 depth) (str/blank? c)) (recur (inc i) depth (inc i) (if (str/blank? (str/trim (string-substring s start i))) out (typed-list-conj [:list :string] out (str/trim (string-substring s start i))))) :else (recur (inc i) depth start out))))))
      :default
   (loop [chars (seq (str/trim (str v))) depth 0 cur "" out []]
     (if-let [c (first chars)]
