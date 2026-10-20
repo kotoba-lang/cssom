@@ -12231,6 +12231,12 @@
    the empty inherited environment above it already makes: a detached node
    has no ancestor chain to read either number off."
   [document rules container-ctx base-font-size]
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): the rule-pipeline gap -- the walk
+;; runs style-element (stubbed). Typed route returns the document
+;; unchanged. Removal condition: style-element answers its tuple.
+     document
+     :default
   (let [registry (rules-property-registry rules)
         initial-env (registered-initial-env registry)]
    (letfn [(walk [document node-id inherited-env inherited-counters visited
@@ -12277,7 +12283,7 @@
                                  base-font-size base-font-size nil 0 initial-flow registry))
            document))
        document
-       (:nodes document))))))
+       (:nodes document)))))))
 
 (defn apply-cascade
   "Applies the cascade over `document`, writing each element's resolved
