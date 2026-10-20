@@ -1012,7 +1012,7 @@
                                        (when-let [[node rest-toks] (parse-calc-level toks 0)]
                                          (when (empty? rest-toks) node))))
                                    (calc-split-arguments (:calc/text t)))]
-                    (when (and (seq args) (every? some? args))
+                    (when (and (seq args) (every? (fn [x] (some? x)) args))
                       [{:calc/op :fn :calc/name (:calc/name t) :calc/args args}
                        (rest tokens)]))
           :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
@@ -1083,7 +1083,7 @@
     :num [(:calc/value node) (:calc/unit node)]
 
     :fn (let [vals (mapv eval-calc-node (:calc/args node))]
-          (when (and (seq vals) (every? some? vals)
+          (when (and (seq vals) (every? (fn [x] (some? x)) vals)
                      (apply = (map second vals)))
             (let [unit (second (first vals))
                   ns' (mapv first vals)]
@@ -1497,7 +1497,7 @@
       (let [terms (split-content-terms v)]
         (when (> (count terms) 1)
           (let [parsed (mapv parse-content-term terms)]
-            (when (every? some? parsed)
+            (when (every? (fn [x] (some? x)) parsed)
               {:content/parts parsed}))))))
 
 (defn- parse-counter-amount
@@ -1540,7 +1540,7 @@
         n (count s)]
     (loop [idx 0 start 0 depth 0 out []]
       (if (= idx n)
-        (into [] (remove str/blank?) (conj out (str/trim (subs s start idx))))
+        (into [] (remove (fn [x] (str/blank? x))) (conj out (str/trim (subs s start idx))))
         (let [ch (nth s idx)]
           (cond
             (= "(" (str ch)) (recur (inc idx) start (inc depth) out)
@@ -1878,7 +1878,7 @@
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-color (result-err-of [:result :f64 :string] tok))
                      :else result))))))))
      :default
-  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))]
+  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
     (reduce (fn [result tok]
               (let [lower (str/ascii-lower tok)]
                 (cond
@@ -2536,7 +2536,7 @@
   (let [v (str/trim (str v))]
     (if (or (str/blank? v) (= "none" (str/ascii-lower v)))
       {:text-shadow-color "none"}
-      (let [tokens (->> (split-value-components v " ") (remove str/blank?))]
+      (let [tokens (->> (split-value-components v " ") (remove (fn [x] (str/blank? x))))]
         (reduce (fn [result tok]
                   (cond
                     (and (not (contains? result :text-shadow-x))
@@ -2601,7 +2601,7 @@
   (let [v (str/trim (str v))]
     (if (or (str/blank? v) (= "none" (str/ascii-lower v)))
       {}
-      (let [tokens (->> (split-value-components v " ") (remove str/blank?))]
+      (let [tokens (->> (split-value-components v " ") (remove (fn [x] (str/blank? x))))]
         (reduce (fn [result tok]
                   (cond
                     (and (not (contains? result :box-shadow-x))
@@ -2656,7 +2656,7 @@
    this file's own plain `parse-style-value` coercion, no special-casing
    needed here."
   [v]
-  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))]
+  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
     (reduce (fn [result tok]
               (let [lower (str/ascii-lower tok)]
                 (cond
@@ -2728,7 +2728,7 @@
    `<self-position>` grammar, which is a larger change than this table."
   [k v]
   (when-let [[align justify] (get place-shorthands (str/ascii-lower (str k)))]
-    (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))]
+    (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
       (case (count tokens)
         1 #?(:kotoba
              (typed-map-assoc [:map :keyword :string]
@@ -2774,7 +2774,7 @@
    `expand-box-side-shorthand` takes: a value this cannot parse must not
    become a guessed grow factor."
   [v]
-  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))
+  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))
         n (count tokens)
         numbers (filterv flex-shorthand-number-token? tokens)
         bases (filterv (complement flex-shorthand-number-token?) tokens)
@@ -2935,7 +2935,7 @@
                (parse-style-value (option-value-of [:option :string] lh-part "")))
              m2))))
      :default
-  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove str/blank?))
+  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))
         [leading remaining] (split-with (fn [tok]
                                            (let [lower (str/ascii-lower tok)]
                                              (or (contains? font-shorthand-style-keywords lower)
@@ -3067,7 +3067,7 @@
      :default
   (->> (split-value-components (or text "") ";")
        (mapcat (fn [decl]
-                 (let [[k v] (map str/trim (split-first-on decl ":"))]
+                 (let [[k v] (map (fn [x] (str/trim x)) (split-first-on decl ":"))]
                    (if (and (seq k) (seq v))
                      (let [important? (important-suffix? v)
                            value (strip-important-suffix v)]
@@ -3491,8 +3491,8 @@
            selectors []]
       (if (= idx n)
         (->> (conj selectors (subs s start idx))
-             (map str/trim)
-             (remove str/blank?)
+             (map (fn [x] (str/trim x)))
+             (remove (fn [x] (str/blank? x)))
              vec)
         (let [ch (nth s idx)
               escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
@@ -3574,7 +3574,7 @@
                                  :selector/combinator
                                  (if (seq parts) (or combinator :descendant) nil)))]))
            [nil []]
-           (remove str/blank? tokens)))))
+           (remove (fn [x] (str/blank? x)) tokens)))))
 
 ;; ---------------------------------------------------------------------
 
@@ -3884,7 +3884,7 @@
         ;; which `matches-simple?` walks and `simple-selector-specificity`
         ;; sums. See `complex-selector-arguments` for the measurements.
         parse-arm (fn [arm]
-                    (let [tokens (remove str/blank? (selector-tokens arm))]
+                    (let [tokens (remove (fn [x] (str/blank? x)) (selector-tokens arm))]
                       (cond
                         ;; A RELATIVE selector (leading combinator) is not
                         ;; allowed in `:is()`; Brave drops the whole rule.
@@ -3976,7 +3976,7 @@
                                       (nth span 2) (nth span 3)])
                                    functional-spans)
            parse-arm (fn [arm]
-                       (let [tokens (remove str/blank? (selector-tokens arm))]
+                       (let [tokens (remove (fn [x] (str/blank? x)) (selector-tokens arm))]
                          (cond
                            (contains? #?(:kotoba (typed-set-new [:set :string] ">" "+" "~")
                                          :default #{">" "+" "~"})
@@ -4316,8 +4316,8 @@
       (conj (vec parent-path) (str anonymous-layer-prefix anon-id))
       (into (vec parent-path)
             (->> (split-value-components header ".")
-                 (map str/trim)
-                 (remove str/blank?))))))
+                 (map (fn [x] (str/trim x)))
+                 (remove (fn [x] (str/blank? x))))))))
 
 (defn- layer-paths-with-prefixes
   "`path` preceded by every one of its own prefixes, shortest first --
@@ -4534,8 +4534,8 @@
                   statement?
                   (do (when (= "layer" nm)
                         (doseq [nme (->> (split-value-components (subs s (+ at-idx (count "@layer")) semi-idx) ",")
-                                         (map str/trim)
-                                         (remove str/blank?))]
+                                         (map (fn [x] (str/trim x)))
+                                         (remove (fn [x] (str/blank? x))))]
                           (note-layer! (layer-name-path (:layer ctx) nme nil))))
                       (recur (inc semi-idx) (into out (or before []))))
 
@@ -4894,8 +4894,8 @@
   (let [chunks (css-chunks text)
         decl-text (->> chunks
                        (keep :chunk/text)
-                       (map str/trim)
-                       (remove str/blank?)
+                       (map (fn [x] (str/trim x)))
+                       (remove (fn [x] (str/blank? x)))
                        (remove #(str/starts-with? % "@"))
                        (str/join ";"))]
     (str
@@ -5053,7 +5053,7 @@
   [body]
   (into {}
         (keep (fn [decl]
-                (let [[k v] (map str/trim (split-first-on decl ":"))]
+                (let [[k v] (map (fn [x] (str/trim x)) (split-first-on decl ":"))]
                   (when (and (seq k) (seq v))
                     [(str/ascii-lower k) (strip-edge-quotes (str/trim v))]))))
         (split-value-components (str body) ";")))
@@ -5324,7 +5324,7 @@
 
                        :else nil)))
                  (split-value-components s "|"))]
-        (when (and (seq alternatives) (every? some? alternatives))
+        (when (and (seq alternatives) (every? (fn [x] (some? x)) alternatives))
           (vec alternatives)))))))
 
 (defn- syntax-alternative-support
@@ -6142,8 +6142,8 @@
     (loop [idx 0 start 0 depth 0 out []]
       (if (>= idx n)
         (->> (conj out (subs s start))
-             (map str/trim)
-             (remove str/blank?)
+             (map (fn [x] (str/trim x)))
+             (remove (fn [x] (str/blank? x)))
              vec)
         (let [ch (nth s idx)]
           (cond
@@ -6165,8 +6165,8 @@
       (if (>= idx n)
         (when (seq out)
           (->> (conj out (subs s start))
-               (map str/trim)
-               (remove str/blank?)
+               (map (fn [x] (str/trim x)))
+               (remove (fn [x] (str/blank? x)))
                vec))
         (let [ch (nth s idx)]
           (cond
@@ -6296,7 +6296,7 @@
           ::invalid))
 
       (str/includes? inner ":")
-      (let [[name value] (map str/trim (split-first-on inner ":"))]
+      (let [[name value] (map (fn [x] (str/trim x)) (split-first-on inner ":"))]
         (case (feature-of name)
           :width (if-let [n (parse-media-length value)]
                    (case (str/ascii-lower name)
@@ -6474,15 +6474,41 @@
   ([condition viewport-width]
    (media-condition-matches? condition viewport-width default-color-scheme))
   ([condition viewport-width color-scheme]
-   (if (vector? condition)
-     (every? #(media-condition-matches? % viewport-width color-scheme) condition)
-     (let [condition (-> (str condition)
-                         strip-media-prefix
-                         str/trim)]
-       (if (str/blank? condition)
-         true
-         (boolean (some #(media-query-matches? % viewport-width color-scheme)
-                        (split-top-level condition ","))))))))
+   #?(:kotoba
+      (media-any-query? (str condition) viewport-width color-scheme)
+      :default
+      (if (vector? condition)
+        (every? #(media-condition-matches? % viewport-width color-scheme) condition)
+        (let [condition (str/trim (strip-media-prefix (str condition)))]
+          (if (str/blank? condition)
+            true
+            (boolean (some #(media-query-matches? % viewport-width color-scheme)
+                           (split-top-level condition ",")))))))))
+(defn- media-any-query?
+  "Typed-route OR fold over one condition's comma-separated media queries."
+  [condition :string viewport-width :i64 color-scheme :string] :bool
+  (let [queries (split-top-level (str/trim (strip-media-prefix condition)) ",")]
+    (if (option-some?-of [:option [:list :string]] queries)
+      (let [qs (option-value-of [:option [:list :string]] queries (typed-list-new [:list :string]))]
+        (loop [i 0]
+          (if (>= i (vector-count qs))
+            false
+            (if (media-query-matches? (typed-list-nth [:list :string] qs i) viewport-width color-scheme)
+              true
+              (recur (inc i))))))
+      (str/blank? (str/trim (strip-media-prefix condition))))))
+
+(defn- media-all-conditions?
+  "Typed-route AND fold over a nested @media condition list."
+  [conditions [:list :string] viewport-width :i64 color-scheme :string] :bool
+  (loop [i 0]
+    (if (>= i (vector-count conditions))
+      true
+      (if (media-any-query? (typed-list-nth [:list :string] conditions i) viewport-width color-scheme)
+        (recur (inc i))
+        false))))
+
+
 
 (defn- rule-applies-to-viewport?
   [rule viewport-width color-scheme]
@@ -6561,8 +6587,8 @@
                                   raw)
                         :default (str/replace raw #"(?i)^\s*@container\s*" ""))
            parts (->> (or (split-top-level-word condition "and") [condition])
-                      (map str/trim)
-                      (remove str/blank?))]
+                      (map (fn [x] (str/trim x)))
+                      (remove (fn [x] (str/blank? x))))]
        (and (seq parts)
             (every? (fn [part]
                       (when-let [[kind n] (parse-container-feature part)]
@@ -6575,7 +6601,7 @@
 
 (defn- classes
   [node]
-  (set (remove str/blank? (split-value-components (str (get-in node [:attrs :class] "")) " "))))
+  (set (remove (fn [x] (str/blank? x)) (split-value-components (str (get-in node [:attrs :class] "")) " "))))
 
 (defn- truthy-attr? [v]
   (or (= true v)
@@ -7528,7 +7554,7 @@
   [arg]
   (->> (split-value-components (str arg) ",")
        (map unquote-lang-range)
-       (remove str/blank?)))
+       (remove (fn [x] (str/blank? x)))))
 
 ;; ---- `:read-only`/`:read-write` and `:required`/`:optional` ------------
 ;;
@@ -8361,7 +8387,7 @@
                            (case operator
                              nil true
                              "=" (= actual-str value)
-                             "~=" (contains? (set (remove str/blank?
+                             "~=" (contains? (set (remove (fn [x] (str/blank? x))
                                                           (split-value-components actual-str " ")))
                                             value)
                              "^=" (str/starts-with? actual-str value)
@@ -8635,7 +8661,7 @@
    longhand is parsed; the `container` shorthand (`container: sidebar /
    inline-size`) is explicitly out of scope (see the namespace docstring)."
   [document node-id]
-  (set (remove str/blank?
+  (set (remove (fn [x] (str/blank? x))
                (split-value-components (str (or (get-in document [:nodes node-id :attrs :style/container-name]) "")) " "))))
 
 (defn- resolvable-container-width
@@ -8804,7 +8830,7 @@
   (cond
     (and (map? value) (contains? value :content/parts))
     (let [resolved (mapv #(resolve-content-term node counters %) (:content/parts value))]
-      (when (every? some? resolved)
+      (when (every? (fn [x] (some? x)) resolved)
         (str/join "" resolved)))
 
     (and (map? value) (or (contains? value :content/attr-name)
@@ -10693,7 +10719,7 @@
    the caller reads as `<general-enclosed>` rather than as false."
   [text]
   (when-let [[name value] (and (str/includes? text ":")
-                               (map str/trim (split-first-on text ":")))]
+                               (map (fn [x] (str/trim x)) (split-first-on text ":")))]
     (when (and (seq name) (seq value)
                (supports-property-name? name))
       (let [property (keyword (str/ascii-lower name))]
