@@ -8433,8 +8433,8 @@
 
 (defn- parts-match-at
   "Typed-route combinator walk step for parts-match?."
-  [document parents node-id :string parts [:list [:ref :cssom/compound]] idx :i64 match-fn] :bool
-  (let [simple (typed-list-nth [:list [:ref :cssom/compound]] parts idx) node (dom-node-at document node-id)] (and (match-fn document node simple) (if (= idx 0) true (let [kind (option-value-of [:option :keyword] (:selector/combinator simple) :none)] (cond (= kind :child) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (parts-match-at document parents (option-value-of [:option :string] parent "") parts (dec idx) match-fn) false)) (= kind :descendant) (loop [ancestor (typed-map-get [:map :string :string] parents node-id)] (if (not (option-some?-of [:option :string] ancestor)) false (if (parts-match-at document parents (option-value-of [:option :string] ancestor "") parts (dec idx) match-fn) true (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] ancestor "")))))) (= kind :next-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) n (vector-count sibs)] (if (= n 0) false (parts-match-at document parents (typed-list-nth [:list :string] sibs (dec n)) parts (dec idx) match-fn))) false)) (= kind :subsequent-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id)] (loop [i 0] (if (>= i (vector-count sibs)) false (if (parts-match-at document parents (typed-list-nth [:list :string] sibs i) parts (dec idx) match-fn) true (recur (inc i)))))) false)) :else false))))))
+  [document parents [:map :string :string] node-id :string parts [:list [:ref :cssom/compound]] idx :i64 match-fn] :bool
+  (let [simple (typed-list-nth [:list [:ref :cssom/compound]] parts idx) node (dom-node-at document node-id)] (and (match-fn document node simple) (if (= idx 0) true (let [kind (option-value-of [:option :keyword] (:selector/combinator simple) :none)] (cond (= kind :child) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (parts-match-at document parents (option-value-of [:option :string] parent "") parts (dec idx) match-fn) false)) (= kind :descendant) (loop [ancestor (typed-map-get [:map :string :string] parents node-id)] (if (not (option-some?-of [:option :string] ancestor)) false (if (parts-match-at document parents (option-value-of [:option :string] ancestor "") parts (dec idx) match-fn) true (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] ancestor "")))))) (= kind :next-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) n (vector-count sibs)] (if (= n 0) false (parts-match-at document parents (typed-list-nth [:list :string] sibs (dec n)) parts (dec idx) match-fn))) false)) (= kind :subsequent-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) nsibs (vector-count sibs)] (loop [i 0] (if (>= i nsibs) false (if (parts-match-at document parents (typed-list-nth [:list :string] sibs i) parts (dec idx) match-fn) true (recur (inc i)))))) false)) :else false))))))
 
 (defn- parts-match?
   "Whether the element `node-id` is the SUBJECT of an already-parsed
@@ -10571,7 +10571,7 @@
      their own docstrings)."
   [property]
   #?(:kotoba
-     (let [rules (ua-rules)] (or (inherited-property? property) (contains? (initial-values) property) (em-resolvable-property? property) (layout-read-property? property) (contains? shorthand-properties property) (loop [i 0] (if (>= i (vector-count rules)) false (if (contains? (:rule/declarations (typed-list-nth [:list [:ref :cssom/rule]] rules i)) property) true (recur (inc i)))))))
+     (let [rules (ua-rules) nrules (vector-count rules)] (or (inherited-property? property) (contains? (initial-values) property) (em-resolvable-property? property) (layout-read-property? property) (contains? shorthand-properties property) (loop [i 0] (if (>= i nrules) false (if (contains? (:rule/declarations (typed-list-nth [:list [:ref :cssom/rule]] rules i)) property) true (recur (inc i)))))))
      :default
   (or (inherited-property? property)
       (contains? (initial-values) property)
@@ -11079,8 +11079,8 @@
    nothing for `revert` to roll back TO. `nil` (no declaration on this
    element) inherits, which is the whole reason this value is threaded down
    the walk at all."
-  [declared inherited fallback]
-  (let [kw (css-wide-keyword declared)]
+  [#?@(:kotoba [declared [:option :string]] :default [declared]) inherited fallback]
+  (let [kw (css-wide-keyword (option-value-of [:option :string] declared ""))]
     (cond
       (nil? declared) (or inherited fallback)
       (contains? #{:inherit :unset} kw) (or inherited fallback)
@@ -11888,9 +11888,9 @@
    counters simplification). `pairs` nil/empty is a no-op (`reduce` over nil
    returns `counters` unchanged), matching a node with no
    counter-reset/counter-increment declaration at all."
-  [counters op pairs]
+  [counters op #?@(:kotoba [pairs [:option [:list [:list :i64]]]] :default [pairs])]
   #?(:kotoba
-     (if (nil? pairs) counters (let [n (vector-count pairs)] (loop [i 0 out counters] (if (>= i n) out (let [pair (typed-list-nth [:list [:list :i64]] pairs i) name (typed-list-nth [:list :string] pair 0) amount (typed-list-nth [:list :i64] pair 1)] (recur (inc i) (if (= op :reset) (typed-map-assoc [:map :string :i64] out name amount) (if (typed-map-contains? [:map :string :i64] out name) (typed-map-assoc [:map :string :i64] out name (+ (typed-map-get [:map :string :i64] out name) amount)) (typed-map-assoc [:map :string :i64] out name amount)))))))))
+     (if (nil? pairs) counters (let [pl (option-value-of [:option [:list [:list :i64]]] pairs (typed-list-new [:list [:list :i64]])) n (vector-count pl)] (loop [i 0 out counters] (if (>= i n) out (let [pair (typed-list-nth [:list [:list :i64]] pl i) name (typed-list-nth [:list :string] pair 0) amount (typed-list-nth [:list :i64] pair 1)] (recur (inc i) (if (= op :reset) (typed-map-assoc [:map :string :i64] out name amount) (if (typed-map-contains? [:map :string :i64] out name) (typed-map-assoc [:map :string :i64] out name (+ (typed-map-get [:map :string :i64] out name) amount)) (typed-map-assoc [:map :string :i64] out name amount)))))))))
      :default
   (reduce (fn [counters [name amount]]
             (case op
