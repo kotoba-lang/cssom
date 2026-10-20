@@ -4452,59 +4452,32 @@
      :scope/limit (when (and limit-text (not (str/blank? limit-text)))
                     (mapv parse-selector (split-selector-list limit-text)))}))
 
-(defn- implicit-scope-part
-  []
-  "The `:scope ` DESCENDANT prefix every scoped selector that does not name
-   `:scope` itself carries. Measured in Brave 151 on 2026-08-06:
-
-   - `@scope (#r) { div { ... } }` leaves the ROOT ITSELF unmatched even
-     though the root is a `div`, so the prefix is a real ancestor
-     constraint and not `:is(:scope, :scope *)`.
-   - `@scope (#r) { div > p { ... } }` leaves a `<p>` whose parent IS the
-     root unmatched, and reddens one whose parent is a `<div>` inside it --
-     so the prefix attaches to the WHOLE complex selector (`:scope div > p`)
-     rather than to each compound.
-
-   `:selector/scope-implicit?` is what keeps it out of `specificity`: the
-   prelude contributes nothing (`@scope (#r) { p }` loses to `div p`,
-   measured BLUE) while an explicitly written `:scope` is an ordinary
-   pseudo-class (`:scope p` beats `div p`, measured RED). The two cannot
-   share one representation, and this flag is the whole of the difference."
+(defn- implicit-scope-part [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])] #?@(:kotoba [[:ref :cssom/compound]])
   #?(:kotoba
-     (record-new [:record :cssom/compound [[:selector/raw :string] [:selector/tag [:option :keyword]] [:selector/id [:option :string]] [:selector/classes [:list :string]] [:selector/attrs [:list [:ref :cssom/attr]]] [:selector/pseudos [:list :keyword]] [:selector/pseudo-element [:option :keyword]] [:selector/not [:list [:list [:ref :cssom/compound]]]] [:selector/is [:list [:list [:ref :cssom/compound]]]] [:selector/where [:list [:list [:ref :cssom/compound]]]] [:selector/has [:list [:list [:ref :cssom/has-item]]]] [:selector/nth-args [:map :keyword :string]] [:selector/lang-args [:map :keyword :string]] [:selector/combinator [:option :keyword]] [:selector/parts [:option [:list [:ref :cssom/compound]]]] [:selector/scope-implicit? :bool]]]
-       ":scope"
-       (option-none-of [:option :keyword])
-       (option-none-of [:option :string])
-       (typed-list-new [:list :string])
-       (typed-list-new [:list [:ref :cssom/attr]])
-       (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :scope)
-       (option-none-of [:option :keyword])
-       (typed-list-new [:list [:list [:ref :cssom/compound]]])
-       (typed-list-new [:list [:list [:ref :cssom/compound]]])
-       (typed-list-new [:list [:list [:ref :cssom/compound]]])
-       (typed-list-new [:list [:list [:ref :cssom/has-item]]])
-       (typed-map-new [:map :keyword :string])
-       (typed-map-new [:map :keyword :string])
-       (option-none-of [:option :keyword])
-       (option-none-of [:option [:list [:ref :cssom/compound]]])
-       true)
+     (if (names-scope? selector)
+       selector
+       (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector) (typed-list-new [:list [:ref :cssom/compound]]))
+             np (vector-count p0)]
+         (if (= np 0)
+           selector
+           (let [first-c (assoc (typed-list-nth [:list [:ref :cssom/compound]] p0 0) :selector/combinator (option-some-of [:option :keyword] :descendant))
+                 base (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part)) first-c)]
+             (assoc selector :selector/parts
+               (loop [i 1 out base]
+                 (if (>= i np) out
+                   (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (typed-list-nth [:list [:ref :cssom/compound]] p0 i))))))))))
      :default
-     {:selector/raw ":scope"
-      :selector/tag nil
-      :selector/id nil
-      :selector/classes []
-      :selector/attrs []
-      :selector/pseudos [:scope]
-      :selector/pseudo-element nil
-      :selector/not []
-      :selector/is []
-      :selector/where []
-      :selector/has []
-      :selector/nth-args {}
-      :selector/lang-args {}
-      :selector/combinator nil
-      :selector/scope-implicit? true}))
-
+  (if (names-scope? selector)
+    selector
+    (let [parts (vec (:selector/parts selector))]
+      (if (empty? parts)
+        selector
+        (assoc selector
+               :selector/parts
+               (into [(implicit-scope-part)
+                      (assoc (first parts) :selector/combinator :descendant)]
+                     (rest parts)))))))
+)
 (defn- names-scope?
   "Whether an already-parsed selector writes `:scope` anywhere in itself --
    including inside `:is()`/`:where()`/`:not()`, which is why this reads
