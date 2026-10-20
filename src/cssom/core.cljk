@@ -8761,6 +8761,16 @@
    pipeline, not a scope change, which is why it is named here rather than
    guessed at."
   [document parents spec node-id]
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): the limit test binds the dynamic
+;; *scope-roots* around scope-limited?, and `binding` is not an admitted
+;; operation (unknown operation: binding). @scope root/limit matching
+;; therefore yields NOTHING on the kotoba route until the dynamic-state
+;; mechanism (or an explicit scope-roots parameter through the
+;; match-fn chain) lands. Removal condition: scope-root-ids answers its
+;; [hops root-id] list.
+     (nil)
+     :default
   (let [roots (:scope/root spec)
         limits (:scope/limit spec)]
     (when (seq roots)
@@ -8772,7 +8782,7 @@
            (remove (fn [[_ id]]
                      (and (seq limits)
                           (binding [*scope-roots* #{id}]
-                            (scope-limited? document parents limits id node-id)))))))))
+                            (scope-limited? document parents limits id node-id))))))))))
 
 (defn- scope-proximity
   "The hop count `node-id` sits at from the nearest scope root the scoped
