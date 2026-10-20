@@ -3621,7 +3621,7 @@
 
 ;; ---------------------------------------------------------------------
 
-(defn- selector-quoted-end [s open]
+(defn- selector-quoted-end [#?@(:kotoba [s :string open :i64] :default [s open])] #?@(:kotoba [:i64])
   (let [quote-char (string-substring s open (inc open))]
     (loop [idx (inc open)]
       (if (>= idx (string-byte-length s)) -1
@@ -3631,7 +3631,7 @@
             (inc idx)
             (recur (inc idx))))))))
 
-(defn- selector-bracket-end [s open]
+(defn- selector-bracket-end [#?@(:kotoba [s :string open :i64] :default [s open])] #?@(:kotoba [:i64])
   (loop [idx (inc open) quote-char ""]
     (if (>= idx (string-byte-length s)) -1
       (let [ch (string-substring s idx (inc idx))
@@ -3643,7 +3643,7 @@
           (= ch "]") (inc idx)
           :else (recur (inc idx) ""))))))
 
-(defn- selector-paren-end [s open]
+(defn- selector-paren-end [#?@(:kotoba [s :string open :i64] :default [s open])] #?@(:kotoba [:i64])
   (loop [idx open depth 0 quote-char ""]
     (if (>= idx (string-byte-length s)) -1
       (let [ch (string-substring s idx (inc idx))
