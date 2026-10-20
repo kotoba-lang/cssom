@@ -3683,7 +3683,7 @@
 (defn- selector-outer-spans [spans]
   (loop [idx 0 remaining spans out []]
     (if (empty? remaining) out
-      (let [span (first remaining) start (nth span 0) end (nth span 1)]
+      (let [span (first remaining) start (hetero-vector-at [:vector [:i64 :i64]] span 0) end (hetero-vector-at [:vector [:i64 :i64]] span 1)]
         (if (< start idx)
           (recur idx (rest remaining) out)
           (recur end (rest remaining) (typed-list-conj [:list [:vector [:i64 :i64]]] out span)))))))
@@ -3691,7 +3691,7 @@
 (defn- selector-remove-spans [s spans]
   (loop [span-index 0 offset 0 out ""]
     (if (>= span-index (count spans)) (str out (string-substring s offset (string-byte-length s)))
-      (let [span (nth spans span-index) start (nth span 0) end (nth span 1)]
+      (let [span (typed-list-nth [:list [:vector [:i64 :i64]]] spans span-index) start (hetero-vector-at [:vector [:i64 :i64]] span 0) end (hetero-vector-at [:vector [:i64 :i64]] span 1)]
         (if (< start offset)
           (recur (inc span-index) offset out)
           (recur (inc span-index) end (str out (string-substring s offset start) " ")))))))
