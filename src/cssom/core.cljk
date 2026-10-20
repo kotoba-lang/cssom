@@ -8367,6 +8367,9 @@
    attempting a documentless walk (the documentless 2-arity `matches-simple?`
    form below passes `document` nil, so :has() never matches there either)."
   [document node group match-fn]
+  #?(:kotoba
+     (when document (loop [i 0] (if (>= i (vector-count group)) false (let [item (typed-list-nth [:list [:ref :cssom/has-item]] group i) selector (:has/selector item) combinator (:has/combinator item) direct? (:has/direct-child? item) kind (if (option-some?-of [:option :keyword] combinator) (option-value-of [:option :keyword] combinator :none) (if direct? :child :descendant))] (if (cond (= kind :child) (has-arg-child-match? document node selector match-fn) (= kind :next-sibling) (has-arg-sibling-match? document node selector true match-fn) (= kind :following-sibling) (has-arg-sibling-match? document node selector false match-fn) :else (has-arg-descendant-match? document node selector match-fn)) true (recur (inc i)))))))
+     :default
   (boolean
    (when document
      (some (fn [{:has/keys [selector combinator direct-child?]}]
@@ -8375,7 +8378,7 @@
                :next-sibling (has-arg-sibling-match? document node selector true match-fn)
                :following-sibling (has-arg-sibling-match? document node selector false match-fn)
                (has-arg-descendant-match? document node selector match-fn)))
-           group))))
+           group)))))
 
 (defn- parent-index
   [document]
@@ -8404,6 +8407,11 @@
            (filter #(= :element (get-in document [:nodes % :node/type]))))
       [])))
 
+(defn- parts-match-at
+  "Typed-route combinator walk step for parts-match?."
+  [document parents node-id :string parts [:list [:ref :cssom/compound]] idx :i64 match-fn] :bool
+  (let [simple (typed-list-nth [:list [:ref :cssom/compound]] parts idx) node (dom-node-at document node-id)] (and (match-fn document node simple) (if (= idx 0) true (let [kind (option-value-of [:option :keyword] (:selector/combinator simple) :none)] (cond (= kind :child) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (parts-match-at document parents (option-value-of [:option :string] parent "") parts (dec idx) match-fn) false)) (= kind :descendant) (loop [ancestor (typed-map-get [:map :string :string] parents node-id)] (if (not (option-some?-of [:option :string] ancestor)) false (if (parts-match-at document parents (option-value-of [:option :string] ancestor "") parts (dec idx) match-fn) true (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] ancestor "")))))) (= kind :next-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) n (vector-count sibs)] (if (= n 0) false (parts-match-at document parents (typed-list-nth [:list :string] sibs (dec n)) parts (dec idx) match-fn))) false)) (= kind :subsequent-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id)] (loop [i 0] (if (>= i (vector-count sibs)) false (if (parts-match-at document parents (typed-list-nth [:list :string] sibs i) parts (dec idx) match-fn) true (recur (inc i)))))) false)) :else false))))))
+
 (defn- parts-match?
   "Whether the element `node-id` is the SUBJECT of an already-parsed
    complex selector's `parts` (see `selector-parts`) -- the combinator walk
@@ -8416,6 +8424,9 @@
    `:is()`/`:not()`/`:where()` argument, and this namespace deliberately
    avoids `declare`-based forward references."
   [document parents node-id parts match-fn]
+  #?(:kotoba
+     (if (> (vector-count parts) 0) (parts-match-at document parents node-id parts (dec (vector-count parts)) match-fn) false)
+     :default
   (let [parts (vec parts)]
     (letfn [(match-at [node-id idx]
               (let [simple (nth parts idx)
@@ -8450,7 +8461,7 @@
                          false)))))]
       (if (seq parts)
         (match-at node-id (dec (count parts)))
-        false))))
+        false)))))
 
 (defn- matches-simple?
   "Whether `node` matches one compound/simple selector map (see
