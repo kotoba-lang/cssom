@@ -1516,12 +1516,20 @@
    than guessing -- callers treat nil exactly like `content` being absent:
    no generated-content box, no crash."
   [v]
-  (or (parse-content-term v)
-      (let [terms (split-content-terms (str v))]
-        (when (> (count terms) 1)
-          (let [parsed (mapv parse-content-term terms)]
-            (when (every? (fn [x] (some? x)) parsed)
-              {:content/parts parsed}))))))
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): multi-term content values (a
+     ;; `content` declaration mixing several quoted/attr()/counter() terms)
+     ;; need a heterogeneous parts list -- beyond the closed profile's
+     ;; homogeneous typed lists for now. Single-term values work.
+     ;; Removal condition: a typed heterogeneous parts carrier lands.
+     (parse-content-term v)
+     :default
+     (or (parse-content-term v)
+         (let [terms (split-content-terms (str v))]
+           (when (> (count terms) 1)
+             (let [parsed (mapv parse-content-term terms)]
+               (when (every? (fn [x] (some? x)) parsed)
+                 {:content/parts parsed})))))))
 
 (defn- parse-counter-amount
   "Parses a bare integer token already validated by `counter-list-pattern`
