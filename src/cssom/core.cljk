@@ -10981,6 +10981,22 @@
       ;; not <supports-in-parens> at all
       :else ::invalid)))
 
+(defn- supports-condition-combine
+  "Typed-route and/or fold for supports-condition*; :invalid/:yes/:no."
+  [op :keyword parts [:list :string]] :keyword
+  (loop [i 0 invalid false yes false no false]
+    (if (>= i (vector-count parts))
+      (if invalid
+        :invalid
+        (if (= op :and)
+          (if no :no :yes)
+          (if yes :yes :no)))
+      (let [v (supports-condition* (typed-list-nth [:list :string] parts i))]
+        (recur (inc i)
+          (or invalid (= v :invalid))
+          (or yes (= v :yes))
+          (or no (= v :no)))))))
+
 (defn- supports-condition*
   "Evaluates a `<supports-condition>`: `not <in-parens>`, or one or more
    `<in-parens>` joined by `and` or `or`. Returns true, false or
@@ -10988,6 +11004,9 @@
    than being inverted or absorbed -- measured, `(display: grid) or
    garbage` is dropped by Brave even though its first arm is true."
   [s]
+  #?(:kotoba
+     (let [s (str/trim s) and-parts (split-top-level-word s "and") or-parts (split-top-level-word s "or") not-inner (strip-leading-word s "not")] (cond (str/blank? s) :invalid (option-some?-of [:option [:list :string]] and-parts) (supports-condition-combine :and (option-value-of [:option [:list :string]] and-parts (typed-list-new [:list :string]))) (option-some?-of [:option [:list :string]] or-parts) (supports-condition-combine :or (option-value-of [:option [:list :string]] or-parts (typed-list-new [:list :string]))) (option-some?-of [:option :string] not-inner) (let [inner (supports-condition* (option-value-of [:option :string] not-inner ""))] (if (= inner :invalid) :invalid (if (= inner :yes) :no :yes))) :else (supports-in-parens s supports-condition*)))
+     :default
   (let [s (str/trim s)
         combine (fn [op parts]
                   (let [vals (map supports-condition* parts)]
@@ -11002,7 +11021,7 @@
       (some? (strip-leading-word s "not"))
       (let [inner (supports-condition* (strip-leading-word s "not"))]
         (if (= ::invalid inner) ::invalid (not inner)))
-      :else (supports-in-parens s supports-condition*))))
+      :else (supports-in-parens s supports-condition*)))))
 
 (defn supports-condition-matches?
   "Whether a raw `@supports` condition (as stored in :rule/supports -- one
