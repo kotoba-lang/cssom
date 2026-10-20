@@ -6314,12 +6314,47 @@
         (pos? viewport-width)
         true))))
 
+(defn- media-condition-combine
+  "Typed-route fold for media-condition-matches*'s and/or combination; the
+   three-valued result is encoded :invalid / :yes / :no."
+  [op :keyword parts [:list :string] viewport-width :i64 color-scheme :keyword] :keyword
+  (loop [i 0 invalid false yes false no false]
+    (if (>= i (vector-count parts))
+      (if invalid
+        :invalid
+        (if (= op :and)
+          (if no :no :yes)
+          (if yes :yes :no)))
+      (let [v (media-condition-matches* (typed-list-nth [:list :string] parts i) viewport-width color-scheme)]
+        (recur (inc i)
+          (or invalid (= v :invalid))
+          (or yes (= v :yes))
+          (or no (= v :no)))))))
+
 (defn- media-condition-matches*
   "Evaluates a `<media-condition>` -- one or more `<media-in-parens>` joined
    by `and`/`or`, or a `not` of one. Returns true, false or `::invalid`;
    `::invalid` PROPAGATES rather than being inverted by a `not`, which is
    what makes an unparseable condition different from a false one."
   [s viewport-width color-scheme]
+  #?(:kotoba
+     (let [s (str/trim s)
+            and-parts (split-top-level-word s "and")
+            or-parts (split-top-level-word s "or")
+            not-inner (strip-leading-word s "not")]
+       (cond
+         (str/blank? s) :invalid
+         (option-some?-of [:option [:list :string]] and-parts)
+         (media-condition-combine :and (option-value-of [:option [:list :string]] and-parts (typed-list-new [:list :string])) viewport-width color-scheme)
+         (option-some?-of [:option [:list :string]] or-parts)
+         (media-condition-combine :or (option-value-of [:option [:list :string]] or-parts (typed-list-new [:list :string])) viewport-width color-scheme)
+         (option-some?-of [:option :string] not-inner)
+         (let [inner (media-condition-matches* (option-value-of [:option :string] not-inner "") viewport-width color-scheme)]
+           (if (= inner :invalid) :invalid (if (= inner :yes) :no :yes)))
+         (parenthesised? s)
+         (media-feature-matches? s viewport-width color-scheme media-condition-matches*)
+         :else :invalid))
+     :default
   (let [s (str/trim s)
         combine (fn [op parts]
                   (let [vals (map #(media-condition-matches* % viewport-width color-scheme) parts)]
@@ -6336,7 +6371,7 @@
         (if (= ::invalid inner) ::invalid (not inner)))
       (parenthesised? s) (media-feature-matches? s viewport-width color-scheme
                                                  media-condition-matches*)
-      :else ::invalid)))
+      :else ::invalid))))
 
 (defn- media-query-matches?
   "Evaluates ONE `<media-query>` of a comma-separated list: an optional
@@ -6349,6 +6384,36 @@
    `(min-width: 5000px), not all` with the rule still standing, so one
    unparseable query does not invalidate its neighbours in the list."
   [query viewport-width color-scheme]
+  #?(:kotoba
+     (let [s (str/trim query)
+            not-1 (strip-leading-word s "not")
+            negated? (option-some?-of [:option :string] not-1)
+            s2 (if (option-some?-of [:option :string] not-1)
+                 (option-value-of [:option :string] not-1 "")
+                 (if (option-some?-of [:option :string] (strip-leading-word s "only"))
+                   (option-value-of [:option :string] (strip-leading-word s "only") "")
+                   s))
+            and-parts (split-top-level-word s2 "and")
+            parts (if (option-some?-of [:option [:list :string]] and-parts)
+                    (option-value-of [:option [:list :string]] and-parts (typed-list-new [:list :string]))
+                    (typed-list-conj [:list :string] (typed-list-new [:list :string]) s2))
+            head (typed-list-nth [:list :string] parts 0)
+            type? (and (not (str/blank? head)) (media-type-token? head))
+            result (if type?
+                     (let [type-ok (contains? media-types (str/ascii-lower head))]
+                       (loop [i 1 invalid false all-yes true]
+                         (if (>= i (vector-count parts))
+                           (if invalid :invalid (if (and type-ok all-yes) :yes :no))
+                           (let [v (media-condition-matches* (typed-list-nth [:list :string] parts i) viewport-width color-scheme)]
+                             (recur (inc i)
+                               (or invalid (= v :invalid))
+                               (and all-yes (= v :yes)))))))
+                     (media-condition-matches* s2 viewport-width color-scheme))]
+       (cond
+         (= result :invalid) false
+         negated? (= result :no)
+         :else (= result :yes)))
+     :default
   (let [s (str/trim query)
         negated? (some? (strip-leading-word s "not"))
         s (or (strip-leading-word s "not") (strip-leading-word s "only") s)
@@ -6368,7 +6433,7 @@
     (cond
       (= ::invalid result) false
       negated? (not result)
-      :else (boolean result))))
+      :else (boolean result)))))
 
 (def default-viewport-width
   "Viewport width (px) `apply-cascade` assumes for @media evaluation when the
