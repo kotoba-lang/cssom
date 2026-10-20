@@ -1451,16 +1451,16 @@
   [v]
   (let [s (str v)
         n (count s)]
-    (loop [idx 0 start 0 quote-char 0 terms []]
+    (loop [idx 0 start 0 quote-char "" terms []]
       (if (= idx n)
         (let [term (str/trim (subs s start idx))]
           (if (str/blank? term) terms (conj terms term)))
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
-            (and (< 0 quote-char) (= ch quote-char))
-            (recur (inc idx) start 0 terms)
+            (and (not= "" quote-char) (= ch quote-char))
+            (recur (inc idx) start "" terms)
 
-            (< 0 quote-char)
+            (not= "" quote-char)
             (recur (inc idx) start quote-char terms)
 
             (or (= "\"" (str ch)) (= "'" (str ch)))
@@ -1468,7 +1468,7 @@
 
             (content-ws-char? ch)
             (let [term (str/trim (subs s start idx))]
-              (recur (inc idx) (inc idx) 0 (if (str/blank? term) terms (conj terms term))))
+              (recur (inc idx) (inc idx) "" (if (str/blank? term) terms (conj terms term))))
 
             :else
             (recur (inc idx) start quote-char terms)))))))
@@ -1561,7 +1561,7 @@
     (loop [idx 0 start 0 depth 0 out []]
       (if (= idx n)
         (into [] (remove (fn [x] (str/blank? x))) (conj out (str/trim (subs s start idx))))
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
             (= "(" (str ch)) (recur (inc idx) start (inc depth) out)
             (= ")" (str ch)) (recur (inc idx) start (max 0 (dec depth)) out)
@@ -1674,7 +1674,7 @@
     (loop [idx open depth 0]
       (if (>= idx n)
         nil
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
             (= "(" (str ch)) (let [next-depth (inc depth)]
                            (if (> next-depth 2) nil
@@ -1705,7 +1705,7 @@
     (loop [idx start before 0 after 0 dot? 0]
       (if (>= idx n)
         (or (> before 0) (> after 0))
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
             (str/includes? "0123456789" (str ch))
             (if (< 0 dot?)
@@ -1757,7 +1757,7 @@
     (loop [idx start dot? 0]
       (if (>= idx n)
         true
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
             (= "0" (str ch)) (recur (inc idx) dot?)
             (and (= "." (str ch)) (= 0 dot?)) (recur (inc idx) 1)
@@ -1770,7 +1770,7 @@
          (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" (str (nth s start))))
          (loop [idx (inc start)]
            (if (>= idx n) true
-             (let [ch (nth s idx)]
+             (let [ch (string-substring s idx (inc idx))]
                (if (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789-" (str ch)))
                  (recur (inc idx)) false)))))))
 
@@ -1926,6 +1926,9 @@
    `resolve-style-map`'s own post-substitution re-slice, so the two can
    never disagree about where one side's value ends."
   [v]
+  #?(:kotoba
+     (let [s (str/trim (str v)) n (string-length s)] (loop [i 0 depth 0 start 0 out (typed-list-new [:list :string])] (if (>= i n) (let [term (str/trim (string-substring s start i))] (if (str/blank? term) out (typed-list-append [:list :string] out term))) (let [c (string-substring s i (inc i))] (cond (= "(" c) (recur (inc i) (inc depth) start out) (= ")" c) (recur (inc i) (dec depth) start out) (and (= 0 depth) (str/blank? c)) (recur (inc i) depth (inc i) (if (str/blank? (str/trim (string-substring s start i))) out (typed-list-append [:list :string] out (str/trim (string-substring s start i))))) :else (recur (inc i) depth start out))))))
+     :default
   (loop [chars (seq (str/trim (str v))) depth 0 cur "" out []]
     (if-let [c (first chars)]
       (cond
@@ -1934,7 +1937,7 @@
         (and (zero? depth) (str/blank? (str c)))
         (recur (rest chars) depth "" (if (str/blank? cur) out (conj out cur)))
         :else (recur (rest chars) depth (str cur c) out))
-      (if (str/blank? cur) out (conj out cur)))))
+      (if (str/blank? cur) out (conj out cur))))))
 
 (def ^:private box-side-picks
   "Real CSS's own 1-to-4 value rule as a token index per side, indexed by
@@ -3438,7 +3441,7 @@
            start 0
            bracket-depth 0
            paren-depth 0
-           quote-char (option-none-of [:option :string])
+           quote-char ""
            tokens []]
       (if (= idx n)
         (append-token tokens (str/trim (subs s start idx)))
@@ -3446,14 +3449,14 @@
               escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))
               nesting-depth (+ bracket-depth paren-depth)]
           (cond
-            (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
-            (recur (inc idx) start bracket-depth paren-depth (option-none-of [:option :string]) tokens)
+            (and (not= "" quote-char) (= ch quote-char) (not escaped?))
+            (recur (inc idx) start bracket-depth paren-depth "" tokens)
 
-            quote-char
+            (not= "" quote-char)
             (recur (inc idx) start bracket-depth paren-depth quote-char tokens)
 
             (or (= ch "\"") (= ch "'"))
-            (recur (inc idx) start bracket-depth paren-depth (option-some-of [:option :string] ch) tokens)
+            (recur (inc idx) start bracket-depth paren-depth ch tokens)
 
             (= ch "[")
             (recur (inc idx) start (inc bracket-depth) paren-depth quote-char tokens)
@@ -3507,7 +3510,7 @@
            start 0
            bracket-depth 0
            paren-depth 0
-           quote-char (option-none-of [:option :string])
+           quote-char ""
            selectors []]
       (if (= idx n)
         (->> (conj selectors (subs s start idx))
@@ -3517,10 +3520,10 @@
         (let [ch (nth s idx)
               escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
           (cond
-            (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
+            (and (not= "" quote-char) (= ch quote-char) (not escaped?))
             (recur (inc idx) start bracket-depth paren-depth nil selectors)
 
-            quote-char
+            (not= "" quote-char)
             (recur (inc idx) start bracket-depth paren-depth quote-char selectors)
 
             (or (= ch "\"") (= ch "'"))
@@ -3604,30 +3607,30 @@
       (if (>= idx (count s)) -1
         (let [ch (nth s idx)
               escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
-          (if (and (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
+          (if (and (= ch quote-char) (not escaped?))
             (inc idx)
             (recur (inc idx))))))))
 
 (defn- selector-bracket-end [s open]
-  (loop [idx (inc open) quote-char (option-none-of [:option :string])]
+  (loop [idx (inc open) quote-char ""]
     (if (>= idx (count s)) -1
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?)) (recur (inc idx) nil)
-          quote-char (recur (inc idx) quote-char)
+          (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) nil)
+          (not= "" quote-char) (recur (inc idx) quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) ch)
           (= ch "]") (inc idx)
           :else (recur (inc idx) nil))))))
 
 (defn- selector-paren-end [s open]
-  (loop [idx open depth 0 quote-char (option-none-of [:option :string])]
+  (loop [idx open depth 0 quote-char ""]
     (if (>= idx (count s)) -1
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?)) (recur (inc idx) depth nil)
-          quote-char (recur (inc idx) depth quote-char)
+          (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) depth nil)
+          (not= "" quote-char) (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
           (= ch "(") (recur (inc idx) (inc depth) nil)
           (= ch ")") (if (= depth 1) idx (recur (inc idx) (dec depth) nil))
@@ -3636,7 +3639,7 @@
 (defn- selector-function-spans [s]
   (loop [idx 0 spans []]
     (if (>= idx (count s)) spans
-      (let [ch (nth s idx)]
+      (let [ch (string-substring s idx (inc idx))]
         (cond
           (or (= ch "\"") (= ch "'"))
           (let [end (selector-quoted-end s idx)]
@@ -3676,7 +3679,7 @@
 (defn- selector-attribute-spans [s]
   (loop [idx 0 spans []]
     (if (>= idx (count s)) spans
-      (let [ch (nth s idx)]
+      (let [ch (string-substring s idx (inc idx))]
         (cond
           (or (= ch "\"") (= ch "'"))
           (let [end (selector-quoted-end s idx)]
@@ -4253,7 +4256,7 @@
   (let [n (count s)]
     (loop [idx (inc open-idx) depth 1]
       (when (< idx n)
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
             (= ch "{") (recur (inc idx) (inc depth))
             (= ch "}") (if (= depth 1) idx (recur (inc idx) (dec depth)))
@@ -4710,7 +4713,7 @@
    the desugaring goes through this, so a `content: \"}\"` or a
    commented-out block cannot end a rule early."
   [s idx n]
-  (let [ch (nth s idx)]
+  (let [ch (string-substring s idx (inc idx))]
     (cond
       (or (= ch "\"") (= ch "'"))
       (loop [i (inc idx)]
@@ -5795,14 +5798,14 @@
     (or resolved (let [f fallback] (when f (let [t (str/trim f)] (when (not (str/blank? t)) t)))))))
 
 (defn- split-css-call-arguments [s]
-  (loop [idx 0 depth 0 quote-char (option-none-of [:option :string])]
+  (loop [idx 0 depth 0 quote-char ""]
     (if (>= idx (count s)) [s]
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and quote-char (= ch (option-value-of [:option :string] quote-char "")) (not escaped?))
+          (and (not= "" quote-char) (= ch quote-char) (not escaped?))
           (recur (inc idx) depth nil)
-          quote-char (recur (inc idx) depth quote-char)
+          (not= "" quote-char) (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
           (= ch "(") (recur (inc idx) (inc depth) nil)
           (= ch ")") (recur (inc idx) (max 0 (dec depth)) nil)
@@ -6127,7 +6130,7 @@
 (defn- media-range-tokens [s]
   (loop [idx 0 tokens []]
     (if (>= idx (count s)) tokens
-      (let [ch (nth s idx)]
+      (let [ch (string-substring s idx (inc idx))]
         (cond
           (str/blank? (str ch)) (recur (inc idx) tokens)
           (media-range-token? ch)
@@ -6165,7 +6168,7 @@
              (map (fn [x] (str/trim x)))
              (remove (fn [x] (str/blank? x)))
              vec)
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
             (= ch "(") (recur (inc idx) start (inc depth) out)
             (= ch ")") (recur (inc idx) start (max 0 (dec depth)) out)
@@ -6188,7 +6191,7 @@
                (map (fn [x] (str/trim x)))
                (remove (fn [x] (str/blank? x)))
                vec))
-        (let [ch (nth s idx)]
+        (let [ch (string-substring s idx (inc idx))]
           (cond
             (= ch "(") (recur (inc idx) start (inc depth) out)
             (= ch ")") (recur (inc idx) start (max 0 (dec depth)) out)
