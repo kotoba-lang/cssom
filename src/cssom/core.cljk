@@ -3063,7 +3063,7 @@
                      value (strip-important-suffix v)
                      lower-k (str/ascii-lower k)
                      entries (cond
-                               (and (contains? (typed-set-new [:set :string] "margin" "padding") lower-k)
+                               (and (contains? (typed-map-new [:map :string :bool] "margin" true "padding" true) lower-k)
                                     (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-box-side-shorthand lower-k value)) 0))
                                (expand-box-side-shorthand lower-k value)
 
@@ -3507,7 +3507,7 @@
             (= ch ")")
             (recur (inc idx) start bracket-depth (max 0 (dec paren-depth)) qc-a tokens)
 
-            (and (contains? (typed-set-new [:set :string] ">" "+" "~") ch) (zero? nesting-depth))
+            (and (contains? (typed-map-new [:map :string :bool] ">" true "+" true "~" true) ch) (zero? nesting-depth))
             (recur (inc idx)
                    (inc idx)
                    bracket-depth
@@ -6740,15 +6740,33 @@
   (contains? disabled-capable-tags (:tag node)))
 
 (defn- descendant-node-ids
-  ([document node-id]
-   (descendant-node-ids document node-id #{}))
-  ([document node-id visited]
-   (when-not (contains? visited node-id)
-     (let [visited (conj visited node-id)]
-       (mapcat (fn [child-id]
-                 (cons child-id (descendant-node-ids document child-id visited)))
-               (get-in document [:nodes node-id :children]))))))
-
+  ([#?@(:kotoba [document :document node-id :string] :default [document node-id])]
+   #?(:kotoba
+      (descendant-node-ids document node-id (typed-set-new [:set :string]))
+      :default
+      (descendant-node-ids document node-id #{})))
+  ([#?@(:kotoba [document :document node-id :string visited [:set :string]] :default [document node-id visited])]
+   #?(:kotoba
+     (when-not (typed-set-contains [:set :string] visited node-id)
+       (let [visited (typed-set-conj [:set :string] visited node-id)
+             kids (:children (dom-node-at document node-id))
+             nk (vector-count kids)]
+         (loop [i 0 out (typed-list-new [:list :string])]
+           (if (>= i nk)
+             out
+             (let [cid (typed-list-nth [:list :string] kids i)
+                   sub (descendant-node-ids document cid visited)
+                   ns2 (vector-count sub)]
+               (recur (inc i)
+                 (loop [j 0 out2 (typed-list-conj [:list :string] out cid)]
+                   (if (>= j ns2) out2
+                     (recur (inc j) (typed-list-conj [:list :string] out2 (typed-list-nth [:list :string] sub j)))))))))))
+     :default
+     (when-not (contains? visited node-id)
+       (let [visited (conj visited node-id)]
+         (mapcat (fn [child-id]
+                   (cons child-id (descendant-node-ids document child-id visited)))
+                 (get-in document [:nodes node-id :children])))))))
 (defn- parent-node-id
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] child-id] :default [document child-id])]
   #?(:kotoba
