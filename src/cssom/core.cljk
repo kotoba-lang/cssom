@@ -1578,8 +1578,8 @@
         n (string-byte-length s)]
     (loop [idx 0]
       (cond
-        (= idx n) [s]
-        (= sep (str (string-substring s idx (inc idx)))) [(subs s 0 idx) (subs s (inc idx))]
+        (= idx n) (typed-list-new [:list :string] s)
+        (= sep (str (string-substring s idx (inc idx)))) (typed-list-new [:list :string] (string-substring s 0 idx) (string-substring s (inc idx) (string-byte-length s)))
         :else (recur (inc idx))))))
 
 (defn- parse-counter-property
