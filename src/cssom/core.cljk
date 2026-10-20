@@ -3531,7 +3531,7 @@
            bracket-depth 0
            paren-depth 0
            quote-char ""
-           selectors (typed-list-new [:list :string])]
+           selectors []]
       (if (>= idx (string-byte-length s))
         (->> (conj selectors (string-substring s start idx))
              (map (fn [x] (str/trim x)))
