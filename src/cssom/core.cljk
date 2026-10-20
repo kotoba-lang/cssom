@@ -1440,38 +1440,38 @@
 
 (defn- content-ws-char? [c] (str/blank? (str c)))
 
-(defn- split-content-terms
+(defn- split-content-trms
   "Splits a `content` declaration's raw value into its top-level
-   whitespace-separated terms, without breaking a quoted string literal
+   whitespace-separated trms, without breaking a quoted string literal
    apart on any whitespace *inside* it (e.g. `\"Price: \" attr(data-price)`
-   splits into exactly two terms, not four) -- tracks a quote-char state
+   splits into exactly two trms, not four) -- tracks a qc state
    while scanning, the same technique `selector-tokens`/
    `split-selector-list` already use elsewhere in this namespace for the
    same reason."
   [#?@(:kotoba [v :string] :default [v])] #?@(:kotoba [[:list :string]])
   (let [s (str v)]
-    (loop [idx 0 start 0 quote-char "" terms (typed-list-new [:list :string])]
-      (if (>= idx (string-byte-length s))
-        (let [term (str/trim (subs s start idx))]
-          (if (str/blank? term) terms (typed-list-conj [:list :string] terms term)))
-        (let [ch (string-substring s idx (inc idx))]
+    (loop [si 0 st 0 qc "" trms (typed-list-new [:list :string])]
+      (if (>= si (string-byte-length s))
+        (let [term (str/trim (subs s st si))]
+          (if (str/blank? term) trms (typed-list-conj [:list :string] trms term)))
+        (let [ch (string-substring s si (inc si))]
           (cond
-            (and (not= "" quote-char) (= ch quote-char))
-            (recur (inc idx) start "" terms)
+            (and (not= "" qc) (= ch qc))
+            (recur (inc si) st "" trms)
 
-            (not= "" quote-char)
-            (recur (inc idx) start quote-char terms)
+            (not= "" qc)
+            (recur (inc si) st qc trms)
 
             (or (= "\"" (str ch)) (= "'" (str ch)))
-            (recur (inc idx) start ch terms)
+            (recur (inc si) st ch trms)
 
             (content-ws-char? ch)
-            (let [term (str/trim (subs s start idx))
-                  out2 (if (str/blank? term) terms (typed-list-conj [:list :string] terms term))]
-              (recur (inc idx) (inc idx) "" out2))
+            (let [term (str/trim (subs s st si))
+                  o2 (if (str/blank? term) trms (typed-list-conj [:list :string] trms term))]
+              (recur (inc si) (inc si) "" o2))
 
             :else
-            (recur (inc idx) start quote-char terms)))))))
+            (recur (inc si) st qc trms)))))))
 
 (defn- parse-content-value
   "Parses a CSS `content` declaration's raw value. Supports:
@@ -3602,7 +3602,7 @@
 ;; ---------------------------------------------------------------------
 
 (defn- selector-quoted-end [s open]
-  (let [quote-char (nth s open)]
+  (let [quote-char (string-substring s open (inc open))]
     (loop [idx (inc open)]
       (if (>= idx (count s)) -1
         (let [ch (nth s idx)
@@ -3617,7 +3617,7 @@
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) nil)
+          (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) "")
           (not= "" quote-char) (recur (inc idx) quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) ch)
           (= ch "]") (inc idx)
@@ -3629,7 +3629,7 @@
       (let [ch (nth s idx)
             escaped? (and (pos? idx) (= "\\" (nth s (dec idx))))]
         (cond
-          (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) depth nil)
+          (and (not= "" quote-char) (= ch quote-char) (not escaped?)) (recur (inc idx) depth "")
           (not= "" quote-char) (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
           (= ch "(") (recur (inc idx) (inc depth) nil)
