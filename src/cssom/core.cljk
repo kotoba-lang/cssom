@@ -8145,7 +8145,7 @@
    is visited in a fresh headless profile), which is exactly why there is
    no corpus case for it -- it would pass for the wrong reason."
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (and (contains? #{:a :area} (:tag node))
+  (and (contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :a true :area true) :default #{:a :area}) (:tag node))
        (some? (get-in node [:attrs :href]))))
 
 (defn- lang-pseudo-matches?
@@ -9193,7 +9193,7 @@
             m))
         before (:pseudo/before style)
         after (:pseudo/after style)
-        opens? (contains? #{:open :no-open} (quote-marker before))
+        opens? (contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :open true :no-open true) :default #{:open :no-open}) (quote-marker before))
         style (cond-> style
                 before (assoc :pseudo/before (resolve-one before true))
                 after (assoc :pseudo/after (resolve-one after false)))]
@@ -9347,7 +9347,7 @@
     (if-let [{:keys [value]} (last lower-entries)]
       (if-let [nested (css-wide-keyword value)]
         (resolve-css-wide-keyword document node property
-                                  (if (contains? #{:revert :revert-layer} nested) :unset nested)
+                                  (if (contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :revert true :revert-layer true) :default #{:revert :revert-layer}) nested) :unset nested)
                                   nil)
         value)
       (resolve-css-wide-keyword document node property :unset nil))))
