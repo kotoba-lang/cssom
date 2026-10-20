@@ -12149,6 +12149,14 @@
   [document rules node-id inherited-env inherited-counters container-ctx
    parent-font-size root-font-size parent-display parent-quote-depth parent-flow
    registry]
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): the rule-pipeline gap (parse-rules
+;; + resolve-style-and-flow stubs) -- the walker consumes resolved
+;; style maps. The typed route returns the document unchanged; no
+;; style attrs are computed until those land. Removal condition:
+;; parse-rules and resolve-style-and-flow answer their values.
+     [document nil nil]
+     :default
   (let [node (get-in document [:nodes node-id])
         [style node-counters node-flow]
         (style-with-counters document rules node inherited-counters container-ctx parent-flow)
@@ -12194,7 +12202,7 @@
                   final-style)]
     [document child-env node-counters node-font-size
      (children-container-display final-style parent-display)
-     child-quote-depth node-flow]))
+     child-quote-depth node-flow])))
 
 (defn- run-cascade-walk
   "The actual top-down tree walk apply-cascade performs (see its own
