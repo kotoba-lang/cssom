@@ -8333,6 +8333,9 @@
    False when `node` has no parent, matching every other sibling-relative
    answer in this namespace."
   [document node compound adjacent-only? match-fn]
+  #?(:kotoba
+     (let [siblings0 (structural-siblings document node false)] (if (not (option-some?-of [:option [:list :string]] siblings0)) false (let [siblings (option-value-of [:option [:list :string]] siblings0 (typed-list-new [:list :string])) position (sibling-position siblings (:node/id node))] (if (not (option-some?-of [:option :i64] position)) false (let [start (option-value-of [:option :i64] position 0) n (vector-count siblings) limit (if adjacent-only? (min n (inc start)) n)] (loop [i start] (if (>= i limit) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] siblings i)) compound) true (recur (inc i))))))))))
+     :default
   (boolean
    (when-let [siblings (structural-siblings document node false)]
      (let [siblings (vec siblings)
@@ -8341,7 +8344,7 @@
            candidates (if adjacent-only? (take 1 following) following)]
        (some (fn [sibling-id]
                (match-fn document (get-in document [:nodes sibling-id]) compound))
-             candidates)))))
+             candidates))))))
 
 (defn- has-group-matches?
   "Whether `node` matches one :has() GROUP -- one occurrence's
