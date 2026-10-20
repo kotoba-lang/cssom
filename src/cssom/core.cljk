@@ -492,7 +492,8 @@
                                                      [:layer-key [:option :string]]
                                                      [:order :i64]
                                                      [:decl-index :i64]
-                                                     [:rule/order :i64]]]}))
+                                                     [:rule/order :i64]]]
+    :cssom/rule [:record :cssom/rule [[:rule/declarations [:map :keyword [:result :f64 :string]]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -10559,12 +10560,15 @@
      places where the knowledge exists but is not reachable from here (see
      their own docstrings)."
   [property]
+  #?(:kotoba
+     (let [rules (ua-rules)] (or (inherited-property? property) (contains? (initial-values) property) (em-resolvable-property? property) (layout-read-property? property) (contains? shorthand-properties property) (loop [i 0] (if (>= i (vector-count rules)) false (if (contains? (:rule/declarations (typed-list-nth [:list [:ref :cssom/rule]] rules i)) property) true (recur (inc i)))))))
+     :default
   (or (inherited-property? property)
       (contains? (initial-values) property)
       (em-resolvable-property? property)
       (layout-read-property? property)
       (contains? shorthand-properties property)
-      (some #(contains? (:rule/declarations %) property) (ua-rules))))
+      (some #(contains? (:rule/declarations %) property) (ua-rules)))))
 
 (def ^:private property-value-keywords
   "For the properties whose value space this engine ENUMERATES, the
