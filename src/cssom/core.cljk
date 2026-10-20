@@ -11716,6 +11716,9 @@
    Custom properties are skipped too: `--x: attr(data-w px)` is legal CSS
    and unsupported here, an honest gap rather than a silent one."
   [node style]
+  #?(:kotoba
+     (let [n (typed-map-count [:map :keyword [:result :f64 :string]] style)] (if (not (loop [i 0] (if (>= i n) false (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) true (recur (inc i))))))) style (let [attrs (:attrs node)] (loop [i 0 out (typed-map-new [:map :keyword [:result :f64 :string]])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (recur (inc i) (typed-map-assoc [:map :keyword [:result :f64 :string]] out k (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) (parse-style-value (resolve-attr-refs-kotoba (result-error-of [:result :f64 :string] v "") attrs)) v)))))))))
+     :default
   (if-not (some (fn [[k v]] (and (string? v)
                                  (not= :content k)
                                  (not (custom-property? k))
@@ -11733,7 +11736,7 @@
                                                   (fn [[_ name syntax unit fallback]]
                                                     (or (attr-typed-value attrs name unit syntax fallback) "")))))]
                      [k v])))
-            style))))
+            style)))))
 
 (defn- resolve-value
   "Resolves `var(--name[, fallback])` references in `value` against the
