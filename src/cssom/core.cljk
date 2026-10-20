@@ -5411,6 +5411,38 @@
    lengths and registers in Brave, which a whole-value
    `parse-style-value` reads as one unparseable string."
   [syntax initial]
+  #?(:kotoba
+     (let [alts0 (parse-property-syntax syntax)]
+       (if (or (not (option-some?-of [:option [:list [:ref :cssom/syntax]]] alts0))
+               (= 0 (vector-count (option-value-of [:option [:list [:ref :cssom/syntax]]] alts0 (typed-list-new [:list [:ref :cssom/syntax]])))))
+         true
+         (let [alts (option-value-of [:option [:list [:ref :cssom/syntax]]] alts0 (typed-list-new [:list [:ref :cssom/syntax]]))]
+           (loop [i 0]
+             (if (>= i (vector-count alts))
+               false
+               (let [alternative (typed-list-nth [:list [:ref :cssom/syntax]] alts i)
+                     name (:syntax/name alternative)
+                     multiplier (:syntax/multiplier alternative)
+                     support (syntax-alternative-support alternative initial)
+                     relative? (and (option-some?-of [:option :string] name)
+                                    (or (= (option-value-of [:option :string] name "") "length")
+                                        (= (option-value-of [:option :string] name "") "length-percentage")))]
+                 (if (and (not (= support :no))
+                          (or (not relative?)
+                              (let [items (if (= multiplier :plus)
+                                            (split-value-components initial " ")
+                                            (if (= multiplier :hash)
+                                              (split-value-components initial ",")
+                                              (typed-list-conj [:list :string] (typed-list-new [:list :string]) initial)))]
+                                (loop [j 0]
+                                  (if (>= j (vector-count items))
+                                    true
+                                    (if (result-ok?-of [:result :f64 :string] (parse-style-value (typed-list-nth [:list :string] items j)))
+                                      (recur (inc j))
+                                      false))))))
+                   true
+                   (recur (inc i)))))))))
+     :default
   (let [alternatives (parse-property-syntax syntax)
         relative? #?(:kotoba (typed-set-new [:set :string] "length" "length-percentage") :default #{"length" "length-percentage"})
         independent?
@@ -5422,7 +5454,7 @@
                              :plus (split-value-components initial " ")
                              :hash (split-value-components initial ",")
                              [initial])))))]
-    (boolean (or (empty? alternatives) (some independent? alternatives)))))
+    (boolean (or (empty? alternatives) (some independent? alternatives))))))
 
 (defn- parse-property-registrations
   "Every valid `@property --name { ... }` registration in `css`, as
