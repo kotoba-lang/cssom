@@ -2952,6 +2952,86 @@
    because `into {}` keeps the last pair -- which is the same answer the
    `:value` already gave."
   [text]
+  #?(:kotoba
+     (let [decls (split-value-components (str text) ";")
+           ndecl (vector-count decls)]
+       (loop [di 0 idx 0 out (typed-map-new [:map :keyword [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]])]
+         (if (>= di ndecl)
+           out
+           (let [decl (typed-list-nth [:list :string] decls di)
+                 ci (str/index-of decl ":")
+                 k (if (option-some?-of [:option :i64] ci)
+                     (str/trim (s-sub decl 0 (option-value-of [:option :i64] ci 0)))
+                     "")
+                 v (if (option-some?-of [:option :i64] ci)
+                     (str/trim (s-sub decl (inc (option-value-of [:option :i64] ci 0)) (s-len decl)))
+                     "")]
+             (if (or (str/blank? k) (str/blank? v))
+               (recur (inc di) idx out)
+               (let [important? (important-suffix? v)
+                     value (strip-important-suffix v)
+                     lower-k (str/ascii-lower k)
+                     entries (cond
+                               (and (contains? (typed-set-new [:set :string] "margin" "padding") lower-k)
+                                    (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-box-side-shorthand lower-k value)) 0))
+                               (expand-box-side-shorthand lower-k value)
+
+                               (and (= "inset" lower-k)
+                                    (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-inset-shorthand value)) 0))
+                               (expand-inset-shorthand value)
+
+                               (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-logical-side-shorthand lower-k value)) 0)
+                               (expand-logical-side-shorthand lower-k value)
+
+                               (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-logical-border-shorthand lower-k value)) 0)
+                               (expand-logical-border-shorthand lower-k value)
+
+                               (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-border-side-shorthand lower-k value)) 0)
+                               (expand-border-side-shorthand lower-k value)
+
+                               (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-border-box-shorthand lower-k value)) 0)
+                               (expand-border-box-shorthand lower-k value)
+
+                               (and (= "border" lower-k)
+                                    (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-border-shorthand-with-sides value)) 0))
+                               (expand-border-shorthand-with-sides value)
+
+                               (= "text-shadow" lower-k)
+                               (expand-text-shadow-shorthand value)
+
+                               (= "box-shadow" lower-k)
+                               (expand-box-shadow-shorthand value)
+
+                               (= "outline" lower-k)
+                               (expand-outline-shorthand value)
+
+                               (= "font" lower-k)
+                               (expand-font-shorthand value)
+
+                               (and (= "flex" lower-k)
+                                    (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-flex-shorthand value)) 0))
+                               (expand-flex-shorthand value)
+
+                               (> (typed-map-count [:map :keyword [:result :f64 :string]] (expand-place-shorthand k value)) 0)
+                               (expand-place-shorthand k value)
+
+                               :else
+                               (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-new [:map :keyword [:result :f64 :string]]) (keyword-from-string k) (parse-property-value k value)))
+                     ne (typed-map-count [:map :keyword [:result :f64 :string]] entries)]
+                 (loop [ei 0 idx idx out out]
+                   (if (>= ei ne)
+                     (recur (inc di) idx out)
+                     (recur (inc ei) (inc idx)
+                       (typed-map-assoc [:map :keyword [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] out
+                         (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] entries) ei)
+                         (record-new [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]
+                           (option-value-of [:option [:result :f64 :string]]
+                             (typed-map-get [:map :keyword [:result :f64 :string]] entries
+                               (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] entries) ei))
+                             (result-err-of [:result :f64 :string] ""))
+                           important?
+                           idx)))))))))))
+     :default
   (->> (split-value-components (or text "") ";")
        (mapcat (fn [decl]
                  (let [[k v] (map str/trim (split-first-on decl ":"))]
@@ -3040,7 +3120,7 @@
                              []))))
                      []))))
        (map-indexed (fn [idx [property meta]] [property (assoc meta :index idx)]))
-       (into {})))
+       (into {}))))
 
 (defn parse-declarations
   "Like `parse-declarations-with-importance`, but each entry's value is
@@ -3048,7 +3128,18 @@
    `:rule/declarations`, or `kotoba-lang/browser`'s `dom_bridge.cljc`
    before this fix) that don't need per-property `!important` tracking."
   [text]
-  (into {} (map (fn [[k v]] [k (:value v)])) (parse-declarations-with-importance text)))
+  #?(:kotoba
+     (let [src (parse-declarations-with-importance text)
+           n (typed-map-count [:map :keyword [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] src)]
+       (loop [i 0 out (typed-map-new [:map :keyword [:result :f64 :string]])]
+         (if (>= i n)
+           out
+           (recur (inc i)
+             (typed-map-assoc [:map :keyword [:result :f64 :string]] out
+               (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] src) i)
+               (:value (typed-list-nth [:list [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] (typed-map-vals [:map :keyword [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] src) i)))))))
+     :default
+  (into {} (map (fn [[k v]] [k (:value v)])) (parse-declarations-with-importance text))))
 
 (defn- selector-ident-end
   "Returns the end offset of an ASCII CSS identifier beginning at `start`."
@@ -3085,18 +3176,18 @@
                tail (str/trim (subs inside name-end))]
            (when (and (pos? name-end) (css-ident? attr))
              (if (empty? tail)
-               {:attr/name (keyword attr) :attr/operator nil :attr/value nil
+               {:attr/name (keyword attr) :attr/operator (option-none-of [:option :string]) :attr/value (option-none-of [:option :string])
                 :attr/case-insensitive? false}
                (let [operator (cond
-                                (and (>= (count tail) 2) (= "~" (str (nth tail 0))) (= "=" (str (nth tail 1)))) "~="
-                                (and (>= (count tail) 2) (= "|" (str (nth tail 0))) (= "=" (str (nth tail 1)))) "|="
-                                (and (>= (count tail) 2) (= "^" (str (nth tail 0))) (= "=" (str (nth tail 1)))) "^="
-                                (and (>= (count tail) 2) (= "$" (str (nth tail 0))) (= "=" (str (nth tail 1)))) "$="
-                                (and (>= (count tail) 2) (= "*" (str (nth tail 0))) (= "=" (str (nth tail 1)))) "*="
-                                (= "=" (str (nth tail 0))) "="
-                                :else nil)]
-                 (when operator
-                   (let [after-op (subs tail (count operator))
+                                (and (>= (count tail) 2) (= "~" (str (nth tail 0))) (= "=" (str (nth tail 1)))) (option-some-of [:option :string] "~=")
+                                (and (>= (count tail) 2) (= "|" (str (nth tail 0))) (= "=" (str (nth tail 1)))) (option-some-of [:option :string] "|=")
+                                (and (>= (count tail) 2) (= "^" (str (nth tail 0))) (= "=" (str (nth tail 1)))) (option-some-of [:option :string] "^=")
+                                (and (>= (count tail) 2) (= "$" (str (nth tail 0))) (= "=" (str (nth tail 1)))) (option-some-of [:option :string] "$=")
+                                (and (>= (count tail) 2) (= "*" (str (nth tail 0))) (= "=" (str (nth tail 1)))) (option-some-of [:option :string] "*=")
+                                (= "=" (str (nth tail 0))) (option-some-of [:option :string] "=")
+                                :else (option-none-of [:option :string]))]
+                 (when (option-some?-of [:option :string] operator)
+                   (let [after-op (subs tail (s-len (option-value-of [:option :string] operator "")))
                          value-start (loop [i 0]
                                        (if (and (< i (count after-op))
                                                 (str/blank? (str (nth after-op i))))
@@ -3115,9 +3206,10 @@
                                                 (not (str/blank? (str (nth after-op i)))))
                                          (recur (inc i)) i)))
                          value (when (>= value-end 0)
-                                 (if quoted?
-                                   (subs after-op (inc value-start) value-end)
-                                   (subs after-op value-start value-end)))
+                                 (option-some-of [:option :string]
+                                   (if quoted?
+                                     (subs after-op (inc value-start) value-end)
+                                     (subs after-op value-start value-end))))
                          rest-start (if quoted? (inc value-end) value-end)
                          raw-rest (when (>= rest-start 0) (subs after-op rest-start))
                          rest (str/trim (or raw-rest ""))
@@ -3126,7 +3218,7 @@
                          valid-flag? (and separated? (= 1 (count rest))
                                           (or (= "i" rest) (= "I" rest)
                                               (= "s" rest) (= "S" rest)))]
-                     (when (and (some? value)
+                     (when (and (option-some?-of [:option :string] value)
                                 (or (empty? rest) valid-flag?))
                        {:attr/name (keyword attr)
                         :attr/operator operator
