@@ -7328,8 +7328,16 @@
   "1-indexed position of `node-id` within `siblings` (a seq of node-ids in
    document order, see `structural-siblings`), or nil if not present."
   [siblings node-id]
+  #?(:kotoba
+     (loop [i 0]
+       (if (>= i (vector-count siblings))
+         (option-none-of [:option :i64])
+         (if (= (typed-list-nth [:list :string] siblings i) node-id)
+           (option-some-of [:option :i64] (inc i))
+           (recur (inc i)))))
+     :default
   (some (fn [[idx id]] (when (= id node-id) (inc idx)))
-        (map-indexed vector siblings)))
+        (map-indexed vector siblings))))
 
 (def ^:private nth-an-b-pattern
   "Matches the general `An+B` form of real CSS's nth-child micro-syntax: an
