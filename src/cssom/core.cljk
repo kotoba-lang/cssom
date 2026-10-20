@@ -478,7 +478,9 @@
                                             [:node/type :keyword]
                                             [:tag [:option :keyword]]
                                             [:attrs [:map :keyword :string]]
-                                            [:children [:list :string]]]]}))
+                                            [:children [:list :string]]]]
+    :cssom/container [:record :cssom/container [[:names [:set :string]]
+                                               [:known-width [:option :f64]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -8898,13 +8900,16 @@
    its container-ctx (alongside parent-index) so container-rule-matches?
    can walk from any descendant up to its nearest matching container."
   [document]
+  #?(:kotoba
+     (let [nodes (:nodes document)] (loop [i 0 out (typed-map-new [:map :string [:ref :cssom/container]])] (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes)) out (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i) node (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i) ntype (:node/type node) ctype (typed-map-get [:map :keyword :string] (:attrs node) :container-type)] (recur (inc i) (if (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (option-some?-of [:option :string] ctype) (or (= (option-value-of [:option :string] ctype "") "inline-size") (= (option-value-of [:option :string] ctype "") "size"))) (typed-map-assoc [:map :string [:ref :cssom/container]] out node-id (record-new [:record :cssom/container [[:names [:set :string]] [:known-width [:option :f64]]]] (container-names-of document node-id) (resolvable-container-width document node-id))) out))))))
+     :default
   (into {}
         (keep (fn [[node-id node]]
                 (when (and (= :element (:node/type node))
                            (contains? #?(:kotoba (typed-set-new [:set :string] "inline-size" "size") :default #{"inline-size" "size"}) (container-type-of document node-id)))
                   [node-id {:names (container-names-of document node-id)
                             :known-width (resolvable-container-width document node-id)}])))
-        (:nodes document)))
+        (:nodes document))))
 
 (defn- nearest-container
   "Walks up from `node-id`'s PARENT (never `node-id` itself -- real CSS
@@ -9140,70 +9145,12 @@
 (defn- inherited-property? [property]
   (keyword-list-contains? inherited-properties property))
 
-(def ^:private initial-values
-  "CSS's own initial value for the properties whose initial value is not
-   the same as ABSENCE in this engine's representation -- i.e. every
-   property the user-agent stylesheet declares (where dropping the
-   declaration would leave the UA value standing, and `initial` must beat
-   it), plus the inherited properties (where dropping would inherit).
-
-   Every entry measured in Brave 151 on 2026-08-05 by setting the property
-   to `initial` on an element inside an ancestor that declared a different
-   value, and reading `getComputedStyle` back -- see `css-wide-keywords`
-   for the table and the page.
-
-   NOT here, and each for a reason that is not 'not got to yet':
-
-   - `font-size`. Its initial value is the keyword `medium`, whose pixel
-     value is keyed on the DEFAULT font of the family in use: measured
-     13px on the corpus's monospace page and 16px on the same page with
-     `font-family: Arial`. That is the same family-keyed table that keeps
-     the absolute font-size keywords out of `resolve-font-size` (see its
-     own docstring), and this engine has no font-family model to key it
-     on. `font-size: initial` therefore drops, and inherits -- wrong, and
-     wrong in a way that is one measurement away from being right if a
-     family model ever arrives.
-   - `font-family`. Its initial value is the browser's own default family,
-     which is a user preference and not a CSS value at all: measured
-     `\"Hiragino Kaku Gothic ProN\"` on this machine. This sheet has no
-     font-family rule to beat, so `font-family: initial` drops and
-     inherits -- the same cut as `font-size`, for the same missing model.
-   - The uniform `:margin`/`:padding` keys this engine emits alongside the
-     four longhands (see `expand-box-side-shorthand`). They are not CSS
-     properties, and absence is exactly what they should say when no
-     uniform value survives -- their readers already fall back.
-   - `quotes` and `list-style-image`. Both inherit, so both would qualify
-     under the rule below -- but nothing reads either as a style property.
-     `quotes` is hardcoded at its `auto` behaviour (see `quote-marks`, and
-     Brave reports `auto` for `quotes: initial`), and `list-style-image`'s
-     initial value is `none`, which is what its absence already means.
-   - `font-variant` (`normal`) and `font-stretch` (`100%`), measured in
-     Brave 151 on 2026-08-06 alongside the rows that ARE here. Neither has
-     a reader anywhere in this repo, so an entry would only add a
-     `:style/*` attr nobody consumes.
-   - Anything else. A property with no entry drops, which is CSS's initial
-     value for every non-inherited property that the UA sheet does not
-     declare. Adding an entry is only ever needed to beat the UA sheet or
-     to stop an inherited property inheriting.
-
-   The last seven rows below are the second reason, and they arrived with
-   the `all` shorthand: `all: initial` on an element inside a
-   `writing-mode: vertical-rl` parent reports `horizontal-tb` in Brave 151
-   (2026-08-06), which only an entry here can say -- dropping the
-   declaration leaves an inherited property inheriting. Measured on the one
-   page, each property set to a non-initial value on the parent and to
-   `initial` on the child, with an `unset` sibling beside it that reports
-   the parent's value in every row and so separates the two keywords:
-
-   | property              | parent        | `initial` | `unset`     |
-   |-----------------------|---------------|-----------|-------------|
-   | `writing-mode`        | `vertical-rl` | `horizontal-tb` | `vertical-rl` |
-   | `text-orientation`    | `upright`     | `mixed`   | `upright`   |
-   | `list-style-position` | `inside`      | `outside` | `inside`    |
-   | `hyphens`             | `auto`        | `manual`  | `auto`      |
-   | `orphans`             | `5`           | `2`       | `5`         |
-   | `widows`              | `5`           | `2`       | `5`         |"
-  {:color "#000000"
+(defn- initial-values
+  []
+  #?(:kotoba
+     (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-new [:map :keyword [:result :f64 :string]]) :color (result-err-of [:result :f64 :string] "#000000")) :font-weight (result-err-of [:result :f64 :string] "normal")) :font-style (result-err-of [:result :f64 :string] "normal")) :display (result-err-of [:result :f64 :string] "inline")) :text-align (result-err-of [:result :f64 :string] "start")) :vertical-align (result-err-of [:result :f64 :string] "baseline")) :white-space (result-err-of [:result :f64 :string] "normal")) :text-transform (result-err-of [:result :f64 :string] "none")) :text-indent (result-ok-of [:result :f64 :string] 0)) :letter-spacing (result-err-of [:result :f64 :string] "normal")) :word-spacing (result-ok-of [:result :f64 :string] 0)) :line-height (result-err-of [:result :f64 :string] "normal")) :visibility (result-err-of [:result :f64 :string] "visible")) :list-style-type (result-err-of [:result :f64 :string] "disc")) :direction (result-err-of [:result :f64 :string] "ltr")) :border-collapse (result-err-of [:result :f64 :string] "separate")) :border-spacing (result-ok-of [:result :f64 :string] 0)) :caption-side (result-err-of [:result :f64 :string] "top")) :empty-cells (result-err-of [:result :f64 :string] "show")) :word-break (result-err-of [:result :f64 :string] "normal")) :overflow-wrap (result-err-of [:result :f64 :string] "normal")) :tab-size (result-ok-of [:result :f64 :string] 8)) :cursor (result-err-of [:result :f64 :string] "auto")) :text-shadow (result-err-of [:result :f64 :string] "none")) :margin-top (result-ok-of [:result :f64 :string] 0)) :margin-right (result-ok-of [:result :f64 :string] 0)) :margin-bottom (result-ok-of [:result :f64 :string] 0)) :margin-left (result-ok-of [:result :f64 :string] 0)) :padding-top (result-ok-of [:result :f64 :string] 0)) :padding-right (result-ok-of [:result :f64 :string] 0)) :padding-bottom (result-ok-of [:result :f64 :string] 0)) :padding-left (result-ok-of [:result :f64 :string] 0)) :writing-mode (result-err-of [:result :f64 :string] "horizontal-tb")) :text-orientation (result-err-of [:result :f64 :string] "mixed")) :list-style-position (result-err-of [:result :f64 :string] "outside")) :hyphens (result-err-of [:result :f64 :string] "manual")) :orphans (result-ok-of [:result :f64 :string] 2)) :widows (result-ok-of [:result :f64 :string] 2))
+     :default
+       {:color "#000000"
    :font-weight "normal"
    :font-style "normal"
    :display "inline"
@@ -9234,7 +9181,7 @@
    :list-style-position "outside"
    :hyphens "manual"
    :orphans 2
-   :widows 2})
+   :widows 2}))
 
 (def ^:private drop-declaration
   "The sentinel `resolve-css-wide-keyword` returns for 'this property has
@@ -9306,7 +9253,7 @@
   [document node property keyword-kind lower-entries]
   (case keyword-kind
     :inherit (parent-computed-value document node property)
-    :initial (get initial-values property drop-declaration)
+    :initial (get (initial-values) property drop-declaration)
     :unset (resolve-css-wide-keyword document node property
                                      (if (inherited-property? property)
                                        :inherit
@@ -9443,7 +9390,7 @@
    and every UA declaration for this element is in `sorted`."
   [document node sorted keyword-kind]
   (cond-> (into (into #{} (map :property) sorted)
-                (concat (keys initial-values)
+                (concat (keys (initial-values))
                         (map keyword (split-value-components inherited-properties "|"))))
     (= :inherit keyword-kind)
     (into (when document
@@ -10598,7 +10545,7 @@
      their own docstrings)."
   [property]
   (or (inherited-property? property)
-      (contains? initial-values property)
+      (contains? (initial-values) property)
       (em-resolvable-property? property)
       (layout-read-property? property)
       (contains? shorthand-properties property)
