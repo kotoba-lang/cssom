@@ -462,7 +462,9 @@
                                               [:selector/has [:list [:list [:ref :cssom/has-item]]]]
                                               [:selector/nth-args [:map :keyword :string]]
                                               [:selector/lang-args [:map :keyword :string]]
-                                              [:selector/combinator [:option :keyword]]]]}))
+                                              [:selector/combinator [:option :keyword]]
+                                              [:selector/parts [:option [:list [:ref :cssom/compound]]]]
+                                              [:selector/scope-implicit? :bool]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -3944,7 +3946,9 @@
       has-groups
       nth-args
       lang-args
-      (option-none-of [:option :keyword]))))
+      (option-none-of [:option :keyword])
+      (option-none-of [:option [:list [:ref :cssom/compound]]])
+      false)))
    :kotoba
    (defn parse-simple-selector
      "Parses a compound CSS selector with Kotoba scanners for identifiers,
@@ -4084,6 +4088,33 @@
    pseudo-class). Those two numbers are why the flag exists rather than a
    shared representation."
   [simple]
+  #?(:kotoba
+     (if (:selector/scope-implicit? simple)
+       [0 0 0]
+       (let [not-s (spec-groups-sum (:selector/not simple))
+             is-s (spec-groups-sum (:selector/is simple))
+             has-groups (loop [i 0 acc (typed-list-new [:list [:list [:ref :cssom/compound]]])]
+                          (if (>= i (vector-count (:selector/has simple)))
+                            acc
+                            (recur (inc i)
+                              (typed-list-conj [:list [:list [:ref :cssom/compound]]] acc
+                                (loop [j 0 g (typed-list-new [:list [:ref :cssom/compound]])]
+                                  (if (>= j (vector-count (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has simple) i)))
+                                    g
+                                    (recur (inc j)
+                                      (typed-list-conj [:list [:ref :cssom/compound]] g
+                                        (:has/selector (typed-list-nth [:list [:ref :cssom/has-item]]
+                                                       (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has simple) i) j))))))))))
+             has-s (spec-groups-sum has-groups)]
+         [(+ (if (:selector/id simple) 1 0) (nth not-s 0) (nth is-s 0) (nth has-s 0))
+          (+ (vector-count (:selector/classes simple))
+             (vector-count (:selector/attrs simple))
+             (vector-count (:selector/pseudos simple))
+             (nth not-s 1) (nth is-s 1) (nth has-s 1))
+          (+ (if (:selector/tag simple) 1 0)
+             (if (:selector/pseudo-element simple) 1 0)
+             (nth not-s 2) (nth is-s 2) (nth has-s 2))]))
+     :default
   (if (:selector/scope-implicit? simple)
     [0 0 0]
     (let [arg-specificity
@@ -4125,16 +4156,65 @@
           nb ib hb)
        (+ (if (:selector/tag simple) 1 0)
           (if (:selector/pseudo-element simple) 1 0)
-          nc ic hc)])))
+          nc ic hc)]))))
+
+(defn- selector-arg-specificity
+  "Typed-route helper for `simple-selector-specificity`: one :is()/:not()
+   argument -- a bare compound, or a complex arg carrying :selector/parts
+   whose compounds sum (see complex-selector-arguments)."
+  [arg [:ref :cssom/compound]] [:vector-i64]
+  (let [parts (:selector/parts arg)]
+    (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts)
+      (loop [i 0 acc [0 0 0]]
+        (if (>= i (vector-count parts))
+          acc
+          (recur (inc i)
+            (let [s (simple-selector-specificity (typed-list-nth [:list [:ref :cssom/compound]] parts i))]
+              [(+ (nth acc 0) (nth s 0)) (+ (nth acc 1) (nth s 1)) (+ (nth acc 2) (nth s 2))]))))
+      (simple-selector-specificity arg))))
+
+(defn- spec-most-specific
+  [group [:list [:ref :cssom/compound]]] [:vector-i64]
+  (loop [i 0 best [0 0 0]]
+    (if (>= i (vector-count group))
+      best
+      (recur (inc i)
+        (let [c (selector-arg-specificity (typed-list-nth [:list [:ref :cssom/compound]] group i))
+              lt (or (< (nth c 0) (nth best 0))
+                     (and (= (nth c 0) (nth best 0))
+                          (or (< (nth c 1) (nth best 1))
+                              (and (= (nth c 1) (nth best 1)) (< (nth c 2) (nth best 2))))))]
+          (if lt best c))))))
+
+(defn- spec-groups-sum
+  [groups [:list [:list [:ref :cssom/compound]]]] [:vector-i64]
+  (loop [i 0 acc [0 0 0]]
+    (if (>= i (vector-count groups))
+      acc
+      (recur (inc i)
+        (let [s (spec-most-specific (typed-list-nth [:list [:list [:ref :cssom/compound]]] groups i))]
+          [(+ (nth acc 0) (nth s 0)) (+ (nth acc 1) (nth s 1)) (+ (nth acc 2) (nth s 2))])))))
+
 
 (defn specificity
   [selector]
+  #?(:kotoba
+     (let [parts (if (option-some?-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector))
+                    (:selector/parts selector)
+                    (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) selector))]
+       (loop [i 0 acc [0 0 0]]
+         (if (>= i (vector-count parts))
+           acc
+           (recur (inc i)
+             (let [s (simple-selector-specificity (typed-list-nth [:list [:ref :cssom/compound]] parts i))]
+               [(+ (nth acc 0) (nth s 0)) (+ (nth acc 1) (nth s 1)) (+ (nth acc 2) (nth s 2))])))))
+     :default
   (let [parts (or (:selector/parts selector) [selector])]
     (reduce (fn [[a b c] part]
               (let [[pa pb pc] (simple-selector-specificity part)]
                 [(+ a pa) (+ b pb) (+ c pc)]))
             [0 0 0]
-            parts)))
+            parts))))
 
 (defn- find-matching-brace
   "Index of the `}` that closes the `{` at `open-idx`, honoring nested braces
