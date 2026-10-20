@@ -4493,6 +4493,16 @@
    scans that happen to count the same way today are two scans that can
    stop counting the same way."
   [css]
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): the recursive at-rule scanner carries
+;; state in volatiles + a letfn walk, and layer-priority-map a named
+;; self-recursive fn -- neither shape is admitted (local-state-not-a-cell /
+;; named fn literal). @media/@layer/@supports/@container rules therefore
+;; yield NOTHING on the kotoba route until this walk is rewritten as a
+;; pure state-threaded module fn pair. Removal condition:
+;; scan-conditional-at-rules answers its :segments/:layer-paths shape.
+(nil)
+     :default
   (let [anon (volatile! 0)
         paths (volatile! [])
         note-layer! (fn [path] (vswap! paths into (layer-paths-with-prefixes path)))]
@@ -4554,7 +4564,7 @@
                     (into out [{:segment/text (subs s idx) :segment/ctx ctx}]))))
               (cond-> out
                 (< idx n) (conj {:segment/text (subs s idx) :segment/ctx ctx}))))))]
-      {:segments (walk (str (or css "")) {}) :layer-paths @paths})))
+      {:segments (walk (str (or css "")) {}) :layer-paths @paths}))))
 
 (defn- layer-priority-map
   "`path -> priority integer` for every layer named in a stylesheet, where a
@@ -4577,6 +4587,16 @@
    flat `distinct` over first-appearance NAMES with no tree at all: it got
    the first row right and the other three wrong."
   [ordered-paths]
+  #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): the recursive at-rule scanner carries
+;; state in volatiles + a letfn walk, and layer-priority-map a named
+;; self-recursive fn -- neither shape is admitted (local-state-not-a-cell /
+;; named fn literal). @media/@layer/@supports/@container rules therefore
+;; yield NOTHING on the kotoba route until this walk is rewritten as a
+;; pure state-threaded module fn pair. Removal condition:
+;; scan-conditional-at-rules answers its :segments/:layer-paths shape.
+(nil)
+     :default
   (let [ordered (distinct ordered-paths)
         children (reduce (fn [m path]
                            (let [parent (vec (butlast path))
@@ -4588,7 +4608,7 @@
         post-order (fn post-order [path]
                      (concat (mapcat #(post-order (conj path %)) (get children path []))
                              (when (seq path) [path])))]
-    (into {} (map-indexed (fn [idx path] [path idx]) (post-order [])))))
+    (into {} (map-indexed (fn [idx path] [path idx]) (post-order []))))))
 
 ;; ---------------------------------------------------------------------
 ;; CSS Nesting (CSS Nesting Module Level 1), as a DESUGARING over the raw
