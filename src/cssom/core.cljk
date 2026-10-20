@@ -1269,7 +1269,7 @@
   (or (css-ident-start? ch)
       (str/includes? "0123456789-" (str ch))))
 
-(defn- css-ident? [s]
+(defn- css-ident? [#?@(:kotoba [s :string] :default [s])] #?@(:kotoba [:bool])
   (let [n (string-byte-length s)]
     (and (> n 0)
          (css-ident-start? (string-substring s 0 (inc 0)))
@@ -1671,7 +1671,7 @@
 
       :else (parse-style-value v))))
 
-(defn- matching-var-close [s open]
+(defn- matching-var-close [#?@(:kotoba [s :string open :i64] :default [s open])] #?@(:kotoba [:i64])
   (let [n (string-byte-length s)]
     (loop [idx open depth 0]
       (if (>= idx n)
@@ -8931,7 +8931,7 @@
    never lets an element be its own query container, precisely to avoid the
    circularity of an element's style depending on a size that depends on
    that same element's own style; see apply-cascade's docstring) via
-   `parent-index`, returning the first (nearest) `containers` entry -- see
+   `parents`, returning the first (nearest) `containers` entry -- see
    build-containers -- whose :names includes `container-name` (or the very
    first container entry found at all, when `container-name` is nil, i.e.
    an unnamed @container query just wants 'the nearest container, whatever
@@ -8943,14 +8943,14 @@
    to be resolvable (container-rule-matches? is what turns an unresolvable
    :known-width into an honest non-match; this function's job is purely
    finding WHICH container, never approximating one)."
-  [containers parent-index node-id container-name]
-  (loop [pid (get parent-index node-id)]
+  [containers parents node-id container-name]
+  (loop [pid (get parents node-id)]
     (when pid
       (if-let [container (get containers pid)]
         (if (or (nil? container-name) (contains? (:names container) container-name))
           container
-          (recur (get parent-index pid)))
-        (recur (get parent-index pid))))))
+          (recur (get parents pid)))
+        (recur (get parents pid))))))
 
 (defn- container-rule-matches?
   "Whether a rule carrying `:rule/container`/`:rule/container-name` (see
@@ -8980,8 +8980,9 @@
     (or (nil? condition)
         (and (some? container-ctx)
              (some? node-id)
-             (let [{:keys [containers parent-index]} container-ctx
-                   container (nearest-container containers parent-index node-id (:rule/container-name rule))]
+             (let [containers (get container-ctx :containers)
+                   ctx-parents (get container-ctx :parent-index)
+                   container (nearest-container containers ctx-parents node-id (:rule/container-name rule))]
                (and container
                     (some? (:known-width container))
                     (container-condition-matches? condition (:known-width container))))))))
@@ -10289,7 +10290,7 @@
    that has no cascade behind it (`ua-style-for`, a document nobody
    cascaded) -- the same reason `ua-style-for` itself is public, and the
    same rule against writing this knowledge down twice."
-  [style parent-font-size root-font-size]
+  [#?@(:kotoba [style [:map :keyword [:result :f64 :string]] parent-font-size root-font-size] :default [style parent-font-size root-font-size])]
   (let [resolved-own (resolve-font-size (:font-size style) parent-font-size
                                         (or root-font-size parent-font-size))
         own (or resolved-own parent-font-size)
