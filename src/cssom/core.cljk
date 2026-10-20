@@ -6518,9 +6518,9 @@
   [condition :string viewport-width :i64 color-scheme :string] :bool
   (let [queries (split-top-level (str/trim (strip-media-prefix condition)) ",")]
     (if (option-some?-of [:option [:list :string]] queries)
-      (let [qs (option-value-of [:option [:list :string]] queries (typed-list-new [:list :string]))]
+      (let [qs (option-value-of [:option [:list :string]] queries (typed-list-new [:list :string])) nqs (vector-count qs)]
         (loop [i 0]
-          (if (>= i (vector-count qs))
+          (if (>= i nqs)
             false
             (if (media-query-matches? (typed-list-nth [:list :string] qs i) viewport-width color-scheme)
               true
@@ -6530,11 +6530,11 @@
 (defn- media-all-conditions?
   "Typed-route AND fold over a nested @media condition list."
   [conditions [:list :string] viewport-width :i64 color-scheme :string] :bool
-  (loop [i 0]
-    (if (>= i (vector-count conditions))
+  (loop [i 0 nconds (vector-count conditions)]
+    (if (>= i nconds)
       true
       (if (media-any-query? (typed-list-nth [:list :string] conditions i) viewport-width color-scheme)
-        (recur (inc i))
+        (recur (inc i) nconds)
         false))))
 
 
@@ -6732,10 +6732,10 @@
            (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i)
                  node (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i)
                  children (:children node)]
-             (if (loop [j 0]
-                   (if (>= j (vector-count children))
+             (if (loop [j 0 nchildren (vector-count children)]
+                   (if (>= j nchildren)
                      false
-                     (if (= (typed-list-nth [:list :string] children j) child-id) true (recur (inc j)))))
+                     (if (= (typed-list-nth [:list :string] children j) child-id) true (recur (inc j) nchildren))))
                (option-some-of [:option :string] node-id)
                (recur (inc i)))))))
      :default
@@ -6757,12 +6757,12 @@
      (if (= ancestor-id node-id)
        true
        (let [children (:children (dom-node-at document ancestor-id))]
-         (loop [j 0]
-           (if (>= j (vector-count children))
+         (loop [j 0 nchildren (vector-count children)]
+           (if (>= j nchildren)
              false
              (if (descendant-or-self? document (typed-list-nth [:list :string] children j) node-id)
                true
-               (recur (inc j)))))))
+               (recur (inc j) nchildren))))))
      :default
   (or (= ancestor-id node-id)
       (some (fn [child-id]
@@ -6773,15 +6773,15 @@
   [document fieldset-id]
   #?(:kotoba
      (let [children (:children (dom-node-at document fieldset-id))]
-       (loop [j 0]
-         (if (>= j (vector-count children))
+       (loop [j 0 nchildren (vector-count children)]
+         (if (>= j nchildren)
            (option-none-of [:option :string])
            (let [cid (typed-list-nth [:list :string] children j)
                  tag (:tag (dom-node-at document cid))]
              (if (and (option-some?-of [:option :keyword] tag)
                       (= (option-value-of [:option :keyword] tag :none) :legend))
                (option-some-of [:option :string] cid)
-               (recur (inc j)))))))
+               (recur (inc j) nchildren))))))
      :default
   (first (filter #(= :legend (get-in document [:nodes % :tag]))
                  (get-in document [:nodes fieldset-id :children])))))
@@ -7351,14 +7351,14 @@
 (defn- sibling-position
   "1-indexed position of `node-id` within `siblings` (a seq of node-ids in
    document order, see `structural-siblings`), or nil if not present."
-  [siblings node-id]
+  [#?@(:kotoba [siblings [:list :string] node-id :string] :default [siblings node-id])]
   #?(:kotoba
-     (loop [i 0]
-       (if (>= i (vector-count siblings))
+     (loop [i 0 nsibs (vector-count siblings)]
+       (if (>= i nsibs)
          (option-none-of [:option :i64])
          (if (= (typed-list-nth [:list :string] siblings i) node-id)
            (option-some-of [:option :i64] (inc i))
-           (recur (inc i)))))
+           (recur (inc i) nsibs))))
      :default
   (some (fn [[idx id]] (when (= id node-id) (inc idx)))
         (map-indexed vector siblings))))
@@ -7785,7 +7785,7 @@
    `contenteditable=\"plaintext-only\"` are all `:read-write`;
    `contenteditable=\"false\"` is `:read-only`. That is `truthy-attr?`'s
    own rule, named here so the `false` row is visible at the call site."
-  [v]
+  [#?@(:kotoba [v [:option :string]] :default [v])] #?@(:kotoba [:bool])
   (and (some? v) (truthy-attr? v)))
 
 (defn- in-contenteditable-subtree?
@@ -8113,7 +8113,7 @@
    when `arg` parses to no usable ranges."
   [document node arg]
   #?(:kotoba
-     (let [tag (computed-lang document node)] (if (not (option-some?-of [:option :string] tag)) false (let [ranges (parse-lang-ranges arg) tag-s (option-value-of [:option :string] tag "")] (loop [i 0] (if (>= i (vector-count ranges)) false (if (lang-range-matches-tag? (typed-list-nth [:list :string] ranges i) tag-s) true (recur (inc i))))))))
+     (let [tag (computed-lang document node)] (if (not (option-some?-of [:option :string] tag)) false (let [ranges (parse-lang-ranges arg) tag-s (option-value-of [:option :string] tag "") nranges (vector-count ranges)] (loop [i 0] (if (>= i nranges) false (if (lang-range-matches-tag? (typed-list-nth [:list :string] ranges i) tag-s) true (recur (inc i))))))))
      :default
   (boolean
    (when-let [tag (computed-lang document node)]
@@ -8490,7 +8490,7 @@
 (defn- attr-op-matches?
   "Typed-route attribute operator test for matches-simple?."
   [operator [:option :string] actual-str :string value :string] :bool
-  (cond (not (option-some?-of [:option :string] operator)) true (= (option-value-of [:option :string] operator "") "=") (= actual-str value) (= (option-value-of [:option :string] operator "") "~=") (let [toks (split-value-components actual-str " ")] (loop [i 0] (if (>= i (vector-count toks)) false (if (= (typed-list-nth [:list :string] toks i) value) true (recur (inc i)))))) (= (option-value-of [:option :string] operator "") "^=") (str/starts-with? actual-str value) (= (option-value-of [:option :string] operator "") "$=") (str/ends-with? actual-str value) (= (option-value-of [:option :string] operator "") "*=") (str/includes? actual-str value) (= (option-value-of [:option :string] operator "") "|=") (or (= actual-str value) (str/starts-with? actual-str (str value "-"))) :else false))
+  (cond (not (option-some?-of [:option :string] operator)) true (= (option-value-of [:option :string] operator "") "=") (= actual-str value) (= (option-value-of [:option :string] operator "") "~=") (let [toks (split-value-components actual-str " ") ntoks (vector-count toks)] (loop [i 0] (if (>= i ntoks) false (if (= (typed-list-nth [:list :string] toks i) value) true (recur (inc i)))))) (= (option-value-of [:option :string] operator "") "^=") (str/starts-with? actual-str value) (= (option-value-of [:option :string] operator "") "$=") (str/ends-with? actual-str value) (= (option-value-of [:option :string] operator "") "*=") (str/includes? actual-str value) (= (option-value-of [:option :string] operator "") "|=") (or (= actual-str value) (str/starts-with? actual-str (str value "-"))) :else false))
 
 (defn- selector-arm-matches?
   "Typed-route group-arm match for matches-simple? (compound or complex)."
@@ -9464,7 +9464,7 @@
    `:style/all` onto the element for nobody to read."
   [document node sorted]
   #?(:kotoba
-     (if (not (loop [i 0] (if (>= i (vector-count sorted)) false (if (= (:property (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted i)) :all) true (recur (inc i)))))) sorted (loop [e 0 out (typed-list-new [:list [:ref :cssom/cascade-entry]])] (if (>= e (vector-count sorted)) out (let [entry (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted e) kind (css-wide-keyword (:value entry))] (recur (inc e) (cond (not (= (:property entry) :all)) (typed-list-conj [:list [:ref :cssom/cascade-entry]] out entry) (not (option-some?-of [:option :keyword] kind)) out :else (let [universe (all-shorthand-universe document node sorted (option-value-of [:option :keyword] kind :none))] (loop [u 0 acc out] (if (>= u (vector-count universe)) acc (let [property (typed-list-nth [:list :keyword] universe u)] (recur (inc u) (typed-list-conj [:list [:ref :cssom/cascade-entry]] acc (assoc entry :property property :value (if (and (= kind :initial) (= property :font-size)) all-initial-font-size (:value entry)))))))))))))))
+     (if (not (loop [i 0 nsorted (vector-count sorted)] (if (>= i nsorted) false (if (= (:property (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted i)) :all) true (recur (inc i) nsorted))))) sorted (loop [e 0 out (typed-list-new [:list [:ref :cssom/cascade-entry]])] (if (>= e (vector-count sorted)) out (let [entry (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted e) kind (css-wide-keyword (:value entry))] (recur (inc e) (cond (not (= (:property entry) :all)) (typed-list-conj [:list [:ref :cssom/cascade-entry]] out entry) (not (option-some?-of [:option :keyword] kind)) out :else (let [universe (all-shorthand-universe document node sorted (option-value-of [:option :keyword] kind :none))] (loop [u 0 acc out] (if (>= u (vector-count universe)) acc (let [property (typed-list-nth [:list :keyword] universe u)] (recur (inc u) (typed-list-conj [:list [:ref :cssom/cascade-entry]] acc (assoc entry :property property :value (if (and (= kind :initial) (= property :font-size)) all-initial-font-size (:value entry)))))))))))))))
      :default
   (if-not (some #(= :all (:property %)) sorted)
     sorted
