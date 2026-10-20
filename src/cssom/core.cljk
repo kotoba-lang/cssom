@@ -3587,10 +3587,11 @@
    sidesteps it here."
   [tokens parse-compound]
   #?(:kotoba
-     (loop [i 0
+     (let [ntok (vector-count tokens)]
+       (loop [i 0
               combinator (option-none-of [:option :keyword])
               parts (typed-list-new [:list [:ref :cssom/compound]])]
-       (if (>= i (vector-count tokens))
+       (if (>= i ntok)
          parts
          (let [token (typed-list-nth [:list :string] tokens i)]
            (if (str/blank? token)
@@ -3608,7 +3609,7 @@
                                     (option-some-of [:option :keyword] :descendant))
                                   (option-none-of [:option :keyword])))]
                  (recur (inc i) (option-none-of [:option :keyword])
-                   (typed-list-conj [:list [:ref :cssom/compound]] parts combined))))))))
+                   (typed-list-conj [:list [:ref :cssom/compound]] parts combined)))))))))
      :default
   (second
    (reduce (fn [[combinator parts] token]
