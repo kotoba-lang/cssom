@@ -11278,7 +11278,13 @@
    resolved `{:writing-mode :direction}`, which its children inherit.
    `resolve-style-for` is the same function without the second value, and
    is what every caller that does not walk a tree uses."
-  ([document rules node pseudo-element counters container-ctx inherited-flow]
+  ([document rules node pseudo-element counters container-ctx inherited-flow] #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): rule-pipeline gap + delay/deref
+;; (scope-parents). Cascade resolution yields NOTHING on the kotoba
+;; route. Removal condition: parse-rules answers its rule list and
+;; resolve-style-and-flow returns its style map.
+     (nil)
+     :default
    (let [max-layer-priority (or (some->> rules (keep (fn [x] (:rule/layer-priority x))) seq (apply max)) 0)
          ;; Built at most ONCE per element, and only when some rule is
          ;; actually scoped: `@scope` is the only thing here that needs an
@@ -11537,7 +11543,7 @@
             (dissoc m :content)
             (assoc m :content resolved)))
         m)
-      flow])))
+      flow]))))
 
 (defn- resolve-style-for
   "`resolve-style-and-flow`'s resolved style map alone, for every caller
