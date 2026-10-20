@@ -4161,7 +4161,7 @@
                         [(+ a ga) (+ b gb) (+ c gc)]))
                     [0 0 0]
                     groups))
-          has-groups (mapv (fn [group] (mapv :has/selector group)) (:selector/has simple))
+          has-groups (mapv (fn [group] (mapv (fn [x] (:has/selector x)) group)) (:selector/has simple))
           [na nb nc] (groups-specificity (:selector/not simple))
           [ia ib ic] (groups-specificity (:selector/is simple))
           [ha hb hc] (groups-specificity has-groups)]
@@ -4900,7 +4900,7 @@
   [text parent]
   (let [chunks (css-chunks text)
         decl-text (->> chunks
-                       (keep :chunk/text)
+                       (keep (fn [x] (:chunk/text x)))
                        (map (fn [x] (str/trim x)))
                        (remove (fn [x] (str/blank? x)))
                        (remove #(str/starts-with? % "@"))
@@ -5002,7 +5002,7 @@
 
                  at false
 
-                 :else (boolean (some :chunk/prelude (css-chunks body)))))))
+                 :else (boolean (some (fn [x] (:chunk/prelude x)) (css-chunks body)))))))
          (css-chunks text))))))
 
 (defn- desugar-nesting
@@ -5557,7 +5557,7 @@
    which emits it as one selector-less pseudo-rule so no caller has to pass
    a second value alongside the rules it already passes)."
   [rules]
-  (reduce merge {} (keep :rule/property-registry rules)))
+  (reduce merge {} (keep (fn [x] (:rule/property-registry x)) rules)))
 
 (defn- registered-initial-env
   "The custom-property environment a document STARTS from: every registered
@@ -9389,7 +9389,7 @@
    complete for a different reason -- `revert` rolls back to the UA origin,
    and every UA declaration for this element is in `sorted`."
   [document node sorted keyword-kind]
-  (cond-> (into (into #{} (map :property) sorted)
+  (cond-> (into (into #{} (map (fn [x] (:property x))) sorted)
                 (concat (keys (initial-values))
                         (map keyword (split-value-components inherited-properties "|"))))
     (= :inherit keyword-kind)
@@ -11241,7 +11241,7 @@
    `resolve-style-for` is the same function without the second value, and
    is what every caller that does not walk a tree uses."
   ([document rules node pseudo-element counters container-ctx inherited-flow]
-   (let [max-layer-priority (or (some->> rules (keep :rule/layer-priority) seq (apply max)) 0)
+   (let [max-layer-priority (or (some->> rules (keep (fn [x] (:rule/layer-priority x))) seq (apply max)) 0)
          ;; Built at most ONCE per element, and only when some rule is
          ;; actually scoped: `@scope` is the only thing here that needs an
          ;; ancestor chain of its own (`matches?` builds its own index per
@@ -12271,7 +12271,7 @@
    `run-cascade-walk` TWICE rather than once -- and why it never needs a
    third time, or a loop, to do it:
 
-   1. If `rules` contains no `@container` rule at all (`(some :rule/container
+   1. If `rules` contains no `@container` rule at all (`(some (fn [x] (:rule/container x))
       rules)` is nil), this is exactly the single walk this function always
       performed -- no new code path, no behavior change, no extra cost.
 
@@ -12312,7 +12312,7 @@
          color-scheme (or (:color-scheme opts) default-color-scheme)
          base-font-size (or (:base-font-size opts) (default-base-font-size-value))
          rules (filterv #(rule-applies-to-viewport? % viewport-width color-scheme) rules)]
-     (if (some :rule/container rules)
+     (if (some (fn [x] (:rule/container x)) rules)
        (let [pass1-rules (filterv #(nil? (:rule/container %)) rules)
              pass1-document (run-cascade-walk document pass1-rules nil base-font-size)
              container-ctx {:containers (build-containers pass1-document)
