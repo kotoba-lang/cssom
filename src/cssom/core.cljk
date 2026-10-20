@@ -4966,8 +4966,8 @@
   [text]
   #?(:kotoba
      (let [chunks (css-chunks text)]
-       (loop [i 0]
-         (if (>= i (vector-count chunks))
+       (loop [i 0 nchunks (vector-count chunks)]
+         (if (>= i nchunks)
            false
            (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
                  prelude (:chunk/prelude c)]
@@ -4987,7 +4987,7 @@
                          (if (option-some?-of [:option :string] (:chunk/prelude (typed-list-nth [:list [:ref :cssom/chunk]] subs2 j)))
                            true
                            (recur (inc j) nsubs2)))))))
-               (recur (inc i)))))))
+               (recur (inc i) nchunks))))))
      :default
   #?(:kotoba
      (let [chunks (css-chunks text)]
@@ -5376,12 +5376,12 @@
         per-item (map #(syntax-component-support name literal %) items)]
     (if (empty? items)
       :no
-      (loop [i 0]
+      (loop [i 0 nitems (vector-count per-item)]
         (cond
-          (>= i (vector-count per-item)) :yes
+          (>= i nitems) :yes
           (= (typed-list-nth [:list :keyword] per-item i) :no) :no
           (= (typed-list-nth [:list :keyword] per-item i) :unknown) :unknown
-          :else (recur (inc i)))))))
+          :else (recur (inc i) nitems))))))
 
 (defn- registered-value-valid?
   "Whether `value` is admissible for a registered property declared with
@@ -5405,11 +5405,11 @@
          (let [alternatives (option-value-of [:option [:list [:ref :cssom/syntax]]] alts (typed-list-new [:list [:ref :cssom/syntax]]))]
            (if (= 0 (vector-count alternatives))
              true
-             (loop [i 0]
-               (if (>= i (vector-count alternatives))
+             (loop [i 0 nalts (vector-count alternatives)]
+               (if (>= i nalts)
                  false
                  (let [a (syntax-alternative-support (typed-list-nth [:list [:ref :cssom/syntax]] alternatives i) value)]
-                   (if (or (= a :yes) (= a :unknown)) true (recur (inc i))))))))))
+                   (if (or (= a :yes) (= a :unknown)) true (recur (inc i) nalts)))))))))
      :default
   (if-let [alternatives (parse-property-syntax syntax)]
     (if (empty? alternatives)
@@ -5466,11 +5466,11 @@
                                             (if (= multiplier :hash)
                                               (split-value-components initial ",")
                                               (typed-list-conj [:list :string] (typed-list-new [:list :string]) initial)))]
-                                (loop [j 0]
-                                  (if (>= j (vector-count items))
+                                (loop [j 0 nitems (vector-count items)]
+                                  (if (>= j nitems)
                                     true
                                     (if (result-ok?-of [:result :f64 :string] (parse-style-value (typed-list-nth [:list :string] items j)))
-                                      (recur (inc j))
+                                      (recur (inc j) nitems)
                                       false))))))
                    true
                    (recur (inc i)))))))))
@@ -5519,9 +5519,9 @@
      (let [s (str (or css ""))]
        (if (not (str/includes? s "@property"))
          (typed-map-new [:map :keyword [:ref :cssom/registration]])
-         (let [chunks (css-chunks s)]
+          (let [chunks (css-chunks s) nchunks (vector-count chunks)]
            (loop [i 0 out (typed-map-new [:map :keyword [:ref :cssom/registration]])]
-             (if (>= i (vector-count chunks))
+             (if (>= i nchunks)
                out
                (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
                      prelude (:chunk/prelude c)]
