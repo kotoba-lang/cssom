@@ -6118,7 +6118,7 @@
                   (str/ends-with? lower "em") "em"
                   (str/ends-with? lower "px") "px"
                   :else nil)
-           number (if unit (subs value 0 (- (count value) (count unit))) value)]
+           number (if unit (subs value 0 (- (string-byte-length value) (count unit))) value)]
        (when (css-decimal-token? number)
          (let [n (parse-media-number number)]
            (cond
@@ -6586,12 +6586,12 @@
            (let [kind (str/ascii-lower (str/trim (first pieces)))
                  value (str/ascii-lower (str/trim (second pieces)))
                  value (if (str/ends-with? value "px")
-                         (str/trim (subs value 0 (- (count value) 2)))
+                         (str/trim (subs value 0 (- (string-byte-length value) 2)))
                          value)]
              (when (and (case kind ("min-width" "max-width" "width") true false)
                         (css-integer-token? value))
                [kind (loop [idx 0 n 0]
-                       (if (>= idx (count value)) n
+                       (if (>= idx (string-byte-length value)) n
                          (let [digit (case (nth value idx)
                                        "0" 0 "1" 1 "2" 2 "3" 3 "4" 4
                                        "5" 5 "6" 6 "7" 7 "8" 8 "9" 9 0)]
@@ -7146,7 +7146,7 @@
   (or (ascii-alnum? ch)
       (str/includes? ".!#$%&'*+/=?^_`{|}~-" (str ch))))
 
-(defn- email-domain-label-valid? [domain start end]
+(defn- email-domain-label-valid? [#?@(:kotoba [domain :string start :i64 end :i64] :default [domain start end])] #?@(:kotoba [:bool])
   (let [length (- end start)]
     (and (pos? length)
          (<= length 63)
@@ -7160,14 +7160,14 @@
 
 (defn- email-domain-valid? [domain]
   (loop [idx 0 start 0]
-    (if (>= idx (count domain))
+    (if (>= idx (string-byte-length domain))
       (email-domain-label-valid? domain start idx)
       (if (= "." (nth domain idx))
-        (and (email-domain-label-valid? domain start idx)
-             (< (inc idx) (count domain))
-             (recur (inc idx) (inc idx)))
+        (if (and (email-domain-label-valid? domain start idx)
+                 (< (inc idx) (string-byte-length domain)))
+          (recur (inc idx) (inc idx))
+          false)
         (recur (inc idx) start)))))
-
 (defn- email-format-valid? [value]
   (let [parts (split-first-on value "@")]
     (and (= 2 (count parts))
@@ -7180,7 +7180,7 @@
 (defn- url-format-valid? [value]
   (let [colon (loop [idx 0]
                 (cond
-                  (>= idx (count value)) nil
+                  (>= idx (string-byte-length value)) nil
                   (= ":" (nth value idx)) idx
                   :else (recur (inc idx))))]
     (and (some? colon)
@@ -7191,12 +7191,12 @@
              (let [ch (nth value idx)]
                (and (or (ascii-alnum? ch) (= ch "+") (= ch ".") (= ch "-"))
                     (recur (inc idx))))))
-         (<= (+ colon 3) (count value))
+         (<= (+ colon 3) (string-byte-length value))
          (= "/" (nth value (inc colon)))
          (= "/" (nth value (+ colon 2)))
-         (> (count value) (+ colon 3))
+         (> (string-byte-length value) (+ colon 3))
          (loop [idx (+ colon 3)]
-           (if (>= idx (count value)) true
+           (if (>= idx (string-byte-length value)) true
              (and (not (str/blank? (str (nth value idx))))
                   (recur (inc idx))))))))
 
@@ -7261,7 +7261,7 @@
   (let [attrs (:attrs node)
         type (str/ascii-lower (str (or (:type attrs) "text")))
         value (control-value document node)
-        length (count value)
+        length (string-byte-length value)
         minlength (parse-int (:minlength attrs))
         maxlength (parse-int (:maxlength attrs))
         length-constrained? (length-constrained-control? node type)]
