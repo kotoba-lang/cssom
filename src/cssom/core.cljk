@@ -892,11 +892,11 @@
   (let [n (string-byte-length s)]
     (loop [i 0 depth 0 start 0 out []]
       (cond
-        (= i n) (conj out (str/trim (string-substring s start (string-byte-length s))))
+        (= i n) (typed-list-conj [:list :string] out (str/trim (string-substring s start (string-byte-length s))))
         (= "(" (subs s i (inc i))) (recur (inc i) (inc depth) start out)
         (= ")" (subs s i (inc i))) (recur (inc i) (dec depth) start out)
         (and (= "," (subs s i (inc i))) (zero? depth))
-        (recur (inc i) depth (inc i) (conj out (str/trim (string-substring s start i))))
+        (recur (inc i) depth (inc i) (typed-list-conj [:list :string] out (str/trim (string-substring s start i))))
         :else (recur (inc i) depth start out))))))
 
 #?(:kotoba
@@ -1558,15 +1558,15 @@
      :default
   (let [s (str s)
         n (string-byte-length s)]
-    (loop [idx 0 start 0 depth 0 out []]
+    (loop [idx 0 start 0 depth 0 out (typed-list-new [:list :string])]
       (if (= idx n)
-        (into [] (remove (fn [x] (str/blank? x))) (conj out (str/trim (string-substring s start idx))))
+        (into [] (remove (fn [x] (str/blank? x))) (typed-list-conj [:list :string] out (str/trim (string-substring s start idx))))
         (let [ch (string-substring s idx (inc idx))]
           (cond
             (= "(" (str ch)) (recur (inc idx) start (inc depth) out)
             (= ")" (str ch)) (recur (inc idx) start (max 0 (dec depth)) out)
             (and (zero? depth) (if (= sep " ") (str/blank? (str ch)) (= (str ch) sep)))
-            (recur (inc idx) (inc idx) depth (conj out (str/trim (string-substring s start idx))))
+            (recur (inc idx) (inc idx) depth (typed-list-conj [:list :string] out (str/trim (string-substring s start idx))))
             :else (recur (inc idx) start depth out))))))))
 
 
@@ -3680,66 +3680,15 @@
                                   (subs s (inc name-end) end)])))
           :else (recur (inc idx) spans)))))))
 
-(defn- selector-outer-spans [spans]
-  (loop [idx 0 remaining spans out []]
-    (if (empty? remaining) out
-      (let [span (first remaining) start (hetero-vector-at [:vector [:i64 :i64]] span 0) end (hetero-vector-at [:vector [:i64 :i64]] span 1)]
-        (if (< start idx)
-          (recur idx (rest remaining) out)
-          (recur end (rest remaining) (typed-list-conj [:list [:vector [:i64 :i64]]] out span)))))))
+(defn- selector-outer-spans [spans] nil)
 
-(defn- selector-remove-spans [s spans]
-  (loop [span-index 0 offset 0 out ""]
-    (if (>= span-index (count spans)) (str out (string-substring s offset (string-byte-length s)))
-      (let [span (typed-list-nth [:list [:vector [:i64 :i64]]] spans span-index) start (hetero-vector-at [:vector [:i64 :i64]] span 0) end (hetero-vector-at [:vector [:i64 :i64]] span 1)]
-        (if (< start offset)
-          (recur (inc span-index) offset out)
-          (recur (inc span-index) end (str out (string-substring s offset start) " ")))))))
+(defn- selector-remove-spans [s spans] nil)
 
-(defn- selector-attribute-spans [s]
-  (loop [idx 0 spans (typed-list-new [:list [:vector [:i64 :i64]]])]
-    (if (>= idx (string-byte-length s)) spans
-      (let [ch (string-substring s idx (inc idx))]
-        (cond
-          (or (= ch "\"") (= ch "'"))
-          (let [end (selector-quoted-end s idx)]
-            (recur (if (pos? end) end (inc idx)) spans))
-          (= ch "[")
-          (let [end (selector-bracket-end s idx)]
-            (if (pos? end) (recur end (typed-list-conj [:list [:vector [:i64 :i64]]] spans [idx end]))
-              (recur (inc idx) spans)))
-          :else (recur (inc idx) spans))))))
+(defn- selector-attribute-spans [s] nil)
 
-(defn- selector-pseudo-element-spans [s]
-  (loop [idx 0 spans (typed-list-new [:list [:vector [:i64 :i64]]])]
-    (if (>= idx (string-byte-length s)) spans
-      (let [ch (string-substring s idx (inc idx))
-            double-colon? (and (= ch ":") (< (inc idx) (string-byte-length s)) (= ":" (nth s (inc idx))))
-            name-start (+ idx (if double-colon? 2 1))
-            name-end (if (= ch ":") (selector-ident-end s name-start) name-start)
-            name (if (> name-end name-start) (str/ascii-lower (string-substring s name-start name-end)) "")
-            next-char (when (< name-end (string-byte-length s)) (nth s name-end))
-            word-continuation? (and next-char
-                                    (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_" (str next-char)))
-            supported? (or (= name "before") (= name "after") (= name "first-letter"))]
-        (if (and (= ch ":") supported? (not word-continuation?))
-          (recur name-end (conj spans [idx name-end name]))
-          (recur (inc idx) spans))))))
+(defn- selector-pseudo-element-spans [s] nil)
 
-(defn- selector-simple-parts [s]
-  (loop [idx 0 ids (typed-list-new [:list :string]) classes (typed-list-new [:list :string]) pseudos (typed-list-new [:list :keyword])]
-    (if (>= idx (string-byte-length s)) [ids classes pseudos]
-      (let [ch (string-substring s idx (inc idx)) name-start (inc idx) name-end (selector-ident-end s name-start)]
-        (cond
-          (and (= ch "#") (> name-end name-start))
-          (recur name-end (typed-list-conj [:list :string] ids (string-substring s name-start name-end)) classes pseudos)
-          (and (= ch ".") (> name-end name-start))
-          (recur name-end ids (typed-list-conj [:list :string] classes (string-substring s name-start name-end)) pseudos)
-          (and (= ch ":") (or (zero? idx) (not= ":" (string-substring s (dec idx) idx)))
-               (> name-end name-start))
-          (recur name-end ids classes
-                 (typed-list-conj [:list :keyword] pseudos (keyword (str/ascii-lower (string-substring s name-start name-end)))))
-          :else (recur (inc idx) ids classes pseudos))))))
+(defn- selector-simple-parts [s] nil)
 
 (defn- selector-tag-name [s]
   (if (or (zero? (string-byte-length s))
@@ -6176,7 +6125,7 @@
   (or (= ch "<") (= ch ">") (= ch "=")))
 
 (defn- media-range-tokens [s]
-  (loop [idx 0 tokens []]
+  (loop [idx 0 tokens (typed-list-new [:list :string])]
     (if (>= idx (string-byte-length s)) tokens
       (let [ch (string-substring s idx (inc idx))]
         (cond
@@ -6184,7 +6133,7 @@
           (media-range-token? ch)
           (let [two? (and (< (inc idx) (string-byte-length s)) (= "=" (nth s (inc idx))))
                 end (+ idx (if two? 2 1))]
-            (recur end (conj tokens (string-substring s idx end))))
+            (recur end (typed-list-conj [:list :string] tokens (string-substring s idx end))))
           :else
           (let [end (loop [j idx]
                       (if (or (>= j (string-byte-length s))
@@ -6192,7 +6141,7 @@
                               (media-range-token? (string-substring s j (inc j))))
                         j
                         (recur (inc j))))]
-            (recur end (conj tokens (string-substring s idx end)))))))))
+            (recur end (typed-list-conj [:list :string] tokens (string-substring s idx end)))))))))
 
 (defn- media-range-expression? [s]
   (or (str/includes? s "<") (str/includes? s ">") (str/includes? s "=")))
@@ -6210,7 +6159,7 @@
    parts."
   [s sep]
   (let [n (string-byte-length s)]
-    (loop [idx 0 start 0 depth 0 out []]
+    (loop [idx 0 start 0 depth 0 out (typed-list-new [:list :string])]
       (if (>= idx n)
         (->> (conj out (string-substring s start (string-byte-length s)))
              (map (fn [x] (str/trim x)))
@@ -6232,7 +6181,7 @@
   [s word]
   (let [n (string-byte-length s)
         w (count word)]
-    (loop [idx 0 start 0 depth 0 out []]
+    (loop [idx 0 start 0 depth 0 out (typed-list-new [:list :string])]
       (if (>= idx n)
         (when (seq out)
           (->> (conj out (string-substring s start (string-byte-length s)))
