@@ -1449,10 +1449,9 @@
    `split-selector-list` already use elsewhere in this namespace for the
    same reason."
   [#?@(:kotoba [v :string] :default [v])] #?@(:kotoba [[:list :string]])
-  (let [s (str v)
-        n (string-byte-length s)]
+  (let [s (str v)]
     (loop [idx 0 start 0 quote-char "" terms (typed-list-new [:list :string])]
-      (if (= idx n)
+      (if (>= idx (string-byte-length s))
         (let [term (str/trim (subs s start idx))]
           (if (str/blank? term) terms (typed-list-conj [:list :string] terms term)))
         (let [ch (string-substring s idx (inc idx))]
