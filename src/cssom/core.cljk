@@ -6849,6 +6849,22 @@
    <form>. Mirrors browser.document-input's own already-correct
    ancestor-form-id (https://html.spec.whatwg.org/multipage/forms.html#form-owner)."
   [document node-id]
+  #?(:kotoba
+     (let [form-dom-id (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs (dom-node-at document node-id)) :form) "")]
+       (if (not (str/blank? form-dom-id))
+         (let [form-id (node-by-dom-id document form-dom-id)]
+           (if (and (option-some?-of [:option :string] form-id)
+                    (= :form (:tag (dom-node-at document (option-value-of [:option :string] form-id "")))))
+             form-id
+             (option-none-of [:option :string])))
+         (loop [parent-id (parent-node-id document node-id)]
+           (if (not (option-some?-of [:option :string] parent-id))
+             (option-none-of [:option :string])
+             (let [pid (option-value-of [:option :string] parent-id "")]
+               (if (= :form (:tag (dom-node-at document pid)))
+                 parent-id
+                 (recur (parent-node-id document pid))))))))
+     :default
   (or (when-let [form-dom-id (get-in document [:nodes node-id :attrs :form])]
         (let [form-id (node-by-dom-id document form-dom-id)]
           (when (= :form (get-in document [:nodes form-id :tag]))
@@ -6857,7 +6873,7 @@
         (when parent-id
           (if (= :form (get-in document [:nodes parent-id :tag]))
             parent-id
-            (recur (parent-node-id document parent-id)))))))
+            (recur (parent-node-id document parent-id))))))))
 
 (defn- radio-group-node-ids
   "The HTML radio button group containing node: same (non-empty) `name`
@@ -6872,6 +6888,32 @@
    browser.document-input's own radio-group-node-ids already gets this
    right via ancestor-form-id; this mirrors that fix."
   [document node]
+  #?(:kotoba
+     (let [node-id (:node/id node)
+            group-name (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) :name) "")
+            named? (not (str/blank? group-name))
+            group-form-id (ancestor-form-id document node-id)
+            nodes (:nodes document)]
+       (loop [i 0 out (typed-list-new [:list :string])]
+         (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes))
+           out
+           (let [id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i)
+                 candidate (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i)
+                 cand-type (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs candidate) :type) "")
+                 cand-name (typed-map-get [:map :keyword :string] (:attrs candidate) :name)
+                 cand-tag (:tag candidate)]
+             (recur (inc i)
+               (if (and (option-some?-of [:option :keyword] cand-tag)
+                        (= (option-value-of [:option :keyword] cand-tag :none) :input)
+                        (= "radio" (str/ascii-lower (str cand-type)))
+                        (if named?
+                          (and (option-some?-of [:option :string] cand-name)
+                               (= group-name (option-value-of [:option :string] cand-name ""))
+                               (= group-form-id (ancestor-form-id document id)))
+                          (= id node-id)))
+                 (typed-list-conj [:list :string] out id)
+                 out))))))
+     :default
   (let [node-id (:node/id node)
         group-name (get-in node [:attrs :name])
         named? (not (str/blank? (str group-name)))
@@ -6885,12 +6927,21 @@
                                    (= group-form-id (ancestor-form-id document id)))
                               (= id node-id)))
                    id)))
-         vec)))
+         vec))))
 
 (defn- radio-required-satisfied?
   [document node]
+  #?(:kotoba
+     (let [ids (radio-group-node-ids document node)]
+       (loop [i 0]
+         (if (>= i (vector-count ids))
+           false
+           (let [cid (typed-list-nth [:list :string] ids i)
+                 checked (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs (dom-node-at document cid)) :checked) "")]
+             (if (truthy-attr? checked) true (recur (inc i)))))))
+     :default
   (some #(truthy-attr? (get-in document [:nodes % :attrs :checked]))
-        (radio-group-node-ids document node)))
+        (radio-group-node-ids document node))))
 
 (defn- textarea-default-value
   "A `<textarea>`'s value when nothing has typed into it: its own text
