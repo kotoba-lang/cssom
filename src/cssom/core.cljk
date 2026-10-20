@@ -5866,13 +5866,13 @@
   [css]
   #?(:kotoba
      (let [s (or css "")]
-       (loop [offset 0 rules []]
+       (loop [offset 0 rules (typed-list-new [:list [:map :keyword :string]])]
          (if-let [open (str/index-of s "{" offset)]
            (if-let [close (str/index-of s "}" (inc open))]
              (let [selector-text (string-substring s offset open)
                    body (subs s (inc open) close)
                    rules (if (and (seq selector-text) (seq body))
-                           (conj rules
+                           (typed-list-conj [:list [:map :keyword :string]] rules
                                  {:rule/selectors (mapv parse-selector (split-selector-list selector-text))
                                   :rule/declarations (parse-declarations body)
                                   :rule/declaration-meta (parse-declarations-with-importance body)})
