@@ -8463,6 +8463,16 @@
         (match-at node-id (dec (count parts)))
         false)))))
 
+(defn- attr-op-matches?
+  "Typed-route attribute operator test for matches-simple?."
+  [operator [:option :string] actual-str :string value :string] :bool
+  (cond (not (option-some?-of [:option :string] operator)) true (= (option-value-of [:option :string] operator "") "=") (= actual-str value) (= (option-value-of [:option :string] operator "") "~=") (let [toks (split-value-components actual-str " ")] (loop [i 0] (if (>= i (vector-count toks)) false (if (= (typed-list-nth [:list :string] toks i) value) true (recur (inc i)))))) (= (option-value-of [:option :string] operator "") "^=") (str/starts-with? actual-str value) (= (option-value-of [:option :string] operator "") "$=") (str/ends-with? actual-str value) (= (option-value-of [:option :string] operator "") "*=") (str/includes? actual-str value) (= (option-value-of [:option :string] operator "") "|=") (or (= actual-str value) (str/starts-with? actual-str (str value "-"))) :else false))
+
+(defn- selector-arm-matches?
+  "Typed-route group-arm match for matches-simple? (compound or complex)."
+  [document node arm] :bool
+  (let [parts (:selector/parts arm)] (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts) (and document (parts-match? document (parent-index document) (:node/id node) (option-value-of [:option [:list [:ref :cssom/compound]]] parts (typed-list-new [:list [:ref :cssom/compound]])) matches-simple?)) (matches-simple? document node arm))))
+
 (defn- matches-simple?
   "Whether `node` matches one compound/simple selector map (see
    `parse-simple-selector`) -- tag/id/classes/attrs/pseudos as before, plus
@@ -8521,7 +8531,9 @@
   ([node selector]
    (matches-simple? nil node selector))
   ([document node selector]
-   (and (= :element (:node/type node))
+  #?(:kotoba
+     (let [ntype (:node/type node) sel-tag (:selector/tag selector) sel-id (:selector/id selector)] (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (or (not (option-some?-of [:option :keyword] sel-tag)) (= (option-value-of [:option :keyword] sel-tag :none) (:tag node))) (or (not (option-some?-of [:option :string] sel-id)) (= (option-value-of [:option :string] sel-id "") (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) :id) ""))) (let [node-classes (classes node)] (loop [i 0] (if (>= i (vector-count (:selector/classes selector))) true (if (loop [j 0] (if (>= j (vector-count node-classes)) false (if (= (typed-list-nth [:list :string] node-classes j) (typed-list-nth [:list :string] (:selector/classes selector) i)) true (recur (inc j))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (:selector/attrs selector))) true (if (let [spec (typed-list-nth [:list [:ref :cssom/attr]] (:selector/attrs selector) i) name (:attr/name spec) operator (:attr/operator spec) value (option-value-of [:option :string] (:attr/value spec) "") ci? (:attr/case-insensitive? spec) actual (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) name) "")] (let [actual-str (if ci? (str/ascii-lower actual) actual) value2 (if ci? (str/ascii-lower value) value)] (attr-op-matches? operator actual-str value2))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/pseudos selector))) true (let [pseudo (typed-list-nth [:list :keyword] (:selector/pseudos selector) i)] (if (matches-pseudo? document node pseudo (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:selector/nth-args selector) pseudo) (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:selector/lang-args selector) pseudo) "")) matches-simple?) (recur (inc i)) false)))) (and (loop [i 0] (if (>= i (vector-count (:selector/not selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/not selector) i)] (loop [j 0] (if (>= j (vector-count group)) true (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) false (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/is selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/is selector) i)] (loop [j 0] (if (>= j (vector-count group)) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/where selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/where selector) i)] (loop [j 0] (if (>= j (vector-count group)) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (:selector/has selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has selector) i)] (has-group-matches? document node group matches-simple?)) (recur (inc i)) false)))))
+     :default   (and (= :element (:node/type node))
         (or (nil? (:selector/tag selector))
             (= (:selector/tag selector) (:tag node)))
         (or (nil? (:selector/id selector))
@@ -8577,7 +8589,7 @@
                (every? (fn [group] (some arm-matches? group))
                        (:selector/where selector))))
         (every? (fn [group] (has-group-matches? document node group matches-simple?))
-                (:selector/has selector)))))
+                (:selector/has selector))))))
 
 (defn- matches-parts?
   [document parents node-id parts]
