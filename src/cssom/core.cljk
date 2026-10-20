@@ -5711,7 +5711,8 @@
 
 (defn- env-name-token? [#?@(:kotoba [s :string] :default [s])]
   (let [parts (split-value-components (str/trim s) " ")
-        first-part (first parts)
+        nparts (vector-count parts)
+        first-part (typed-list-nth [:list :string] parts 0)
         n (string-byte-length first-part)
         start-char (when (pos? n) (string-substring first-part 0 (inc 0)))
         start-ok? (and start-char
@@ -5719,10 +5720,16 @@
         tail-ok? (loop [idx 1]
                    (if (>= idx n) true
                      (let [ch (string-substring first-part idx (inc idx))]
-                       (and (or (= ch "-") (css-digit? ch)
-                                (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str ch)))
-                            (recur (inc idx))))))]
-    (and start-ok? tail-ok? (every? css-digits-only? (rest parts)))))
+                       (if (or (= ch "-") (css-digit? ch)
+                               (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str ch)))
+                         (recur (inc idx))
+                         false))))
+        rest-ok? (loop [j 1]
+                   (if (>= j nparts) true
+                     (if (css-digits-only? (typed-list-nth [:list :string] parts j))
+                       (recur (inc j))
+                       false)))]
+    (and start-ok? tail-ok? rest-ok?)))
 
 (defn- env-reference-at [s start]
   (let [close (matching-var-close s (+ start 3))]
