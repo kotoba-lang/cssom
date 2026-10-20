@@ -3495,7 +3495,7 @@
 
 (defn split-selector-list [#?@(:kotoba [selector-list :string] :default [selector-list])] #?@(:kotoba [[:list :string]])
   #?(:kotoba
-     (if (>= idx (string-byte-length s)) (let [all (typed-list-conj [:list :string] selectors (subs s start idx)) m (vector-count all)] (loop [k 0 out (typed-list-new [:list :string])] (if (>= k m) out (let [t (str/trim (typed-list-nth [:list :string] all k))] (recur (inc k) (if (str/blank? t) out (typed-list-conj [:list :string] out t))))))) (let [ch (string-substring s idx (inc idx))
+     (let [s (str selector-list)] (loop [idx 0 start 0 bracket-depth 0 paren-depth 0 quote-char "" selectors (typed-list-new [:list :string])] (if (>= idx (string-byte-length s)) (let [all (typed-list-conj [:list :string] selectors (string-substring s start idx)) m (vector-count all)] (loop [k 0 out (typed-list-new [:list :string])] (if (>= k m) out (let [t (str/trim (typed-list-nth [:list :string] all k))] (recur (inc k) (if (str/blank? t) out (typed-list-conj [:list :string] out t))))))) (let [ch (string-substring s idx (inc idx))
                 escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
             (cond
               (and (not= "" quote-char) (= ch quote-char) (not escaped?))
@@ -3520,10 +3520,10 @@
               (recur (inc idx) start bracket-depth (max 0 (dec paren-depth)) quote-char selectors)
 
               (and (= ch ",") (zero? bracket-depth) (zero? paren-depth))
-              (recur (inc idx) (inc idx) bracket-depth paren-depth quote-char (typed-list-conj [:list :string] selectors (subs s start idx)))
+              (recur (inc idx) (inc idx) bracket-depth paren-depth quote-char (typed-list-conj [:list :string] selectors (string-substring s start idx)))
 
               :else
-              (recur (inc idx) start bracket-depth paren-depth quote-char selectors))))
+              (recur (inc idx) start bracket-depth paren-depth quote-char selectors))))))
      :default
   (let [s (str selector-list)]
     (loop [idx 0
@@ -5828,7 +5828,7 @@
           (not= "" quote-char) (recur (inc idx) depth quote-char)
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
           (= ch "(") (recur (inc idx) (inc depth) "")
-          (= ch ")") (recur (inc idx) (max 0 (dec depth)) nil)
+          (= ch ")") (recur (inc idx) (max 0 (dec depth)) "")
           (and (= ch ",") (zero? depth)) [(subs s 0 idx) (subs s (inc idx))]
           :else (recur (inc idx) depth ""))))))
 
