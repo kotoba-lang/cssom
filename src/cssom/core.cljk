@@ -3589,7 +3589,7 @@
   #?(:kotoba
      (let [ntok (vector-count tokens)]
        (loop [i 0
-              combinator (option-none-of [:option :keyword])
+              combinator 0
               parts (typed-list-new [:list [:ref :cssom/compound]])]
        (if (>= i ntok)
          parts
@@ -3597,18 +3597,19 @@
            (if (str/blank? token)
              (recur (inc i) combinator parts)
              (cond
-               (= token ">") (recur (inc i) (option-some-of [:option :keyword] :child) parts)
-               (= token "+") (recur (inc i) (option-some-of [:option :keyword] :next-sibling) parts)
-               (= token "~") (recur (inc i) (option-some-of [:option :keyword] :subsequent-sibling) parts)
+               (= token ">") (recur (inc i) 1 parts)
+               (= token "+") (recur (inc i) 2 parts)
+               (= token "~") (recur (inc i) 3 parts)
                :else
                (let [parsed (parse-simple-selector token)
+                     comb-key (if (= combinator 1) :child (if (= combinator 2) :next-sibling (if (= combinator 3) :subsequent-sibling :descendant)))
                      combined (assoc parsed :selector/combinator
                                 (if (> (vector-count parts) 0)
-                                  (if (option-some?-of [:option :keyword] combinator)
-                                    combinator
+                                  (if (> combinator 0)
+                                    (option-some-of [:option :keyword] comb-key)
                                     (option-some-of [:option :keyword] :descendant))
                                   (option-none-of [:option :keyword])))]
-                 (recur (inc i) (option-none-of [:option :keyword])
+                 (recur (inc i) 0
                    (typed-list-conj [:list [:ref :cssom/compound]] parts combined)))))))))
      :default
   (second
