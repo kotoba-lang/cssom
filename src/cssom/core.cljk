@@ -3885,42 +3885,42 @@
                                :selector/parts (selector-parts tokens parse-simple-selector)})))
         parse-group (fn [kind]
                       (->> functional-matches
-                           (filter (fn [[_ fn-name _]] (= kind (str/ascii-lower fn-name))))
-                           (mapv (fn [[_ _ arg]]
+                           (filter (fn [m] (= kind (str/ascii-lower (hetero-vector-at [:vector [:string :string :string]] m 1)))))
+                           (mapv (fn [m]
                                    ;; `:is()` is FORGIVING: an arm it cannot
                                    ;; parse is dropped and the rest of the
                                    ;; list stands. Measured in Brave:
                                    ;; `:is(> .wB) span` matches nothing at
                                    ;; all, and `:is(%%bad, .wA .wB) span`
                                    ;; still matches through the good arm.
-                                   (into [] (keep parse-arm) (split-selector-list arg))))))
+                                   (into [] (keep parse-arm) (split-selector-list (hetero-vector-at [:vector [:string :string :string]] m 2)))))))
         parse-has-item (fn [item]
                          (let [trimmed (str/trim item)
                                rest (combinator-rest trimmed) combinator (when rest (s-sub trimmed 0 1))]
                            {:has/selector (parse-simple-selector (or rest trimmed))
-                            :has/combinator (case combinator
-                                              ">" :child
-                                              "+" :next-sibling
-                                              "~" :following-sibling
-                                              nil :descendant)
+                            :has/combinator (cond
+                                              (= combinator ">") :child
+                                              (= combinator "+") :next-sibling
+                                              (= combinator "~") :following-sibling
+                                              :else :descendant)
                             ;; kept for readers that only ever knew the
                             ;; child form; :has/combinator is the value
                             ;; `has-group-matches?` actually dispatches on.
                             :has/direct-child? (= ">" combinator)}))
         has-groups (->> functional-matches
-                        (filter (fn [[_ fn-name _]] (= "has" (str/ascii-lower fn-name))))
-                        (mapv (fn [[_ _ arg]] (mapv parse-has-item (split-selector-list arg)))))
+                        (filter (fn [m] (= "has" (str/ascii-lower (hetero-vector-at [:vector [:string :string :string]] m 1)))))
+                        (mapv (fn [m] (mapv parse-has-item (split-selector-list (hetero-vector-at [:vector [:string :string :string]] m 2))))))
         nth-args (into {}
-                       (map (fn [[_ pseudo-name arg]]
-                              [(keyword (str/ascii-lower pseudo-name)) (str/trim arg)]))
+                       (map (fn [m]
+                              [(keyword (str/ascii-lower (hetero-vector-at [:vector [:string :string :string]] m 1))) (str/trim (hetero-vector-at [:vector [:string :string :string]] m 2))]))
                        (re-seq nth-pseudo-class-pattern raw))
         lang-args (into {}
-                        (map (fn [[_ arg]] [:lang (str/trim arg)]))
+                        (map (fn [m] [:lang (str/trim (hetero-vector-at [:vector [:string :string]] m 1))]))
                         (re-seq lang-pseudo-class-pattern raw))
         s (str/replace raw functional-pseudo-class-pattern "")
         selector-without-attrs (str/replace s attribute-selector-pattern "")
-        pseudo-element (some-> (re-find pseudo-element-pattern selector-without-attrs)
-                                second str/ascii-lower keyword)
+        pseudo-element (let [m (re-find pseudo-element-pattern selector-without-attrs)]
+                                 (when m (keyword (str/ascii-lower (second m)))))
         selector-sans-pseudo-element (str/replace selector-without-attrs pseudo-element-pattern "")
         selector-without-pseudos (str/replace selector-sans-pseudo-element pseudo-class-pattern "")
         tag (tag-prefix selector-without-attrs)
@@ -3928,7 +3928,7 @@
         classes (class-captures selector-without-pseudos)
         attrs (mapv parse-attribute-selector
                     (re-seq attribute-selector-pattern s))
-        pseudos (mapv (comp keyword str/ascii-lower second)
+        pseudos (mapv (fn [m] (keyword (str/ascii-lower (hetero-vector-at [:vector [:string :string :string]] m 1))))
                       (re-seq pseudo-class-pattern selector-sans-pseudo-element))]
     (record-new [:record :cssom/compound [[:selector/raw :string] [:selector/tag [:option :keyword]] [:selector/id [:option :string]] [:selector/classes [:list :string]] [:selector/attrs [:list [:ref :cssom/attr]]] [:selector/pseudos [:list :keyword]] [:selector/pseudo-element [:option :keyword]] [:selector/not [:list [:list [:ref :cssom/compound]]]] [:selector/is [:list [:list [:ref :cssom/compound]]]] [:selector/where [:list [:list [:ref :cssom/compound]]]] [:selector/has [:list [:list [:ref :cssom/has-item]]]] [:selector/nth-args [:map :keyword :string]] [:selector/lang-args [:map :keyword :string]] [:selector/combinator [:option :keyword]]]]
       raw
@@ -3974,8 +3974,8 @@
            parse-group (fn [kind]
                          (->> functional-matches
                               (filter (fn [[_ fn-name _]] (= kind fn-name)))
-                              (mapv (fn [[_ _ arg]]
-                                      (into [] (keep parse-arm) (split-selector-list arg))))))
+                              (mapv (fn [m]
+                                      (into [] (keep parse-arm) (split-selector-list (hetero-vector-at [:vector [:string :string :string]] m 2)))))))
            parse-has-item (fn [item]
                             (let [trimmed (str/trim item)
                                   first-char (when (seq trimmed) (nth trimmed 0))
@@ -3991,7 +3991,7 @@
                                :has/direct-child? (= ">" combinator)}))
            has-groups (->> functional-matches
                            (filter (fn [[_ fn-name _]] (= "has" fn-name)))
-                           (mapv (fn [[_ _ arg]] (mapv parse-has-item (split-selector-list arg)))))
+                           (mapv (fn [m] (mapv parse-has-item (split-selector-list (hetero-vector-at [:vector [:string :string :string]] m 2))))))
            nth-args (into {}
                           (map (fn [span]
                                  [(keyword (nth span 2)) (str/trim (nth span 3))]))
@@ -4644,7 +4644,7 @@
 
 (defn- at-rule-name
   [prelude]
-  (some-> (at-rule-name-capture (str prelude)) str/ascii-lower))
+  (let [n (at-rule-name-capture (str prelude))] (when n (str/ascii-lower n))))
 
 (defn- amp-positions
   "Indexes of every `&` in `sel` that is not inside a string literal or a
@@ -4967,7 +4967,7 @@
         lower (str/ascii-lower v)
         [_ magnitude unit] #?(:kotoba (css-dimension-parts v)
                               :default (re-matches dimension-pattern v))
-        unit (some-> unit str/ascii-lower)
+        unit (when unit (str/ascii-lower unit))
         bare-number? #?(:kotoba (css-number-token? v)
                         :default (some? (re-matches #"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$" v)))
         zero? #?(:kotoba (css-zero-token? v)
@@ -5705,17 +5705,17 @@
            number (if unit (subs value 0 (- (count value) (count unit))) value)]
        (when (css-decimal-token? number)
          (let [n (parse-media-number number)]
-           (case unit
-             "px" n
-             ("em" "rem") (f64-mul n (i64-to-f64-rounded media-em-px))
-             nil (when (f64-eq n 0.0) 0.0)))))
+           (cond
+             (= unit "px") n
+             (or (= unit "em") (= unit "rem")) (f64-mul n (i64-to-f64-rounded media-em-px))
+             :else (when (f64-eq n 0.0) 0.0)))))
      :default
      (when-let [[_ number unit] (re-matches media-length-pattern (str/trim (str s)))]
        (let [n (parse-media-number number)]
-         (case (some-> unit str/ascii-lower)
-           "px" n
-           ("em" "rem") (* n media-em-px)
-           nil (when (zero? n) 0.0))))))
+         (cond
+           (= (when unit (str/ascii-lower unit)) "px") n
+           (or (= (when unit (str/ascii-lower unit)) "em") (= (when unit (str/ascii-lower unit)) "rem")) (* n media-em-px)
+           :else (when (zero? n) 0.0))))))
 
 (def ^:private media-types
   "The media types this engine answers TRUE for. `print` and every other
@@ -7409,7 +7409,7 @@
    do not."
   [node]
   (case (:tag node)
-    :button (let [type (some-> (get-in node [:attrs :type]) str str/ascii-lower)]
+    :button (let [type (let [t (get-in node [:attrs :type])] (when t (str/ascii-lower (str t))))]
                (or (= "submit" type) (nil? type)))
     :input (contains? #?(:kotoba (typed-set-new [:set :string] "submit" "image") :default #{"submit" "image"}) (input-type node))
     false))
@@ -7925,8 +7925,8 @@
         (every? (fn [{:attr/keys [name operator value case-insensitive?]}]
                   (let [actual (get-in node [:attrs name])]
                     (and (some? actual)
-                         (let [actual-str (cond-> (str actual) case-insensitive? str/ascii-lower)
-                               value (cond-> value case-insensitive? str/ascii-lower)]
+                         (let [actual-str (if case-insensitive? (str/ascii-lower (str actual)) (str actual))
+                               value (if case-insensitive? (str/ascii-lower value) value)]
                            (case operator
                              nil true
                              "=" (= actual-str value)
