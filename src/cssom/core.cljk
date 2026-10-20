@@ -440,7 +440,29 @@
             ;; `cssom.layout` never parses a colour at all -- it passes the
             ;; string through onto the draw-op. See `color-value-support`.
             [kotoba.wasm.host.color :as host-color]
-            #?(:kotoba [kotoba.lang.bounded-regex :as bounded-regex])))
+            #?(:kotoba [kotoba.lang.bounded-regex :as bounded-regex]))
+  (:schemas
+   {:cssom/attr [:record :cssom/attr [[:attr/name :keyword]
+                                      [:attr/operator [:option :string]]
+                                      [:attr/value [:option :string]]
+                                      [:attr/case-insensitive? :bool]]]
+    :cssom/has-item [:record :cssom/has-item [[:has/selector [:ref :cssom/compound]]
+                                              [:has/combinator [:option :keyword]]
+                                              [:has/direct-child? :bool]]]
+    :cssom/compound [:record :cssom/compound [[:selector/raw :string]
+                                              [:selector/tag [:option :keyword]]
+                                              [:selector/id [:option :string]]
+                                              [:selector/classes [:list :string]]
+                                              [:selector/attrs [:list [:ref :cssom/attr]]]
+                                              [:selector/pseudos [:list :keyword]]
+                                              [:selector/pseudo-element [:option :keyword]]
+                                              [:selector/not [:list [:list [:ref :cssom/compound]]]]
+                                              [:selector/is [:list [:list [:ref :cssom/compound]]]]
+                                              [:selector/where [:list [:list [:ref :cssom/compound]]]]
+                                              [:selector/has [:list [:list [:ref :cssom/has-item]]]]
+                                              [:selector/nth-args [:map :keyword :string]]
+                                              [:selector/lang-args [:map :keyword :string]]
+                                              [:selector/combinator [:option :keyword]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -3506,6 +3528,30 @@
    pass-the-function-in shape `has-group-matches?` uses one screen down
    sidesteps it here."
   [tokens parse-compound]
+  #?(:kotoba
+     (loop [i 0
+              combinator (option-none-of [:option :keyword])
+              parts (typed-list-new [:list [:ref :cssom/compound]])]
+       (if (>= i (vector-count tokens))
+         parts
+         (let [token (typed-list-nth [:list :string] tokens i)]
+           (if (str/blank? token)
+             (recur (inc i) combinator parts)
+             (cond
+               (= token ">") (recur (inc i) (option-some-of [:option :keyword] :child) parts)
+               (= token "+") (recur (inc i) (option-some-of [:option :keyword] :next-sibling) parts)
+               (= token "~") (recur (inc i) (option-some-of [:option :keyword] :subsequent-sibling) parts)
+               :else
+               (let [parsed (parse-simple-selector token)
+                     combined (assoc parsed :selector/combinator
+                                (if (> (vector-count parts) 0)
+                                  (if (option-some?-of [:option :keyword] combinator)
+                                    combinator
+                                    (option-some-of [:option :keyword] :descendant))
+                                  (option-none-of [:option :keyword])))]
+                 (recur (inc i) (option-none-of [:option :keyword])
+                   (typed-list-conj [:list [:ref :cssom/compound]] parts combined))))))))
+     :default
   (second
    (reduce (fn [[combinator parts] token]
              (case token
@@ -3517,7 +3563,7 @@
                                  :selector/combinator
                                  (if (seq parts) (or combinator :descendant) nil)))]))
            [nil []]
-           (remove str/blank? tokens))))
+           (remove str/blank? tokens)))))
 
 ;; ---------------------------------------------------------------------
 
@@ -3884,19 +3930,21 @@
                     (re-seq attribute-selector-pattern s))
         pseudos (mapv (comp keyword str/ascii-lower second)
                       (re-seq pseudo-class-pattern selector-sans-pseudo-element))]
-    {:selector/raw raw
-     :selector/tag (when (seq tag) (keyword (str/ascii-lower tag)))
-     :selector/id id
-     :selector/classes classes
-     :selector/attrs (filterv some? attrs)
-     :selector/pseudos pseudos
-     :selector/pseudo-element pseudo-element
-     :selector/not (parse-group "not")
-     :selector/is (parse-group "is")
-     :selector/where (parse-group "where")
-     :selector/has has-groups
-     :selector/nth-args nth-args
-     :selector/lang-args lang-args}))
+    (record-new [:record :cssom/compound [[:selector/raw :string] [:selector/tag [:option :keyword]] [:selector/id [:option :string]] [:selector/classes [:list :string]] [:selector/attrs [:list [:ref :cssom/attr]]] [:selector/pseudos [:list :keyword]] [:selector/pseudo-element [:option :keyword]] [:selector/not [:list [:list [:ref :cssom/compound]]]] [:selector/is [:list [:list [:ref :cssom/compound]]]] [:selector/where [:list [:list [:ref :cssom/compound]]]] [:selector/has [:list [:list [:ref :cssom/has-item]]]] [:selector/nth-args [:map :keyword :string]] [:selector/lang-args [:map :keyword :string]] [:selector/combinator [:option :keyword]]]]
+      raw
+      (when (seq tag) (keyword (str/ascii-lower tag)))
+      id
+      classes
+      (filterv some? attrs)
+      pseudos
+      pseudo-element
+      (parse-group "not")
+      (parse-group "is")
+      (parse-group "where")
+      has-groups
+      nth-args
+      lang-args
+      (option-none-of [:option :keyword]))))
    :kotoba
    (defn parse-simple-selector
      "Parses a compound CSS selector with Kotoba scanners for identifiers,
