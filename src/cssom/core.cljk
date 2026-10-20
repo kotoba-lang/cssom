@@ -802,21 +802,21 @@
                          (or (= "+" (subs s 0 1)) (= "-" (subs s 0 1)))) 1 0)
             value 0.0
             scale 0.1
-            fractional? false]
+            fractional? 0]
        (if (>= idx (s-len s))
          (if (and (> (s-len s) 0) (= "-" (subs s 0 1))) (f64-neg value) value)
          (let [ch (subs s idx (inc idx))]
            (if (= ch ".")
-             (recur (inc idx) value scale true)
+             (recur (inc idx) value scale 1)
              (let [digit (case ch
                            "0" 0 "1" 1 "2" 2 "3" 3 "4" 4
                            "5" 5 "6" 6 "7" 7 "8" 8 "9" 9 0)
                    digit-f64 (i64-to-f64-rounded digit)]
-               (if fractional?
+               (if (< 0 fractional?)
                  (recur (inc idx) (f64-add value (f64-mul digit-f64 scale))
-                        (f64-div scale 10.0) true)
+                        (f64-div scale 10.0) 1)
                  (recur (inc idx) (f64-add (f64-mul value 10.0) digit-f64)
-                        scale false)))))))))
+                        scale 0)))))))))
 
 
 #?(:kotoba
@@ -12372,9 +12372,21 @@
    rule -- nested/chained container queries are explicitly unsupported, see
    the namespace docstring) simply makes @container rules inside it not
    apply, rather than this function looping passes until things stabilize."
-  ([document rules]
-   (apply-cascade document rules {}))
-  ([document rules opts]
+  ([document rules] #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): the rule-pipeline gap --
+;; parse-rules + the cascade walk are stubbed. Typed route returns
+;; the document unchanged (no styles are written). Removal condition:
+;; parse-rules and run-cascade-walk answer their values.
+     document
+     :default
+   (apply-cascade document rules {})))
+  ([document rules opts] #?(:kotoba
+     ;; KOTOBA ROUTE GAP (2026-10-20): the rule-pipeline gap --
+;; parse-rules + the cascade walk are stubbed. Typed route returns
+;; the document unchanged (no styles are written). Removal condition:
+;; parse-rules and run-cascade-walk answer their values.
+     document
+     :default
    (let [viewport-width (or (:viewport-width opts) default-viewport-width)
          color-scheme (or (:color-scheme opts) default-color-scheme)
          base-font-size (or (:base-font-size opts) (default-base-font-size-value))
@@ -12385,4 +12397,4 @@
              container-ctx {:containers (build-containers pass1-document)
                             :parent-index (parent-index pass1-document)}]
          (run-cascade-walk document rules container-ctx base-font-size))
-       (run-cascade-walk document rules nil base-font-size)))))
+       (run-cascade-walk document rules nil base-font-size))))))
