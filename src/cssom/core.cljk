@@ -480,7 +480,19 @@
                                             [:attrs [:map :keyword :string]]
                                             [:children [:list :string]]]]
     :cssom/container [:record :cssom/container [[:names [:set :string]]
-                                               [:known-width [:option :f64]]]]}))
+                                               [:known-width [:option :f64]]]]
+    :cssom/cascade-entry [:record :cssom/cascade-entry [[:property :keyword]
+                                                     [:value [:result :f64 :string]]
+                                                     [:important? :bool]
+                                                     [:origin :keyword]
+                                                     [:specificity [:vector [:i64 :i64 :i64]]]
+                                                     [:inline? :bool]
+                                                     [:proximity [:option :i64]]
+                                                     [:layer [:option :string]]
+                                                     [:layer-key [:option :string]]
+                                                     [:order :i64]
+                                                     [:decl-index :i64]
+                                                     [:rule/order :i64]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -9440,6 +9452,9 @@
    passing the entry through -- letting it through would write
    `:style/all` onto the element for nobody to read."
   [document node sorted]
+  #?(:kotoba
+     (if (not (loop [i 0] (if (>= i (vector-count sorted)) false (if (= (:property (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted i)) :all) true (recur (inc i)))))) sorted (loop [e 0 out (typed-list-new [:list [:ref :cssom/cascade-entry]])] (if (>= e (vector-count sorted)) out (let [entry (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted e) kind (css-wide-keyword (:value entry))] (recur (inc e) (cond (not (= (:property entry) :all)) (typed-list-conj [:list [:ref :cssom/cascade-entry]] out entry) (not (option-some?-of [:option :keyword] kind)) out :else (let [universe (all-shorthand-universe document node sorted (option-value-of [:option :keyword] kind :none))] (loop [u 0 acc out] (if (>= u (vector-count universe)) acc (let [property (typed-list-nth [:list :keyword] universe u)] (recur (inc u) (typed-list-conj [:list [:ref :cssom/cascade-entry]] acc (assoc entry :property property :value (if (and (= kind :initial) (= property :font-size)) all-initial-font-size (:value entry)))))))))))))))
+     :default
   (if-not (some #(= :all (:property %)) sorted)
     sorted
     (vec
@@ -9457,7 +9472,7 @@
                      :value (if (and (= :initial kind) (= :font-size property))
                               all-initial-font-size
                               (:value entry)))))))
-      sorted))))
+      sorted)))))
 
 ;; ---- the user-agent stylesheet ----
 ;;
