@@ -3727,18 +3727,18 @@
           (recur (inc idx) spans))))))
 
 (defn- selector-simple-parts [s]
-  (loop [idx 0 ids [] classes [] pseudos []]
+  (loop [idx 0 ids (typed-list-new [:list :string]) classes (typed-list-new [:list :string]) pseudos (typed-list-new [:list :keyword])]
     (if (>= idx (string-byte-length s)) [ids classes pseudos]
       (let [ch (string-substring s idx (inc idx)) name-start (inc idx) name-end (selector-ident-end s name-start)]
         (cond
           (and (= ch "#") (> name-end name-start))
-          (recur name-end (conj ids (string-substring s name-start name-end)) classes pseudos)
+          (recur name-end (typed-list-conj [:list :string] ids (string-substring s name-start name-end)) classes pseudos)
           (and (= ch ".") (> name-end name-start))
-          (recur name-end ids (conj classes (string-substring s name-start name-end)) pseudos)
+          (recur name-end ids (typed-list-conj [:list :string] classes (string-substring s name-start name-end)) pseudos)
           (and (= ch ":") (or (zero? idx) (not= ":" (string-substring s (dec idx) idx)))
                (> name-end name-start))
           (recur name-end ids classes
-                 (conj pseudos (keyword (str/ascii-lower (string-substring s name-start name-end)))))
+                 (typed-list-conj [:list :keyword] pseudos (keyword (str/ascii-lower (string-substring s name-start name-end)))))
           :else (recur (inc idx) ids classes pseudos))))))
 
 (defn- selector-tag-name [s]
