@@ -5819,7 +5819,7 @@
 
 (defn- split-css-call-arguments [s]
   (loop [idx 0 depth 0 quote-char ""]
-    (if (>= idx (string-byte-length s)) [s]
+    (if (>= idx (string-byte-length s)) (typed-list-new [:list :string] s)
       (let [ch (string-substring s idx (inc idx))
             escaped? (and (pos? idx) (= "\\" (string-substring s (dec idx) idx)))]
         (cond
@@ -5829,7 +5829,7 @@
           (or (= ch "\"") (= ch "'")) (recur (inc idx) depth ch)
           (= ch "(") (recur (inc idx) (inc depth) "")
           (= ch ")") (recur (inc idx) (max 0 (dec depth)) "")
-          (and (= ch ",") (zero? depth)) [(subs s 0 idx) (subs s (inc idx))]
+          (and (= ch ",") (zero? depth)) (typed-list-new [:list :string] (string-substring s 0 idx) (string-substring s (inc idx) (string-byte-length s)))
           :else (recur (inc idx) depth ""))))))
 
 (defn- attr-reference-at [s start]
