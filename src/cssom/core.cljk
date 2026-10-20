@@ -4198,12 +4198,12 @@
 
 (defn- spec-groups-sum
   [groups [:list [:list [:ref :cssom/compound]]]] [:vector [:i64 :i64 :i64]]
-  (loop [i 0 acc [0 0 0]]
-    (if (>= i (vector-count groups))
+  (loop [i 0 acc [0 0 0] ngroups (vector-count groups)]
+    (if (>= i ngroups)
       acc
       (recur (inc i)
         (let [s (spec-most-specific (typed-list-nth [:list [:list [:ref :cssom/compound]]] groups i))]
-          [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))])))))
+          [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))]) ngroups))))
 
 
 (defn specificity
@@ -5293,10 +5293,10 @@
          (str/blank? s) (option-none-of [:option [:list [:ref :cssom/syntax]]])
          (= "*" s) (typed-list-new [:list [:ref :cssom/syntax]])
          :else
-         (let [alts (split-value-components s "|")]
+            (let [alts (split-value-components s "|") nalts (vector-count alts)]
            (loop [i 0 out (typed-list-new [:list [:ref :cssom/syntax]]) ok 1]
-             (if (>= i (vector-count alts))
-               (if (and (< 0 ok) (> (vector-count alts) 0))
+             (if (>= i nalts)
+               (if (and (< 0 ok) (> nalts 0))
                  (option-some-of [:option [:list [:ref :cssom/syntax]]] out)
                  (option-none-of [:option [:list [:ref :cssom/syntax]]]))
                (let [alt (str/trim (typed-list-nth [:list :string] alts i))
@@ -5448,9 +5448,9 @@
        (if (or (not (option-some?-of [:option [:list [:ref :cssom/syntax]]] alts0))
                (= 0 (vector-count (option-value-of [:option [:list [:ref :cssom/syntax]]] alts0 (typed-list-new [:list [:ref :cssom/syntax]])))))
          true
-         (let [alts (option-value-of [:option [:list [:ref :cssom/syntax]]] alts0 (typed-list-new [:list [:ref :cssom/syntax]]))]
+         (let [alts (option-value-of [:option [:list [:ref :cssom/syntax]]] alts0 (typed-list-new [:list [:ref :cssom/syntax]])) nalts (vector-count alts)]
            (loop [i 0]
-             (if (>= i (vector-count alts))
+             (if (>= i nalts)
                false
                (let [alternative (typed-list-nth [:list [:ref :cssom/syntax]] alts i)
                      name (:syntax/name alternative)
@@ -6226,7 +6226,7 @@
 (defn- parenthesised?
   "Whether `s` is exactly ONE `( ... )` group -- i.e. the paren it opens
    with is closed by its last character, so `(a) and (b)` is not."
-  [s]
+  [#?@(:kotoba [s :string] :default [s])] #?@(:kotoba [:bool])
   (and (str/starts-with? s "(")
        (str/ends-with? s ")")
        (let [n (string-byte-length s)]
@@ -6276,7 +6276,7 @@
    not\", and the second is far more common in real stylesheets. The
    corpus's control for it is `(min-resolution: 1dppx)`, which is exactly
    that second case: Brave matches it, and so does this."
-  [text viewport-width color-scheme condition-fn]
+  [#?@(:kotoba [text :string] :default [text]) viewport-width color-scheme condition-fn]
   (let [inner (str/trim (subs text 1 (dec (count text))))
         feature-of (fn [name]
                      (case (str/ascii-lower (str/trim (str name)))
