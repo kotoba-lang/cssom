@@ -1880,9 +1880,10 @@
    internal spaces and tokenizes correctly as-is)."
   [v]
   #?(:kotoba
-     (let [raw (split-value-components (str/trim (str v)) " ")]
-       (loop [idx 0 result (typed-map-new [:map :keyword [:result :f64 :string]])]
-         (if (>= idx (vector-count raw))
+     (let [raw (split-value-components (str/trim (str v)) " ")
+           nraw (vector-count raw)]
+       (loop [idx 0 result (typed-map-new [:map :keyword [:result :f64 :string]]) raw raw]
+         (if (>= idx nraw)
            result
            (let [tok (typed-list-nth [:list :string] raw idx)]
              (recur (inc idx)
@@ -1898,7 +1899,7 @@
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-style (result-err-of [:result :f64 :string] tok))
                      (not (contains? result :border-color))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-color (result-err-of [:result :f64 :string] tok))
-                     :else result))))))))
+                     :else result))) raw)))))
      :default
   (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
     (reduce (fn [result tok]
@@ -2349,10 +2350,11 @@
                     (typed-map-get [:map :string [:list :keyword]] (logical-border-shorthand-sides) prop)
                     (typed-list-new [:list :keyword]))
            lv (border-side-longhand-values (expand-border-shorthand v))]
-       (when (and (> (vector-count sides) 0)
+            nsides (vector-count sides)
+       (when (and (> nsides 0)
                   (> (typed-map-count [:map :keyword [:result :f64 :string]] lv) 0))
          (loop [si 0 acc (typed-map-new [:map :keyword [:result :f64 :string]])]
-           (if (>= si (vector-count sides))
+           (if (>= si nsides)
              acc
              (recur (inc si)
                (let [side (typed-list-nth [:list :keyword] sides si)] (loop [i 0 acc2 acc]
