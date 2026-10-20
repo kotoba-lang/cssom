@@ -473,7 +473,12 @@
                                         [:syntax/multiplier [:option :keyword]]]]
     :cssom/registration [:record :cssom/registration [[:registration/syntax :string]
                                                  [:registration/inherits? :bool]
-                                                 [:registration/initial [:option :string]]]]}))
+                                                 [:registration/initial [:option :string]]]]
+    :cssom/dom-node [:record :cssom/dom-node [[:node/id :string]
+                                            [:node/type :keyword]
+                                            [:tag [:option :keyword]]
+                                            [:attrs [:map :keyword :string]]
+                                            [:children [:list :string]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -6695,10 +6700,25 @@
 
 (defn- parent-node-id
   [document child-id]
-  (some (fn [[node-id node]]
-          (when (some #{child-id} (:children node))
-            node-id))
-        (:nodes document)))
+  #?(:kotoba
+     (let [nodes (:nodes document)]
+       (loop [i 0]
+         (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes))
+           (option-none-of [:option :string])
+           (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i)
+                 node (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i)
+                 children (:children node)]
+             (if (loop [j 0]
+                   (if (>= j (vector-count children))
+                     false
+                     (if (= (typed-list-nth [:list :string] children j) child-id) true (recur (inc j)))))
+               (option-some-of [:option :string] node-id)
+               (recur (inc i)))))))
+     :default
+     (some (fn [[node-id node]]
+             (when (some #{child-id} (:children node))
+               node-id))
+           (:nodes document))))
 
 (defn- descendant-or-self?
   [document ancestor-id node-id]
