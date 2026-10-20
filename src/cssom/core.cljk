@@ -4502,6 +4502,20 @@
    `pseudo-element-of` and `matches?` all read one selector value and can
    never disagree about which one they got."
   [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
+  #?(:kotoba
+     (if (names-scope? selector)
+       selector
+       (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector) (typed-list-new [:list [:ref :cssom/compound]]))
+             np (vector-count p0)]
+         (if (= np 0)
+           selector
+           (let [first-c (assoc (typed-list-nth [:list [:ref :cssom/compound]] p0 0) :selector/combinator (option-some-of [:option :keyword] :descendant))
+                 base (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part)) first-c)]
+             (assoc selector :selector/parts
+               (loop [i 1 out base]
+                 (if (>= i np) out
+                   (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (typed-list-nth [:list [:ref :cssom/compound]] p0 i))))))))))
+     :default
   (if (names-scope? selector)
     selector
     (let [parts (vec (:selector/parts selector))]
@@ -4511,7 +4525,7 @@
                :selector/parts
                (into [(implicit-scope-part)
                       (assoc (first parts) :selector/combinator :descendant)]
-                     (rest parts)))))))
+                     (rest parts))))))))
 
 (defn- scan-conditional-at-rules
   "One recursive walk of `css`. Returns
@@ -4864,11 +4878,14 @@
    routes a string match through JS `String.replace`, which reads `$&`/`$1`
    in the REPLACEMENT as capture-group references."
   [sel replacement]
-  (let [s (str sel)]
-    (loop [positions (amp-positions s) prev 0 out ""]
-      (if-let [p (first positions)]
-        (recur (rest positions) (inc p) (str out (string-substring s prev p) replacement))
-        (str out (string-substring s prev (string-byte-length s)))))))
+  (let [s (str sel)
+        positions (amp-positions s)
+        np (vector-count positions)]
+    (loop [i 0 prev 0 out ""]
+      (if (>= i np)
+        (str out (string-substring s prev (string-byte-length s)))
+        (let [p (typed-list-nth [:list :i64] positions i)]
+          (recur (inc i) (inc p) (str out (string-substring s prev p) replacement)))))))
 
 (defn- expand-nested-selector
   "One nested selector, resolved against `parent` (the enclosing rule's own
