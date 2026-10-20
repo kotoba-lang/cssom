@@ -6650,7 +6650,7 @@
                     parts))))))
 
 (defn- classes
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (set (remove (fn [x] (str/blank? x)) (split-value-components (str (get-in node [:attrs :class] "")) " "))))
 
 (defn- truthy-attr? [v]
@@ -6706,21 +6706,21 @@
 (def editable-form-control-tags #{:input :textarea})
 
 (defn- input-type
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (str/ascii-lower (str (or (get-in node [:attrs :type]) "text"))))
 
 (defn- hidden-input-control?
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (and (= :input (:tag node))
        (= "hidden" (input-type node))))
 
 (defn- file-input-control?
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (and (= :input (:tag node))
        (= "file" (input-type node))))
 
 (defn- editable-form-control?
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (and (contains? editable-form-control-tags (:tag node))
        (not (hidden-input-control? node))
        (not (file-input-control? node))))
@@ -6808,7 +6808,7 @@
                  (get-in document [:nodes fieldset-id :children])))))
 
 (defn- disabled-by-fieldset?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (loop [parent-id (parent-node-id document (:node/id node))]
     (when parent-id
       (let [parent (get-in document [:nodes parent-id])]
@@ -6820,7 +6820,7 @@
           (recur (parent-node-id document parent-id)))))))
 
 (defn- disabled-by-optgroup?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (when (= :option (:tag node))
     (loop [parent-id (parent-node-id document (:node/id node))]
       (when parent-id
@@ -6864,7 +6864,7 @@
           (first (filter enabled-option? options))))))
 
 (defn- select-value
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (when-let [option-id (and document (selected-option-id document (:node/id node)))]
     (option-control-value document option-id)))
 
@@ -6975,7 +6975,7 @@
          vec))))
 
 (defn- radio-required-satisfied?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   #?(:kotoba
      (let [ids (radio-group-node-ids document node) nids (vector-count ids)]
        (loop [i 0]
@@ -7013,7 +7013,7 @@
     (if (str/starts-with? raw "\n") (string-substring raw 1 (string-byte-length raw)) raw)))
 
 (defn- control-value
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (str (or (get-in node [:attrs :text/value])
            (case (:tag node)
              :select (select-value document node)
@@ -7022,12 +7022,12 @@
            "")))
 
 (defn- validation-barred-control?
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (or (hidden-input-control? node)
       (file-input-control? node)))
 
 (defn- constraint-validation-barred-control?
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (or (validation-barred-control? node)
       (and (editable-form-control? node)
            (truthy-attr? (get-in node [:attrs :readonly])))))
@@ -7047,7 +7047,7 @@
    confirmed via direct REPL reproduction through the real cascade (the
    real out-of-range value resolved `:invalid`/`:valid` CSS to the same
    `green`/valid color as an in-range one)."
-  [type value attrs]
+  [#?@(:kotoba [type value :string attrs [:map :keyword :string]] :default [type value attrs])]
   (and (contains? #?(:kotoba (typed-set-new [:set :string] "number" "range") :default #{"number" "range"}) type)
        (not (str/blank? value))
        (when-let [n (parse-number value)]
@@ -7090,7 +7090,7 @@
    don't. `step-base` is `min` when present and parseable, else `0`,
    matching real HTML5's own step-base algorithm for these two types
    (neither has a `list`/default-option step base concept to consider)."
-  [type value attrs]
+  [#?@(:kotoba [type value :string attrs [:map :keyword :string]] :default [type value attrs])]
   (and (contains? #?(:kotoba (typed-set-new [:set :string] "number" "range") :default #{"number" "range"}) type)
        (not (str/blank? value))
        (when-let [n (parse-number value)]
@@ -7124,7 +7124,7 @@
    kotoba-lang/browser's own identically-scoped compile-pattern/pattern-
    mismatch check in document_input.cljc, fixed together for the same
    reason `range-invalid?` above was)."
-  [type value attrs]
+  [#?@(:kotoba [type value :string attrs [:map :keyword :string]] :default [type value attrs])]
   (and (contains? #?(:kotoba (typed-set-new [:set :string] "text" "search" "url" "tel" "email" "password") :default #{"text" "search" "url" "tel" "email" "password"}) type)
        (not (str/blank? value))
        (when-let [pattern (:pattern attrs)]
@@ -7257,7 +7257,7 @@
            (contains? #?(:kotoba (typed-set-new [:set :string] "text" "search" "url" "tel" "email" "password") :default #{"text" "search" "url" "tel" "email" "password"}) type))))
 
 (defn- constraint-invalid?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (let [attrs (:attrs node)
         type (str/ascii-lower (str (or (:type attrs) "text")))
         value (control-value document node)
@@ -7289,7 +7289,7 @@
                   (step-invalid? type value attrs))))))
 
 (defn- constraint-valid?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (and (form-control? node)
        (not (disabled-control? document node))
        (not (constraint-validation-barred-control? node))
@@ -7304,12 +7304,12 @@
    control that has range limitations at all -- a plain, unbounded
    `type=\"number\"` with neither `min` nor `max` matches NEITHER
    pseudo-class, not `:in-range` by default."
-  [type attrs]
+  [#?@(:kotoba [type attrs [:map :keyword :string]] :default [type attrs])]
   (and (contains? #?(:kotoba (typed-set-new [:set :string] "number" "range") :default #{"number" "range"}) type)
        (boolean (or (parse-number (:min attrs)) (parse-number (:max attrs))))))
 
 (defn- in-range?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (let [attrs (:attrs node)
         type (str/ascii-lower (str (or (:type attrs) "text")))
         value (control-value document node)]
@@ -7321,7 +7321,7 @@
          (not (range-invalid? type value attrs)))))
 
 (defn- out-of-range?
-  [document node]
+  [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (let [attrs (:attrs node)
         type (str/ascii-lower (str (or (:type attrs) "text")))
         value (control-value document node)]
@@ -8654,7 +8654,7 @@
      (matches-parts? document (parent-index document) node-id (:selector/parts selector)))))
 
 (defn- inline-style
-  [node]
+  [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (or (get-in node [:attrs :style-inline])
       {}))
 
