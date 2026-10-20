@@ -1448,13 +1448,13 @@
    while scanning, the same technique `selector-tokens`/
    `split-selector-list` already use elsewhere in this namespace for the
    same reason."
-  [v]
+  [#?@(:kotoba [v :string] :default [v])] #?@(:kotoba [[:list :string]])
   (let [s (str v)
-        n (count s)]
-    (loop [idx 0 start 0 quote-char "" terms []]
+        n (string-byte-length s)]
+    (loop [idx 0 start 0 quote-char "" terms (typed-list-new [:list :string])]
       (if (= idx n)
         (let [term (str/trim (subs s start idx))]
-          (if (str/blank? term) terms (conj terms term)))
+          (if (str/blank? term) terms (typed-list-append [:list :string] terms term)))
         (let [ch (string-substring s idx (inc idx))]
           (cond
             (and (not= "" quote-char) (= ch quote-char))
@@ -1467,8 +1467,9 @@
             (recur (inc idx) start ch terms)
 
             (content-ws-char? ch)
-            (let [term (str/trim (subs s start idx))]
-              (recur (inc idx) (inc idx) "" (if (str/blank? term) terms (conj terms term))))
+            (let [term (str/trim (subs s start idx))
+                  out2 (if (str/blank? term) terms (typed-list-append [:list :string] terms term))]
+              (recur (inc idx) (inc idx) "" out2))
 
             :else
             (recur (inc idx) start quote-char terms)))))))
