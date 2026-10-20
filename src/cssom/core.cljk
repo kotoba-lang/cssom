@@ -467,7 +467,10 @@
                                               [:selector/scope-implicit? :bool]]]
     :cssom/chunk [:record :cssom/chunk [[:chunk/text [:option :string]]
                                       [:chunk/prelude [:option :string]]
-                                      [:chunk/body [:option :string]]]]}))
+                                      [:chunk/body [:option :string]]]]
+    :cssom/syntax [:record :cssom/syntax [[:syntax/name [:option :string]]
+                                        [:syntax/literal [:option :string]]
+                                        [:syntax/multiplier [:option :keyword]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -5252,6 +5255,48 @@
    `\"*\"` is the universal syntax and parses to the empty vector, which
    `registered-value-valid?` reads as \"accepts anything\"."
   [syntax]
+  #?(:kotoba
+     (let [s (str/trim (str syntax))]
+       (cond
+         (str/blank? s) (option-none-of [:option [:list [:ref :cssom/syntax]]])
+         (= "*" s) (typed-list-new [:list [:ref :cssom/syntax]])
+         :else
+         (let [alts (split-value-components s "|")]
+           (loop [i 0 out (typed-list-new [:list [:ref :cssom/syntax]]) ok true]
+             (if (>= i (vector-count alts))
+               (if (and ok (> (vector-count alts) 0))
+                 (option-some-of [:option [:list [:ref :cssom/syntax]]] out)
+                 (option-none-of [:option [:list [:ref :cssom/syntax]]]))
+               (let [alt (str/trim (typed-list-nth [:list :string] alts i))
+                     parts (parse-property-syntax-alternative alt)
+                     body (hetero-vector-at [:vector [:string [:option :string] [:option :string]]] parts 0)
+                     multiplier (hetero-vector-at [:vector [:string [:option :string] [:option :string]]] parts 1)
+                     type-name (hetero-vector-at [:vector [:string [:option :string] [:option :string]]] parts 2)]
+                 (cond
+                   (option-some?-of [:option :string] type-name)
+                   (if (contains? syntax-component-names (str/ascii-lower (option-value-of [:option :string] type-name "")))
+                     (recur (inc i)
+                       (typed-list-conj [:list [:ref :cssom/syntax]] out
+                         (record-new [:record :cssom/syntax [[:syntax/name [:option :string]] [:syntax/literal [:option :string]] [:syntax/multiplier [:option :keyword]]]]
+                           (option-some-of [:option :string] (str/ascii-lower (option-value-of [:option :string] type-name "")))
+                           (option-none-of [:option :string])
+                           (if (= multiplier "+") (option-some-of [:option :keyword] :plus)
+                             (if (= multiplier "#") (option-some-of [:option :keyword] :hash)
+                               (option-none-of [:option :keyword])))))
+                       ok)
+                     (recur (inc i) out false))
+
+                   (css-ident-token? alt)
+                   (recur (inc i)
+                     (typed-list-conj [:list [:ref :cssom/syntax]] out
+                       (record-new [:record :cssom/syntax [[:syntax/name [:option :string]] [:syntax/literal [:option :string]] [:syntax/multiplier [:option :keyword]]]]
+                         (option-none-of [:option :string])
+                         (option-some-of [:option :string] alt)
+                         (option-none-of [:option :keyword])))
+                     ok)
+
+                   :else (recur (inc i) out false))))))))
+     :default
   (let [s (str/trim (str syntax))]
     (cond
       (str/blank? s) nil
@@ -5277,14 +5322,17 @@
                        :else nil)))
                  (split-value-components s "|"))]
         (when (and (seq alternatives) (every? some? alternatives))
-          (vec alternatives))))))
+          (vec alternatives)))))))
 
 (defn- syntax-alternative-support
   "Three-valued support of `value` against ONE alternative of a parsed
    `<syntax>`, applying its `+`/`#` multiplier by slicing the value into
    repetitions first. Every repetition has to hold; one `:no` is `:no`."
-  [{:syntax/keys [name literal multiplier] :as _alternative} value]
-  (let [items (case multiplier
+  [alternative value]
+  (let [name (:syntax/name alternative)
+        literal (:syntax/literal alternative)
+        multiplier (:syntax/multiplier alternative)
+        items (case multiplier
                 :plus (split-value-components value " ")
                 :hash (split-value-components value ",")
                 ;; the un-multiplied value passes through UNTOUCHED --
@@ -5294,11 +5342,14 @@
                 ;; from a typo at use time (see `syntax-component-support`)
                 [value])
         per-item (map #(syntax-component-support name literal %) items)]
-    (cond
-      (empty? items) :no
-      (some #{:no} per-item) :no
-      (some #{:unknown} per-item) :unknown
-      :else :yes)))
+    (if (empty? items)
+      :no
+      (loop [i 0]
+        (cond
+          (>= i (vector-count per-item)) :yes
+          (= (typed-list-nth [:list :keyword] per-item i) :no) :no
+          (= (typed-list-nth [:list :keyword] per-item i) :unknown) :unknown
+          :else (recur (inc i)))))))
 
 (defn- registered-value-valid?
   "Whether `value` is admissible for a registered property declared with
@@ -5315,6 +5366,19 @@
    \"<color>\"; initial-value: red }` with `--c: 7` is `red` in Brave and
    was `7` here."
   [syntax value]
+  #?(:kotoba
+     (let [alts (parse-property-syntax syntax)]
+       (if (not (option-some?-of [:option [:list [:ref :cssom/syntax]]] alts))
+         true
+         (let [alternatives (option-value-of [:option [:list [:ref :cssom/syntax]]] alts (typed-list-new [:list [:ref :cssom/syntax]]))]
+           (if (= 0 (vector-count alternatives))
+             true
+             (loop [i 0]
+               (if (>= i (vector-count alternatives))
+                 false
+                 (let [a (syntax-alternative-support (typed-list-nth [:list [:ref :cssom/syntax]] alternatives i) value)]
+                   (if (or (= a :yes) (= a :unknown)) true (recur (inc i))))))))))
+     :default
   (if-let [alternatives (parse-property-syntax syntax)]
     (if (empty? alternatives)
       true                                        ; `*`
@@ -5324,7 +5388,7 @@
     ;; (`parse-property-registrations`) drops the registration outright,
     ;; and this arm is only reached from `registered-custom-value` for a
     ;; registration that already passed that check.
-    true))
+    true)))
 
 (defn- computationally-independent?
   "Whether `initial` may be an `initial-value` for `syntax` -- a second,
