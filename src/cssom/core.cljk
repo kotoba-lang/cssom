@@ -8088,10 +8088,13 @@
    itself up to the document root, or no `document` to walk at all), or
    when `arg` parses to no usable ranges."
   [document node arg]
+  #?(:kotoba
+     (let [tag (computed-lang document node)] (if (not (option-some?-of [:option :string] tag)) false (let [ranges (parse-lang-ranges arg) tag-s (option-value-of [:option :string] tag "")] (loop [i 0] (if (>= i (vector-count ranges)) false (if (lang-range-matches-tag? (typed-list-nth [:list :string] ranges i) tag-s) true (recur (inc i))))))))
+     :default
   (boolean
    (when-let [tag (computed-lang document node)]
      (let [ranges (parse-lang-ranges arg)]
-       (some #(lang-range-matches-tag? % tag) ranges)))))
+       (some #(lang-range-matches-tag? % tag) ranges))))))
 
 (defn- matches-pseudo?
   "Whether `node` matches bare pseudo-class `selector-pseudo`, given its raw
@@ -8277,10 +8280,13 @@
    instant one matches -- real `:has()` semantics only ever need ONE
    matching descendant, never proof that every descendant was checked."
   [document node compound match-fn]
+  #?(:kotoba
+     (let [ids (descendant-node-ids document node)] (loop [i 0] (if (>= i (vector-count ids)) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] ids i)) compound) true (recur (inc i))))))
+     :default
   (boolean
    (some (fn [descendant-id]
            (match-fn document (get-in document [:nodes descendant-id]) compound))
-         (descendant-node-ids document (:node/id node)))))
+         (descendant-node-ids document (:node/id node))))))
 
 (defn- has-arg-child-match?
   "Whether ANY of `node`'s DIRECT CHILDREN ONLY (one level, never a deeper
@@ -8297,10 +8303,13 @@
    in this function. Short-circuits (`some`) the same way as
    `has-arg-descendant-match?`."
   [document node compound match-fn]
+  #?(:kotoba
+     (let [kids (:children node)] (loop [i 0] (if (>= i (vector-count kids)) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
+     :default
   (boolean
    (some (fn [child-id]
            (match-fn document (get-in document [:nodes child-id]) compound))
-         (:children node))))
+         (:children node)))))
 
 (defn- has-arg-sibling-match?
   "Whether any of `node`'s FOLLOWING siblings matches compound selector
