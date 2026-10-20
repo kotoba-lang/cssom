@@ -4384,7 +4384,8 @@
      :scope/limit (when (and limit-text (not (str/blank? limit-text)))
                     (mapv parse-selector (split-selector-list limit-text)))}))
 
-(def ^:private implicit-scope-part
+(defn- implicit-scope-part
+  []
   "The `:scope ` DESCENDANT prefix every scoped selector that does not name
    `:scope` itself carries. Measured in Brave 151 on 2026-08-06:
 
@@ -4401,21 +4402,40 @@
    measured BLUE) while an explicitly written `:scope` is an ordinary
    pseudo-class (`:scope p` beats `div p`, measured RED). The two cannot
    share one representation, and this flag is the whole of the difference."
-  {:selector/raw ":scope"
-   :selector/tag nil
-   :selector/id nil
-   :selector/classes []
-   :selector/attrs []
-   :selector/pseudos [:scope]
-   :selector/pseudo-element nil
-   :selector/not []
-   :selector/is []
-   :selector/where []
-   :selector/has []
-   :selector/nth-args {}
-   :selector/lang-args {}
-   :selector/combinator nil
-   :selector/scope-implicit? true})
+  #?(:kotoba
+     (record-new [:record :cssom/compound [[:selector/raw :string] [:selector/tag [:option :keyword]] [:selector/id [:option :string]] [:selector/classes [:list :string]] [:selector/attrs [:list [:ref :cssom/attr]]] [:selector/pseudos [:list :keyword]] [:selector/pseudo-element [:option :keyword]] [:selector/not [:list [:list [:ref :cssom/compound]]]] [:selector/is [:list [:list [:ref :cssom/compound]]]] [:selector/where [:list [:list [:ref :cssom/compound]]]] [:selector/has [:list [:list [:ref :cssom/has-item]]]] [:selector/nth-args [:map :keyword :string]] [:selector/lang-args [:map :keyword :string]] [:selector/combinator [:option :keyword]] [:selector/parts [:option [:list [:ref :cssom/compound]]]] [:selector/scope-implicit? :bool]]]
+       ":scope"
+       (option-none-of [:option :keyword])
+       (option-none-of [:option :string])
+       (typed-list-new [:list :string])
+       (typed-list-new [:list [:ref :cssom/attr]])
+       (typed-list-conj [:list :keyword] (typed-list-new [:list :keyword]) :scope)
+       (option-none-of [:option :keyword])
+       (typed-list-new [:list [:list [:ref :cssom/compound]]])
+       (typed-list-new [:list [:list [:ref :cssom/compound]]])
+       (typed-list-new [:list [:list [:ref :cssom/compound]]])
+       (typed-list-new [:list [:list [:ref :cssom/has-item]]])
+       (typed-map-new [:map :keyword :string])
+       (typed-map-new [:map :keyword :string])
+       (option-none-of [:option :keyword])
+       (option-none-of [:option [:list [:ref :cssom/compound]]])
+       true)
+     :default
+     {:selector/raw ":scope"
+      :selector/tag nil
+      :selector/id nil
+      :selector/classes []
+      :selector/attrs []
+      :selector/pseudos [:scope]
+      :selector/pseudo-element nil
+      :selector/not []
+      :selector/is []
+      :selector/where []
+      :selector/has []
+      :selector/nth-args {}
+      :selector/lang-args {}
+      :selector/combinator nil
+      :selector/scope-implicit? true}))
 
 (defn- names-scope?
   "Whether an already-parsed selector writes `:scope` anywhere in itself --
@@ -4448,7 +4468,7 @@
         selector
         (assoc selector
                :selector/parts
-               (into [implicit-scope-part
+               (into [(implicit-scope-part)
                       (assoc (first parts) :selector/combinator :descendant)]
                      (rest parts)))))))
 
