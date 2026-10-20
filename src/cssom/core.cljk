@@ -2451,14 +2451,14 @@
            n (vector-count tokens)
            lp (str/ascii-lower (str prop))]
        (when (and (> n 0) (<= n 4))
-         (let [all-ok (loop [i 0 ok true]
+         (let [all-ok (loop [i 0 ok 1]
                         (if (>= i n)
-                          ok
+                          (< 0 ok)
                           (let [tok (typed-list-nth [:list :string] tokens i)]
                             (recur (inc i)
-                              (and ok (cond (= lp "border-width") (border-shorthand-width-token? tok)
+                              (if (and (< 0 ok) (cond (= lp "border-width") (border-shorthand-width-token? tok)
                                             (= lp "border-style") (contains? border-style-keywords (str/ascii-lower tok))
-                                            :else (not (str/blank? tok))))))))
+                                            :else (not (str/blank? tok)))) 1 0)))))
                t (typed-list-nth [:list :string] tokens 0)
                r (typed-list-nth [:list :string] tokens (if (= n 1) 0 1))
                b (typed-list-nth [:list :string] tokens (if (= n 1) 0 (if (= n 2) 0 2)))
@@ -5308,9 +5308,9 @@
          (= "*" s) (typed-list-new [:list [:ref :cssom/syntax]])
          :else
          (let [alts (split-value-components s "|")]
-           (loop [i 0 out (typed-list-new [:list [:ref :cssom/syntax]]) ok true]
+           (loop [i 0 out (typed-list-new [:list [:ref :cssom/syntax]]) ok 1]
              (if (>= i (vector-count alts))
-               (if (and ok (> (vector-count alts) 0))
+               (if (and (< 0 ok) (> (vector-count alts) 0))
                  (option-some-of [:option [:list [:ref :cssom/syntax]]] out)
                  (option-none-of [:option [:list [:ref :cssom/syntax]]]))
                (let [alt (str/trim (typed-list-nth [:list :string] alts i))
@@ -5330,7 +5330,7 @@
                              (if (= multiplier "#") (option-some-of [:option :keyword] :hash)
                                (option-none-of [:option :keyword])))))
                        ok)
-                     (recur (inc i) out false))
+                     (recur (inc i) out 0))
 
                    (css-ident-token? alt)
                    (recur (inc i)
@@ -5341,7 +5341,7 @@
                          (option-none-of [:option :keyword])))
                      ok)
 
-                   :else (recur (inc i) out false))))))))
+                   :else (recur (inc i) out 0))))))))
      :default
   (let [s (str/trim (str syntax))]
     (cond
