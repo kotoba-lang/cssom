@@ -1604,7 +1604,7 @@
   (let [s (str/trim (str v))
         tokens (split-value-components s " ")]
     (when (seq tokens)
-      (loop [tokens tokens pairs []]
+      (loop [tokens tokens pairs (typed-list-new [:list [:vector [:string :i64]]])]
         (if (empty? tokens)
           pairs
           (let [name (first tokens)
@@ -1614,8 +1614,8 @@
               (if (and next-tok
                        #?(:kotoba (css-signed-integer-token? next-tok)
                           :default (re-matches #"-?\d+" next-tok)))
-                (recur (drop 2 tokens) (conj pairs [name (parse-counter-amount next-tok)]))
-                (recur (rest tokens) (conj pairs [name default-amount]))))))))))
+                (recur (drop 2 tokens) (typed-list-conj [:list [:vector [:string :i64]]] pairs [name (parse-counter-amount next-tok)]))
+                (recur (rest tokens) (typed-list-conj [:list [:vector [:string :i64]]] pairs [name default-amount]))))))))))
 
 (defn- parse-property-value
   "Parses a single declaration's raw value string for property `k` (still a
@@ -4838,12 +4838,12 @@
    counts."
   [sel]
   (let [s (str sel) n (string-byte-length s)]
-    (loop [idx 0 acc []]
+    (loop [idx 0 acc (typed-list-new [:list :i64])]
       (if (>= idx n)
         acc
         (if-let [skip (css-scan-skip s idx n)]
           (recur skip acc)
-          (recur (inc idx) (if (= "&" (string-substring s idx (inc idx))) (conj acc idx) acc)))))))
+          (recur (inc idx) (if (= "&" (string-substring s idx (inc idx))) (typed-list-conj [:list :i64] acc idx) acc)))))))
 
 (defn- replace-amps
   "Every `&` in `sel` replaced by `replacement`. Hand-rolled rather than
