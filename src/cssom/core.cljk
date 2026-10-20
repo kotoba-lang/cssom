@@ -4170,9 +4170,10 @@
    argument -- a bare compound, or a complex arg carrying :selector/parts
    whose compounds sum (see complex-selector-arguments)."
   [arg [:ref :cssom/compound]] [:vector [:i64 :i64 :i64]]
-  (let [parts (:selector/parts arg)]
-    (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts)
-      (let [nparts (vector-count parts)]
+  (let [parts0 (:selector/parts arg)]
+    (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts0)
+      (let [parts (option-value-of [:option [:list [:ref :cssom/compound]]] parts0 (typed-list-new [:list [:ref :cssom/compound]]))
+            nparts (vector-count parts)]
        (loop [i 0 acc [0 0 0]]
         (if (>= i nparts)
           acc
@@ -4209,14 +4210,14 @@
   [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
   #?(:kotoba
      (let [parts (if (option-some?-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector))
-                    (:selector/parts selector)
+                    (option-value-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector) (typed-list-new [:list [:ref :cssom/compound]]))
                     (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) selector))]
-       (loop [i 0 acc [0 0 0]]
-         (if (>= i (vector-count parts))
+       (loop [i 0 acc [0 0 0] nparts (vector-count parts)]
+         (if (>= i nparts)
            acc
            (recur (inc i)
              (let [s (simple-selector-specificity (typed-list-nth [:list [:ref :cssom/compound]] parts i))]
-               [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) ((hetero-vector-at [:vector [:i64 :i64 :i64]] s 0))) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) ((hetero-vector-at [:vector [:i64 :i64 :i64]] s 1))) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) ((hetero-vector-at [:vector [:i64 :i64 :i64]] s 2)))])))))
+               [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))]) nparts))))
      :default
   (let [parts (or (:selector/parts selector) [selector])]
     (reduce (fn [[a b c] part]
@@ -4229,7 +4230,7 @@
   "Index of the `}` that closes the `{` at `open-idx`, honoring nested braces
    (so a `@media { selector { decls } }` block's outer `}` isn't mistaken for
    the inner rule's `}`)."
-  [s open-idx]
+  [#?@(:kotoba [s :string open-idx :i64] :default [s open-idx])] #?@(:kotoba [:i64])
   (let [n (string-byte-length s)]
     (loop [idx (inc open-idx) depth 1]
       (when (< idx n)
@@ -4375,7 +4376,7 @@
    opening at the first `(` at or after `idx` in `s`, or nil when there is
    none or it is unbalanced. Depth-aware, because a scope root is a
    SELECTOR and a selector may hold parens of its own (`:is(.a, .b)`)."
-  [s idx]
+  [#?@(:kotoba [s :string idx :i64] :default [s idx])] #?@(:kotoba [[:option [:vector [:string :i64]]]])
   (let [n (string-byte-length s)]
     (when-let [open (str/index-of s "(" idx)]
       (loop [i (inc open) depth 1]
@@ -4980,12 +4981,12 @@
                    (option-some?-of [:option :string] at) false
                    :else
                    (let [subs2 (css-chunks body)]
-                     (loop [j 0]
-                       (if (>= j (vector-count subs2))
+                      (loop [j 0 nsubs2 (vector-count subs2)]
+                        (if (>= j nsubs2)
                          false
                          (if (option-some?-of [:option :string] (:chunk/prelude (typed-list-nth [:list [:ref :cssom/chunk]] subs2 j)))
                            true
-                           (recur (inc j))))))))
+                           (recur (inc j) nsubs2)))))))
                (recur (inc i)))))))
      :default
   #?(:kotoba
