@@ -10591,13 +10591,13 @@
    but `@supports (padding: 1px 2px)` and `@supports (font: 10px/1.2
    serif)` are both red in Brave 151 and this engine really does support
    them -- it is the expanders that prove it."
-  #{:margin :padding :inset :border :border-width :border-style
+  #?(:kotoba (typed-map-new [:map :keyword :bool] :margin true :padding true :inset true :border true :border-width true :border-style true :border-color true :border-top true :border-right true :border-bottom true :border-left true :border-block true :border-inline true :border-block-start true :border-block-end true :border-inline-start true :border-inline-end true :margin-block true :margin-inline true :padding-block true :padding-inline true :inset-block true :inset-inline true :outline true :box-shadow true :text-shadow true :font true :flex true) :default #{:margin :padding :inset :border :border-width :border-style
     :border-color :border-top :border-right :border-bottom :border-left
     :border-block :border-inline :border-block-start :border-block-end
     :border-inline-start :border-inline-end
     :margin-block :margin-inline :padding-block :padding-inline
     :inset-block :inset-inline
-    :outline :box-shadow :text-shadow :font :flex})
+    :outline :box-shadow :text-shadow :font :flex}))
 
 (defn- engine-property?
   "The properties this engine models, which is the PROPERTY half of the
@@ -10720,7 +10720,7 @@
    which keeps it a string for exactly this reason) and a `flex-basis: 0`
    is a zero of any kind. Everything else in `length-valued-properties`
    needs a unit on a non-zero value."
-  #{:line-height :flex-basis})
+  #?(:kotoba (typed-map-new [:map :keyword :bool] :line-height true :flex-basis true) :default #{:line-height :flex-basis}))
 
 (defn- color-valued-property?
   "The properties whose value this engine reads as a COLOUR. DERIVED from
