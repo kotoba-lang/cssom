@@ -4320,13 +4320,28 @@
    mistaken for an at-rule. No corpus case and no stylesheet this engine
    parses does that, and a tokenizer is a much larger change than the
    nesting bug this scanner exists to fix."
-  [s idx]
+  [#?@(:kotoba [s :string idx :i64] :default [s idx])] #?@(:kotoba [[:option [:vector [:i64 :string]]]])
+  #?(:kotoba
+     (let [names conditional-at-rule-names
+           n (vector-count names)]
+       (loop [k 0 best-idx -1 best-name ""]
+         (if (>= k n)
+           (if (< best-idx 0) nil [best-idx best-name])
+           (let [nm (typed-list-nth [:list :string] names k)
+                 i (str/index-of s (str "@" nm) idx)]
+             (if (option-some?-of [:option :i64] i)
+               (let [iv (option-value-of [:option :i64] i -1)]
+                 (if (or (< best-idx 0) (< iv best-idx))
+                   (recur (inc k) iv nm)
+                   (recur (inc k) best-idx best-name)))
+               (recur (inc k) best-idx best-name))))))
+     :default
   (->> conditional-at-rule-names
        (keep (fn [nm]
                (when-let [i (str/index-of s (str "@" nm) idx)]
                  [i nm])))
        (sort-by first)
-       first))
+       first)))
 
 (def ^:private anonymous-layer-prefix
   "The stem of the name an anonymous `@layer { ... }` block is given. It
