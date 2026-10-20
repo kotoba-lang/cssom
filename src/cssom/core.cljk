@@ -464,7 +464,10 @@
                                               [:selector/lang-args [:map :keyword :string]]
                                               [:selector/combinator [:option :keyword]]
                                               [:selector/parts [:option [:list [:ref :cssom/compound]]]]
-                                              [:selector/scope-implicit? :bool]]]}))
+                                              [:selector/scope-implicit? :bool]]]
+    :cssom/chunk [:record :cssom/chunk [[:chunk/text [:option :string]]
+                                      [:chunk/prelude [:option :string]]
+                                      [:chunk/body [:option :string]]]]}))
 
 (defn- css-regex-full?
   "Whole-string matching over Kotoba's bounded, non-backtracking regex
@@ -4725,6 +4728,42 @@
    with nesting there IS none: `#x { color: blue; span { color: red } }`
    is both."
   [text]
+  #?(:kotoba
+     (let [s (str (or text "")) n (s-len s)]
+       (loop [idx 0 start 0 chunks (typed-list-new [:list [:ref :cssom/chunk]])]
+         (if (>= idx n)
+           (if (str/blank? (s-sub s (min start n) n))
+             chunks
+             (typed-list-conj [:list [:ref :cssom/chunk]] chunks
+               (record-new [:record :cssom/chunk [[:chunk/text [:option :string]] [:chunk/prelude [:option :string]] [:chunk/body [:option :string]]]]
+                 (option-some-of [:option :string] (s-sub s (min start n) n))
+                 (option-none-of [:option :string])
+                 (option-none-of [:option :string]))))
+           (if-let [skip (css-scan-skip s idx n)]
+             (recur skip start chunks)
+             (let [ch (s-sub s idx (inc idx))]
+               (cond
+                 (= ch ";")
+                 (recur (inc idx) (inc idx)
+                   (if (str/blank? (s-sub s start idx))
+                     chunks
+                     (typed-list-conj [:list [:ref :cssom/chunk]] chunks
+                       (record-new [:record :cssom/chunk [[:chunk/text [:option :string]] [:chunk/prelude [:option :string]] [:chunk/body [:option :string]]]]
+                         (option-some-of [:option :string] (s-sub s start idx))
+                         (option-none-of [:option :string])
+                         (option-none-of [:option :string])))))
+                 (= ch "{")
+                 (let [close (css-matching-brace s idx n)
+                       body-end (if close close n)
+                       next-idx (if close (inc close) n)]
+                   (recur next-idx next-idx
+                     (typed-list-conj [:list [:ref :cssom/chunk]] chunks
+                       (record-new [:record :cssom/chunk [[:chunk/text [:option :string]] [:chunk/prelude [:option :string]] [:chunk/body [:option :string]]]]
+                         (option-none-of [:option :string])
+                         (option-some-of [:option :string] (s-sub s start idx))
+                         (option-some-of [:option :string] (s-sub s (inc idx) body-end))))))
+                 :else (recur (inc idx) start chunks)))))))
+     :default
   (let [s (str (or text "")) n (count s)]
     (loop [idx 0 start 0 chunks []]
       (if (>= idx n)
@@ -4744,7 +4783,7 @@
                  (recur next-idx next-idx
                         (conj chunks {:chunk/prelude (subs s start idx)
                                       :chunk/body (subs s (inc idx) body-end)})))
-            (recur (inc idx) start chunks)))))))
+            (recur (inc idx) start chunks))))))))
 
 (def ^:private conditional-group-at-rules
   "The at-rules whose body is a RULE LIST, so nesting recurses into it and
@@ -4890,6 +4929,56 @@
    `parse-rules` is on the path of every case in the conformance corpus,
    and a rewrite that never fires cannot move one."
   [text]
+  #?(:kotoba
+     (let [chunks (css-chunks text)]
+       (loop [i 0]
+         (if (>= i (vector-count chunks))
+           false
+           (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
+                 prelude (:chunk/prelude c)]
+             (if (option-some?-of [:option :string] prelude)
+               (let [at (at-rule-name (option-value-of [:option :string] prelude ""))
+                     body (option-value-of [:option :string] (:chunk/body c) "")]
+                 (cond
+                   (and (option-some?-of [:option :string] at)
+                        (contains? conditional-group-at-rules (option-value-of [:option :string] at "")))
+                   (nested-rule-present? body)
+                   (option-some?-of [:option :string] at) false
+                   :else
+                   (let [subs2 (css-chunks body)]
+                     (loop [j 0]
+                       (if (>= j (vector-count subs2))
+                         false
+                         (if (option-some?-of [:option :string] (:chunk/prelude (typed-list-nth [:list [:ref :cssom/chunk]] subs2 j)))
+                           true
+                           (recur (inc j))))))))
+               (recur (inc i)))))))
+     :default
+  #?(:kotoba
+     (let [chunks (css-chunks text)]
+       (loop [i 0]
+         (if (>= i (vector-count chunks))
+           false
+           (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
+                 prelude (:chunk/prelude c)]
+             (if (option-some?-of [:option :string] prelude)
+               (let [at (at-rule-name (option-value-of [:option :string] prelude ""))
+                     body (option-value-of [:option :string] (:chunk/body c) "")]
+                 (cond
+                   (and (option-some?-of [:option :string] at)
+                        (contains? conditional-group-at-rules (option-value-of [:option :string] at "")))
+                   (nested-rule-present? body)
+                   (option-some?-of [:option :string] at) false
+                   :else
+                   (let [subs2 (css-chunks body)]
+                     (loop [j 0]
+                       (if (>= j (vector-count subs2))
+                         false
+                         (if (option-some?-of [:option :string] (:chunk/prelude (typed-list-nth [:list [:ref :cssom/chunk]] subs2 j)))
+                           true
+                           (recur (inc j))))))))
+               (recur (inc i)))))))
+     :default
   (boolean
    (some (fn [{:chunk/keys [prelude body]}]
            (when prelude
@@ -4901,7 +4990,7 @@
                  at false
 
                  :else (boolean (some :chunk/prelude (css-chunks body)))))))
-         (css-chunks text))))
+         (css-chunks text))))))
 
 (defn- desugar-nesting
   "CSS with every nested rule flattened to a top-level one, or the input
