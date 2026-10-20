@@ -2002,6 +2002,18 @@
   (when (string? value)
     (get css-wide-keywords (str/ascii-lower (str/trim value)))))
 
+(defn- box-side-pick
+  "The token index one side reads under real CSS's 1-to-4 rule."
+  [#?@(:kotoba [n :i64 slot :i64] :default [n slot])] #?@(:kotoba [:i64])
+  #?(:kotoba
+     (case n
+       2 (if (= slot 1) 1 0)
+       3 (if (= slot 0) 0 (if (= slot 1) 1 (if (= slot 2) 2 1)))
+       4 slot
+       0)
+     :default
+     (nth (get box-side-picks n [0 0 0 0]) slot)))
+
 (defn- expand-box-side-shorthand
   "Expands a `margin`/`padding` shorthand into its four per-side longhands
    using real CSS's own 1-to-4 value rule: one value applies to all four
@@ -2047,8 +2059,12 @@
   [prop v]
   (let [tokens (box-shorthand-tokens v)
         n (count tokens)
-        [t r b l] (map #(get tokens % (last tokens))
-                       (get box-side-picks n [0 0 0 0]))]
+        #?@(:kotoba [t (typed-list-nth [:list :string] tokens (box-side-pick n 0))
+                     r (typed-list-nth [:list :string] tokens (box-side-pick n 1))
+                     b (typed-list-nth [:list :string] tokens (box-side-pick n 2))
+                     l (typed-list-nth [:list :string] tokens (box-side-pick n 3))]
+            :default [[t r b l] (map #(get tokens % (last tokens))
+                                     (get box-side-picks n [0 0 0 0]))])]
     (when (and (pos? n) (<= n 4)
                ;; Only expand when EVERY token is a length this engine can
                ;; actually resolve, or -- for `margin` alone -- the keyword
@@ -2156,8 +2172,12 @@
   [v]
   (let [tokens (box-shorthand-tokens v)
         n (count tokens)
-        [t r b l] (map #(get tokens % (last tokens))
-                       (get box-side-picks n [0 0 0 0]))]
+        #?@(:kotoba [t (typed-list-nth [:list :string] tokens (box-side-pick n 0))
+                     r (typed-list-nth [:list :string] tokens (box-side-pick n 1))
+                     b (typed-list-nth [:list :string] tokens (box-side-pick n 2))
+                     l (typed-list-nth [:list :string] tokens (box-side-pick n 3))]
+            :default [[t r b l] (map #(get tokens % (last tokens))
+                                     (get box-side-picks n [0 0 0 0]))])]
     (when (and (pos? n) (<= n 4)
                (every? #(or (css-int-or-px-token? %)
                             (some? (percentage-number %))
@@ -8552,7 +8572,7 @@
    same documented restriction `matches?`'s own document-less arity
    already has. :selector/has has that identical document-less restriction
    too, for the same underlying reason (see `has-group-matches?`)."
-  ([node selector]
+  ([#?@(:kotoba [node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [node selector])]
    (matches-simple? nil node selector))
   ([document node selector]
   #?(:kotoba
@@ -8621,9 +8641,10 @@
 
 (defn matches?
   ([#?@(:kotoba [node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [node selector])]
-   (matches-simple? node (if (:selector/parts selector)
-                           (last (:selector/parts selector))
-                           selector)))
+   (let [sel (if (:selector/parts selector)
+               (last (:selector/parts selector))
+               selector)]
+     (matches-simple? node sel)))
   ([#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]]]] node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [document node selector])]
    (let [selector (if (:selector/parts selector)
                     selector
