@@ -7582,13 +7582,13 @@
    conservative defaults their own docstrings describe."
   [document node same-tag? from-end? arg match-fn]
   #?(:kotoba
-     (let [an-b-text (if same-tag? arg (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 0)) of-text (if same-tag? (option-none-of [:option :string]) (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 1)) of-selectors (if (option-some?-of [:option :string] of-text) (let [arms (split-selector-list (option-value-of [:option :string] of-text ""))] (loop [i 0 out (typed-list-new [:list [:ref :cssom/compound]])] (if (>= i (vector-count arms)) (option-some-of [:option [:list [:ref :cssom/compound]]] out) (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (parse-simple-selector (typed-list-nth [:list :string] arms i))))))) (option-none-of [:option [:list [:ref :cssom/compound]]])) an-b (parse-nth-expression an-b-text) raw-siblings (structural-siblings document node same-tag?) siblings (if (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors) (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [i 0 out (typed-list-new [:list :string]) nrs (vector-count raw-siblings)] (if (>= i nrs) out (let [cid (typed-list-nth [:list :string] raw-siblings i)] (recur (inc i) (if (loop [k 0] (if (>= k (vector-count sels)) false (if (match-fn document (dom-node-at document cid) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k))))) (typed-list-conj [:list :string] out cid) out) nrs))))) (structural-siblings document node same-tag?)) position (sibling-position siblings (:node/id node)) node-matches-of (if (not (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors)) true (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [k 0] (if (>= k (vector-count sels)) false (if (match-fn document (dom-node-at document node) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k)))))))] (and (option-some?-of [:option :i64] position) node-matches-of (nth-matches? (if from-end? (- (+ (vector-count siblings) 1) (option-value-of [:option :i64] position 0)) (option-value-of [:option :i64] position 0)) an-b)))
+     (let [an-b-text (if same-tag? arg (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 0)) of-text (if same-tag? (option-none-of [:option :string]) (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 1)) of-selectors (if (option-some?-of [:option :string] of-text) (let [arms (split-selector-list (option-value-of [:option :string] of-text ""))] (loop [i 0 out (typed-list-new [:list [:ref :cssom/compound]])] (if (>= i (vector-count arms)) (option-some-of [:option [:list [:ref :cssom/compound]]] out) (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (parse-simple-selector (typed-list-nth [:list :string] arms i))))))) (option-none-of [:option [:list [:ref :cssom/compound]]])) an-b (parse-nth-expression an-b-text) raw-siblings (structural-siblings document node same-tag?) siblings (if (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors) (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [i 0 out (typed-list-new [:list :string]) nrs (vector-count raw-siblings)] (if (>= i nrs) out (let [cid (typed-list-nth [:list :string] raw-siblings i)] (recur (inc i) (if (loop [k 0] (if (>= k (vector-count sels)) false (if (matches-simple? document (dom-node-at document cid) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k))))) (typed-list-conj [:list :string] out cid) out) nrs))))) (structural-siblings document node same-tag?)) position (sibling-position siblings (:node/id node)) node-matches-of (if (not (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors)) true (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [k 0] (if (>= k (vector-count sels)) false (if (matches-simple? document (dom-node-at document node) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k)))))))] (and (option-some?-of [:option :i64] position) node-matches-of (nth-matches? (if from-end? (- (+ (vector-count siblings) 1) (option-value-of [:option :i64] position 0)) (option-value-of [:option :i64] position 0)) an-b)))
      :default
   (boolean
    (let [[an-b-text of-text] (if same-tag? [arg nil] (nth-of-clause arg))
          of-selectors (when of-text (mapv parse-simple-selector (split-selector-list of-text)))]
      (when-let [an-b (parse-nth-expression an-b-text)]
-       (let [matches-of? (fn [n] (some #(match-fn document n %) of-selectors))
+       (let [matches-of? (fn [n] (some #(matches-simple? document n %) of-selectors))
              siblings (cond->> (structural-siblings document node same-tag?)
                         of-selectors
                         (filter #(matches-of? (get-in document [:nodes %]))))
@@ -8324,13 +8324,13 @@
    candidate descendant with `match-fn` and SHORT-CIRCUITING (`some`) the
    instant one matches -- real `:has()` semantics only ever need ONE
    matching descendant, never proof that every descendant was checked."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node compound match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn] :default [document node compound match-fn])]
   #?(:kotoba
-     (let [ids (descendant-node-ids document node) nids (vector-count ids)] (loop [i 0] (if (>= i nids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] ids i)) compound) true (recur (inc i))))))
+     (let [ids (descendant-node-ids document node) nids (vector-count ids)] (loop [i 0] (if (>= i nids) false (if (matches-simple? document (dom-node-at document (typed-list-nth [:list :string] ids i)) compound) true (recur (inc i))))))
      :default
   (boolean
    (some (fn [descendant-id]
-           (match-fn document (get-in document [:nodes descendant-id]) compound))
+           (matches-simple? document (get-in document [:nodes descendant-id]) compound))
          (descendant-node-ids document (:node/id node))))))
 
 (defn- has-arg-child-match?
@@ -8347,13 +8347,13 @@
    never going to match any compound selector, no separate filtering needed
    in this function. Short-circuits (`some`) the same way as
    `has-arg-descendant-match?`."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node compound match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound match-fn] :default [document node compound match-fn])]
   #?(:kotoba
-     (let [kids (:children node) nkids (vector-count kids)] (loop [i 0] (if (>= i nkids) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
+     (let [kids (:children node) nkids (vector-count kids)] (loop [i 0] (if (>= i nkids) false (if (matches-simple? document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
      :default
   (boolean
    (some (fn [child-id]
-           (match-fn document (get-in document [:nodes child-id]) compound))
+           (matches-simple? document (get-in document [:nodes child-id]) compound))
          (:children node)))))
 
 (defn- has-arg-sibling-match?
@@ -8377,9 +8377,9 @@
 
    False when `node` has no parent, matching every other sibling-relative
    answer in this namespace."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound adjacent-only? match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node compound adjacent-only? match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] compound adjacent-only? match-fn] :default [document node compound adjacent-only? match-fn])]
   #?(:kotoba
-     (let [siblings0 (structural-siblings document node false)] (if (not (option-some?-of [:option [:list :string]] siblings0)) false (let [siblings (option-value-of [:option [:list :string]] siblings0 (typed-list-new [:list :string])) position (sibling-position siblings (:node/id node))] (if (not (option-some?-of [:option :i64] position)) false (let [start (option-value-of [:option :i64] position 0) n (vector-count siblings) limit (if adjacent-only? (min n (inc start)) n)] (loop [i start] (if (>= i limit) false (if (match-fn document (dom-node-at document (typed-list-nth [:list :string] siblings i)) compound) true (recur (inc i))))))))))
+     (let [siblings0 (structural-siblings document node false)] (if (not (option-some?-of [:option [:list :string]] siblings0)) false (let [siblings (option-value-of [:option [:list :string]] siblings0 (typed-list-new [:list :string])) position (sibling-position siblings (:node/id node))] (if (not (option-some?-of [:option :i64] position)) false (let [start (option-value-of [:option :i64] position 0) n (vector-count siblings) limit (if adjacent-only? (min n (inc start)) n)] (loop [i start] (if (>= i limit) false (if (matches-simple? document (dom-node-at document (typed-list-nth [:list :string] siblings i)) compound) true (recur (inc i))))))))))
      :default
   (boolean
    (when-let [siblings (structural-siblings document node false)]
@@ -8388,7 +8388,7 @@
            following (when position (subvec siblings position))
            candidates (if adjacent-only? (take 1 following) following)]
        (some (fn [sibling-id]
-               (match-fn document (get-in document [:nodes sibling-id]) compound))
+               (matches-simple? document (get-in document [:nodes sibling-id]) compound))
              candidates))))))
 
 (defn- has-group-matches?
@@ -8411,7 +8411,7 @@
    this unconditionally returns false when `document` is nil rather than
    attempting a documentless walk (the documentless 2-arity `matches-simple?`
    form below passes `document` nil, so :has() never matches there either)."
-  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] group match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document node group match-fn])]
+  [#?@(:kotoba [document :document node [:ref :cssom/dom-node] group match-fn] :default [document node group match-fn])]
   #?(:kotoba
      (when document (loop [i 0 ngrp (vector-count group)] (if (>= i ngrp) false (let [item (typed-list-nth [:list [:ref :cssom/has-item]] group i) selector (:has/selector item) combinator (:has/combinator item) direct? (:has/direct-child? item) kind (if (option-some?-of [:option :keyword] combinator) (option-value-of [:option :keyword] combinator :none) (if direct? :child :descendant))] (if (cond (= kind :child) (has-arg-child-match? document node selector match-fn) (= kind :next-sibling) (has-arg-sibling-match? document node selector true match-fn) (= kind :following-sibling) (has-arg-sibling-match? document node selector false match-fn) :else (has-arg-descendant-match? document node selector match-fn)) true (recur (inc i) ngrp))))))
      :default
@@ -8454,8 +8454,8 @@
 
 (defn- parts-match-at
   "Typed-route combinator walk step for parts-match?."
-  [document parents [:map :string :string] node-id :string parts [:list [:ref :cssom/compound]] idx :i64 match-fn] :bool
-  (let [simple (typed-list-nth [:list [:ref :cssom/compound]] parts idx) node (dom-node-at document node-id)] (and (match-fn document node simple) (if (= idx 0) true (let [kind (option-value-of [:option :keyword] (:selector/combinator simple) :none)] (cond (= kind :child) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (parts-match-at document parents (option-value-of [:option :string] parent "") parts (dec idx) match-fn) false)) (= kind :descendant) (loop [ancestor (typed-map-get [:map :string :string] parents node-id)] (if (not (option-some?-of [:option :string] ancestor)) false (if (parts-match-at document parents (option-value-of [:option :string] ancestor "") parts (dec idx) match-fn) true (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] ancestor "")))))) (= kind :next-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) n (vector-count sibs)] (if (= n 0) false (parts-match-at document parents (typed-list-nth [:list :string] sibs (dec n)) parts (dec idx) match-fn))) false)) (= kind :subsequent-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) nsibs (vector-count sibs)] (loop [i 0] (if (>= i nsibs) false (if (parts-match-at document parents (typed-list-nth [:list :string] sibs i) parts (dec idx) match-fn) true (recur (inc i)))))) false)) :else false))))))
+  [document :document parents [:map :string :string] node-id :string parts [:list [:ref :cssom/compound]] idx :i64 match-fn] :bool
+  (let [simple (typed-list-nth [:list [:ref :cssom/compound]] parts idx) node (dom-node-at document node-id)] (and (matches-simple? document node simple) (if (= idx 0) true (let [kind (option-value-of [:option :keyword] (:selector/combinator simple) :none)] (cond (= kind :child) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (parts-match-at document parents (option-value-of [:option :string] parent "") parts (dec idx) match-fn) false)) (= kind :descendant) (loop [ancestor (typed-map-get [:map :string :string] parents node-id)] (if (not (option-some?-of [:option :string] ancestor)) false (if (parts-match-at document parents (option-value-of [:option :string] ancestor "") parts (dec idx) match-fn) true (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] ancestor "")))))) (= kind :next-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) n (vector-count sibs)] (if (= n 0) false (parts-match-at document parents (typed-list-nth [:list :string] sibs (dec n)) parts (dec idx) match-fn))) false)) (= kind :subsequent-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) nsibs (vector-count sibs)] (loop [i 0] (if (>= i nsibs) false (if (parts-match-at document parents (typed-list-nth [:list :string] sibs i) parts (dec idx) match-fn) true (recur (inc i)))))) false)) :else false))))))
 
 (defn- parts-match?
   "Whether the element `node-id` is the SUBJECT of an already-parsed
@@ -8468,7 +8468,7 @@
    `matches-simple?`, because `matches-simple?` needs it for a COMPLEX
    `:is()`/`:not()`/`:where()` argument, and this namespace deliberately
    avoids `declare`-based forward references."
-  [#?@(:kotoba [document :document parents node-id parts [:ref :cssom/compound] match-fn [:fn [[:document :i64 :i64] :bool]]] :default [document parents node-id parts match-fn])]
+  [#?@(:kotoba [document :document parents node-id parts [:ref :cssom/compound] match-fn] :default [document parents node-id parts match-fn])]
   #?(:kotoba
      (if (> (vector-count parts) 0) (parts-match-at document parents node-id parts (dec (vector-count parts)) match-fn) false)
      :default
@@ -8476,7 +8476,7 @@
     (letfn [(match-at [node-id idx]
               (let [simple (nth parts idx)
                     node (get-in document [:nodes node-id])]
-                (and (match-fn document node simple)
+                (and (matches-simple? document node simple)
                      (if (zero? idx)
                        true
                        (case (:selector/combinator simple)
@@ -8574,8 +8574,8 @@
    already has. :selector/has has that identical document-less restriction
    too, for the same underlying reason (see `has-group-matches?`)."
   ([#?@(:kotoba [node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [node selector])]
-   (matches-simple? (record-new :document (typed-map-new [:map :string [:ref :cssom/dom-node]]) (option-none-of [:option :string]) (option-none-of [:option :string])) node selector))
-  ([document node selector]
+   (matches-simple? (document-null) node selector))
+  ([#?@(:kotoba [document :document node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [document node selector])]
   #?(:kotoba
      (let [ntype (:node/type node) sel-tag (:selector/tag selector) sel-id (:selector/id selector)] (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (or (not (option-some?-of [:option :keyword] sel-tag)) (= (option-value-of [:option :keyword] sel-tag :none) (:tag node))) (or (not (option-some?-of [:option :string] sel-id)) (= (option-value-of [:option :string] sel-id "") (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) :id) ""))) (let [node-classes (classes node) ncl (vector-count node-classes)] (loop [i 0] (if (>= i (vector-count (:selector/classes selector))) true (if (loop [j 0] (if (>= j ncl) false (if (= (typed-list-nth [:list :string] node-classes j) (typed-list-nth [:list :string] (:selector/classes selector) i)) true (recur (inc j))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (:selector/attrs selector))) true (if (let [spec (typed-list-nth [:list [:ref :cssom/attr]] (:selector/attrs selector) i) name (:attr/name spec) operator (:attr/operator spec) value (option-value-of [:option :string] (:attr/value spec) "") ci? (:attr/case-insensitive? spec) actual (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) name) "")] (let [actual-str (if ci? (str/ascii-lower actual) actual) value2 (if ci? (str/ascii-lower value) value)] (attr-op-matches? operator actual-str value2))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/pseudos selector))) true (let [pseudo (typed-list-nth [:list :keyword] (:selector/pseudos selector) i)] (if (matches-pseudo? document node pseudo (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:selector/nth-args selector) pseudo) (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:selector/lang-args selector) pseudo) "")) matches-simple?) (recur (inc i)) false)))) (and (loop [i 0] (if (>= i (vector-count (:selector/not selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/not selector) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) true (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) false (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/is selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/is selector) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/where selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/where selector) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (:selector/has selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has selector) i)] (has-group-matches? document node group matches-simple?)) (recur (inc i)) false)))))
      :default   (and (= :element (:node/type node))
