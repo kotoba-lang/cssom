@@ -85,6 +85,13 @@ printed forms are truncated in the diagnostic.
   typed this way and needs either a compact shadow record or direct
   calls instead of fn values.
 
+## Keyword-set contains? sites (4 remaining)
+
+`(contains? #{:a :b} x)` sites at 8148/9180/9334/11137 need the same
+typed-map conversion as the string sets -- an automated regex attempt
+broke the reader (unmatched paren), so convert these FOUR by hand:
+`(contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :a true :b true) :default #{:a :b}) x)`.
+
 ## Known remaining wall
 
 `:kotoba.error/loop-exit-type` (no span): one loop exits with a

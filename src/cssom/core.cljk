@@ -11134,7 +11134,7 @@
   (let [kw (css-wide-keyword (option-value-of [:option :string] declared ""))]
     (cond
       (nil? declared) (or inherited fallback)
-      (contains? #{:inherit :unset} kw) (or inherited fallback)
+      (contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :inherit true :unset true) :default #{:inherit :unset}) kw) (or inherited fallback)
       (some? kw) fallback
       :else (let [s (str/ascii-lower (str/trim (str declared)))]
               (if (seq s) s fallback)))))
