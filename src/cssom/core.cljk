@@ -773,7 +773,7 @@
    this pipeline needs or rare enough that guessing would cost more than
    declining. A name outside this set is an unrecognized token, and the
    whole value degrades to a raw string unchanged."
-  #?(:kotoba (typed-set-new [:set :string] "calc" "min" "max" "clamp") :default #{"calc" "min" "max" "clamp"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "calc" true "min" true "max" true "clamp" true) :default #{"calc" "min" "max" "clamp"}))
 
 (defn- calc-name-parts
   "One function name's whole-call match for `calc-pattern-parts` (below)."
@@ -1710,7 +1710,7 @@
                               (string-substring name 2 (string-byte-length name))
                               "")]
             (when (css-ident? custom-name)
-              [name (when (= (count parts) 2) (second parts))])))))))
+              [name (when (= (count parts) 2) (typed-list-nth [:list :string] parts 1))])))))))
 
 (defn- css-decimal-token? [#?@(:kotoba [s :string] :default [s])] #?@(:kotoba [:bool])
   (let [n (string-byte-length s)
@@ -1833,7 +1833,7 @@
         (when (css-decimal-token? number) number)))))
 
 (def ^:private border-style-keywords
-  #?(:kotoba (typed-set-new [:set :string] "none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset") :default #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "dotted" true "dashed" true "solid" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"}))
 
 (def ^:private line-width-keywords
   "CSS's three named `<line-width>` values. Kept as the KEYWORD here, not
@@ -1848,7 +1848,7 @@
    longhand, which is why `border-top: solid` -- a shorthand with no width
    token at all -- is 3px rather than 0 (measured: a 300px block with
    `border-top: solid` is 19.797 tall against a 16.797 bare one)."
-  #?(:kotoba (typed-set-new [:set :string] "thin" "medium" "thick") :default #{"thin" "medium" "thick"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"}))
 
 (defn- border-shorthand-width-token?
   [tok]
@@ -2695,7 +2695,7 @@
   ;; which this engine does not attempt to render any differently, the
   ;; same "parsed but not visually distinguished" scope-cut border-style
   ;; already has).
-  #?(:kotoba (typed-set-new [:set :string] "none" "auto" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset") :default #{"none" "auto" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "none" true "auto" true "dotted" true "dashed" true "solid" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "auto" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"}))
 
 (defn- expand-outline-shorthand
   "Parses an `outline` shorthand value (real CSS's own order-independent
@@ -2863,10 +2863,10 @@
                      0)})))
 
 (def ^:private font-shorthand-style-keywords
-  #?(:kotoba (typed-set-new [:set :string] "italic" "oblique") :default #{"italic" "oblique"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "italic" true "oblique" true) :default #{"italic" "oblique"}))
 
 (def ^:private font-shorthand-weight-keywords
-  #?(:kotoba (typed-set-new [:set :string] "bold" "bolder" "lighter" "100" "200" "300" "400" "500" "600" "700" "800" "900") :default #{"bold" "bolder" "lighter" "100" "200" "300" "400" "500" "600" "700" "800" "900"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "bold" true "bolder" true "lighter" true "100" true "200" true "300" true "400" true "500" true "600" true "700" true "800" true "900" true) :default #{"bold" "bolder" "lighter" "100" "200" "300" "400" "500" "600" "700" "800" "900"}))
 
 (def ^:private font-shorthand-skip-keywords
   ;; `normal` (real CSS's own reset value, legal in the style/variant/
@@ -2876,7 +2876,7 @@
   ;; this engine has no longhand support for at all (no `font-variant`/
   ;; `font-stretch` property is read anywhere in layout.cljc) -- consumed
   ;; and dropped here rather than mis-parsed as the start of font-family.
-  #?(:kotoba (typed-set-new [:set :string] "normal" "small-caps" "condensed" "expanded" "semi-condensed" "semi-expanded" "extra-condensed" "extra-expanded" "ultra-condensed" "ultra-expanded") :default #{"normal" "small-caps" "condensed" "expanded" "semi-condensed" "semi-expanded"
+  #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "small-caps" true "condensed" true "expanded" true "semi-condensed" true "semi-expanded" true "extra-condensed" true "extra-expanded" true "ultra-condensed" true "ultra-expanded" true) :default #{"normal" "small-caps" "condensed" "expanded" "semi-condensed" "semi-expanded"
     "extra-condensed" "extra-expanded" "ultra-condensed" "ultra-expanded"}))
 
 (defn- expand-font-shorthand
@@ -4851,7 +4851,7 @@
    IS evaluated as of 2026-08-06 (see `parse-scope-prelude` /
    `scope-proximity`); a nested rule inside one still has to come out flat
    before `scan-conditional-at-rules` can record its prelude."
-  #?(:kotoba (typed-set-new [:set :string] "media" "supports" "layer" "container" "scope") :default #{"media" "supports" "layer" "container" "scope"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "media" true "supports" true "layer" true "container" true "scope" true) :default #{"media" "supports" "layer" "container" "scope"}))
 
 (defn- at-rule-name
   [prelude]
@@ -5163,12 +5163,12 @@
    name NOT in this set makes the whole `@property` registration invalid
    (measured above), so this set has to be complete even though only some
    of its members are checked -- see `syntax-component-support`."
-  #?(:kotoba (typed-set-new [:set :string] "length" "number" "percentage" "length-percentage" "color" "image" "url" "integer" "angle" "time" "resolution" "transform-function" "transform-list" "custom-ident" "string") :default #{"length" "number" "percentage" "length-percentage" "color" "image"
+  #?(:kotoba (typed-map-new [:map :string :bool] "length" true "number" true "percentage" true "length-percentage" true "color" true "image" true "url" true "integer" true "angle" true "time" true "resolution" true "transform-function" true "transform-list" true "custom-ident" true "string" true) :default #{"length" "number" "percentage" "length-percentage" "color" "image"
     "url" "integer" "angle" "time" "resolution" "transform-function"
     "transform-list" "custom-ident" "string"}))
 
 (def ^:private length-units
-  #?(:kotoba (typed-set-new [:set :string] "px" "em" "rem" "vw" "vh" "vmin" "vmax" "ch" "ex" "pt" "pc" "in" "cm" "mm" "q") :default #{"px" "em" "rem" "vw" "vh" "vmin" "vmax" "ch" "ex" "pt" "pc" "in" "cm" "mm" "q"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "px" true "em" true "rem" true "vw" true "vh" true "vmin" true "vmax" true "ch" true "ex" true "pt" true "pc" true "in" true "cm" true "mm" true "q" true) :default #{"px" "em" "rem" "vw" "vh" "vmin" "vmax" "ch" "ex" "pt" "pc" "in" "cm" "mm" "q"}))
 
 (def ^:private dimension-pattern
   #?(:kotoba nil :default #"(?i)^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)([a-z]+|%)$"))
@@ -5496,7 +5496,7 @@
                    (recur (inc i)))))))))
      :default
   (let [alternatives (parse-property-syntax syntax)
-        relative? #?(:kotoba (typed-set-new [:set :string] "length" "length-percentage") :default #{"length" "length-percentage"})
+        relative? #?(:kotoba (typed-map-new [:map :string :bool] "length" true "length-percentage" true) :default #{"length" "length-percentage"})
         independent?
         (fn [{:syntax/keys [name multiplier] :as alternative}]
           (and (not= :no (syntax-alternative-support alternative initial))
@@ -6146,10 +6146,10 @@
    does not apply. That is the opposite of the fail-open default an unknown
    FEATURE gets, and deliberately so -- a media type is a closed vocabulary,
    a feature set is not."
-  #?(:kotoba (typed-set-new [:set :string] "all" "screen") :default #{"all" "screen"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "all" true "screen" true) :default #{"all" "screen"}))
 
 (def ^:private media-range-comparators
-  #?(:kotoba (typed-set-new [:set :string] "<" "<=" ">" ">=" "=") :default #{"<" "<=" ">" ">=" "="}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "<" true "<=" true ">" true ">=" true "=" true) :default #{"<" "<=" ">" ">=" "="}))
 
 (def ^:private media-range-token-pattern
   "Splits a range-syntax feature into `<value> <op> <name>` tokens without
@@ -6590,7 +6590,7 @@
              pieces (split-first-on inner ":")]
          (when (= 2 (count pieces))
            (let [kind (str/ascii-lower (str/trim (first pieces)))
-                 value (str/ascii-lower (str/trim (second pieces)))
+                 value (str/ascii-lower (str/trim (typed-list-nth [:list :string] pieces 1)))
                  value (if (str/ends-with? value "px")
                          (str/trim (subs value 0 (- (string-byte-length value) 2)))
                          value)]
@@ -7802,7 +7802,7 @@
    `:required` and NOT `:invalid`, while `<select readonly required>` IS
    `:invalid` because `readonly` reaches no `<select>` at all. So the two
    sets are genuinely different questions and this is the narrower one."
-  #?(:kotoba (typed-set-new [:set :string] "text" "search" "url" "tel" "email" "password" "date" "month" "week" "time" "datetime-local" "number") :default #{"text" "search" "url" "tel" "email" "password"
+  #?(:kotoba (typed-map-new [:map :string :bool] "text" true "search" true "url" true "tel" true "email" true "password" true "date" true "month" true "week" true "time" true "datetime-local" true "number" true) :default #{"text" "search" "url" "tel" "email" "password"
     "date" "month" "week" "time" "datetime-local" "number"}))
 
 (defn- contenteditable-truthy?
@@ -7997,7 +7997,7 @@
    types, which is why it is its own set rather than that one reused: a
    `<input type=date placeholder=h>` is `:read-write` and is not
    `:placeholder-shown`."
-  #?(:kotoba (typed-set-new [:set :string] "text" "search" "url" "tel" "email" "password" "number") :default #{"text" "search" "url" "tel" "email" "password" "number"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "text" true "search" true "url" true "tel" true "email" true "password" true "number" true) :default #{"text" "search" "url" "tel" "email" "password" "number"}))
 
 (defn- placeholder-shown?
   "Whether `node` is showing placeholder text: it carries a `placeholder`
@@ -10633,42 +10633,42 @@
    Every one of these is a keyword-only property: a property that also
    accepts a length or a colour is either absent from this table or listed
    in `length-valued-properties` below, never both."
-  {:position #?(:kotoba (typed-set-new [:set :string] "static" "relative" "absolute" "fixed" "sticky") :default #{"static" "relative" "absolute" "fixed" "sticky"})
-   :float #?(:kotoba (typed-set-new [:set :string] "none" "left" "right" "inline-start" "inline-end") :default #{"none" "left" "right" "inline-start" "inline-end"})
-   :clear #?(:kotoba (typed-set-new [:set :string] "none" "left" "right" "both" "inline-start" "inline-end") :default #{"none" "left" "right" "both" "inline-start" "inline-end"})
-   :overflow #?(:kotoba (typed-set-new [:set :string] "visible" "hidden" "clip" "scroll" "auto") :default #{"visible" "hidden" "clip" "scroll" "auto"})
-   :overflow-x #?(:kotoba (typed-set-new [:set :string] "visible" "hidden" "clip" "scroll" "auto") :default #{"visible" "hidden" "clip" "scroll" "auto"})
-   :overflow-y #?(:kotoba (typed-set-new [:set :string] "visible" "hidden" "clip" "scroll" "auto") :default #{"visible" "hidden" "clip" "scroll" "auto"})
-   :visibility #?(:kotoba (typed-set-new [:set :string] "visible" "hidden" "collapse") :default #{"visible" "hidden" "collapse"})
-   :box-sizing #?(:kotoba (typed-set-new [:set :string] "content-box" "border-box") :default #{"content-box" "border-box"})
-   :direction #?(:kotoba (typed-set-new [:set :string] "ltr" "rtl") :default #{"ltr" "rtl"})
-   :writing-mode #?(:kotoba (typed-set-new [:set :string] "horizontal-tb" "vertical-rl" "vertical-lr" "sideways-rl" "sideways-lr") :default #{"horizontal-tb" "vertical-rl" "vertical-lr"
+  {:position #?(:kotoba (typed-map-new [:map :string :bool] "static" true "relative" true "absolute" true "fixed" true "sticky" true) :default #{"static" "relative" "absolute" "fixed" "sticky"})
+   :float #?(:kotoba (typed-map-new [:map :string :bool] "none" true "left" true "right" true "inline-start" true "inline-end" true) :default #{"none" "left" "right" "inline-start" "inline-end"})
+   :clear #?(:kotoba (typed-map-new [:map :string :bool] "none" true "left" true "right" true "both" true "inline-start" true "inline-end" true) :default #{"none" "left" "right" "both" "inline-start" "inline-end"})
+   :overflow #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "clip" true "scroll" true "auto" true) :default #{"visible" "hidden" "clip" "scroll" "auto"})
+   :overflow-x #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "clip" true "scroll" true "auto" true) :default #{"visible" "hidden" "clip" "scroll" "auto"})
+   :overflow-y #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "clip" true "scroll" true "auto" true) :default #{"visible" "hidden" "clip" "scroll" "auto"})
+   :visibility #?(:kotoba (typed-map-new [:map :string :bool] "visible" true "hidden" true "collapse" true) :default #{"visible" "hidden" "collapse"})
+   :box-sizing #?(:kotoba (typed-map-new [:map :string :bool] "content-box" true "border-box" true) :default #{"content-box" "border-box"})
+   :direction #?(:kotoba (typed-map-new [:map :string :bool] "ltr" true "rtl" true) :default #{"ltr" "rtl"})
+   :writing-mode #?(:kotoba (typed-map-new [:map :string :bool] "horizontal-tb" true "vertical-rl" true "vertical-lr" true "sideways-rl" true "sideways-lr" true) :default #{"horizontal-tb" "vertical-rl" "vertical-lr"
                    "sideways-rl" "sideways-lr"})
-   :text-orientation #?(:kotoba (typed-set-new [:set :string] "mixed" "upright" "sideways") :default #{"mixed" "upright" "sideways"})
-   :white-space #?(:kotoba (typed-set-new [:set :string] "normal" "nowrap" "pre" "pre-wrap" "pre-line" "break-spaces") :default #{"normal" "nowrap" "pre" "pre-wrap" "pre-line" "break-spaces"})
-   :word-break #?(:kotoba (typed-set-new [:set :string] "normal" "break-all" "keep-all" "break-word") :default #{"normal" "break-all" "keep-all" "break-word"})
-   :overflow-wrap #?(:kotoba (typed-set-new [:set :string] "normal" "break-word" "anywhere") :default #{"normal" "break-word" "anywhere"})
-   :word-wrap #?(:kotoba (typed-set-new [:set :string] "normal" "break-word" "anywhere") :default #{"normal" "break-word" "anywhere"})
-   :text-align #?(:kotoba (typed-set-new [:set :string] "start" "end" "left" "right" "center" "justify" "match-parent") :default #{"start" "end" "left" "right" "center" "justify" "match-parent"})
-   :text-transform #?(:kotoba (typed-set-new [:set :string] "none" "capitalize" "uppercase" "lowercase" "full-width") :default #{"none" "capitalize" "uppercase" "lowercase" "full-width"})
-   :font-style #?(:kotoba (typed-set-new [:set :string] "normal" "italic" "oblique") :default #{"normal" "italic" "oblique"})
-   :border-collapse #?(:kotoba (typed-set-new [:set :string] "separate" "collapse") :default #{"separate" "collapse"})
-   :caption-side #?(:kotoba (typed-set-new [:set :string] "top" "bottom") :default #{"top" "bottom"})
-   :empty-cells #?(:kotoba (typed-set-new [:set :string] "show" "hide") :default #{"show" "hide"})
-   :table-layout #?(:kotoba (typed-set-new [:set :string] "auto" "fixed") :default #{"auto" "fixed"})
-   :flex-direction #?(:kotoba (typed-set-new [:set :string] "row" "row-reverse" "column" "column-reverse") :default #{"row" "row-reverse" "column" "column-reverse"})
-   :flex-wrap #?(:kotoba (typed-set-new [:set :string] "nowrap" "wrap" "wrap-reverse") :default #{"nowrap" "wrap" "wrap-reverse"})
-   :container-type #?(:kotoba (typed-set-new [:set :string] "normal" "inline-size" "size") :default #{"normal" "inline-size" "size"})
-   :list-style-position #?(:kotoba (typed-set-new [:set :string] "inside" "outside") :default #{"inside" "outside"})
-   :border-style #?(:kotoba (typed-set-new [:set :string] "none" "hidden" "solid" "dashed" "dotted" "double" "groove" "ridge" "inset" "outset") :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+   :text-orientation #?(:kotoba (typed-map-new [:map :string :bool] "mixed" true "upright" true "sideways" true) :default #{"mixed" "upright" "sideways"})
+   :white-space #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "nowrap" true "pre" true "pre-wrap" true "pre-line" true "break-spaces" true) :default #{"normal" "nowrap" "pre" "pre-wrap" "pre-line" "break-spaces"})
+   :word-break #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "break-all" true "keep-all" true "break-word" true) :default #{"normal" "break-all" "keep-all" "break-word"})
+   :overflow-wrap #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "break-word" true "anywhere" true) :default #{"normal" "break-word" "anywhere"})
+   :word-wrap #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "break-word" true "anywhere" true) :default #{"normal" "break-word" "anywhere"})
+   :text-align #?(:kotoba (typed-map-new [:map :string :bool] "start" true "end" true "left" true "right" true "center" true "justify" true "match-parent" true) :default #{"start" "end" "left" "right" "center" "justify" "match-parent"})
+   :text-transform #?(:kotoba (typed-map-new [:map :string :bool] "none" true "capitalize" true "uppercase" true "lowercase" true "full-width" true) :default #{"none" "capitalize" "uppercase" "lowercase" "full-width"})
+   :font-style #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "italic" true "oblique" true) :default #{"normal" "italic" "oblique"})
+   :border-collapse #?(:kotoba (typed-map-new [:map :string :bool] "separate" true "collapse" true) :default #{"separate" "collapse"})
+   :caption-side #?(:kotoba (typed-map-new [:map :string :bool] "top" true "bottom" true) :default #{"top" "bottom"})
+   :empty-cells #?(:kotoba (typed-map-new [:map :string :bool] "show" true "hide" true) :default #{"show" "hide"})
+   :table-layout #?(:kotoba (typed-map-new [:map :string :bool] "auto" true "fixed" true) :default #{"auto" "fixed"})
+   :flex-direction #?(:kotoba (typed-map-new [:map :string :bool] "row" true "row-reverse" true "column" true "column-reverse" true) :default #{"row" "row-reverse" "column" "column-reverse"})
+   :flex-wrap #?(:kotoba (typed-map-new [:map :string :bool] "nowrap" true "wrap" true "wrap-reverse" true) :default #{"nowrap" "wrap" "wrap-reverse"})
+   :container-type #?(:kotoba (typed-map-new [:map :string :bool] "normal" true "inline-size" true "size" true) :default #{"normal" "inline-size" "size"})
+   :list-style-position #?(:kotoba (typed-map-new [:map :string :bool] "inside" true "outside" true) :default #{"inside" "outside"})
+   :border-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
                    "groove" "ridge" "inset" "outset"})
-   :border-top-style #?(:kotoba (typed-set-new [:set :string] "none" "hidden" "solid" "dashed" "dotted" "double" "groove" "ridge" "inset" "outset") :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+   :border-top-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
                        "groove" "ridge" "inset" "outset"})
-   :border-right-style #?(:kotoba (typed-set-new [:set :string] "none" "hidden" "solid" "dashed" "dotted" "double" "groove" "ridge" "inset" "outset") :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+   :border-right-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
                          "groove" "ridge" "inset" "outset"})
-   :border-bottom-style #?(:kotoba (typed-set-new [:set :string] "none" "hidden" "solid" "dashed" "dotted" "double" "groove" "ridge" "inset" "outset") :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+   :border-bottom-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
                           "groove" "ridge" "inset" "outset"})
-   :border-left-style #?(:kotoba (typed-set-new [:set :string] "none" "hidden" "solid" "dashed" "dotted" "double" "groove" "ridge" "inset" "outset") :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
+   :border-left-style #?(:kotoba (typed-map-new [:map :string :bool] "none" true "hidden" true "solid" true "dashed" true "dotted" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "hidden" "solid" "dashed" "dotted" "double"
                         "groove" "ridge" "inset" "outset"})})
 
 (def ^:private length-valued-properties
@@ -10683,18 +10683,18 @@
    `@supports (width: 10)` is BLACK -- a unitless non-zero number is not a
    length, which is exactly the distinction `parse-media-length` makes for
    the same reason one line of CSS away."
-  {:default #?(:kotoba (typed-set-new [:set :string] "auto" "inherit" "min-content" "max-content" "fit-content" "none" "normal") :default #{"auto" "inherit" "min-content" "max-content" "fit-content" "none" "normal"})
-   :line-height #?(:kotoba (typed-set-new [:set :string] "normal") :default #{"normal"})
-   :vertical-align #?(:kotoba (typed-set-new [:set :string] "baseline" "sub" "super" "top" "text-top" "middle" "bottom" "text-bottom") :default #{"baseline" "sub" "super" "top" "text-top" "middle"
+  {:default #?(:kotoba (typed-map-new [:map :string :bool] "auto" true "inherit" true "min-content" true "max-content" true "fit-content" true "none" true "normal" true) :default #{"auto" "inherit" "min-content" "max-content" "fit-content" "none" "normal"})
+   :line-height #?(:kotoba (typed-map-new [:map :string :bool] "normal" true) :default #{"normal"})
+   :vertical-align #?(:kotoba (typed-map-new [:map :string :bool] "baseline" true "sub" true "super" true "top" true "text-top" true "middle" true "bottom" true "text-bottom" true) :default #{"baseline" "sub" "super" "top" "text-top" "middle"
                      "bottom" "text-bottom"})
-   :letter-spacing #?(:kotoba (typed-set-new [:set :string] "normal") :default #{"normal"})
-   :word-spacing #?(:kotoba (typed-set-new [:set :string] "normal") :default #{"normal"})
-   :border-width #?(:kotoba (typed-set-new [:set :string] "thin" "medium" "thick") :default #{"thin" "medium" "thick"})
-   :border-top-width #?(:kotoba (typed-set-new [:set :string] "thin" "medium" "thick") :default #{"thin" "medium" "thick"})
-   :border-right-width #?(:kotoba (typed-set-new [:set :string] "thin" "medium" "thick") :default #{"thin" "medium" "thick"})
-   :border-bottom-width #?(:kotoba (typed-set-new [:set :string] "thin" "medium" "thick") :default #{"thin" "medium" "thick"})
-   :border-left-width #?(:kotoba (typed-set-new [:set :string] "thin" "medium" "thick") :default #{"thin" "medium" "thick"})
-   :outline-width #?(:kotoba (typed-set-new [:set :string] "thin" "medium" "thick") :default #{"thin" "medium" "thick"})})
+   :letter-spacing #?(:kotoba (typed-map-new [:map :string :bool] "normal" true) :default #{"normal"})
+   :word-spacing #?(:kotoba (typed-map-new [:map :string :bool] "normal" true) :default #{"normal"})
+   :border-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
+   :border-top-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
+   :border-right-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
+   :border-bottom-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
+   :border-left-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})
+   :outline-width #?(:kotoba (typed-map-new [:map :string :bool] "thin" true "medium" true "thick" true) :default #{"thin" "medium" "thick"})})
 
 (def ^:private unitless-number-properties
   "The length-ish properties whose value may legitimately be a bare number:
@@ -10733,7 +10733,7 @@
 
    `none` is here and not there because a renderer draws nothing for it --
    absence is how it is implemented, so it cannot appear in a `case`."
-  #?(:kotoba (typed-set-new [:set :string] "none" "underline" "overline" "line-through") :default #{"none" "underline" "overline" "line-through"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "none" true "underline" true "overline" true "line-through" true) :default #{"none" "underline" "overline" "line-through"}))
 
 (def ^:private text-decoration-style-keywords
   "The `text-decoration-style` keywords. Nothing in this engine draws a
@@ -10743,7 +10743,7 @@
    be the fail-CLOSED direction this oracle exists to avoid. Listed so the
    component walk in `supports-value?` can recognise them rather than
    claiming they are unsupported."
-  #?(:kotoba (typed-set-new [:set :string] "solid" "double" "dotted" "dashed" "wavy") :default #{"solid" "double" "dotted" "dashed" "wavy"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "solid" true "double" true "dotted" true "dashed" true "wavy" true) :default #{"solid" "double" "dotted" "dashed" "wavy"}))
 
 (def ^:private supports-value-function-pattern
   "A whole value that is one function call this engine resolves --
@@ -11700,7 +11700,7 @@
             (if parts
               (recur (inc close) (inc close)
                      (str out (string-substring s start idx)
-                          (str (var-lookup env (first parts) (second parts)))))
+                          (str (var-lookup env (typed-list-nth [:list :string] parts 0) (typed-list-nth [:list :string] parts 1)))))
               (recur (inc idx) start out)))
           (recur (inc idx) start out))))))
 
@@ -11811,7 +11811,7 @@
            value substituted
            trimmed (str/trim value)]
        (if-let [parts (parse-var-reference trimmed)]
-         (let [resolved (var-lookup env (first parts) (second parts))]
+         (let [resolved (var-lookup env (typed-list-nth [:list :string] parts 0) (typed-list-nth [:list :string] parts 1))]
            (if (string? resolved)
              (parse-style-value (resolve-value env resolved (inc depth)))
              resolved))
@@ -12089,7 +12089,7 @@
    `inline-flex` container that is ITSELF blockified reads as `flex` while
    one in a line box still reads as `inline-flex`, and its children are
    items either way."
-  #?(:kotoba (typed-set-new [:set :string] "flex" "inline-flex" "grid" "inline-grid") :default #{"flex" "inline-flex" "grid" "inline-grid"}))
+  #?(:kotoba (typed-map-new [:map :string :bool] "flex" true "inline-flex" true "grid" true "inline-grid" true) :default #{"flex" "inline-flex" "grid" "inline-grid"}))
 
 (defn- display-token
   "A `display`/`float`/`position` value normalised for comparison: the
