@@ -5713,8 +5713,8 @@
     (when close
       (let [inside (subs s (+ start 4) close)
             parts (split-first-on inside ",")
-            name (str/trim (first parts))
-            fallback (when (= 2 (count parts)) (second parts))]
+            name (str/trim (typed-list-nth [:list :string] parts 0))
+            fallback (when (= 2 (vector-count parts)) (typed-list-nth [:list :string] parts 1))]
         (when (env-name-token? name)
           [(inc close) name fallback])))))
 
@@ -5838,11 +5838,11 @@
     (when close
       (let [inside (subs s (+ open 1) close)
             parts (split-css-call-arguments inside)
-            head (str/trim (first parts))
+            head (str/trim (typed-list-nth [:list :string] parts 0))
             name-end (selector-ident-end head 0)
             name (string-substring head 0 name-end)
             tail (str/trim (string-substring head name-end (string-byte-length head)))
-            fallback (when (= 2 (count parts)) (second parts))
+            fallback (when (= 2 (vector-count parts)) (typed-list-nth [:list :string] parts 1))
             lower-tail (str/ascii-lower tail)
             syntax (when (str/starts-with? lower-tail "type(")
                      (let [type-close (matching-var-close tail 4)
