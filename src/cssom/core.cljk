@@ -3998,7 +3998,7 @@
                     (re-seq attribute-selector-pattern s))
         pseudos (mapv (fn [m] (keyword (str/ascii-lower (hetero-vector-at [:vector [:string :string :string]] m 1))))
                       (re-seq pseudo-class-pattern selector-sans-pseudo-element))]
-    (record-new [:record :cssom/compound [[:selector/raw :string] [:selector/tag [:option :keyword]] [:selector/id [:option :string]] [:selector/classes [:list :string]] [:selector/attrs [:list [:ref :cssom/attr]]] [:selector/pseudos [:list :keyword]] [:selector/pseudo-element [:option :keyword]] [:selector/not [:list [:ref :cssom/group]]] [:selector/is [:list [:ref :cssom/group]]] [:selector/where [:list [:ref :cssom/group]]] [:selector/has [:list [:list [:ref :cssom/has-item]]]] [:selector/nth-args [:map :keyword :string]] [:selector/lang-args [:map :keyword :string]] [:selector/combinator [:option :keyword]]]]
+    (record-new [:ref :cssom/compound]
       raw
       (when (seq tag) (keyword (str/ascii-lower tag)))
       id
