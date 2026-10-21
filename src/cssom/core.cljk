@@ -1893,41 +1893,41 @@
   #?(:kotoba
      (let [raw (split-value-components (str/trim (str v)) " ")
            nraw (vector-count raw)]
-       (loop [idx 0 result (typed-map-new [:map :keyword [:result :f64 :string]]) raw raw]
+       (loop [idx 0 acc-map (typed-map-new [:map :keyword [:result :f64 :string]])]
          (if (>= idx nraw)
-           result
+           acc-map
            (let [tok (typed-list-nth [:list :string] raw idx)]
              (recur (inc idx)
                (if (str/blank? tok)
-                 result
+                 acc-map
                  (let [lower (str/ascii-lower tok)]
                    (cond
-                     (and (not (contains? result :border-width))
+                     (and (not (contains? acc-map :border-width))
                           (border-shorthand-width-token? tok))
-                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-width (parse-style-value tok))
-                     (and (not (contains? result :border-style))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] acc-map :border-width (parse-style-value tok))
+                     (and (not (contains? acc-map :border-style))
                           (contains? border-style-keywords lower))
-                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-style (result-err-of [:result :f64 :string] tok))
-                     (not (contains? result :border-color))
-                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :border-color (result-err-of [:result :f64 :string] tok))
-                     :else result))) raw)))))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] acc-map :border-style (result-err-of [:result :f64 :string] tok))
+                     (not (contains? acc-map :border-color))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] acc-map :border-color (result-err-of [:result :f64 :string] tok))
+                     :else acc-map))))))))
      :default
   (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
-    (reduce (fn [result tok]
+    (reduce (fn [acc-map tok]
               (let [lower (str/ascii-lower tok)]
                 (cond
-                  (and (not (contains? result :border-width))
+                  (and (not (contains? acc-map :border-width))
                        (border-shorthand-width-token? tok))
-                  (assoc result :border-width (parse-style-value tok))
+                  (assoc acc-map :border-width (parse-style-value tok))
 
-                  (and (not (contains? result :border-style))
+                  (and (not (contains? acc-map :border-style))
                        (contains? border-style-keywords lower))
-                  (assoc result :border-style tok)
+                  (assoc acc-map :border-style tok)
 
-                  (not (contains? result :border-color))
-                  (assoc result :border-color tok)
+                  (not (contains? acc-map :border-color))
+                  (assoc acc-map :border-color tok)
 
-                  :else result)))
+                  :else acc-map)))
             {}
             tokens))))
 
