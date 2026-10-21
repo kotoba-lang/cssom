@@ -4479,29 +4479,24 @@
      :scope/limit (when (and limit-text (not (str/blank? limit-text)))
                     (mapv parse-selector (split-selector-list limit-text)))}))
 
-(defn- implicit-scope-part [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])] #?@(:kotoba [[:ref :cssom/compound]])
-  #?(:kotoba
-     (if (names-scope? selector)
-       selector
-       (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (get selector :selector/parts) (typed-list-new [:list [:ref :cssom/compound]]))
-             ]
-         (if (= 0 (count p0))
-           selector
-           (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))]
-             (assoc selector :selector/parts
-               (scope-parts-new p0 selector))))))
-     :default
-  (if (names-scope? selector)
-    selector
-    (let [parts (vec (get selector :selector/parts))]
-      (if (empty? parts)
-        selector
-        (assoc selector
-               :selector/parts
-               (into [(implicit-scope-part)
-                      (assoc (first parts) :selector/combinator :descendant)]
-                     (rest parts)))))))
-)
+(defn- implicit-scope-part
+  []
+  "The `:scope ` DESCENDANT prefix every scoped selector that does not name
+   `:scope` itself carries. Measured in Brave 151 on 2026-08-06:
+
+   - `@scope (#r) { div { ... } }` leaves the ROOT ITSELF unmatched even
+     though the root is a `div`, so the prefix is a real ancestor
+     constraint and not `:is(:scope, :scope *)`.
+   - `@scope (#r) { div > p { ... } }` leaves a `<p>` whose parent IS the
+     root unmatched, and reddens one whose parent is a `<div>` inside it --
+     so the prefix attaches to the WHOLE complex selector (`:scope div > p`)
+     rather than to each compound.
+
+   `:selector/scope-implicit?` is what keeps it out of `specificity`: the
+   prelude contributes nothing (`@scope (#r) { p }` loses to `div p`,
+   measured BLUE) while an explicitly written `:scope` is an ordinary
+   pseudo-class (`:scope p` beats `div p`, measured RED). The two cannot
+   share one representation, and this flag is the whole of the difference.")
 (defn- names-scope?
   "Whether an already-parsed selector writes `:scope` anywhere in itself --
    including inside `:is()`/`:where()`/`:not()`, which is why this reads
@@ -4533,7 +4528,7 @@
              ]
          (if (= 0 (count p0))
            selector
-           (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))]
+           (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part))]
              (assoc selector :selector/parts
                (scope-parts-new p0 selector))))))
      :default
