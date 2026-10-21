@@ -1017,11 +1017,11 @@
   (if (= level 2)
     (when (seq tokens)
       (let [t (first tokens)]
-        (case (:calc/type t)
+        (case (get t :calc/type)
           :minus (when-let [[node toks] (parse-calc-level (rest tokens) 2)]
                    [{:calc/op :neg :calc/arg node} toks])
           :plus (parse-calc-level (rest tokens) 2)
-          :operand [{:calc/op :num :calc/unit (:calc/unit t) :calc/value (:calc/value t)}
+          :operand [{:calc/op :num :calc/unit (get t :calc/unit) :calc/value (get t :calc/value)}
                     (rest tokens)]
           ;; A nested `calc()`/`min()`/`max()`/`clamp()`: each top-level
           ;; comma-separated argument is a WHOLE expression of its own, so
@@ -1034,9 +1034,9 @@
                                      (when-let [toks (tokenize-calc-expr arg)]
                                        (when-let [[node rest-toks] (parse-calc-level toks 0)]
                                          (when (empty? rest-toks) node))))
-                                   (calc-split-arguments (:calc/text t)))]
+                                   (calc-split-arguments (get t :calc/text)))]
                     (when (and (seq args) (every? (fn [x] (some? x)) args))
-                      [{:calc/op :fn :calc/name (:calc/name t) :calc/args args}
+                      [{:calc/op :fn :calc/name (get t :calc/name) :calc/args args}
                        (rest tokens)]))
           :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
                     (when (and (seq toks) (= :rparen (:calc/type (first toks))))
@@ -1102,15 +1102,15 @@
        makes `clamp(90px, 5px, 300px)` come out 90 rather than 5.
        A wrong argument count is rejected rather than tolerated."
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (case (:calc/op node)
-    :num [(:calc/value node) (:calc/unit node)]
+  (case (get node :calc/op)
+    :num [(get node :calc/value) (get node :calc/unit)]
 
-    :fn (let [vals (mapv eval-calc-node (:calc/args node))]
+    :fn (let [vals (mapv eval-calc-node (get node :calc/args))]
           (when (and (seq vals) (every? (fn [x] (some? x)) vals)
                      (apply = (map second vals)))
             (let [unit (second (first vals))
                   ns' (mapv first vals)]
-              (case (:calc/name node)
+              (case (get node :calc/name)
                 "calc" (when (= 1 (count ns')) [(first ns') unit])
                 "min" [(reduce min ns') unit]
                 "max" [(reduce max ns') unit]
@@ -1119,26 +1119,26 @@
                             [(max lo (min v hi)) unit]))
                 nil))))
 
-    :neg (when-let [[v u] (eval-calc-node (:calc/arg node))]
+    :neg (when-let [[v u] (eval-calc-node (get node :calc/arg))]
            [(- v) u])
 
-    :add (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+    :add (when-let [[lv lu] (eval-calc-node (get node :calc/left))]
+           (when-let [[rv ru] (eval-calc-node (get node :calc/right))]
              (when (= lu ru) [(+ lv rv) lu])))
 
-    :sub (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+    :sub (when-let [[lv lu] (eval-calc-node (get node :calc/left))]
+           (when-let [[rv ru] (eval-calc-node (get node :calc/right))]
              (when (= lu ru) [(- lv rv) lu])))
 
-    :mul (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+    :mul (when-let [[lv lu] (eval-calc-node (get node :calc/left))]
+           (when-let [[rv ru] (eval-calc-node (get node :calc/right))]
              (cond
                (= lu :number) [(* lv rv) ru]
                (= ru :number) [(* lv rv) lu]
                :else nil)))
 
-    :div (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+    :div (when-let [[lv lu] (eval-calc-node (get node :calc/left))]
+           (when-let [[rv ru] (eval-calc-node (get node :calc/right))]
              (when (and (= ru :number) (not (zero? rv)))
                [(/ lv rv) lu])))
 
@@ -3257,7 +3257,7 @@
                (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] src) i)
                (:value (typed-list-nth [:list [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] (typed-map-vals [:map :keyword [:record :cssom/property [[:value [:result :f64 :string]] [:important? :bool] [:index :i64]]]] src) i)))))))
      :default
-  (into {} (map (fn [[k v]] [k (:value v)])) (parse-declarations-with-importance text))))
+  (into {} (map (fn [[k v]] [k (get v :value)])) (parse-declarations-with-importance text))))
 
 (defn- selector-ident-end
   "Returns the end offset of an ASCII CSS identifier beginning at `start`."
@@ -4155,35 +4155,35 @@
   #?(:kotoba
      (if (:selector/scope-implicit? simple)
        [0 0 0]
-       (let [not-s (spec-groups-sum (:selector/not simple))
-             is-s (spec-groups-sum (:selector/is simple))
+       (let [not-s (spec-groups-sum (get simple :selector/not))
+             is-s (spec-groups-sum (get simple :selector/is))
              has-groups (loop [i 0 acc (typed-list-new [:list [:list [:ref :cssom/compound]]])]
-                          (if (>= i (vector-count (:selector/has simple)))
+                          (if (>= i (vector-count (get simple :selector/has)))
                             acc
                             (recur (inc i)
                               (typed-list-conj [:list [:list [:ref :cssom/compound]]] acc
                                 (loop [j 0 g (typed-list-new [:list [:ref :cssom/compound]])]
-                                  (if (>= j (vector-count (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has simple) i)))
+                                  (if (>= j (vector-count (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (get simple :selector/has) i)))
                                     g
                                     (recur (inc j)
                                       (typed-list-conj [:list [:ref :cssom/compound]] g
                                         (:has/selector (typed-list-nth [:list [:ref :cssom/has-item]]
-                                                       (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has simple) i) j))))))))))
+                                                       (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (get simple :selector/has) i) j))))))))))
              has-s (spec-groups-sum has-groups)]
-         [(+ (if (:selector/id simple) 1 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] not-s 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] is-s 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] has-s 0))
-          (+ (vector-count (:selector/classes simple))
-             (vector-count (:selector/attrs simple))
-             (vector-count (:selector/pseudos simple))
+         [(+ (if (get simple :selector/id) 1 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] not-s 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] is-s 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] has-s 0))
+          (+ (vector-count (get simple :selector/classes))
+             (vector-count (get simple :selector/attrs))
+             (vector-count (get simple :selector/pseudos))
              (hetero-vector-at [:vector [:i64 :i64 :i64]] not-s 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] is-s 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] has-s 1))
-          (+ (if (:selector/tag simple) 1 0)
-             (if (:selector/pseudo-element simple) 1 0)
+          (+ (if (get simple :selector/tag) 1 0)
+             (if (get simple :selector/pseudo-element) 1 0)
              (hetero-vector-at [:vector [:i64 :i64 :i64]] not-s 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] is-s 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] has-s 2))]))
      :default
   (if (:selector/scope-implicit? simple)
     [0 0 0]
     (let [arg-specificity
           (fn arg-specificity [arg]
-            (if-let [parts (:selector/parts arg)]
+            (if-let [parts (get arg :selector/parts)]
               ;; a COMPLEX argument: its specificity is the SUM over its own
               ;; compounds, exactly like a top-level selector's. Measured in
               ;; Brave: `:is(.wA .wB) span` is (0,2,1) and beats
@@ -4209,17 +4209,17 @@
                         [(+ a ga) (+ b gb) (+ c gc)]))
                     [0 0 0]
                     groups))
-          has-groups (mapv (fn [group] (mapv (fn [x] (:has/selector x)) group)) (:selector/has simple))
-          [na nb nc] (groups-specificity (:selector/not simple))
-          [ia ib ic] (groups-specificity (:selector/is simple))
+          has-groups (mapv (fn [group] (mapv (fn [x] (get x :has/selector)) group)) (get simple :selector/has))
+          [na nb nc] (groups-specificity (get simple :selector/not))
+          [ia ib ic] (groups-specificity (get simple :selector/is))
           [ha hb hc] (groups-specificity has-groups)]
-      [(+ (if (:selector/id simple) 1 0) na ia ha)
-       (+ (count (:selector/classes simple))
-          (count (:selector/attrs simple))
-          (count (:selector/pseudos simple))
+      [(+ (if (get simple :selector/id) 1 0) na ia ha)
+       (+ (count (get simple :selector/classes))
+          (count (get simple :selector/attrs))
+          (count (get simple :selector/pseudos))
           nb ib hb)
-       (+ (if (:selector/tag simple) 1 0)
-          (if (:selector/pseudo-element simple) 1 0)
+       (+ (if (get simple :selector/tag) 1 0)
+          (if (get simple :selector/pseudo-element) 1 0)
           nc ic hc)]))))
 
 (defn- selector-arg-specificity
@@ -4227,7 +4227,7 @@
    argument -- a bare compound, or a complex arg carrying :selector/parts
    whose compounds sum (see complex-selector-arguments)."
   [arg [:ref :cssom/compound]] [:vector [:i64 :i64 :i64]]
-  (let [parts0 (:selector/parts arg)]
+  (let [parts0 (get arg :selector/parts)]
     (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts0)
       (let [parts (option-value-of [:option [:list [:ref :cssom/compound]]] parts0 (typed-list-new [:list [:ref :cssom/compound]]))
             nparts (vector-count parts)]
@@ -4266,8 +4266,8 @@
 (defn specificity
   [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
   #?(:kotoba
-     (let [parts (if (option-some?-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector))
-                    (option-value-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector) (typed-list-new [:list [:ref :cssom/compound]]))
+     (let [parts (if (option-some?-of [:option [:list [:ref :cssom/compound]]] (get selector :selector/parts))
+                    (option-value-of [:option [:list [:ref :cssom/compound]]] (get selector :selector/parts) (typed-list-new [:list [:ref :cssom/compound]]))
                     (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) selector))]
        (loop [i 0 acc [0 0 0] nparts (vector-count parts)]
          (if (>= i nparts)
@@ -4276,7 +4276,7 @@
              (let [s (simple-selector-specificity (typed-list-nth [:list [:ref :cssom/compound]] parts i))]
                [(+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 0) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 0)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 1) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 1)) (+ (hetero-vector-at [:vector [:i64 :i64 :i64]] acc 2) (hetero-vector-at [:vector [:i64 :i64 :i64]] s 2))]) nparts))))
      :default
-  (let [parts (or (:selector/parts selector) [selector])]
+  (let [parts (or (get selector :selector/parts) [selector])]
     (reduce (fn [[a b c] part]
               (let [[pa pb pc] (simple-selector-specificity part)]
                 [(+ a pa) (+ b pb) (+ c pc)]))
@@ -4483,14 +4483,14 @@
   #?(:kotoba
      (if (names-scope? selector)
        selector
-       (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector) (typed-list-new [:list [:ref :cssom/compound]]))
+       (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (get selector :selector/parts) (typed-list-new [:list [:ref :cssom/compound]]))
              np (vector-count p0)]
          (if (= np 0)
            selector
            (let [comb (option-some-of [:option :keyword] :descendant)
                  first-raw (typed-list-nth [:list [:ref :cssom/compound]] p0 0)
                  first-c (assoc first-raw :selector/combinator comb)
-                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part))
+                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))
              base (typed-list-conj [:list [:ref :cssom/compound]] base0 first-c)]
              (assoc selector :selector/parts
                (loop [i 1 out base]
@@ -4499,7 +4499,7 @@
      :default
   (if (names-scope? selector)
     selector
-    (let [parts (vec (:selector/parts selector))]
+    (let [parts (vec (get selector :selector/parts))]
       (if (empty? parts)
         selector
         (assoc selector
@@ -4521,7 +4521,7 @@
    (`[data-x=\":scope\"]`) would be mistaken for the pseudo-class. No
    stylesheet this engine parses does that."
   [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
-  (scope-pseudo? (str (:selector/raw selector))))
+  (scope-pseudo? (str (get selector :selector/raw))))
 
 (defn- scope-selector
   "`selector` as it must be MATCHED inside a `@scope` block: unchanged when
@@ -4535,14 +4535,14 @@
   #?(:kotoba
      (if (names-scope? selector)
        selector
-       (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (:selector/parts selector) (typed-list-new [:list [:ref :cssom/compound]]))
+       (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (get selector :selector/parts) (typed-list-new [:list [:ref :cssom/compound]]))
              np (vector-count p0)]
          (if (= np 0)
            selector
            (let [comb (option-some-of [:option :keyword] :descendant)
                  first-raw (typed-list-nth [:list [:ref :cssom/compound]] p0 0)
                  first-c (assoc first-raw :selector/combinator comb)
-                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part))
+                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))
              base (typed-list-conj [:list [:ref :cssom/compound]] base0 first-c)]
              (assoc selector :selector/parts
                (loop [i 1 out base]
@@ -4551,7 +4551,7 @@
      :default
   (if (names-scope? selector)
     selector
-    (let [parts (vec (:selector/parts selector))]
+    (let [parts (vec (get selector :selector/parts))]
       (if (empty? parts)
         selector
         (assoc selector
@@ -4615,7 +4615,7 @@
                         (doseq [nme (->> (split-value-components (subs s (+ at-idx (count "@layer")) semi-idx) ",")
                                          (map (fn [x] (str/trim x)))
                                          (remove (fn [x] (str/blank? x))))]
-                          (note-layer! (layer-name-path (:layer ctx) nme nil))))
+                          (note-layer! (layer-name-path (get ctx :layer) nme nil))))
                       (recur (inc semi-idx) (into out (or before []))))
 
                   (nil? brace-idx)
@@ -4636,7 +4636,7 @@
                                      :container-name (when (and paren (pos? paren))
                                                        (not-empty (str/trim (string-substring header 0 paren))))))
                             "layer"
-                            (let [path (layer-name-path (:layer ctx) header (vswap! anon inc))]
+                            (let [path (layer-name-path (get ctx :layer) header (vswap! anon inc))]
                               (note-layer! path)
                               (assoc ctx :layer path))
                             ;; Outermost first, like :media/:supports, so a
@@ -4975,7 +4975,7 @@
   [text parent]
   (let [chunks (css-chunks text)
         decl-text (->> chunks
-                       (keep (fn [x] (:chunk/text x)))
+                       (keep (fn [x] (get x :chunk/text)))
                        (map (fn [x] (str/trim x)))
                        (remove (fn [x] (str/blank? x)))
                        (remove #(str/starts-with? % "@"))
@@ -5023,10 +5023,10 @@
          (if (>= i nchunks)
            false
            (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
-                 prelude (:chunk/prelude c)]
+                 prelude (get c :chunk/prelude)]
              (if (option-some?-of [:option :string] prelude)
                (let [at (at-rule-name (option-value-of [:option :string] prelude ""))
-                     body (option-value-of [:option :string] (:chunk/body c) "")]
+                     body (option-value-of [:option :string] (get c :chunk/body) "")]
                  (cond
                    (and (option-some?-of [:option :string] at)
                         (contains? conditional-group-at-rules (option-value-of [:option :string] at "")))
@@ -5048,10 +5048,10 @@
          (if (>= i (vector-count chunks))
            false
            (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
-                 prelude (:chunk/prelude c)]
+                 prelude (get c :chunk/prelude)]
              (if (option-some?-of [:option :string] prelude)
                (let [at (at-rule-name (option-value-of [:option :string] prelude ""))
-                     body (option-value-of [:option :string] (:chunk/body c) "")]
+                     body (option-value-of [:option :string] (get c :chunk/body) "")]
                  (cond
                    (and (option-some?-of [:option :string] at)
                         (contains? conditional-group-at-rules (option-value-of [:option :string] at "")))
@@ -5077,7 +5077,7 @@
 
                  at false
 
-                 :else (boolean (some (fn [x] (:chunk/prelude x)) (css-chunks body)))))))
+                 :else (boolean (some (fn [x] (get x :chunk/prelude)) (css-chunks body)))))))
          (css-chunks text))))))
 
 (defn- desugar-nesting
@@ -5414,9 +5414,9 @@
    `<syntax>`, applying its `+`/`#` multiplier by slicing the value into
    repetitions first. Every repetition has to hold; one `:no` is `:no`."
   [alternative value]
-  (let [name (:syntax/name alternative)
-        literal (:syntax/literal alternative)
-        multiplier (:syntax/multiplier alternative)
+  (let [name (get alternative :syntax/name)
+        literal (get alternative :syntax/literal)
+        multiplier (get alternative :syntax/multiplier)
         items (case multiplier
                 :plus (split-value-components value " ")
                 :hash (split-value-components value ",")
@@ -5506,8 +5506,8 @@
              (if (>= i nalts)
                false
                (let [alternative (typed-list-nth [:list [:ref :cssom/syntax]] alts i)
-                     name (:syntax/name alternative)
-                     multiplier (:syntax/multiplier alternative)
+                     name (get alternative :syntax/name)
+                     multiplier (get alternative :syntax/multiplier)
                      support (syntax-alternative-support alternative initial)
                      relative? (and (option-some?-of [:option :string] name)
                                     (or (= (option-value-of [:option :string] name "") "length")
@@ -5577,12 +5577,12 @@
              (if (>= i nchunks)
                out
                (let [c (typed-list-nth [:list [:ref :cssom/chunk]] chunks i)
-                     prelude (:chunk/prelude c)]
+                     prelude (get c :chunk/prelude)]
                  (if (and (option-some?-of [:option :string] prelude)
                           (= "property" (option-value-of [:option :string] (at-rule-name (option-value-of [:option :string] prelude "")) "")))
                    (let [p (str/trim (option-value-of [:option :string] prelude ""))
                          name (str/trim (s-sub p 8 (s-len p)))
-                         decls (parse-at-property-body (option-value-of [:option :string] (:chunk/body c) ""))
+                         decls (parse-at-property-body (option-value-of [:option :string] (get c :chunk/body) ""))
                          syntax (typed-map-get [:map :string :string] decls "syntax")
                          inherits (typed-map-get [:map :string :string] decls "inherits")
                          initial (typed-map-get [:map :string :string] decls "initial-value")
@@ -5632,7 +5632,7 @@
    which emits it as one selector-less pseudo-rule so no caller has to pass
    a second value alongside the rules it already passes)."
   [rules]
-  (reduce merge {} (keep (fn [x] (:rule/property-registry x)) rules)))
+  (reduce merge {} (keep (fn [x] (get x :rule/property-registry)) rules)))
 
 (defn- registered-initial-env
   "The custom-property environment a document STARTS from: every registered
@@ -5647,7 +5647,7 @@
          out
          (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:ref :cssom/registration]] registry) i)
                reg (typed-list-nth [:list [:ref :cssom/registration]] (typed-map-vals [:map :keyword [:ref :cssom/registration]] registry) i)
-               initial (:registration/initial reg)]
+               initial (get reg :registration/initial)]
            (recur (inc i)
              (if (option-some?-of [:option :string] initial)
                (typed-map-assoc [:map :keyword :string] out k (option-value-of [:option :string] initial ""))
@@ -5655,7 +5655,7 @@
      :default
   (into {}
         (keep (fn [[k reg]]
-                (when-let [initial (:registration/initial reg)]
+                (when-let [initial (get reg :registration/initial)]
                   [k initial])))
         registry)))
 
@@ -6025,8 +6025,8 @@
         registry (parse-property-registrations css)]
     (->> segments
          (mapcat (fn [{:segment/keys [text ctx]}]
-                   (let [layer-path (:layer ctx)
-                         scope (:scope ctx)]
+                   (let [layer-path (get ctx :layer)
+                         scope (get ctx :scope)]
                      (map #(assoc %
                                   ;; The `:scope ` prefix is applied HERE,
                                   ;; once per rule at parse time, so
@@ -6035,10 +6035,10 @@
                                   :rule/selectors (cond-> (:rule/selectors %)
                                                     scope (->> (mapv scope-selector)))
                                   :rule/scope scope
-                                  :rule/media (one-or-many (:media ctx))
-                                  :rule/supports (one-or-many (:supports ctx))
-                                  :rule/container (:container ctx)
-                                  :rule/container-name (:container-name ctx)
+                                  :rule/media (one-or-many (get ctx :media))
+                                  :rule/supports (one-or-many (get ctx :supports))
+                                  :rule/container (get ctx :container)
+                                  :rule/container-name (get ctx :container-name)
                                   :rule/layer (when layer-path (str/join "." layer-path))
                                   :rule/layer-priority (if layer-path
                                                          (get priority-of layer-path unlayered-priority)
@@ -6601,7 +6601,7 @@
 
 (defn- rule-applies-to-viewport?
   [rule viewport-width color-scheme]
-  (let [media (:rule/media rule)]
+  (let [media (get rule :rule/media)]
     (or (nil? media) (media-condition-matches? media viewport-width color-scheme))))
 
 (def ^:private container-feature-pattern
@@ -6750,27 +6750,27 @@
 
 (defn- hidden-input-control?
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (and (= :input (:tag node))
+  (and (= :input (get node :tag))
        (= "hidden" (input-type node))))
 
 (defn- file-input-control?
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (and (= :input (:tag node))
+  (and (= :input (get node :tag))
        (= "file" (input-type node))))
 
 (defn- editable-form-control?
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (and (contains? editable-form-control-tags (:tag node))
+  (and (contains? editable-form-control-tags (get node :tag))
        (not (hidden-input-control? node))
        (not (file-input-control? node))))
 
 (defn- form-control?
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (contains? form-control-tags (:tag node)))
+  (contains? form-control-tags (get node :tag)))
 
 (defn- disabled-capable-control?
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (contains? disabled-capable-tags (:tag node)))
+  (contains? disabled-capable-tags (get node :tag)))
 
 (defn- descendant-node-ids
   ([#?@(:kotoba [document :document node-id :string] :default [document node-id])]
@@ -6803,13 +6803,13 @@
 (defn- parent-node-id
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] child-id] :default [document child-id])]
   #?(:kotoba
-     (let [nodes (:nodes document)]
+     (let [nodes (get document :nodes)]
        (loop [i 0]
          (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes))
            (option-none-of [:option :string])
            (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i)
                  node (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i)
-                 children (:children node)]
+                 children (get node :children)]
              (if (loop [j 0 nchildren (vector-count children)]
                    (if (>= j nchildren)
                      false
@@ -6818,15 +6818,15 @@
                (recur (inc i)))))))
      :default
      (some (fn [[node-id node]]
-             (when (some #{child-id} (:children node))
+             (when (some #{child-id} (get node :children))
                node-id))
-           (:nodes document))))
+           (get document :nodes))))
 
 (defn- dom-node-at
   "Typed-route get-in (document [:nodes id]) with an empty-node fallback."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] id :string] :default [document id :string])]
   (option-value-of [:option [:ref :cssom/dom-node]]
-    (typed-map-get [:map :string [:ref :cssom/dom-node]] (:nodes document) id)
+    (typed-map-get [:map :string [:ref :cssom/dom-node]] (get document :nodes) id)
     (record-new [:record :cssom/dom-node [[:node/id :string] [:node/type :keyword] [:tag [:option :keyword]] [:attrs [:map :keyword :string]] [:children [:list :string]]]] "" :none (option-none-of [:option :keyword]) (typed-map-new [:map :keyword :string]) (typed-list-new [:list :string]))))
 
 (defn- descendant-or-self?
@@ -6866,23 +6866,23 @@
 
 (defn- disabled-by-fieldset?
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (loop [parent-id (parent-node-id document (:node/id node))]
+  (loop [parent-id (parent-node-id document (get node :node/id))]
     (when parent-id
       (let [parent (get-in document [:nodes parent-id])]
-        (if (and (= :fieldset (:tag parent))
+        (if (and (= :fieldset (get parent :tag))
                  (truthy-attr? (get-in parent [:attrs :disabled]))
                  (not (when-let [legend-id (first-legend-child-id document parent-id)]
-                        (descendant-or-self? document legend-id (:node/id node)))))
+                        (descendant-or-self? document legend-id (get node :node/id)))))
           true
           (recur (parent-node-id document parent-id)))))))
 
 (defn- disabled-by-optgroup?
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (when (= :option (:tag node))
-    (loop [parent-id (parent-node-id document (:node/id node))]
+  (when (= :option (get node :tag))
+    (loop [parent-id (parent-node-id document (get node :node/id))]
       (when parent-id
         (let [parent (get-in document [:nodes parent-id])]
-          (if (= :optgroup (:tag parent))
+          (if (= :optgroup (get parent :tag))
             (truthy-attr? (get-in parent [:attrs :disabled]))
             (recur (parent-node-id document parent-id))))))))
 
@@ -6896,16 +6896,16 @@
 (defn- text-content
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   (let [node (get-in document [:nodes node-id])]
-    (case (:node/type node)
-      :text (:text node)
-      :element (str/join "" (map #(text-content document %) (:children node)))
+    (case (get node :node/type)
+      :text (get node :text)
+      :element (str/join "" (map #(text-content document %) (get node :children)))
       "")))
 
 (defn- option-control-value
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] option-id] :default [document option-id])]
   (let [attrs (get-in document [:nodes option-id :attrs])]
     (str (if (contains? attrs :value)
-           (:value attrs)
+           (get attrs :value)
            (text-content document option-id)))))
 
 (defn- selected-option-id
@@ -6922,19 +6922,19 @@
 
 (defn- select-value
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (when-let [option-id (and document (selected-option-id document (:node/id node)))]
+  (when-let [option-id (and document (selected-option-id document (get node :node/id)))]
     (option-control-value document option-id)))
 
 (defn- node-by-dom-id
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] dom-id] :default [document dom-id])]
   #?(:kotoba
-     (let [nodes (:nodes document)]
+     (let [nodes (get document :nodes)]
        (loop [i 0]
          (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes))
            (option-none-of [:option :string])
            (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i)
                  candidate (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i)
-                 id-attr (typed-map-get [:map :keyword :string] (:attrs candidate) :id)]
+                 id-attr (typed-map-get [:map :keyword :string] (get candidate :attrs) :id)]
              (if (and (option-some?-of [:option :string] id-attr)
                       (= dom-id (option-value-of [:option :string] id-attr "")))
                (option-some-of [:option :string] node-id)
@@ -6943,7 +6943,7 @@
   (some (fn [[node-id candidate]]
           (when (= dom-id (get-in candidate [:attrs :id]))
             node-id))
-        (:nodes document))))
+        (get document :nodes))))
 
 (defn- ancestor-form-id
   "The owning <form>'s node-id for node-id: an explicit `form=\"...\"`
@@ -6991,19 +6991,19 @@
    right via ancestor-form-id; this mirrors that fix."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   #?(:kotoba
-     (let [node-id (:node/id node)
-            group-name (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) :name) "")
+     (let [node-id (get node :node/id)
+            group-name (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (get node :attrs) :name) "")
             named? (not (str/blank? group-name))
             group-form-id (ancestor-form-id document node-id)
-            nodes (:nodes document)]
+            nodes (get document :nodes)]
        (loop [i 0 out (typed-list-new [:list :string])]
          (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes))
            out
            (let [id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i)
                  candidate (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i)
-                 cand-type (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs candidate) :type) "")
-                 cand-name (typed-map-get [:map :keyword :string] (:attrs candidate) :name)
-                 cand-tag (:tag candidate)]
+                 cand-type (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (get candidate :attrs) :type) "")
+                 cand-name (typed-map-get [:map :keyword :string] (get candidate :attrs) :name)
+                 cand-tag (get candidate :tag)]
              (recur (inc i)
                (if (and (option-some?-of [:option :keyword] cand-tag)
                         (= (option-value-of [:option :keyword] cand-tag :none) :input)
@@ -7016,13 +7016,13 @@
                  (typed-list-conj [:list :string] out id)
                  out))))))
      :default
-  (let [node-id (:node/id node)
+  (let [node-id (get node :node/id)
         group-name (get-in node [:attrs :name])
         named? (not (str/blank? (str group-name)))
         group-form-id (ancestor-form-id document node-id)]
-    (->> (:nodes document)
+    (->> (get document :nodes)
          (keep (fn [[id candidate]]
-                 (when (and (= :input (:tag candidate))
+                 (when (and (= :input (get candidate :tag))
                             (= "radio" (str/ascii-lower (str (or (get-in candidate [:attrs :type]) "text"))))
                             (if named?
                               (and (= group-name (get-in candidate [:attrs :name]))
@@ -7066,13 +7066,13 @@
    `:children` are node-IDS, not inline maps, which is the same reason
    `option-control-value` next door takes one."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (let [raw (if document (text-content document (:node/id node)) "")]
+  (let [raw (if document (text-content document (get node :node/id)) "")]
     (if (str/starts-with? raw "\n") (string-substring raw 1 (string-byte-length raw)) raw)))
 
 (defn- control-value
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (str (or (get-in node [:attrs :text/value])
-           (case (:tag node)
+           (case (get node :tag)
              :select (select-value document node)
              :textarea (textarea-default-value document node)
              (get-in node [:attrs :value]))
@@ -7108,8 +7108,8 @@
   (and (contains? #?(:kotoba (typed-map-new [:map :string :bool] "number" true "range" true) :default #{"number" "range"}) type)
        (not (str/blank? value))
        (when-let [n (parse-number value)]
-         (let [min (parse-number (:min attrs))
-               max (parse-number (:max attrs))]
+         (let [min (parse-number (get attrs :min))
+               max (parse-number (get attrs :max))]
            (or (and min (< n min))
                (and max (> n max)))))))
 
@@ -7151,11 +7151,11 @@
   (and (contains? #?(:kotoba (typed-map-new [:map :string :bool] "number" true "range" true) :default #{"number" "range"}) type)
        (not (str/blank? value))
        (when-let [n (parse-number value)]
-         (let [raw-step (:step attrs)]
+         (let [raw-step (get attrs :step)]
            (when-not (and raw-step (= "any" (str/ascii-lower (str raw-step))))
              (let [step (let [parsed (parse-number raw-step)]
                           (if (and parsed (pos? parsed)) parsed 1.0))
-                   base (or (parse-number (:min attrs)) 0.0)
+                   base (or (parse-number (get attrs :min)) 0.0)
                    steps (/ (- n base) step)
                    ;; portable across CLJ/CLJS (no Math/round -- `mod`'s
                    ;; own floored-division semantics already put the
@@ -7170,7 +7170,7 @@
   "Real HTML5 pattern-mismatch: a non-blank value on a text/search/url/
    tel/email/password `<input>` (real HTML5's own restriction on which
    control types `pattern` even applies to -- the caller's own
-   `(= :input (:tag node))` guard, the same shape `range-invalid?` above
+   `(= :input (get node :tag))` guard, the same shape `range-invalid?` above
    already relies on, excludes `<textarea>` even though an untyped
    `<textarea>` also resolves this file's own `type` default to
    `\"text\"`) that doesn't fully match its own `pattern` attribute,
@@ -7184,7 +7184,7 @@
   [#?@(:kotoba [type value :string attrs [:map :keyword :string]] :default [type value attrs])]
   (and (contains? #?(:kotoba (typed-map-new [:map :string :bool] "text" true "search" true "url" true "tel" true "email" true "password" true) :default #{"text" "search" "url" "tel" "email" "password"}) type)
        (not (str/blank? value))
-       (when-let [pattern (:pattern attrs)]
+       (when-let [pattern (get attrs :pattern)]
          #?(:kotoba
             (let [answer (bounded-regex/regex-match (str pattern) (str value))]
               (and (result-ok?-of [:result :i64 :string] answer)
@@ -7309,25 +7309,25 @@
    validation-reason and quickjs_wasm.cljc's JS-facing
    __kotobaValidationReason."
   [#?@(:kotoba [node [:ref :cssom/dom-node] type] :default [node type])]
-  (or (= :textarea (:tag node))
-      (and (= :input (:tag node))
+  (or (= :textarea (get node :tag))
+      (and (= :input (get node :tag))
            (contains? #?(:kotoba (typed-map-new [:map :string :bool] "text" true "search" true "url" true "tel" true "email" true "password" true) :default #{"text" "search" "url" "tel" "email" "password"}) type))))
 
 (defn- constraint-invalid?
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (let [attrs (:attrs node)
-        type (str/ascii-lower (str (or (:type attrs) "text")))
+  (let [attrs (get node :attrs)
+        type (str/ascii-lower (str (or (get attrs :type) "text")))
         value (control-value document node)
         length (string-byte-length value)
-        minlength (parse-int (:minlength attrs))
-        maxlength (parse-int (:maxlength attrs))
+        minlength (parse-int (get attrs :minlength))
+        maxlength (parse-int (get attrs :maxlength))
         length-constrained? (length-constrained-control? node type)]
     (and (not (constraint-validation-barred-control? node))
-         (or (truthy-attr? (:invalid attrs))
-             (and (truthy-attr? (:required attrs))
+         (or (truthy-attr? (get attrs :invalid))
+             (and (truthy-attr? (get attrs :required))
                   (cond
-                    (and (= :input (:tag node)) (= "checkbox" type)) (not (truthy-attr? (:checked attrs)))
-                    (and (= :input (:tag node)) (= "radio" type)) (not (radio-required-satisfied? document node))
+                    (and (= :input (get node :tag)) (= "checkbox" type)) (not (truthy-attr? (get attrs :checked)))
+                    (and (= :input (get node :tag)) (= "radio" type)) (not (radio-required-satisfied? document node))
                     :else (str/blank? value)))
              (and minlength
                   length-constrained?
@@ -7336,13 +7336,13 @@
              (and maxlength
                   length-constrained?
                   (> length maxlength))
-             (and (= :input (:tag node))
+             (and (= :input (get node :tag))
                   (range-invalid? type value attrs))
-             (and (= :input (:tag node))
+             (and (= :input (get node :tag))
                   (pattern-invalid? type value attrs))
-             (and (= :input (:tag node))
+             (and (= :input (get node :tag))
                   (type-mismatch? type value))
-             (and (= :input (:tag node))
+             (and (= :input (get node :tag))
                   (step-invalid? type value attrs))))))
 
 (defn- constraint-valid?
@@ -7363,14 +7363,14 @@
    pseudo-class, not `:in-range` by default."
   [#?@(:kotoba [type attrs [:map :keyword :string]] :default [type attrs])]
   (and (contains? #?(:kotoba (typed-map-new [:map :string :bool] "number" true "range" true) :default #{"number" "range"}) type)
-       (boolean (or (parse-number (:min attrs)) (parse-number (:max attrs))))))
+       (boolean (or (parse-number (get attrs :min)) (parse-number (get attrs :max))))))
 
 (defn- in-range?
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (let [attrs (:attrs node)
-        type (str/ascii-lower (str (or (:type attrs) "text")))
+  (let [attrs (get node :attrs)
+        type (str/ascii-lower (str (or (get attrs :type) "text")))
         value (control-value document node)]
-    (and (= :input (:tag node))
+    (and (= :input (get node :tag))
          (form-control? node)
          (not (disabled-control? document node))
          (not (constraint-validation-barred-control? node))
@@ -7379,10 +7379,10 @@
 
 (defn- out-of-range?
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (let [attrs (:attrs node)
-        type (str/ascii-lower (str (or (:type attrs) "text")))
+  (let [attrs (get node :attrs)
+        type (str/ascii-lower (str (or (get attrs :type) "text")))
         value (control-value document node)]
-    (and (= :input (:tag node))
+    (and (= :input (get node :tag))
          (form-control? node)
          (not (disabled-control? document node))
          (not (constraint-validation-barred-control? node))
@@ -7420,10 +7420,10 @@
    or root node) -- real CSS never matches any structural pseudo-class on
    an element with no parent."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] same-tag?] :default [document node same-tag?])]
-  (when-let [parent-id (parent-node-id document (:node/id node))]
+  (when-let [parent-id (parent-node-id document (get node :node/id))]
     (let [siblings (element-children document parent-id)]
       (if same-tag?
-        (filter #(= (:tag node) (get-in document [:nodes % :tag])) siblings)
+        (filter #(= (get node :tag) (get-in document [:nodes % :tag])) siblings)
         siblings))))
 
 (defn- sibling-position
@@ -7639,7 +7639,7 @@
    conservative defaults their own docstrings describe."
   [document node same-tag? from-end? arg match-fn]
   #?(:kotoba
-     (let [an-b-text (if same-tag? arg (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 0)) of-text (if same-tag? (option-none-of [:option :string]) (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 1)) of-selectors (if (option-some?-of [:option :string] of-text) (let [arms (split-selector-list (option-value-of [:option :string] of-text ""))] (loop [i 0 out (typed-list-new [:list [:ref :cssom/compound]])] (if (>= i (vector-count arms)) (option-some-of [:option [:list [:ref :cssom/compound]]] out) (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (parse-simple-selector (typed-list-nth [:list :string] arms i))))))) (option-none-of [:option [:list [:ref :cssom/compound]]])) an-b (parse-nth-expression an-b-text) raw-siblings (structural-siblings document node same-tag?) siblings (if (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors) (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [i 0 out (typed-list-new [:list :string]) nrs (vector-count raw-siblings)] (if (>= i nrs) out (let [cid (typed-list-nth [:list :string] raw-siblings i)] (recur (inc i) (if (loop [k 0] (if (>= k (vector-count sels)) false (if (matches-simple? document (dom-node-at document cid) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k))))) (typed-list-conj [:list :string] out cid) out) nrs))))) (structural-siblings document node same-tag?)) position (sibling-position siblings (:node/id node)) node-matches-of (if (not (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors)) true (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [k 0] (if (>= k (vector-count sels)) false (if (matches-simple? document (dom-node-at document node) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k)))))))] (and (option-some?-of [:option :i64] position) node-matches-of (nth-matches? (if from-end? (- (+ (vector-count siblings) 1) (option-value-of [:option :i64] position 0)) (option-value-of [:option :i64] position 0)) an-b)))
+     (let [an-b-text (if same-tag? arg (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 0)) of-text (if same-tag? (option-none-of [:option :string]) (hetero-vector-at [:vector [:string [:option :string]]] (nth-of-clause arg) 1)) of-selectors (if (option-some?-of [:option :string] of-text) (let [arms (split-selector-list (option-value-of [:option :string] of-text ""))] (loop [i 0 out (typed-list-new [:list [:ref :cssom/compound]])] (if (>= i (vector-count arms)) (option-some-of [:option [:list [:ref :cssom/compound]]] out) (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (parse-simple-selector (typed-list-nth [:list :string] arms i))))))) (option-none-of [:option [:list [:ref :cssom/compound]]])) an-b (parse-nth-expression an-b-text) raw-siblings (structural-siblings document node same-tag?) siblings (if (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors) (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [i 0 out (typed-list-new [:list :string]) nrs (vector-count raw-siblings)] (if (>= i nrs) out (let [cid (typed-list-nth [:list :string] raw-siblings i)] (recur (inc i) (if (loop [k 0] (if (>= k (vector-count sels)) false (if (matches-simple? document (dom-node-at document cid) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k))))) (typed-list-conj [:list :string] out cid) out) nrs))))) (structural-siblings document node same-tag?)) position (sibling-position siblings (get node :node/id)) node-matches-of (if (not (option-some?-of [:option [:list [:ref :cssom/compound]]] of-selectors)) true (let [sels (option-value-of [:option [:list [:ref :cssom/compound]]] of-selectors (typed-list-new [:list [:ref :cssom/compound]]))] (loop [k 0] (if (>= k (vector-count sels)) false (if (matches-simple? document (dom-node-at document node) (typed-list-nth [:list [:ref :cssom/compound]] sels k)) true (recur (inc k)))))))] (and (option-some?-of [:option :i64] position) node-matches-of (nth-matches? (if from-end? (- (+ (vector-count siblings) 1) (option-value-of [:option :i64] position 0)) (option-value-of [:option :i64] position 0)) an-b)))
      :default
   (boolean
    (let [[an-b-text of-text] (if same-tag? [arg nil] (nth-of-clause arg))
@@ -7649,7 +7649,7 @@
              siblings (cond->> (structural-siblings document node same-tag?)
                         of-selectors
                         (filter #(matches-of? (get-in document [:nodes %]))))
-             position (sibling-position siblings (:node/id node))]
+             position (sibling-position siblings (get node :node/id))]
          (and position
               (or (nil? of-selectors) (matches-of? node))
               (nth-matches? (if from-end?
@@ -7680,9 +7680,9 @@
    case."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] child-id] :default [document child-id])]
   (let [child (get-in document [:nodes child-id])]
-    (case (:node/type child)
+    (case (get child :node/type)
       :element true
-      :text (pos? (count (str (:text child))))
+      :text (pos? (count (str (get child :text))))
       true)))
 
 (defn- empty-pseudo-matches?
@@ -7697,7 +7697,7 @@
    directly -- no parent/sibling traversal needed, unlike the structural
    pseudo-classes."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (not-any? #(child-counts-as-content? document %) (:children node)))
+  (not-any? #(child-counts-as-content? document %) (get node :children)))
 
 ;; ---- :lang() pseudo-class ----
 
@@ -7734,7 +7734,7 @@
     (loop [current node]
       (when current
         (or (own-lang-attr current)
-            (recur (get-in document [:nodes (parent-node-id document (:node/id current))])))))))
+            (recur (get-in document [:nodes (parent-node-id document (get current :node/id))])))))))
 
 (defn- lang-tag-subtags
   [tag]
@@ -7889,7 +7889,7 @@
     (if-let [v (get-in current [:attrs :contenteditable])]
       (contenteditable-truthy? v)
       (when document
-        (when-let [parent (get-in document [:nodes (parent-node-id document (:node/id current))])]
+        (when-let [parent (get-in document [:nodes (parent-node-id document (get current :node/id))])]
           (recur parent))))))
 
 (defn- user-alterable?
@@ -7912,9 +7912,9 @@
    `15-nonelement-and-oddballs` are `:read-only` and none is
    `:read-write`. `:read-only` is not a form-control pseudo-class."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (if (or (and (= :input (:tag node))
+  (if (or (and (= :input (get node :tag))
                (contains? text-entry-input-types (input-type node)))
-          (= :textarea (:tag node)))
+          (= :textarea (get node :tag)))
     (and (not (truthy-attr? (get-in node [:attrs :readonly])))
          (not (disabled-control? document node)))
     (boolean (in-contenteditable-subtree? document node))))
@@ -7954,7 +7954,7 @@
    two -- and `<fieldset>`, `<output>`, `<object>` and `<p>` match
    neither, measured in probe `22-required-optional-other-tags`."
   [node]
-  (case (:tag node)
+  (case (get node :tag)
     :input (required-capable-input-type? (input-type node))
     (:select :textarea) true
     false))
@@ -7980,7 +7980,7 @@
    file does not compute; Brave reports the first option of
    `<select><option>a</option><option>b</option></select>` as `:checked`."
   [node]
-  (case (:tag node)
+  (case (get node :tag)
     :input (and (contains? #?(:kotoba (typed-map-new [:map :string :bool] "checkbox" true "radio" true) :default #{"checkbox" "radio"}) (input-type node))
                 (truthy-attr? (get-in node [:attrs :checked])))
     :option (truthy-attr? (get-in node [:attrs :selected]))
@@ -8029,7 +8029,7 @@
    `disabled` does NOT bar it: measured on `<input type=radio name=x disabled>`
    beside an enabled sibling, both are indeterminate."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (case (:tag node)
+  (case (get node :tag)
     :progress (nil? (get-in node [:attrs :value]))
     :input (and (= "radio" (input-type node))
                 (some? document)
@@ -8076,7 +8076,7 @@
    `disabled` nor `readonly` touches it."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (and (some? (get-in node [:attrs :placeholder]))
-       (case (:tag node)
+       (case (get node :tag)
          :textarea true
          :input (contains? placeholder-input-types (input-type node))
          false)
@@ -8091,7 +8091,7 @@
    `<button type=button>`, `<input type=reset>` and `<input type=button>`
    do not."
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (case (:tag node)
+  (case (get node :tag)
     :button (let [type (let [t (get-in node [:attrs :type])] (when t (str/ascii-lower (str t))))]
                (or (= "submit" type) (nil? type)))
     :input (contains? #?(:kotoba (typed-map-new [:map :string :bool] "submit" true "image" true) :default #{"submit" "image"}) (input-type node))
@@ -8117,16 +8117,16 @@
    two forms cannot steal each other's default button."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
   (boolean
-   (when-let [form-id (and document (ancestor-form-id document (:node/id node)))]
+   (when-let [form-id (and document (ancestor-form-id document (get node :node/id)))]
      ;; Walked from the DOCUMENT root rather than from the form, because
      ;; `form=` ownership reaches outside the form's own subtree -- a
      ;; `<button form=f1>` beside `<form id=f1>` is its default button, and
      ;; a subtree walk cannot see it. `descendant-node-ids` yields document
      ;; order either way, which is the order the answer is defined in.
-     (let [scan (if-let [root (:root document)]
+     (let [scan (if-let [root (get document :root)]
                   (cons root (descendant-node-ids document root))
                   (descendant-node-ids document form-id))]
-       (= (:node/id node)
+       (= (get node :node/id)
           (first (filter (fn [id]
                            (let [candidate (get-in document [:nodes id])]
                              (and (submit-button? candidate)
@@ -8157,7 +8157,7 @@
    the same distinction `checked-control?` draws for `:checked`, and the
    reason the two pseudo-classes are not synonyms once script has run."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
-  (case (:tag node)
+  (case (get node :tag)
     :option (truthy-attr? (get-in node [:attrs :selected]))
     :input (let [t (input-type node)]
              (if (contains? #?(:kotoba (typed-map-new [:map :string :bool] "checkbox" true "radio" true) :default #{"checkbox" "radio"}) t)
@@ -8178,7 +8178,7 @@
    is visited in a fresh headless profile), which is exactly why there is
    no corpus case for it -- it would pass for the wrong reason."
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
-  (and (contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :a true :area true) :default #{:a :area}) (:tag node))
+  (and (contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :a true :area true) :default #{:a :area}) (get node :tag))
        (some? (get-in node [:attrs :href]))))
 
 (defn- lang-pseudo-matches?
@@ -8304,24 +8304,24 @@
     :valid (constraint-valid? document node)
     :in-range (in-range? document node)
     :out-of-range (out-of-range? document node)
-    :focus (and document (= (:node/id node) (:focus document)))
-    :focus-within (and document (:focus document)
-                        (descendant-or-self? document (:node/id node) (:focus document)))
-    :first-child (= 1 (sibling-position (structural-siblings document node false) (:node/id node)))
+    :focus (and document (= (get node :node/id) (get document :focus)))
+    :focus-within (and document (get document :focus)
+                        (descendant-or-self? document (get node :node/id) (get document :focus)))
+    :first-child (= 1 (sibling-position (structural-siblings document node false) (get node :node/id)))
     :last-child (let [siblings (structural-siblings document node false)]
                   (and (seq siblings)
-                       (= (count siblings) (sibling-position siblings (:node/id node)))))
+                       (= (count siblings) (sibling-position siblings (get node :node/id)))))
     :only-child (= 1 (count (structural-siblings document node false)))
     :only-of-type (= 1 (count (structural-siblings document node true)))
-    :first-of-type (= 1 (sibling-position (structural-siblings document node true) (:node/id node)))
+    :first-of-type (= 1 (sibling-position (structural-siblings document node true) (get node :node/id)))
     :last-of-type (let [siblings (structural-siblings document node true)]
                     (and (seq siblings)
-                         (= (count siblings) (sibling-position siblings (:node/id node)))))
+                         (= (count siblings) (sibling-position siblings (get node :node/id)))))
     :nth-child (nth-pseudo-matches? document node false false arg match-fn)
     :nth-of-type (nth-pseudo-matches? document node true false arg match-fn)
     :nth-last-child (nth-pseudo-matches? document node false true arg match-fn)
     :nth-last-of-type (nth-pseudo-matches? document node true true arg match-fn)
-    :root (and document (= (:node/id node) (:root document)))
+    :root (and document (= (get node :node/id) (get document :root)))
 
     ;; `:scope` -- the scope roots currently in play, or the document root
     ;; when there are none. Both halves measured in Brave 151 on
@@ -8338,8 +8338,8 @@
     ;; change than the feature. `scope-proximity` is the only binder, it
     ;; binds one root at a time, and matching is synchronous.
     :scope (if *scope-roots*
-             (contains? *scope-roots* (:node/id node))
-             (and document (= (:node/id node) (:root document))))
+             (contains? *scope-roots* (get node :node/id))
+             (and document (= (get node :node/id) (get document :root))))
     :empty (empty-pseudo-matches? document node)
     :lang (lang-pseudo-matches? document node arg)
     false))
@@ -8387,7 +8387,7 @@
   (boolean
    (some (fn [descendant-id]
            (matches-simple? document (get-in document [:nodes descendant-id]) compound))
-         (descendant-node-ids document (:node/id node))))))
+         (descendant-node-ids document (get node :node/id))))))
 
 (defn- has-arg-child-match?
   "Whether ANY of `node`'s DIRECT CHILDREN ONLY (one level, never a deeper
@@ -8399,18 +8399,18 @@
    (populated by `kotoba.wasm.dom/append-child`) already gives exactly the
    immediate-child node-ids, of every node type -- `matches-simple?` itself
    filters out anything that isn't `:element` (see its own `(= :element
-   (:node/type node))` first clause), so a text-node child here is simply
+   (get node :node/type))` first clause), so a text-node child here is simply
    never going to match any compound selector, no separate filtering needed
    in this function. Short-circuits (`some`) the same way as
    `has-arg-descendant-match?`."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] compound match-fn] :default [document node compound match-fn])]
   #?(:kotoba
-     (let [kids (:children node) nkids (vector-count kids)] (loop [i 0] (if (>= i nkids) false (if (matches-simple? document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
+     (let [kids (get node :children) nkids (vector-count kids)] (loop [i 0] (if (>= i nkids) false (if (matches-simple? document (dom-node-at document (typed-list-nth [:list :string] kids i)) compound) true (recur (inc i))))))
      :default
   (boolean
    (some (fn [child-id]
            (matches-simple? document (get-in document [:nodes child-id]) compound))
-         (:children node)))))
+         (get node :children)))))
 
 (defn- has-arg-sibling-match?
   "Whether any of `node`'s FOLLOWING siblings matches compound selector
@@ -8435,12 +8435,12 @@
    answer in this namespace."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] compound adjacent-only? match-fn] :default [document node compound adjacent-only? match-fn])]
   #?(:kotoba
-     (let [siblings0 (structural-siblings document node false)] (if (not (option-some?-of [:option [:list :string]] siblings0)) false (let [siblings (option-value-of [:option [:list :string]] siblings0 (typed-list-new [:list :string])) position (sibling-position siblings (:node/id node))] (if (not (option-some?-of [:option :i64] position)) false (let [start (option-value-of [:option :i64] position 0) n (vector-count siblings) limit (if adjacent-only? (min n (inc start)) n)] (loop [i start] (if (>= i limit) false (if (matches-simple? document (dom-node-at document (typed-list-nth [:list :string] siblings i)) compound) true (recur (inc i))))))))))
+     (let [siblings0 (structural-siblings document node false)] (if (not (option-some?-of [:option [:list :string]] siblings0)) false (let [siblings (option-value-of [:option [:list :string]] siblings0 (typed-list-new [:list :string])) position (sibling-position siblings (get node :node/id))] (if (not (option-some?-of [:option :i64] position)) false (let [start (option-value-of [:option :i64] position 0) n (vector-count siblings) limit (if adjacent-only? (min n (inc start)) n)] (loop [i start] (if (>= i limit) false (if (matches-simple? document (dom-node-at document (typed-list-nth [:list :string] siblings i)) compound) true (recur (inc i))))))))))
      :default
   (boolean
    (when-let [siblings (structural-siblings document node false)]
      (let [siblings (vec siblings)
-           position (sibling-position siblings (:node/id node))
+           position (sibling-position siblings (get node :node/id))
            following (when position (subvec siblings position))
            candidates (if adjacent-only? (take 1 following) following)]
        (some (fn [sibling-id]
@@ -8469,7 +8469,7 @@
    form below passes `document` nil, so :has() never matches there either)."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] group match-fn] :default [document node group match-fn])]
   #?(:kotoba
-     (when document (loop [i 0 ngrp (vector-count group)] (if (>= i ngrp) false (let [item (typed-list-nth [:list [:ref :cssom/has-item]] group i) selector (:has/selector item) combinator (:has/combinator item) direct? (:has/direct-child? item) kind (if (option-some?-of [:option :keyword] combinator) (option-value-of [:option :keyword] combinator :none) (if direct? :child :descendant))] (if (cond (= kind :child) (has-arg-child-match? document node selector match-fn) (= kind :next-sibling) (has-arg-sibling-match? document node selector true match-fn) (= kind :following-sibling) (has-arg-sibling-match? document node selector false match-fn) :else (has-arg-descendant-match? document node selector match-fn)) true (recur (inc i) ngrp))))))
+     (when document (loop [i 0 ngrp (vector-count group)] (if (>= i ngrp) false (let [item (typed-list-nth [:list [:ref :cssom/has-item]] group i) selector (get item :has/selector) combinator (get item :has/combinator) direct? (:has/direct-child? item) kind (if (option-some?-of [:option :keyword] combinator) (option-value-of [:option :keyword] combinator :none) (if direct? :child :descendant))] (if (cond (= kind :child) (has-arg-child-match? document node selector match-fn) (= kind :next-sibling) (has-arg-sibling-match? document node selector true match-fn) (= kind :following-sibling) (has-arg-sibling-match? document node selector false match-fn) :else (has-arg-descendant-match? document node selector match-fn)) true (recur (inc i) ngrp))))))
      :default
   (boolean
    (when document
@@ -8488,9 +8488,9 @@
      (reduce (fn [parents child-id]
                (assoc parents child-id parent-id))
              parents
-             (:children node)))
+             (get node :children)))
    {}
-   (:nodes document)))
+   (get document :nodes)))
 
 (defn- sibling-index
   [children node-id]
@@ -8511,7 +8511,7 @@
 (defn- parts-match-at
   "Typed-route combinator walk step for parts-match?."
   [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] parents [:map :string :string] node-id :string parts [:list [:ref :cssom/compound]] idx :i64 match-fn] :bool
-  (let [simple (typed-list-nth [:list [:ref :cssom/compound]] parts idx) node (dom-node-at document node-id)] (and (matches-simple? document node simple) (if (= idx 0) true (let [kind (option-value-of [:option :keyword] (:selector/combinator simple) :none)] (cond (= kind :child) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (parts-match-at document parents (option-value-of [:option :string] parent "") parts (dec idx) match-fn) false)) (= kind :descendant) (loop [ancestor (typed-map-get [:map :string :string] parents node-id)] (if (not (option-some?-of [:option :string] ancestor)) false (if (parts-match-at document parents (option-value-of [:option :string] ancestor "") parts (dec idx) match-fn) true (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] ancestor "")))))) (= kind :next-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) n (vector-count sibs)] (if (= n 0) false (parts-match-at document parents (typed-list-nth [:list :string] sibs (dec n)) parts (dec idx) match-fn))) false)) (= kind :subsequent-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) nsibs (vector-count sibs)] (loop [i 0] (if (>= i nsibs) false (if (parts-match-at document parents (typed-list-nth [:list :string] sibs i) parts (dec idx) match-fn) true (recur (inc i)))))) false)) :else false))))))
+  (let [simple (typed-list-nth [:list [:ref :cssom/compound]] parts idx) node (dom-node-at document node-id)] (and (matches-simple? document node simple) (if (= idx 0) true (let [kind (option-value-of [:option :keyword] (get simple :selector/combinator) :none)] (cond (= kind :child) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (parts-match-at document parents (option-value-of [:option :string] parent "") parts (dec idx) match-fn) false)) (= kind :descendant) (loop [ancestor (typed-map-get [:map :string :string] parents node-id)] (if (not (option-some?-of [:option :string] ancestor)) false (if (parts-match-at document parents (option-value-of [:option :string] ancestor "") parts (dec idx) match-fn) true (recur (typed-map-get [:map :string :string] parents (option-value-of [:option :string] ancestor "")))))) (= kind :next-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) n (vector-count sibs)] (if (= n 0) false (parts-match-at document parents (typed-list-nth [:list :string] sibs (dec n)) parts (dec idx) match-fn))) false)) (= kind :subsequent-sibling) (let [parent (typed-map-get [:map :string :string] parents node-id)] (if (option-some?-of [:option :string] parent) (let [sibs (preceding-element-siblings document (option-value-of [:option :string] parent "") node-id) nsibs (vector-count sibs)] (loop [i 0] (if (>= i nsibs) false (if (parts-match-at document parents (typed-list-nth [:list :string] sibs i) parts (dec idx) match-fn) true (recur (inc i)))))) false)) :else false))))))
 
 (defn- parts-match?
   "Whether the element `node-id` is the SUBJECT of an already-parsed
@@ -8535,7 +8535,7 @@
                 (and (matches-simple? document node simple)
                      (if (zero? idx)
                        true
-                       (case (:selector/combinator simple)
+                       (case (get simple :selector/combinator)
                          :child
                          (when-let [parent-id (get parents node-id)]
                            (match-at parent-id (dec idx)))
@@ -8572,7 +8572,7 @@
 (defn- selector-arm-matches?
   "Typed-route group-arm match for matches-simple? (compound or complex)."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] arm [:ref :cssom/compound]] :default [document node arm])] :bool
-  (let [parts (:selector/parts arm)] (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts) (and document (parts-match? document (parent-index document) (:node/id node) (option-value-of [:option [:list [:ref :cssom/compound]]] parts (typed-list-new [:list [:ref :cssom/compound]])) matches-simple?)) (matches-simple? document node arm))))
+  (let [parts (get arm :selector/parts)] (if (option-some?-of [:option [:list [:ref :cssom/compound]]] parts) (and document (parts-match? document (parent-index document) (get node :node/id) (option-value-of [:option [:list [:ref :cssom/compound]]] parts (typed-list-new [:list [:ref :cssom/compound]])) matches-simple?)) (matches-simple? document node arm))))
 
 (defn- matches-simple?
   "Whether `node` matches one compound/simple selector map (see
@@ -8633,13 +8633,13 @@
    (matches-simple? (document-null) node selector))
   ([#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [document node selector])]
   #?(:kotoba
-     (let [ntype (:node/type node) sel-tag (:selector/tag selector) sel-id (:selector/id selector)] (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (or (not (option-some?-of [:option :keyword] sel-tag)) (= (option-value-of [:option :keyword] sel-tag :none) (:tag node))) (or (not (option-some?-of [:option :string] sel-id)) (= (option-value-of [:option :string] sel-id "") (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) :id) ""))) (let [node-classes (classes node) ncl (vector-count node-classes)] (loop [i 0] (if (>= i (vector-count (:selector/classes selector))) true (if (loop [j 0] (if (>= j ncl) false (if (= (typed-list-nth [:list :string] node-classes j) (typed-list-nth [:list :string] (:selector/classes selector) i)) true (recur (inc j))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (:selector/attrs selector))) true (if (let [spec (typed-list-nth [:list [:ref :cssom/attr]] (:selector/attrs selector) i) name (:attr/name spec) operator (:attr/operator spec) value (option-value-of [:option :string] (:attr/value spec) "") ci? (:attr/case-insensitive? spec) actual (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:attrs node) name) "")] (let [actual-str (if ci? (str/ascii-lower actual) actual) value2 (if ci? (str/ascii-lower value) value)] (attr-op-matches? operator actual-str value2))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/pseudos selector))) true (let [pseudo (typed-list-nth [:list :keyword] (:selector/pseudos selector) i)] (if (matches-pseudo? document node pseudo (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:selector/nth-args selector) pseudo) (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (:selector/lang-args selector) pseudo) "")) matches-simple?) (recur (inc i)) false)))) (and (loop [i 0] (if (>= i (vector-count (:selector/not selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/not selector) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) true (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) false (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/is selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/is selector) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (:selector/where selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (:selector/where selector) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (:selector/has selector))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (:selector/has selector) i)] (has-group-matches? document node group matches-simple?)) (recur (inc i)) false)))))
-     :default   (and (= :element (:node/type node))
-        (or (nil? (:selector/tag selector))
-            (= (:selector/tag selector) (:tag node)))
-        (or (nil? (:selector/id selector))
-            (= (:selector/id selector) (get-in node [:attrs :id])))
-        (every? (classes node) (:selector/classes selector))
+     (let [ntype (get node :node/type) sel-tag (get selector :selector/tag) sel-id (get selector :selector/id)] (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (or (not (option-some?-of [:option :keyword] sel-tag)) (= (option-value-of [:option :keyword] sel-tag :none) (get node :tag))) (or (not (option-some?-of [:option :string] sel-id)) (= (option-value-of [:option :string] sel-id "") (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (get node :attrs) :id) ""))) (let [node-classes (classes node) ncl (vector-count node-classes)] (loop [i 0] (if (>= i (vector-count (get selector :selector/classes))) true (if (loop [j 0] (if (>= j ncl) false (if (= (typed-list-nth [:list :string] node-classes j) (typed-list-nth [:list :string] (get selector :selector/classes) i)) true (recur (inc j))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (get selector :selector/attrs))) true (if (let [spec (typed-list-nth [:list [:ref :cssom/attr]] (get selector :selector/attrs) i) name (get spec :attr/name) operator (get spec :attr/operator) value (option-value-of [:option :string] (get spec :attr/value) "") ci? (:attr/case-insensitive? spec) actual (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (get node :attrs) name) "")] (let [actual-str (if ci? (str/ascii-lower actual) actual) value2 (if ci? (str/ascii-lower value) value)] (attr-op-matches? operator actual-str value2))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (get selector :selector/pseudos))) true (let [pseudo (typed-list-nth [:list :keyword] (get selector :selector/pseudos) i)] (if (matches-pseudo? document node pseudo (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (get selector :selector/nth-args) pseudo) (option-value-of [:option :string] (typed-map-get [:map :keyword :string] (get selector :selector/lang-args) pseudo) "")) matches-simple?) (recur (inc i)) false)))) (and (loop [i 0] (if (>= i (vector-count (get selector :selector/not))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (get selector :selector/not) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) true (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) false (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (get selector :selector/is))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (get selector :selector/is) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false))) (loop [i 0] (if (>= i (vector-count (get selector :selector/where))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/compound]]] (get selector :selector/where) i) ngrp (vector-count group)] (loop [j 0] (if (>= j ngrp) false (if (selector-arm-matches? document node (typed-list-nth [:list [:ref :cssom/compound]] group j)) true (recur (inc j)))))) (recur (inc i)) false)))) (loop [i 0] (if (>= i (vector-count (get selector :selector/has))) true (if (let [group (typed-list-nth [:list [:list [:ref :cssom/has-item]]] (get selector :selector/has) i)] (has-group-matches? document node group matches-simple?)) (recur (inc i)) false)))))
+     :default   (and (= :element (get node :node/type))
+        (or (nil? (get selector :selector/tag))
+            (= (get selector :selector/tag) (get node :tag)))
+        (or (nil? (get selector :selector/id))
+            (= (get selector :selector/id) (get-in node [:attrs :id])))
+        (every? (classes node) (get selector :selector/classes))
         (every? (fn [{:attr/keys [name operator value case-insensitive?]}]
                   (let [actual (get-in node [:attrs name])]
                     (and (some? actual)
@@ -8657,13 +8657,13 @@
                              "|=" (or (= actual-str value)
                                      (str/starts-with? actual-str (str value "-")))
                              false)))))
-                (:selector/attrs selector))
+                (get selector :selector/attrs))
         (every? (fn [pseudo]
                   (matches-pseudo? document node pseudo
-                                   (or (get (:selector/nth-args selector) pseudo)
-                                       (get (:selector/lang-args selector) pseudo))
+                                   (or (get (get selector :selector/nth-args) pseudo)
+                                       (get (get selector :selector/lang-args) pseudo))
                                    matches-simple?))
-                (:selector/pseudos selector))
+                (get selector :selector/pseudos))
         (let [;; a group ARM is either a compound-selector map (the shape
               ;; this function has always taken) or, since complex
               ;; arguments landed, a `:selector/parts` map -- which needs
@@ -8678,19 +8678,19 @@
               ;; the structural pseudo-classes already carry.
               arm-matches?
               (fn [arm]
-                (if-let [parts (:selector/parts arm)]
+                (if-let [parts (get arm :selector/parts)]
                   (boolean (when document
                              (parts-match? document (parent-index document)
-                                           (:node/id node) parts matches-simple?)))
+                                           (get node :node/id) parts matches-simple?)))
                   (matches-simple? document node arm)))]
           (and (every? (fn [group] (not-any? arm-matches? group))
-                       (:selector/not selector))
+                       (get selector :selector/not))
                (every? (fn [group] (some arm-matches? group))
-                       (:selector/is selector))
+                       (get selector :selector/is))
                (every? (fn [group] (some arm-matches? group))
-                       (:selector/where selector))))
+                       (get selector :selector/where))))
         (every? (fn [group] (has-group-matches? document node group matches-simple?))
-                (:selector/has selector))))))
+                (get selector :selector/has))))))
 
 (defn- matches-parts?
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] parents node-id parts [:ref :cssom/compound]] :default [document parents node-id parts])]
@@ -8698,16 +8698,16 @@
 
 (defn matches?
   ([#?@(:kotoba [node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [node selector])]
-   (let [sel (if (:selector/parts selector)
-               (last (:selector/parts selector))
+   (let [sel (if (get selector :selector/parts)
+               (last (get selector :selector/parts))
                selector)]
      (matches-simple? node sel)))
   ([#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node] selector [:ref :cssom/compound]] :default [document node selector])]
-   (let [selector (if (:selector/parts selector)
+   (let [selector (if (get selector :selector/parts)
                     selector
                     {:selector/parts [selector]})
-         node-id (:node/id node)]
-     (matches-parts? document (parent-index document) node-id (:selector/parts selector)))))
+         node-id (get node :node/id)]
+     (matches-parts? document (parent-index document) node-id (get selector :selector/parts)))))
 
 (defn- inline-style
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
@@ -8727,7 +8727,7 @@
 (defn- clear-style-attrs
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   #?(:kotoba
-     (let [node (dom-node-at document node-id) attrs (:attrs node) n (typed-map-count [:map :keyword :string] attrs) cleaned (loop [i 0 out (typed-map-new [:map :keyword :string])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword :string] attrs) i) v (typed-list-nth [:list :string] (typed-map-vals [:map :keyword :string] attrs) i) kn (keyword-name k)] (recur (inc i) (if (or (= kn "style") (= kn "pseudo")) out (typed-map-assoc [:map :keyword :string] out k v))))))] (typed-map-assoc [:map :keyword [:map :string [:ref :cssom/dom-node]]] document :nodes (typed-map-assoc [:map :string [:ref :cssom/dom-node]] (:nodes document) node-id (record-new [:record :cssom/dom-node [[:node/id :string] [:node/type :keyword] [:tag [:option :keyword]] [:attrs [:map :keyword :string]] [:children [:list :string]]]] (:node/id node) (:node/type node) (:tag node) cleaned (:children node)))))
+     (let [node (dom-node-at document node-id) attrs (get node :attrs) n (typed-map-count [:map :keyword :string] attrs) cleaned (loop [i 0 out (typed-map-new [:map :keyword :string])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword :string] attrs) i) v (typed-list-nth [:list :string] (typed-map-vals [:map :keyword :string] attrs) i) kn (keyword-name k)] (recur (inc i) (if (or (= kn "style") (= kn "pseudo")) out (typed-map-assoc [:map :keyword :string] out k v))))))] (typed-map-assoc [:map :keyword [:map :string [:ref :cssom/dom-node]]] document :nodes (typed-map-assoc [:map :string [:ref :cssom/dom-node]] (get document :nodes) node-id (record-new [:record :cssom/dom-node [[:node/id :string] [:node/type :keyword] [:tag [:option :keyword]] [:attrs [:map :keyword :string]] [:children [:list :string]]]] (get node :node/id) (get node :node/type) (get node :tag) cleaned (get node :children)))))
      :default
   (update-in document [:nodes node-id :attrs]
              (fn [attrs]
@@ -8738,7 +8738,7 @@
 
 (defn- pseudo-element-of
   [#?@(:kotoba [selector [:ref :cssom/compound]] :default [selector])]
-  (:selector/pseudo-element (last (:selector/parts selector))))
+  (:selector/pseudo-element (last (get selector :selector/parts))))
 
 ;; ---- @scope: a range in the tree, and PROXIMITY in the cascade ----
 ;;
@@ -8873,8 +8873,8 @@
 ;; [hops root-id] list.
      (nil)
      :default
-  (let [roots (:scope/root spec)
-        limits (:scope/limit spec)]
+  (let [roots (get spec :scope/root)
+        limits (get spec :scope/limit)]
     (when (seq roots)
       (->> (ancestors-or-self parents node-id)
            (map-indexed (fn [hops id] [hops id]))
@@ -8920,7 +8920,7 @@
     (when (every? #(seq (scope-root-ids document parents % node-id)) outer)
       (some (fn [[hops root-id]]
               (binding [*scope-roots* #{root-id}]
-                (when (matches-parts? document parents node-id (:selector/parts selector))
+                (when (matches-parts? document parents node-id (get selector :selector/parts))
                   hops)))
             (scope-root-ids document parents inner node-id))))))
 
@@ -8976,10 +8976,10 @@
    for unparseable values."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node-id] :default [document node-id])]
   (let [attrs (get-in document [:nodes node-id :attrs])
-        width (:style/width attrs)]
+        width (get attrs :style/width)]
     (when (number? width)
-      (let [min-w (:style/min-width attrs)
-            max-w (:style/max-width attrs)
+      (let [min-w (get attrs :style/min-width)
+            max-w (get attrs :style/max-width)
             width (if (number? min-w) (max width min-w) width)
             width (if (number? max-w) (min width max-w) width)]
         width))))
@@ -9001,15 +9001,15 @@
    can walk from any descendant up to its nearest matching container."
   [#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]]] :default [document])]
   #?(:kotoba
-     (let [nodes (:nodes document)] (loop [i 0 out (typed-map-new [:map :string [:ref :cssom/container]])] (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes)) out (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i) node (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i) ntype (:node/type node) ctype (typed-map-get [:map :keyword :string] (:attrs node) :container-type)] (recur (inc i) (if (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (option-some?-of [:option :string] ctype) (or (= (option-value-of [:option :string] ctype "") "inline-size") (= (option-value-of [:option :string] ctype "") "size"))) (typed-map-assoc [:map :string [:ref :cssom/container]] out node-id (record-new [:record :cssom/container [[:names [:set :string]] [:known-width [:option :f64]]]] (container-names-of document node-id) (resolvable-container-width document node-id))) out))))))
+     (let [nodes (get document :nodes)] (loop [i 0 out (typed-map-new [:map :string [:ref :cssom/container]])] (if (>= i (typed-map-count [:map :string [:ref :cssom/dom-node]] nodes)) out (let [node-id (typed-list-nth [:list :string] (typed-map-keys [:map :string [:ref :cssom/dom-node]] nodes) i) node (typed-list-nth [:list [:ref :cssom/dom-node]] (typed-map-vals [:map :string [:ref :cssom/dom-node]] nodes) i) ntype (get node :node/type) ctype (typed-map-get [:map :keyword :string] (get node :attrs) :container-type)] (recur (inc i) (if (and (option-some?-of [:option :keyword] ntype) (= (option-value-of [:option :keyword] ntype :none) :element) (option-some?-of [:option :string] ctype) (or (= (option-value-of [:option :string] ctype "") "inline-size") (= (option-value-of [:option :string] ctype "") "size"))) (typed-map-assoc [:map :string [:ref :cssom/container]] out node-id (record-new [:record :cssom/container [[:names [:set :string]] [:known-width [:option :f64]]]] (container-names-of document node-id) (resolvable-container-width document node-id))) out))))))
      :default
   (into {}
         (keep (fn [[node-id node]]
-                (when (and (= :element (:node/type node))
+                (when (and (= :element (get node :node/type))
                            (contains? #?(:kotoba (typed-map-new [:map :string :bool] "inline-size" true "size" true) :default #{"inline-size" "size"}) (container-type-of document node-id)))
                   [node-id {:names (container-names-of document node-id)
                             :known-width (resolvable-container-width document node-id)}])))
-        (:nodes document))))
+        (get document :nodes))))
 
 (defn- nearest-container
   "Walks up from `node-id`'s PARENT (never `node-id` itself -- real CSS
@@ -9032,7 +9032,7 @@
   (loop [pid (get parents node-id)]
     (when pid
       (if-let [container (get containers pid)]
-        (if (or (nil? container-name) (contains? (:names container) container-name))
+        (if (or (nil? container-name) (contains? (get container :names) container-name))
           container
           (recur (get parents pid)))
         (recur (get parents pid))))))
@@ -9061,16 +9061,16 @@
    media-condition-matches?'s own 'unrecognized feature still matches'
    convention, not an inconsistency."
   [rule node-id container-ctx]
-  (let [condition (:rule/container rule)]
+  (let [condition (get rule :rule/container)]
     (or (nil? condition)
         (and (some? container-ctx)
              (some? node-id)
              (let [containers (get container-ctx :containers)
                    ctx-parents (get container-ctx :parent-index)
-                   container (nearest-container containers ctx-parents node-id (:rule/container-name rule))]
+                   container (nearest-container containers ctx-parents node-id (get rule :rule/container-name))]
                (and container
-                    (some? (:known-width container))
-                    (container-condition-matches? condition (:known-width container))))))))
+                    (some? (get container :known-width))
+                    (container-condition-matches? condition (get container :known-width))))))))
 
 (defn- resolve-content-term
   "Resolves a single already-parsed content TERM (see `parse-content-term`):
@@ -9100,11 +9100,11 @@
        (not (map? term)) (str term)
 
     (contains? term :content/attr-name)
-    (str (or (get-in node [:attrs (keyword (:content/attr-name term))]) ""))
+    (str (or (get-in node [:attrs (keyword (get term :content/attr-name))]) ""))
 
     (contains? term :content/counter-name)
     (when (some? counters)
-      (str (get counters (:content/counter-name term) 0)))
+      (str (get counters (get term :content/counter-name) 0)))
 
     :else (str term))))
 
@@ -9134,7 +9134,7 @@
      :default
      (cond
        (and (map? value) (contains? value :content/parts))
-    (let [resolved (mapv #(resolve-content-term node counters %) (:content/parts value))]
+    (let [resolved (mapv #(resolve-content-term node counters %) (get value :content/parts))]
       (when (every? (fn [x] (some? x)) resolved)
         (str/join "" resolved)))
 
@@ -9187,8 +9187,8 @@
   "The `:content/quote` keyword a resolved pseudo-element style's `content`
    holds, or nil -- see `parse-content-quote-ref`."
   [#?@(:kotoba [pseudo-style [:map :keyword :string]] :default [pseudo-style])]
-  (let [v (:content pseudo-style)]
-    (when (map? v) (:content/quote v))))
+  (let [v (get pseudo-style :content)]
+    (when (map? v) (get v :content/quote))))
 
 (defn- resolve-quote-content
   "Turns the `:content/quote` markers on `style`'s `:pseudo/before` and
@@ -9224,8 +9224,8 @@
               :close (assoc m :content (quote-mark depth false))
               (dissoc m :content))
             m))
-        before (:pseudo/before style)
-        after (:pseudo/after style)
+        before (get style :pseudo/before)
+        after (get style :pseudo/after)
         opens? (contains? #?(:kotoba (typed-map-new [:map :keyword :bool] :open true :no-open true) :default #{:open :no-open}) (quote-marker before))
         style (cond-> style
                 before (assoc :pseudo/before (resolve-one before true))
@@ -9324,7 +9324,7 @@
    initial values throughout -- stated here rather than discovered."
   [document node property]
   (or (when document
-        (when-let [parent-id (parent-node-id document (:node/id node))]
+        (when-let [parent-id (parent-node-id document (get node :node/id))]
           (get-in document [:nodes parent-id :attrs (keyword "style" (name property))])))
       drop-declaration))
 
@@ -9506,12 +9506,12 @@
    complete for a different reason -- `revert` rolls back to the UA origin,
    and every UA declaration for this element is in `sorted`."
   [document node sorted keyword-kind]
-  (cond-> (into (into #{} (map (fn [x] (:property x))) sorted)
+  (cond-> (into (into #{} (map (fn [x] (get x :property))) sorted)
                 (concat (keys (initial-values))
                         (map keyword (split-value-components inherited-properties "|"))))
     (= :inherit keyword-kind)
     (into (when document
-            (when-let [parent-id (parent-node-id document (:node/id node))]
+            (when-let [parent-id (parent-node-id document (get node :node/id))]
               (keep (fn [k]
                       (when (= "style" (namespace k)) (keyword (name k))))
                     (keys (get-in document [:nodes parent-id :attrs]))))))
@@ -9558,16 +9558,16 @@
    `:style/all` onto the element for nobody to read."
   [document node sorted]
   #?(:kotoba
-     (if (not (loop [i 0 nsorted (vector-count sorted)] (if (>= i nsorted) false (if (= (:property (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted i)) :all) true (recur (inc i) nsorted))))) sorted (loop [e 0 out (typed-list-new [:list [:ref :cssom/cascade-entry]])] (if (>= e (vector-count sorted)) out (let [entry (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted e) kind (css-wide-keyword (:value entry))] (recur (inc e) (cond (not (= (:property entry) :all)) (typed-list-conj [:list [:ref :cssom/cascade-entry]] out entry) (not (option-some?-of [:option :keyword] kind)) out :else (let [universe (all-shorthand-universe document node sorted (option-value-of [:option :keyword] kind :none))] (loop [u 0 acc out] (if (>= u (vector-count universe)) acc (let [property (typed-list-nth [:list :keyword] universe u)] (recur (inc u) (typed-list-conj [:list [:ref :cssom/cascade-entry]] acc (assoc entry :property property :value (if (and (= kind :initial) (= property :font-size)) all-initial-font-size (:value entry)))))))))))))))
+     (if (not (loop [i 0 nsorted (vector-count sorted)] (if (>= i nsorted) false (if (= (:property (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted i)) :all) true (recur (inc i) nsorted))))) sorted (loop [e 0 out (typed-list-new [:list [:ref :cssom/cascade-entry]])] (if (>= e (vector-count sorted)) out (let [entry (typed-list-nth [:list [:ref :cssom/cascade-entry]] sorted e) kind (css-wide-keyword (get entry :value))] (recur (inc e) (cond (not (= (get entry :property) :all)) (typed-list-conj [:list [:ref :cssom/cascade-entry]] out entry) (not (option-some?-of [:option :keyword] kind)) out :else (let [universe (all-shorthand-universe document node sorted (option-value-of [:option :keyword] kind :none))] (loop [u 0 acc out] (if (>= u (vector-count universe)) acc (let [property (typed-list-nth [:list :keyword] universe u)] (recur (inc u) (typed-list-conj [:list [:ref :cssom/cascade-entry]] acc (assoc entry :property property :value (if (and (= kind :initial) (= property :font-size)) all-initial-font-size (get entry :value)))))))))))))))
      :default
   (if-not (some #(= :all (:property %)) sorted)
     sorted
     (vec
      (mapcat
       (fn [entry]
-        (if-not (= :all (:property entry))
+        (if-not (= :all (get entry :property))
           [entry]
-          (when-let [kind (css-wide-keyword (:value entry))]
+          (when-let [kind (css-wide-keyword (get entry :value))]
             (for [property (all-shorthand-universe document node sorted kind)]
               (assoc entry
                      :property property
@@ -9576,7 +9576,7 @@
                      ;; `all-initial-font-size`.
                      :value (if (and (= :initial kind) (= :font-size property))
                               all-initial-font-size
-                              (:value entry)))))))
+                              (get entry :value)))))))
       sorted)))))
 
 ;; ---- the user-agent stylesheet ----
@@ -9998,14 +9998,14 @@
      :default
      (reduce (fn [idx rule]
                (reduce (fn [idx selector]
-                         (let [subject (if (:selector/parts selector)
-                                         (last (:selector/parts selector))
+                         (let [subject (if (get selector :selector/parts)
+                                         (last (get selector :selector/parts))
                                          selector)
-                               tag (:selector/tag subject)]
+                               tag (get subject :selector/tag)]
                            (update idx tag (fnil conj [])
                                    (assoc rule :rule/selectors [selector]))))
                        idx
-                       (:rule/selectors rule)))
+                       (get rule :rule/selectors)))
              {}
              (ua-rules))))
 
@@ -10014,7 +10014,7 @@
    the tagless one."
   [#?@(:kotoba [node [:ref :cssom/dom-node]] :default [node])]
   (let [by-tag (ua-rules-by-tag)]
-    (concat (get by-tag (:tag node)) (get by-tag nil))))
+    (concat (get by-tag (get node :tag)) (get by-tag nil))))
 
 (def ^:private ua-origin
   "The cascade ORIGIN of a user-agent declaration. Sorted before
@@ -10036,10 +10036,10 @@
    Today: `#{:hidden :href :type}`."
   []
   (set (for [rule (ua-rules)
-             selector (:rule/selectors rule)
-             part (or (:selector/parts selector) [selector])
-             a (:selector/attrs part)]
-         (:attr/name a))))
+             selector (get rule :rule/selectors)
+             part (or (get selector :selector/parts) [selector])
+             a (get part :selector/attrs)]
+         (get a :attr/name))))
 
 (defn- ua-sheet-is-tag-and-attr-only?
   "Whether every COMPOUND in every selector in the sheet is a bare tag, or
@@ -10066,16 +10066,16 @@
   (every? (fn [rule]
             (every? (fn [selector]
                       (every? (fn [p]
-                                (and (nil? (:selector/id p))
-                                     (empty? (:selector/classes p))
-                                     (empty? (:selector/pseudos p))
-                                     (nil? (:selector/pseudo-element p))
-                                     (empty? (:selector/not p))
-                                     (empty? (:selector/is p))
-                                     (empty? (:selector/where p))
-                                     (empty? (:selector/has p))))
-                              (or (:selector/parts selector) [selector])))
-                    (:rule/selectors rule)))
+                                (and (nil? (get p :selector/id))
+                                     (empty? (get p :selector/classes))
+                                     (empty? (get p :selector/pseudos))
+                                     (nil? (get p :selector/pseudo-element))
+                                     (empty? (get p :selector/not))
+                                     (empty? (get p :selector/is))
+                                     (empty? (get p :selector/where))
+                                     (empty? (get p :selector/has))))
+                              (or (get selector :selector/parts) [selector])))
+                    (get rule :rule/selectors)))
           (ua-rules)))
 
 (defn- ua-style-of
@@ -10098,16 +10098,16 @@
    cascaded) has no generated box to hang it on."
   [document node]
   (->> (for [rule (ua-rules-for node)
-             selector (:rule/selectors rule)
+             selector (get rule :rule/selectors)
              :when (nil? (pseudo-element-of selector))
              :when (if document
                      (matches? document node selector)
                      (and (<= (count (:selector/parts selector [selector])) 1)
                           (matches? node selector)))]
-         {:declarations (:rule/declarations rule)
-          :sort-key [(specificity selector) (:rule/order rule)]})
+         {:declarations (get rule :rule/declarations)
+          :sort-key [(specificity selector) (get rule :rule/order)]})
        (sort-by :sort-key)
-       (reduce (fn [m entry] (merge m (:declarations entry))) {})))
+       (reduce (fn [m entry] (merge m (get entry :declarations))) {})))
 
 (defn- ua-style-by-tag
   "The UA style of an element that carries none of `ua-conditional-attrs`
@@ -10153,8 +10153,8 @@
   ([#?@(:kotoba [document [:record :cssom/document [[:nodes [:map :string [:ref :cssom/dom-node]]] [:root [:option :string]] [:focus [:option :string]]]] node [:ref :cssom/dom-node]] :default [document node])]
    (let [style-by-tag (when (nil? document) (ua-style-by-tag))]
      (if (and style-by-tag
-              (not-any? #(contains? (:attrs node) %) (ua-conditional-attrs)))
-       (get style-by-tag (:tag node) {})
+              (not-any? #(contains? (get node :attrs) %) (ua-conditional-attrs)))
+       (get style-by-tag (get node :tag) {})
        (ua-style-of document node)))))
 
 ;; ---- relative lengths: `em`, `rem`, and the computed font size ----
@@ -10398,7 +10398,7 @@
    cascaded) -- the same reason `ua-style-for` itself is public, and the
    same rule against writing this knowledge down twice."
   [#?@(:kotoba [style [:map :keyword [:result :f64 :string]] parent-font-size root-font-size] :default [style parent-font-size root-font-size])]
-  (let [resolved-own (resolve-font-size (:font-size style) parent-font-size
+  (let [resolved-own (resolve-font-size (get style :font-size) parent-font-size
                                         (or root-font-size parent-font-size))
         own (or resolved-own parent-font-size)
         root (or root-font-size own)
@@ -10499,8 +10499,8 @@
 (defn- logical->physical-by-flow
   "Builds the logical-to-physical property map for one writing-mode/direction pair."
   [flow]
-  (let [mode (:writing-mode flow)
-        sides (logical-flow-sides mode (:direction flow))
+  (let [mode (get flow :writing-mode)
+        sides (logical-flow-sides mode (get flow :direction))
         sizes (logical-flow-sizes mode)]
     (when (and sides sizes)
       (into sizes
@@ -10959,7 +10959,7 @@
       (contains? (get property-value-keywords property) lower)
 
       (em-resolvable-property? property)
-      (or (contains? (:default length-valued-properties) lower)
+      (or (contains? (get length-valued-properties :default) lower)
           (contains? (get length-valued-properties property #{}) lower)
           (supported-length-token? v)
           (and (contains? unitless-number-properties property)
@@ -11034,14 +11034,14 @@
    attributes and combinators are all supported, so they need no check."
   [text]
   (let [selector (parse-selector text)
-        parts (or (:selector/parts selector) [selector])]
+        parts (or (get selector :selector/parts) [selector])]
     (boolean
      (and (seq (str/trim (str text)))
           (every? (fn [part]
-                    (and (every? implemented-pseudo-class? (:selector/pseudos part))
-                         (or (nil? (:selector/pseudo-element part))
+                    (and (every? implemented-pseudo-class? (get part :selector/pseudos))
+                         (or (nil? (get part :selector/pseudo-element))
                              (contains? implemented-pseudo-elements
-                                        (:selector/pseudo-element part)))))
+                                        (get part :selector/pseudo-element)))))
                   parts)))))
 
 (defn- supports-in-parens
@@ -11159,7 +11159,7 @@
   "Whether `rule`'s `@supports` condition (if any) holds. nil -- no
    `@supports` around it -- always does."
   [rule]
-  (let [condition (:rule/supports rule)]
+  (let [condition (get rule :rule/supports)]
     (or (nil? condition)
         (supports-condition-matches? condition))))
 
@@ -11354,7 +11354,7 @@
    0 -- measured against Brave, `:cascade/inherit-on-a-non-inherited-
    property`) as well as for an inherited one. When the parent resolved
    nothing, the property is dropped instead, which lets the SAME
-   already-existing `(or (:prop st) (:prop inherited))` fallback
+   already-existing `(or (get st :prop) (get inherited :prop))` fallback
    `cssom.layout` applies for genuinely-inherited properties do the real
    inheriting at layout time -- and is also, for a non-inherited property,
    exactly the initial value the parent itself computed.
@@ -11396,7 +11396,7 @@
 ;; resolve-style-and-flow returns its style map.
      (nil)
      :default
-   (let [max-layer-priority (or (some->> rules (keep (fn [x] (:rule/layer-priority x))) seq (apply max)) 0)
+   (let [max-layer-priority (or (some->> rules (keep (fn [x] (get x :rule/layer-priority))) seq (apply max)) 0)
          ;; Built at most ONCE per element, and only when some rule is
          ;; actually scoped: `@scope` is the only thing here that needs an
          ;; ancestor chain of its own (`matches?` builds its own index per
@@ -11406,7 +11406,7 @@
          scope-parents (delay (parent-index document))
          declarations (for [rule rules
                             :let [{:rule/keys [selectors declarations declaration-meta order layer-priority layer]} rule
-                                  scope (:rule/scope rule)]
+                                  scope (get rule :rule/scope)]
                             selector selectors
                             :when (= pseudo-element (pseudo-element-of selector))
                             ;; `hops` is BOTH the match test and the
@@ -11424,13 +11424,13 @@
                                          ;; has for `ul ul` and `:root`.
                                          (when document
                                            (scope-proximity document @scope-parents scope
-                                                            selector (:node/id node)))
+                                                            selector (get node :node/id)))
                                          (when (if document
                                                  (matches? document node selector)
                                                  (matches? node selector))
                                            ##Inf))]
                             :when (some? hops)
-                            :when (container-rule-matches? rule (:node/id node) container-ctx)
+                            :when (container-rule-matches? rule (get node :node/id) container-ctx)
                             ;; `@supports` is filtered HERE rather than in
                             ;; `apply-cascade` beside `@media`, because
                             ;; unlike `@media` its answer depends on nothing
@@ -11494,7 +11494,7 @@
          ;; in it. `li::marker` -- a real UA sheet's other one -- is still
          ;; not here, because this engine has no marker box to style.
          ua-declarations (for [rule (ua-rules-for node)
-                                 selector (:rule/selectors rule)
+                                 selector (get rule :rule/selectors)
                                  :when (= pseudo-element (pseudo-element-of selector))
                                  ;; Same no-document rule as `ua-style-of`,
                                  ;; and for the same reason: `matches?`'s
@@ -11508,7 +11508,7 @@
                                          (matches? document node selector)
                                          (and (<= (count (:selector/parts selector [selector])) 1)
                                               (matches? node selector)))
-                                 [property value] (:rule/declarations rule)]
+                                 [property value] (get rule :rule/declarations)]
                              {:property property
                               :value value
                               ;; No UA declaration here is `!important`, so
@@ -11530,7 +11530,7 @@
                               :proximity ##-Inf
                               :layer 0
                               :layer-key 0
-                              :order (:rule/order rule)
+                              :order (get rule :rule/order)
                               ;; This sheet's rules are small enough that
                               ;; their own within-block order has never
                               ;; mattered, and `ua-rules` holds bare
@@ -11600,11 +11600,11 @@
          flow (let [win (fn [prop]
                           (some->> sorted (filter #(= prop (:property %))) last :value))]
                 {:writing-mode (flow-keyword (win :writing-mode)
-                                             (:writing-mode inherited-flow)
-                                             (:writing-mode initial-flow))
+                                             (get inherited-flow :writing-mode)
+                                             (get initial-flow :writing-mode))
                  :direction (flow-keyword (win :direction)
-                                          (:direction inherited-flow)
-                                          (:direction initial-flow))})
+                                          (get inherited-flow :direction)
+                                          (get initial-flow :direction))})
          ;; nil only for a flow this table has no row for, which after
          ;; 2026-08-06 means an unrecognised `writing-mode` keyword. A
          ;; logical declaration then stays under its logical key, which
@@ -11631,15 +11631,15 @@
                   (let [resolved (resolve-css-wide-keyword
                                   document node property kind
                                   (case kind
-                                    :revert (filterv #(< (:origin %) (:origin winner)) entries)
+                                    :revert (filterv #(< (:origin %) (get winner :origin)) entries)
                                     ;; "as if no declaration in the
                                     ;; winner's own layer existed" -- see
                                     ;; `resolve-css-wide-keyword`'s
                                     ;; :revert-layer table for the six
                                     ;; shapes this phrasing is measured
                                     ;; against.
-                                    :revert-layer (filterv #(or (< (:origin %) (:origin winner))
-                                                                (not= (:layer-key %) (:layer-key winner)))
+                                    :revert-layer (filterv #(or (< (:origin %) (get winner :origin))
+                                                                (not= (:layer-key %) (get winner :layer-key)))
                                                            entries)
                                     nil))]
                     (if (= drop-declaration resolved)
@@ -11649,7 +11649,7 @@
             {}
             (group-by :property sorted))]
      [(if (contains? m :content)
-        (let [resolved (resolve-content-value node counters (:content m))]
+        (let [resolved (resolve-content-value node counters (get m :content))]
           (if (nil? resolved)
             (dissoc m :content)
             (assoc m :content resolved)))
@@ -11786,9 +11786,9 @@
    grammar to be invalid against at all, so nothing here touches it.)"
   [registry k value]
   (if-let [reg (get registry k)]
-    (if (registered-value-valid? (:registration/syntax reg) value)
+    (if (registered-value-valid? (get reg :registration/syntax) value)
       value
-      (or (:registration/initial reg) value))
+      (or (get reg :registration/initial) value))
     value))
 
 (defn- non-inheriting-child-env
@@ -11805,7 +11805,7 @@
   (reduce-kv (fn [env k reg]
                (if (:registration/inherits? reg)
                  env
-                 (if-let [initial (:registration/initial reg)]
+                 (if-let [initial (get reg :registration/initial)]
                    (assoc env k initial)
                    (dissoc env k))))
              env
@@ -11828,7 +11828,7 @@
    and unsupported here, an honest gap rather than a silent one."
   [#?@(:kotoba [node [:ref :cssom/dom-node] style [:map :keyword [:result :f64 :string]]] :default [node style])]
   #?(:kotoba
-     (let [n (typed-map-count [:map :keyword [:result :f64 :string]] style)] (if (not (loop [i 0] (if (>= i n) false (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) true (recur (inc i))))))) style (let [attrs (:attrs node)] (loop [i 0 out (typed-map-new [:map :keyword [:result :f64 :string]])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (recur (inc i) (typed-map-assoc [:map :keyword [:result :f64 :string]] out k (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) (parse-style-value (resolve-attr-refs-kotoba (result-error-of [:result :f64 :string] v "") attrs)) v)))))))))
+     (let [n (typed-map-count [:map :keyword [:result :f64 :string]] style)] (if (not (loop [i 0] (if (>= i n) false (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) true (recur (inc i))))))) style (let [attrs (get node :attrs)] (loop [i 0 out (typed-map-new [:map :keyword [:result :f64 :string]])] (if (>= i n) out (let [k (typed-list-nth [:list :keyword] (typed-map-keys [:map :keyword [:result :f64 :string]] style) i) v (typed-list-nth [:list [:result :f64 :string]] (typed-map-vals [:map :keyword [:result :f64 :string]] style) i)] (recur (inc i) (typed-map-assoc [:map :keyword [:result :f64 :string]] out k (if (and (not (result-ok?-of [:result :f64 :string] v)) (not (= k :content)) (not (custom-property? k)) (css-contains-attr? (result-error-of [:result :f64 :string] v ""))) (parse-style-value (resolve-attr-refs-kotoba (result-error-of [:result :f64 :string] v "") attrs)) v)))))))))
      :default
   (if-not (some (fn [[k v]] (and (string? v)
                                  (not= :content k)
@@ -11836,7 +11836,7 @@
                                  (css-contains-attr? v)))
                 style)
     style
-    (let [attrs (:attrs node)]
+    (let [attrs (get node :attrs)]
       (into {}
             (map (fn [[k v]]
                    (if (and (string? v) (not= :content k) (not (custom-property? k))
@@ -12048,8 +12048,8 @@
    (let [[base node-flow] (resolve-style-and-flow document rules node nil inherited-counters
                                                   container-ctx inherited-flow)
         node-counters (-> inherited-counters
-                          (apply-counter-pairs :reset (:counter-reset base))
-                          (apply-counter-pairs :increment (:counter-increment base)))
+                          (apply-counter-pairs :reset (get base :counter-reset))
+                          (apply-counter-pairs :increment (get base :counter-increment)))
         ;; The generated boxes sit in THIS element's flow, not its
         ;; parent's -- a `::before` of a `direction: rtl` element has its
         ;; own `margin-inline-start` on the right even though the element
@@ -12099,7 +12099,7 @@
    element has no own `:color`, the keyword is left as-is rather than
    silently resolved to nil."
   [final-style]
-  (let [color (:color final-style)]
+  (let [color (get final-style :color)]
     (if-not color
       final-style
       (reduce (fn [m k]
@@ -12178,8 +12178,8 @@
    which is why this tests the two out-of-flow positions by name rather
    than testing for `static`."
   [style parent-display]
-  (let [pos (display-token (:position style))
-        flt (display-token (:float style))]
+  (let [pos (display-token (get style :position))
+        flt (display-token (get style :float))]
     (boolean
      (or (contains? #?(:kotoba (typed-map-new [:map :string :bool] "absolute" true "fixed" true) :default #{"absolute" "fixed"}) pos)
          (and flt (not= "none" flt))
@@ -12194,7 +12194,7 @@
    thing that says `inline` today is the absence of a declaration. That
    absence is exactly what `initial-display` supplies."
   [style parent-display]
-  (let [d (or (display-token (:display style)) initial-display)]
+  (let [d (or (display-token (get style :display)) initial-display)]
     (if-let [b (and (blockified? style parent-display)
                     (get blockified-displays d))]
       (assoc style :display b)
@@ -12209,7 +12209,7 @@
    `<div style=\"display:flex\"><span style=\"display:contents\">` hide the
    flex container from the spans that really are its items."
   [style parent-display]
-  (let [d (or (display-token (:display style)) initial-display)]
+  (let [d (or (display-token (get style :display)) initial-display)]
     (if (= "contents" d) parent-display d)))
 
 (defn- style-element
@@ -12353,7 +12353,7 @@
    (letfn [(walk [document node-id inherited-env inherited-counters visited
                  parent-font-size root-font-size parent-display quote-depth parent-flow]
             (let [node (get-in document [:nodes node-id])
-                  element? (= :element (:node/type node))
+                  element? (= :element (get node :node/type))
                   [document node-env node-counters node-font-size node-display
                    node-quote-depth node-flow]
                   (if element?
@@ -12375,13 +12375,13 @@
                               node-font-size root-font-size node-display node-quote-depth
                               node-flow))
                       [document visited node-counters]
-                      (:children node))))]
-    (let [[document visited] (if-let [root (:root document)]
+                      (get node :children))))]
+    (let [[document visited] (if-let [root (get document :root)]
                                 (walk document root initial-env {} #{} base-font-size nil nil 0 initial-flow)
                                 [document #{}])]
       (reduce-kv
        (fn [document node-id node]
-         (if (and (= :element (:node/type node)) (not (contains? visited node-id)))
+         (if (and (= :element (get node :node/type)) (not (contains? visited node-id)))
            ;; a detached subtree has no ancestor chain to read a container
            ;; display off either -- the same honest simplification the empty
            ;; inherited environment above it already makes
@@ -12394,7 +12394,7 @@
                                  base-font-size base-font-size nil 0 initial-flow registry))
            document))
        document
-       (:nodes document)))))))
+       (get document :nodes)))))))
 
 (defn apply-cascade
   "Applies the cascade over `document`, writing each element's resolved
@@ -12449,7 +12449,7 @@
    `run-cascade-walk` TWICE rather than once -- and why it never needs a
    third time, or a loop, to do it:
 
-   1. If `rules` contains no `@container` rule at all (`(some (fn [x] (:rule/container x))
+   1. If `rules` contains no `@container` rule at all (`(some (fn [x] (get x :rule/container))
       rules)` is nil), this is exactly the single walk this function always
       performed -- no new code path, no behavior change, no extra cost.
 
@@ -12498,11 +12498,11 @@
 ;; parse-rules and run-cascade-walk answer their values.
      document
      :default
-   (let [viewport-width (or (:viewport-width opts) default-viewport-width)
-         color-scheme (or (:color-scheme opts) default-color-scheme)
-         base-font-size (or (:base-font-size opts) (default-base-font-size-value))
+   (let [viewport-width (or (get opts :viewport-width) default-viewport-width)
+         color-scheme (or (get opts :color-scheme) default-color-scheme)
+         base-font-size (or (get opts :base-font-size) (default-base-font-size-value))
          rules (filterv #(rule-applies-to-viewport? % viewport-width color-scheme) rules)]
-     (if (some (fn [x] (:rule/container x)) rules)
+     (if (some (fn [x] (get x :rule/container)) rules)
        (let [pass1-rules (filterv #(nil? (:rule/container %)) rules)
              pass1-document (run-cascade-walk document pass1-rules nil base-font-size)
              container-ctx {:containers (build-containers pass1-document)
