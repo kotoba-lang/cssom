@@ -4484,13 +4484,13 @@
      (if (names-scope? selector)
        selector
        (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (get selector :selector/parts) (typed-list-new [:list [:ref :cssom/compound]]))
-             np (vector-count p0)]
-         (if (= np 0)
+             ]
+         (if (= 0 (count p0))
            selector
            (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))]
              (assoc selector :selector/parts
                (loop [i 0 out base0]
-                 (if (>= i np) out
+                 (if (>= i (count p0)) out
                    (let [part (typed-list-nth [:list [:ref :cssom/compound]] p0 i)
                          part2 (if (= i 0) (assoc part :selector/combinator (option-some-of [:option :keyword] :descendant)) part)]
                      (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out part2))))))))))
@@ -4534,13 +4534,13 @@
      (if (names-scope? selector)
        selector
        (let [p0 (option-value-of [:option [:list [:ref :cssom/compound]]] (get selector :selector/parts) (typed-list-new [:list [:ref :cssom/compound]]))
-             np (vector-count p0)]
-         (if (= np 0)
+             ]
+         (if (= 0 (count p0))
            selector
            (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))]
              (assoc selector :selector/parts
                (loop [i 0 out base0]
-                 (if (>= i np) out
+                 (if (>= i (count p0)) out
                    (let [part (typed-list-nth [:list [:ref :cssom/compound]] p0 i)
                          part2 (if (= i 0) (assoc part :selector/combinator (option-some-of [:option :keyword] :descendant)) part)]
                      (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out part2))))))))))
