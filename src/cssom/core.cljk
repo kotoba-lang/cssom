@@ -1902,13 +1902,13 @@
                  acc-map
                  (let [lower (str/ascii-lower tok)]
                    (cond
-                     (and (not (contains? acc-map :border-width))
+                     (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] acc-map :border-width))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] acc-map :border-width (parse-style-value tok))
-                     (and (not (contains? acc-map :border-style))
+                     (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] acc-map :border-style))
                           (contains? border-style-keywords lower))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] acc-map :border-style (result-err-of [:result :f64 :string] tok))
-                     (not (contains? acc-map :border-color))
+                     (not (typed-map-contains [:map :keyword [:result :f64 :string]] acc-map :border-color))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] acc-map :border-color (result-err-of [:result :f64 :string] tok))
                      :else acc-map))))))))
      :default
@@ -1916,15 +1916,15 @@
     (reduce (fn [acc-map tok]
               (let [lower (str/ascii-lower tok)]
                 (cond
-                  (and (not (contains? acc-map :border-width))
+                  (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] acc-map :border-width))
                        (border-shorthand-width-token? tok))
                   (assoc acc-map :border-width (parse-style-value tok))
 
-                  (and (not (contains? acc-map :border-style))
+                  (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] acc-map :border-style))
                        (contains? border-style-keywords lower))
                   (assoc acc-map :border-style tok)
 
-                  (not (contains? acc-map :border-color))
+                  (not (typed-map-contains [:map :keyword [:result :f64 :string]] acc-map :border-color))
                   (assoc acc-map :border-color tok)
 
                   :else acc-map)))
@@ -2584,18 +2584,18 @@
                (let [tok (typed-list-nth [:list :string] tokens i)]
                  (recur (inc i)
                    (cond
-                     (and (not (contains? result :text-shadow-x))
+                     (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-x))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :text-shadow-x (parse-style-value tok))
-                     (and (contains? result :text-shadow-x)
-                          (not (contains? result :text-shadow-y))
+                     (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-x)
+                          (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-y))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :text-shadow-y (parse-style-value tok))
-                     (and (contains? result :text-shadow-y)
-                          (not (contains? result :text-shadow-blur))
+                     (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-y)
+                          (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-blur))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :text-shadow-blur (parse-style-value tok))
-                     (not (contains? result :text-shadow-color))
+                     (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-color))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :text-shadow-color (result-err-of [:result :f64 :string] tok))
                      :else result)))))))
      :default
@@ -2605,18 +2605,18 @@
          (let [tokens (->> (split-value-components v " ") (remove (fn [x] (str/blank? x))))]
            (reduce (fn [result tok]
                      (cond
-                       (and (not (contains? result :text-shadow-x))
+                       (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-x))
                             (border-shorthand-width-token? tok))
                        (assoc result :text-shadow-x (parse-style-value tok))
-                       (and (contains? result :text-shadow-x)
-                            (not (contains? result :text-shadow-y))
+                       (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-x)
+                            (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-y))
                             (border-shorthand-width-token? tok))
                        (assoc result :text-shadow-y (parse-style-value tok))
-                       (and (contains? result :text-shadow-y)
-                            (not (contains? result :text-shadow-blur))
+                       (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-y)
+                            (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-blur))
                             (border-shorthand-width-token? tok))
                        (assoc result :text-shadow-blur (parse-style-value tok))
-                       (not (contains? result :text-shadow-color))
+                       (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :text-shadow-color))
                        (assoc result :text-shadow-color tok)
                        :else result))
                    {}
@@ -2635,22 +2635,22 @@
                (let [tok (typed-list-nth [:list :string] tokens i)]
                  (recur (inc i)
                    (cond
-                     (and (not (contains? result :box-shadow-x))
+                     (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-x))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-x (parse-style-value tok))
-                     (and (contains? result :box-shadow-x)
-                          (not (contains? result :box-shadow-y))
+                     (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-x)
+                          (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-y))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-y (parse-style-value tok))
-                     (and (contains? result :box-shadow-y)
-                          (not (contains? result :box-shadow-blur))
+                     (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-y)
+                          (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-blur))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-blur (parse-style-value tok))
-                     (and (contains? result :box-shadow-blur)
-                          (not (contains? result :box-shadow-spread))
+                     (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-blur)
+                          (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-spread))
                           (border-shorthand-width-token? tok))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-spread (parse-style-value tok))
-                     (not (contains? result :box-shadow-color))
+                     (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-color))
                      (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-color (result-err-of [:result :f64 :string] tok))
                      :else result))))))))
      :default
@@ -2660,22 +2660,22 @@
          (let [tokens (->> (split-value-components v " ") (remove (fn [x] (str/blank? x))))]
            (reduce (fn [result tok]
                      (cond
-                       (and (not (contains? result :box-shadow-x))
+                       (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-x))
                             (border-shorthand-width-token? tok))
                        (assoc result :box-shadow-x (parse-style-value tok))
-                       (and (contains? result :box-shadow-x)
-                            (not (contains? result :box-shadow-y))
+                       (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-x)
+                            (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-y))
                             (border-shorthand-width-token? tok))
                        (assoc result :box-shadow-y (parse-style-value tok))
-                       (and (contains? result :box-shadow-y)
-                            (not (contains? result :box-shadow-blur))
+                       (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-y)
+                            (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-blur))
                             (border-shorthand-width-token? tok))
                        (assoc result :box-shadow-blur (parse-style-value tok))
-                       (and (contains? result :box-shadow-blur)
-                            (not (contains? result :box-shadow-spread))
+                       (and (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-blur)
+                            (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-spread))
                             (border-shorthand-width-token? tok))
                        (assoc result :box-shadow-spread (parse-style-value tok))
-                       (not (contains? result :box-shadow-color))
+                       (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :box-shadow-color))
                        (assoc result :box-shadow-color tok)
                        :else result))
                    {}
@@ -2702,13 +2702,13 @@
                  lower (str/ascii-lower tok)]
              (recur (inc i)
                (cond
-                 (and (not (contains? result :outline-width))
+                 (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :outline-width))
                       (border-shorthand-width-token? tok))
                  (typed-map-assoc [:map :keyword [:result :f64 :string]] result :outline-width (parse-style-value tok))
-                 (and (not (contains? result :outline-style))
+                 (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :outline-style))
                       (contains? outline-style-keywords lower))
                  (typed-map-assoc [:map :keyword [:result :f64 :string]] result :outline-style (result-err-of [:result :f64 :string] tok))
-                 (not (contains? result :outline-color))
+                 (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :outline-color))
                  (typed-map-assoc [:map :keyword [:result :f64 :string]] result :outline-color (result-err-of [:result :f64 :string] tok))
                  :else result))))))
      :default
@@ -2716,13 +2716,13 @@
        (reduce (fn [result tok]
                  (let [lower (str/ascii-lower tok)]
                    (cond
-                     (and (not (contains? result :outline-width))
+                     (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :outline-width))
                           (border-shorthand-width-token? tok))
                      (assoc result :outline-width (parse-style-value tok))
-                     (and (not (contains? result :outline-style))
+                     (and (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :outline-style))
                           (contains? outline-style-keywords lower))
                      (assoc result :outline-style tok)
-                     (not (contains? result :outline-color))
+                     (not (typed-map-contains [:map :keyword [:result :f64 :string]] result :outline-color))
                      (assoc result :outline-color tok)
                      :else result)))
                {}
