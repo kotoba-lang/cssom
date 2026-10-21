@@ -2248,26 +2248,48 @@
    store raw under a key nothing reads, which is this namespace's standing
    degrade-don't-guess posture and is precisely what these six did before
    this function existed."
-  [prop v]
-  (when-let [[start end] (get logical-side-shorthand-longhands prop)]
-    (let [tokens (box-shorthand-tokens v)
-          n (count tokens)
-          auto-ok? (or (str/starts-with? prop "margin") (str/starts-with? prop "inset"))]
-      (when (and (pos? n) (<= n 2)
-                 (every? #(or (css-int-or-px-token? %)
-                              (some? (percentage-number %))
-                              (some? (calc-pattern-parts %))
-                              (some? (parse-var-reference %))
-                              (and auto-ok? (= "auto" (str/ascii-lower %)))
-                              (and (= 1 n) (css-wide-keyword %)))
-                         tokens))
-        #?(:kotoba
-           (typed-map-assoc [:map :keyword [:result :f64 :string]]
+  [#?@(:kotoba [prop :string v :string] :default [prop v])]
+  #?(:kotoba
+     (let [lv-opt (typed-map-get [:map :string [:list :keyword]] logical-side-shorthand-longhands prop)]
+       (if (some? lv-opt)
+         (let [lv (option-value-of [:list :keyword] lv-opt (typed-list-new [:list :keyword]))
+               start (typed-list-nth [:list :keyword] lv 0)
+               end (typed-list-nth [:list :keyword] lv 1)
+               tokens (box-shorthand-tokens v)
+               ntoks (vector-count tokens)
+               auto-ok? (or (str/starts-with? prop "margin") (str/starts-with? prop "inset"))
+               ok (loop [i 0 acc true]
+                    (if (or (not acc) (>= i ntoks))
+                      acc
+                      (let [t (typed-list-nth [:list :string] tokens i)
+                            tok-ok (or (css-int-or-px-token? t)
+                                       (some? (percentage-number t))
+                                       (some? (calc-pattern-parts t))
+                                       (some? (parse-var-reference t))
+                                       (and auto-ok? (= "auto" (str/ascii-lower t)))
+                                       (and (= 1 ntoks) (css-wide-keyword t)))]
+                        (recur (inc i) tok-ok))))]
+           (if (and (pos? ntoks) (<= ntoks 2) ok)
              (typed-map-assoc [:map :keyword [:result :f64 :string]]
-               (typed-map-new [:map :keyword [:result :f64 :string]])
-               start (parse-style-value (tokens 0)))
-             end (parse-style-value (get tokens 1 (tokens 0))))
-           :default
+               (typed-map-assoc [:map :keyword [:result :f64 :string]]
+                 (typed-map-new [:map :keyword [:result :f64 :string]])
+                 start (parse-style-value (typed-list-nth [:list :string] tokens 0)))
+               end (parse-style-value (typed-list-nth [:list :string] tokens (if (>= ntoks 2) 1 0))))
+             nil))
+         nil))
+     :default
+     (when-let [[start end] (get logical-side-shorthand-longhands prop)]
+       (let [tokens (box-shorthand-tokens v)
+             n (count tokens)
+             auto-ok? (or (str/starts-with? prop "margin") (str/starts-with? prop "inset"))]
+         (when (and (pos? n) (<= n 2)
+                    (every? #(or (css-int-or-px-token? %)
+                                 (some? (percentage-number %))
+                                 (some? (calc-pattern-parts %))
+                                 (some? (parse-var-reference %))
+                                 (and auto-ok? (= "auto" (str/ascii-lower %)))
+                                 (and (= 1 n) (css-wide-keyword %)))
+                            tokens))
            {start (parse-style-value (tokens 0))
             end (parse-style-value (get tokens 1 (tokens 0)))})))))
 
