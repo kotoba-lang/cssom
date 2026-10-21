@@ -2781,45 +2781,49 @@
    "place-self"    [:align-self :justify-self]})
 
 (defn- expand-place-shorthand
-  "Expands one of `place-shorthands` into its two longhands: one value sets
-   both, two values are align then justify. Returns nil for a name that is
-   not one of the three, or for a value with no tokens or more than two, so
-   the generic path stores it raw rather than this guessing.
-
-   The tokens are NOT validated against an alignment vocabulary. That is
-   deliberate and it is the same posture `expand-border-box-shorthand`
-   takes: `cssom.layout` is the file that knows which alignment keywords it
-   can act on, and a value this cannot check must reach it unchanged rather
-   than being dropped here. `place-items: flurb` therefore expands to two
-   `flurb` longhands, which `cssom.layout` then ignores exactly as it
-   ignores a `justify-items: flurb` written by hand -- one wrong answer
-   instead of two different ones.
-
-   Not expanded, and named: `place-*` accepts a `<baseline-position>` whose
-   two words (`first baseline`) are ONE value, so `place-items: first
-   baseline` would be read here as align `first` / justify `baseline`.
-   Nothing in this repo reads `baseline` on the justify axis, so the cost
-   is confined to that keyword; recognising it means a real
-   `<self-position>` grammar, which is a larger change than this table."
-  [k v]
-  (when-let [[align justify] (get place-shorthands (str/ascii-lower (str k)))]
-    (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
-      (case (count tokens)
-        1 #?(:kotoba
+  [#?@(:kotoba [k :string v :string] :default [k v])]
+  #?(:kotoba
+     (let [lv-opt (typed-map-get [:map :string [:list :keyword]] place-shorthands (str/ascii-lower (str k)))]
+       (if (some? lv-opt)
+         (let [lv (option-value-of [:list :keyword] lv-opt (typed-list-new [:list :keyword]))
+               align (typed-list-nth [:list :keyword] lv 0)
+               justify (typed-list-nth [:list :keyword] lv 1)
+               tokens (value-tokens v)
+               ntoks (vector-count tokens)]
+           (cond
+             (= 1 ntoks)
              (typed-map-assoc [:map :keyword :string]
                (typed-map-assoc [:map :keyword :string]
                  (typed-map-new [:map :keyword :string])
-                 align (first tokens))
-               justify (first tokens))
-             :default {align (first tokens) justify (first tokens)})
-        2 #?(:kotoba
+                 align (typed-list-nth [:list :string] tokens 0))
+               justify (typed-list-nth [:list :string] tokens 0))
+             (= 2 ntoks)
              (typed-map-assoc [:map :keyword :string]
                (typed-map-assoc [:map :keyword :string]
                  (typed-map-new [:map :keyword :string])
-                 align (first tokens))
-               justify (second tokens))
-             :default {align (first tokens) justify (second tokens)})
-        nil))))
+                 align (typed-list-nth [:list :string] tokens 0))
+               justify (typed-list-nth [:list :string] tokens 1))
+             :else nil))
+         nil))
+     :default
+     (when-let [[align justify] (get place-shorthands (str/ascii-lower (str k)))]
+       (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
+         (case (count tokens)
+           1 #?(:kotoba
+                (typed-map-assoc [:map :keyword :string]
+                  (typed-map-assoc [:map :keyword :string]
+                    (typed-map-new [:map :keyword :string])
+                    align (first tokens))
+                  justify (first tokens))
+                :default {align (first tokens) justify (first tokens)})
+           2 #?(:kotoba
+                (typed-map-assoc [:map :keyword :string]
+                  (typed-map-assoc [:map :keyword :string]
+                    (typed-map-new [:map :keyword :string])
+                    align (first tokens))
+                  justify (second tokens))
+                :default {align (first tokens) justify (second tokens)})
+           nil)))))
 
 (defn- expand-flex-shorthand
   "Expands the `flex` shorthand into `:flex-grow`/`:flex-shrink`/
