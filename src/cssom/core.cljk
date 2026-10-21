@@ -442,8 +442,7 @@
             [kotoba.wasm.host.color :as host-color]
             #?(:kotoba [kotoba.lang.bounded-regex :as bounded-regex]))
   (:schemas
-   {:cssom/parts [:list [:ref :cssom/compound]]
-    :cssom/attr [:record :cssom/attr [[:attr/name :keyword]
+   {:cssom/attr [:record :cssom/attr [[:attr/name :keyword]
                                       [:attr/operator [:option :string]]
                                       [:attr/value [:option :string]]
                                       [:attr/case-insensitive? :bool]]]
