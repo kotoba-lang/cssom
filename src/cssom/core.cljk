@@ -2622,74 +2622,64 @@
                    {}
                    tokens)))))))
 (defn- expand-box-shadow-shorthand
-  "Parses a `box-shadow` shorthand value (real CSS's own grammar,
-   `<offset-x> <offset-y> <blur-radius>? <spread-radius>? <color>?` --
-   offsets are REQUIRED, blur-radius/spread-radius/color are each
-   optional, color may also appear before the offsets) into a map of
-   whichever of `:box-shadow-x`/`:box-shadow-y`/`:box-shadow-blur`/
-   `:box-shadow-spread`/`:box-shadow-color` it actually specifies --
-   previously read NOWHERE at all, `box-shadow` stored verbatim as a
-   single unrecognized `:box-shadow` key that `layout.cljc` never read,
-   so a real, common author declaration like `box-shadow: 4px 4px 8px
-   #000000` silently painted nothing at all, confirmed via direct REPL
-   reproduction. Deliberately scoped to the same token forms
-   `expand-border-shorthand`/`expand-text-shadow-shorthand` already
-   commit to (a bare integer/`px` length per offset/blur/spread, color
-   as a single whitespace-delimited token) -- multiple comma-separated
-   shadows and the `inset` keyword are NOT supported, a single non-inset
-   drop shadow only, the same 'reasonable baseline, not full spec
-   coverage' posture as `text-shadow` above.
-
-   Spread-radius (the 4th length component) WAS a real, severe bug here,
-   not merely an absent feature: before this fix, a 4th length-shaped
-   token (e.g. the `0` in the extremely common real-world
-   `box-shadow: 0 1px 2px 0 rgba(0,0,0,0.1)` shape -- Tailwind's/
-   Material's/Bootstrap's own default shadows all use exactly this
-   5-token form) fell through into the `:box-shadow-color` branch,
-   confirmed via direct REPL reproduction, and the REAL trailing color
-   token was then silently DROPPED entirely (the `:else` branch, since
-   `:box-shadow-color` was already \"taken\" by the spread token) --
-   worse than a scope-cut, an author's real shadow color was corrupted
-   and lost. Fixed by recognizing a 4th length-shaped token as
-   `:box-shadow-spread` before falling through to color.
-
-   Unlike `text-shadow`, `box-shadow` is NOT a real inherited CSS
-   property, so `none`/blank simply resolves to an EMPTY map (no
-   ancestor value to cancel -- each element's own box-shadow, or lack
-   thereof, is entirely independent of its parent's), unlike text-
-   shadow's own real, PRESENT `{:text-shadow-color \"none\"}` sentinel."
-  [v]
-  (let [v (str/trim (str v))]
-    (if (or (str/blank? v) (= "none" (str/ascii-lower v)))
-      {}
-      (let [tokens (->> (split-value-components v " ") (remove (fn [x] (str/blank? x))))]
-        (reduce (fn [result tok]
-                  (cond
-                    (and (not (contains? result :box-shadow-x))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-x (parse-style-value tok))
-
-                    (and (contains? result :box-shadow-x)
-                         (not (contains? result :box-shadow-y))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-y (parse-style-value tok))
-
-                    (and (contains? result :box-shadow-y)
-                         (not (contains? result :box-shadow-blur))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-blur (parse-style-value tok))
-
-                    (and (contains? result :box-shadow-blur)
-                         (not (contains? result :box-shadow-spread))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-spread (parse-style-value tok))
-
-                    (not (contains? result :box-shadow-color))
-                    (assoc result :box-shadow-color tok)
-
-                    :else result))
-                {}
-                tokens)))))
+  [#?@(:kotoba [v :string] :default [v])]
+  #?(:kotoba
+     (let [v (str/trim (str v))]
+       (if (or (str/blank? v) (= "none" (str/ascii-lower v)))
+         (typed-map-new [:map :keyword [:result :f64 :string]])
+         (let [tokens (value-tokens v)
+               ntoks (vector-count tokens)]
+           (loop [i 0 result (typed-map-new [:map :keyword [:result :f64 :string]])]
+             (if (>= i ntoks)
+               result
+               (let [tok (typed-list-nth [:list :string] tokens i)]
+                 (recur (inc i)
+                   (cond
+                     (and (not (contains? result :box-shadow-x))
+                          (border-shorthand-width-token? tok))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-x (parse-style-value tok))
+                     (and (contains? result :box-shadow-x)
+                          (not (contains? result :box-shadow-y))
+                          (border-shorthand-width-token? tok))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-y (parse-style-value tok))
+                     (and (contains? result :box-shadow-y)
+                          (not (contains? result :box-shadow-blur))
+                          (border-shorthand-width-token? tok))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-blur (parse-style-value tok))
+                     (and (contains? result :box-shadow-blur)
+                          (not (contains? result :box-shadow-spread))
+                          (border-shorthand-width-token? tok))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-spread (parse-style-value tok))
+                     (not (contains? result :box-shadow-color))
+                     (typed-map-assoc [:map :keyword [:result :f64 :string]] result :box-shadow-color (result-err-of [:result :f64 :string] tok))
+                     :else result))))))))
+     :default
+     (let [v (str/trim (str v))]
+       (if (or (str/blank? v) (= "none" (str/ascii-lower v)))
+         {}
+         (let [tokens (->> (split-value-components v " ") (remove (fn [x] (str/blank? x))))]
+           (reduce (fn [result tok]
+                     (cond
+                       (and (not (contains? result :box-shadow-x))
+                            (border-shorthand-width-token? tok))
+                       (assoc result :box-shadow-x (parse-style-value tok))
+                       (and (contains? result :box-shadow-x)
+                            (not (contains? result :box-shadow-y))
+                            (border-shorthand-width-token? tok))
+                       (assoc result :box-shadow-y (parse-style-value tok))
+                       (and (contains? result :box-shadow-y)
+                            (not (contains? result :box-shadow-blur))
+                            (border-shorthand-width-token? tok))
+                       (assoc result :box-shadow-blur (parse-style-value tok))
+                       (and (contains? result :box-shadow-blur)
+                            (not (contains? result :box-shadow-spread))
+                            (border-shorthand-width-token? tok))
+                       (assoc result :box-shadow-spread (parse-style-value tok))
+                       (not (contains? result :box-shadow-color))
+                       (assoc result :box-shadow-color tok)
+                       :else result))
+                   {}
+                   tokens))))))
 
 (def ^:private outline-style-keywords
   ;; Real CSS outline-style's own keyword set -- close to but not
@@ -2701,40 +2691,42 @@
   #?(:kotoba (typed-map-new [:map :string :bool] "none" true "auto" true "dotted" true "dashed" true "solid" true "double" true "groove" true "ridge" true "inset" true "outset" true) :default #{"none" "auto" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"}))
 
 (defn- expand-outline-shorthand
-  "Parses an `outline` shorthand value (real CSS's own order-independent
-   grammar, `<line-width> || <line-style> || <color>`, identical shape to
-   `border`) into a map of whichever of `:outline-width`/`:outline-
-   style`/`:outline-color` it actually specifies -- previously read
-   NOWHERE at all (a repo-wide grep for `outline` in this file's own
-   source returned nothing but a handful of unrelated comments), so a
-   real, common author declaration like `outline: 2px solid #ff0000`
-   silently painted no outline at all, confirmed via direct REPL
-   reproduction before touching source. Deliberately scoped to the exact
-   same token forms `expand-border-shorthand` already commits to (a bare
-   integer/`px` length for width, color as a single whitespace-delimited
-   token). `outline-offset` is a real, SEPARATE (non-shorthand) CSS
-   property, not part of this grammar at all -- handled generically by
-   this file's own plain `parse-style-value` coercion, no special-casing
-   needed here."
-  [v]
-  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
-    (reduce (fn [result tok]
-              (let [lower (str/ascii-lower tok)]
-                (cond
-                  (and (not (contains? result :outline-width))
-                       (border-shorthand-width-token? tok))
-                  (assoc result :outline-width (parse-style-value tok))
-
-                  (and (not (contains? result :outline-style))
-                       (contains? outline-style-keywords lower))
-                  (assoc result :outline-style tok)
-
-                  (not (contains? result :outline-color))
-                  (assoc result :outline-color tok)
-
-                  :else result)))
-            {}
-            tokens)))
+  [#?@(:kotoba [v :string] :default [v])]
+  #?(:kotoba
+     (let [tokens (value-tokens (str v))
+           ntoks (vector-count tokens)]
+       (loop [i 0 result (typed-map-new [:map :keyword [:result :f64 :string]])]
+         (if (>= i ntoks)
+           result
+           (let [tok (typed-list-nth [:list :string] tokens i)
+                 lower (str/ascii-lower tok)]
+             (recur (inc i)
+               (cond
+                 (and (not (contains? result :outline-width))
+                      (border-shorthand-width-token? tok))
+                 (typed-map-assoc [:map :keyword [:result :f64 :string]] result :outline-width (parse-style-value tok))
+                 (and (not (contains? result :outline-style))
+                      (contains? outline-style-keywords lower))
+                 (typed-map-assoc [:map :keyword [:result :f64 :string]] result :outline-style (result-err-of [:result :f64 :string] tok))
+                 (not (contains? result :outline-color))
+                 (typed-map-assoc [:map :keyword [:result :f64 :string]] result :outline-color (result-err-of [:result :f64 :string] tok))
+                 :else result))))))
+     :default
+     (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))]
+       (reduce (fn [result tok]
+                 (let [lower (str/ascii-lower tok)]
+                   (cond
+                     (and (not (contains? result :outline-width))
+                          (border-shorthand-width-token? tok))
+                     (assoc result :outline-width (parse-style-value tok))
+                     (and (not (contains? result :outline-style))
+                          (contains? outline-style-keywords lower))
+                     (assoc result :outline-style tok)
+                     (not (contains? result :outline-color))
+                     (assoc result :outline-color tok)
+                     :else result)))
+               {}
+               tokens))))
 
 (defn- flex-shorthand-number-token?
   "A `<number>` in the `flex` shorthand's grow/shrink slots. Deliberately
