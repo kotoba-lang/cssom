@@ -840,14 +840,14 @@
   [s idx]
   (let [integer-end (loop [end idx]
                       (if (and (< end (string-byte-length s))
-                               (str/includes? "0123456789" (str (string-substring s end (inc end)))))
+                               (str/includes? "0123456789" (option-value-of :string (string-substring s end (inc end)) "")))
                         (recur (inc end))
                         end))
         dot? (and (< integer-end (string-byte-length s)) (= "." (subs s integer-end (inc integer-end))))
         fraction-end (if dot?
                        (loop [end (inc integer-end)]
                          (if (and (< end (string-byte-length s))
-                                  (str/includes? "0123456789" (str (string-substring s end (inc end)))))
+                                  (str/includes? "0123456789" (option-value-of :string (string-substring s end (inc end)) "")))
                            (recur (inc end))
                            end))
                        integer-end)
@@ -923,7 +923,7 @@
   [s idx]
   (let [name-end (loop [end idx]
                    (if (and (< end (string-byte-length s))
-                            (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str (string-substring s end (inc end))))
+                            (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (option-value-of :string (string-substring s end (inc end)) ""))
                                 (= "-" (subs s end (inc end)))))
                      (recur (inc end))
                      end))
@@ -966,7 +966,7 @@
     (loop [idx 0 tokens []]
       (cond
         (= idx n) tokens
-        (str/blank? (str (string-substring s idx (inc idx)))) (recur (inc idx) tokens)
+        (str/blank? (option-value-of :string (string-substring s idx (inc idx)) "")) (recur (inc idx) tokens)
         :else
         (case (subs s idx (inc idx))
           "+" (recur (inc idx) (conj tokens {:calc/type :plus}))
@@ -1188,7 +1188,7 @@
     (and (seq body)
          (loop [idx 0]
            (if (>= idx (string-byte-length body)) true
-             (and (str/includes? "0123456789" (str (string-substring body idx (inc idx))))
+             (and (str/includes? "0123456789" (option-value-of :string (string-substring body idx (inc idx)) ""))
                   (recur (inc idx))))))))
 
 (defn- css-parse-integer [#?@(:kotoba [s :string] :default [s])]
@@ -1590,7 +1590,7 @@
     (loop [idx 0]
       (cond
         (= idx n) (typed-list-new [:list :string] s)
-        (= sep (str (string-substring s idx (inc idx)))) (typed-list-new [:list :string] (string-substring s 0 idx) (string-substring s (inc idx) (string-byte-length s)))
+        (= sep (option-value-of :string (string-substring s idx (inc idx)) "")) (typed-list-new [:list :string] (string-substring s 0 idx) (string-substring s (inc idx) (string-byte-length s)))
         :else (recur (inc idx))))))
 
 (defn- parse-counter-property
@@ -1700,7 +1700,7 @@
         n (string-byte-length s)]
     (when (and (> n 4)
                (= "var(" (string-substring s 0 4))
-               (= ")" (str (string-substring s (dec n) (inc (dec n))))))
+               (= ")" (option-value-of :string (string-substring s (dec n) (inc (dec n))) "")))
       (let [close (matching-var-close s 3)]
         (when (= close (dec n))
           (let [parts (split-first-on (string-substring s 4 close) ",")
@@ -1714,7 +1714,7 @@
 
 (defn- css-decimal-token? [#?@(:kotoba [s :string] :default [s])] #?@(:kotoba [:bool])
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (string-substring s 0 (inc 0)))) (= "-" (str (string-substring s 0 (inc 0)))))) 1 0)]
+        start (if (and (> n 0) (or (= "+" (option-value-of :string (string-substring s 0 (inc 0)) "")) (= "-" (option-value-of :string (string-substring s 0 (inc 0)) "")))) 1 0)]
     (loop [idx start before 0 after 0 dot? 0]
       (if (>= idx n)
         (or (> before 0) (> after 0))
@@ -1739,17 +1739,17 @@
 
 (defn- css-number-end [#?@(:kotoba [s :string] :default [s])]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (string-substring s 0 (inc 0)))) (= "-" (str (string-substring s 0 (inc 0)))))) 1 0)
+        start (if (and (> n 0) (or (= "+" (option-value-of :string (string-substring s 0 (inc 0)) "")) (= "-" (option-value-of :string (string-substring s 0 (inc 0)) "")))) 1 0)
         integer-end (css-digits-end s start)
-        dot? (and (< integer-end n) (= "." (str (string-substring s integer-end (inc integer-end)))))
+        dot? (and (< integer-end n) (= "." (option-value-of :string (string-substring s integer-end (inc integer-end)) "")))
         fraction-start (if dot? (inc integer-end) integer-end)
         end (css-digits-end s fraction-start)
         has-digits? (or (> integer-end start) (> end fraction-start))]
     (when has-digits?
-      (if (and (< end n) (or (= "e" (str (string-substring s end (inc end)))) (= "E" (str (string-substring s end (inc end))))))
+      (if (and (< end n) (or (= "e" (option-value-of :string (string-substring s end (inc end)) "")) (= "E" (option-value-of :string (string-substring s end (inc end)) ""))))
         (let [exp-sign? (and (< (inc end) n)
-                             (or (= "+" (str (string-substring s (inc end) (inc (inc end)))))
-                                 (= "-" (str (string-substring s (inc end) (inc (inc end)))))))
+                             (or (= "+" (option-value-of :string (string-substring s (inc end) (inc (inc end))) ""))
+                                 (= "-" (option-value-of :string (string-substring s (inc end) (inc (inc end))) ""))))
               exp-start (+ end (if exp-sign? 2 1))
               exp-end (css-digits-end s exp-start)]
           (when (> exp-end exp-start) exp-end))
@@ -1760,13 +1760,13 @@
 
 (defn- css-integer-token? [s]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (string-substring s 0 (inc 0)))) (= "-" (str (string-substring s 0 (inc 0)))))) 1 0)
+        start (if (and (> n 0) (or (= "+" (option-value-of :string (string-substring s 0 (inc 0)) "")) (= "-" (option-value-of :string (string-substring s 0 (inc 0)) "")))) 1 0)
         end (css-digits-end s start)]
     (and (> end start) (= end n))))
 
 (defn- css-zero-token? [#?@(:kotoba [s :string] :default [s])]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (or (= "+" (str (string-substring s 0 (inc 0)))) (= "-" (str (string-substring s 0 (inc 0)))))) 1 0)]
+        start (if (and (> n 0) (or (= "+" (option-value-of :string (string-substring s 0 (inc 0)) "")) (= "-" (option-value-of :string (string-substring s 0 (inc 0)) "")))) 1 0)]
     (loop [idx start dot? 0]
       (if (>= idx n)
         true
@@ -1778,9 +1778,9 @@
 
 (defn- css-ident-token? [#?@(:kotoba [s :string] :default [s])]
   (let [n (string-byte-length s)
-        start (if (and (> n 0) (= "-" (str (string-substring s 0 (inc 0))))) 1 0)]
+        start (if (and (> n 0) (= "-" (option-value-of :string (string-substring s 0 (inc 0)) ""))) 1 0)]
     (and (< start n)
-         (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" (str (string-substring s start (inc start)))))
+         (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" (option-value-of :string (string-substring s start (inc start)) "")))
          (loop [idx (inc start)]
            (if (>= idx n) true
              (let [ch (string-substring s idx (inc idx))]
@@ -1806,7 +1806,7 @@
   (let [n (string-byte-length s)
         open (str/index-of s "(")
         name (when open (string-substring s 0 open))]
-    (and open (> n (inc open)) (= ")" (str (string-substring s (dec n) (inc (dec n)))))
+    (and open (> n (inc open)) (= ")" (option-value-of :string (string-substring s (dec n) (inc (dec n))) ""))
          (not (str/includes? s "\n"))
          (> (string-byte-length name) 0)
          (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (string-substring name 0 1))
@@ -2826,62 +2826,68 @@
            nil)))))
 
 (defn- expand-flex-shorthand
-  "Expands the `flex` shorthand into `:flex-grow`/`:flex-shrink`/
-   `:flex-basis`, per CSS Flexible Box Layout §7.1
-   (`none | [ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ]`).
-
-   This is the whole of `flex: 1`, which is the single most-used flex
-   declaration on the real web -- and it is NOT `flex-grow: 1`. The
-   one-number form resets the BASIS to zero, so the items split the
-   container evenly regardless of their content; `flex-grow: 1` alone
-   leaves the basis at `auto` and only distributes the leftover. Nothing
-   here expanded it at all before, so `flex: 1` reached
-   `cssom.layout/node-style` as an unread `:flex` key and every item kept
-   its content width: measured against a real browser, two `flex: 1`
-   items in a 300px row came out 7px and 70px where the browser gives
-   150 and 150.
-
-   Zero is emitted for the `0%` basis the spec names, rather than the
-   percentage string: this engine resolves a flex basis as a length, and
-   `0%` of any containing block is 0 either way. The distinction real CSS
-   keeps (`0%` behaves as `content` when the container's main size is
-   indefinite) is not modelled -- see `cssom.layout/flex-item-base-size`
-   for the corresponding scope cut on the reading side.
-
-   Anything outside this grammar is left completely unexpanded for the
-   generic path to store raw, the same degrade-don't-guess posture
-   `expand-box-side-shorthand` takes: a value this cannot parse must not
-   become a guessed grow factor."
-  [v]
-  (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))
-        n (count tokens)
-        numbers (filterv flex-shorthand-number-token? tokens)
-        bases (filterv (complement flex-shorthand-number-token?) tokens)
-        ;; `initial`/`auto`/`none` are the three named forms, and each is
-        ;; defined by the spec as an exact grow/shrink/basis triple.
-        named (when (= 1 n) (get {"none" [0 0 "auto"] "auto" [1 1 "auto"]
-                                  "initial" [0 1 "auto"]}
-                                 (str/ascii-lower (first tokens))))]
-    (cond
-      named {:flex-grow (named 0) :flex-shrink (named 1) :flex-basis (named 2)}
-
-      ;; At most two numbers (grow, then shrink) and at most one basis, and
-      ;; nothing left over -- `flex: 1 solid` parses as neither.
-      (and (pos? n) (<= n 3) (<= (count numbers) 2) (<= (count bases) 1)
-           (= n (+ (count numbers) (count bases)))
-           ;; A lone token that is neither a number nor a resolvable length
-           ;; (`flex: содержимое`) is not a basis this engine can use.
-           (every? #(or (css-dec-or-px-token? %)
-                        (= "auto" (str/ascii-lower %))
-                        (some? (calc-pattern-parts %))
-                        (str/ends-with? % "%"))
-                   bases))
-      {:flex-grow (if (seq numbers) (parse-style-value (numbers 0)) 1)
-       :flex-shrink (if (> (count numbers) 1) (parse-style-value (numbers 1)) 1)
-       :flex-basis (if (seq bases)
-                     (parse-style-value (bases 0))
-                     ;; the `<number>`-only form's own `0%`
-                     0)})))
+  [#?@(:kotoba [v :string] :default [v])]
+  #?(:kotoba
+     (let [toks (value-tokens v)
+           ntoks (vector-count toks)
+           numbers (loop [i 0 acc (typed-list-new [:list :string])]
+                     (if (>= i ntoks)
+                       acc
+                       (let [t (typed-list-nth [:list :string] toks i)]
+                         (recur (inc i) (if (flex-shorthand-number-token? t) (typed-list-conj [:list :string] acc t) acc)))))
+           bases (loop [i 0 acc (typed-list-new [:list :string])]
+                   (if (>= i ntoks)
+                     acc
+                     (let [t (typed-list-nth [:list :string] toks i)]
+                       (recur (inc i) (if (flex-shorthand-number-token? t) acc (typed-list-conj [:list :string] acc t))))))
+           nnums (vector-count numbers)
+           nbases (vector-count bases)
+           low (if (>= ntoks 1) (str/ascii-lower (typed-list-nth [:list :string] toks 0)) "")
+           basis-ok (loop [i 0 acc true]
+                      (if (or (not acc) (>= i nbases))
+                        acc
+                        (let [b (typed-list-nth [:list :string] bases i)]
+                          (recur (inc i) (or (css-dec-or-px-token? b)
+                                             (= "auto" (str/ascii-lower b))
+                                             (some? (calc-pattern-parts b))
+                                             (str/ends-with? b "%"))))))]
+       (cond
+         (and (= 1 ntoks) (= low "none"))
+         (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-new [:map :keyword [:result :f64 :string]]) :flex-grow 0) :flex-shrink 0) :flex-basis (result-err-of [:result :f64 :string] "auto"))
+         (and (= 1 ntoks) (= low "auto"))
+         (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-new [:map :keyword [:result :f64 :string]]) :flex-grow 1) :flex-shrink 1) :flex-basis (result-err-of [:result :f64 :string] "auto"))
+         (and (= 1 ntoks) (= low "initial"))
+         (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-new [:map :keyword [:result :f64 :string]]) :flex-grow 0) :flex-shrink 1) :flex-basis (result-err-of [:result :f64 :string] "auto"))
+         (and (pos? ntoks) (<= ntoks 3) (<= nnums 2) (<= nbases 1) (= ntoks (+ nnums nbases)) basis-ok)
+         (typed-map-assoc [:map :keyword [:result :f64 :string]]
+           (typed-map-assoc [:map :keyword [:result :f64 :string]]
+             (typed-map-assoc [:map :keyword [:result :f64 :string]] (typed-map-new [:map :keyword [:result :f64 :string]])
+               :flex-grow (if (>= nnums 1) (parse-style-value (typed-list-nth [:list :string] numbers 0)) 1))
+             :flex-shrink (if (> nnums 1) (parse-style-value (typed-list-nth [:list :string] numbers 1)) 1))
+           :flex-basis (if (>= nbases 1) (parse-style-value (typed-list-nth [:list :string] bases 0)) 0))
+         :else nil))
+     :default
+     (let [tokens (->> (split-value-components (str/trim (str v)) " ") (remove (fn [x] (str/blank? x))))
+           n (count tokens)
+           numbers (filterv flex-shorthand-number-token? tokens)
+           bases (filterv (complement flex-shorthand-number-token?) tokens)
+           named (when (= 1 n) (get {"none" [0 0 "auto"] "auto" [1 1 "auto"]
+                                     "initial" [0 1 "auto"]}
+                                    (str/ascii-lower (first tokens))))]
+       (cond
+         named {:flex-grow (named 0) :flex-shrink (named 1) :flex-basis (named 2)}
+         (and (pos? n) (<= n 3) (<= (count numbers) 2) (<= (count bases) 1)
+              (= n (+ (count numbers) (count bases)))
+              (every? #(or (css-dec-or-px-token? %)
+                           (= "auto" (str/ascii-lower %))
+                           (some? (calc-pattern-parts %))
+                           (str/ends-with? % "%"))
+                      bases))
+         {:flex-grow (if (seq numbers) (parse-style-value (numbers 0)) 1)
+          :flex-shrink (if (> (count numbers) 1) (parse-style-value (numbers 1)) 1)
+          :flex-basis (if (seq bases)
+                        (parse-style-value (bases 0))
+                        0)}))))
 
 (def ^:private font-shorthand-style-keywords
   #?(:kotoba (typed-map-new [:map :string :bool] "italic" true "oblique" true) :default #{"italic" "oblique"}))
@@ -3281,7 +3287,7 @@
   #?(:kotoba
      (let [s (str/trim (str text))
            n (string-byte-length s)]
-       (when (and (> n 2) (= "[" (str (string-substring s 0 (inc 0)))) (= "]" (str (string-substring s (dec n) (inc (dec n))))))
+       (when (and (> n 2) (= "[" (option-value-of :string (string-substring s 0 (inc 0)) "")) (= "]" (option-value-of :string (string-substring s (dec n) (inc (dec n))) "")))
          (let [inside (str/trim (subs s 1 (dec n)))
                name-end (selector-ident-end inside 0)
                attr (string-substring inside 0 name-end)
@@ -3291,18 +3297,18 @@
                {:attr/name (keyword attr) :attr/operator (option-none-of [:option :string]) :attr/value (option-none-of [:option :string])
                 :attr/case-insensitive? false}
                (let [operator (cond
-                                (and (>= (string-byte-length tail) 2) (= "~" (str (string-substring tail 0 (inc 0)))) (= "=" (str (string-substring tail 1 (inc 1))))) (option-some-of [:option :string] "~=")
-                                (and (>= (string-byte-length tail) 2) (= "|" (str (string-substring tail 0 (inc 0)))) (= "=" (str (string-substring tail 1 (inc 1))))) (option-some-of [:option :string] "|=")
-                                (and (>= (string-byte-length tail) 2) (= "^" (str (string-substring tail 0 (inc 0)))) (= "=" (str (string-substring tail 1 (inc 1))))) (option-some-of [:option :string] "^=")
-                                (and (>= (string-byte-length tail) 2) (= "$" (str (string-substring tail 0 (inc 0)))) (= "=" (str (string-substring tail 1 (inc 1))))) (option-some-of [:option :string] "$=")
-                                (and (>= (string-byte-length tail) 2) (= "*" (str (string-substring tail 0 (inc 0)))) (= "=" (str (string-substring tail 1 (inc 1))))) (option-some-of [:option :string] "*=")
-                                (= "=" (str (string-substring tail 0 (inc 0)))) (option-some-of [:option :string] "=")
+                                (and (>= (string-byte-length tail) 2) (= "~" (option-value-of :string (string-substring tail 0 (inc 0)) "")) (= "=" (option-value-of :string (string-substring tail 1 (inc 1)) ""))) (option-some-of [:option :string] "~=")
+                                (and (>= (string-byte-length tail) 2) (= "|" (option-value-of :string (string-substring tail 0 (inc 0)) "")) (= "=" (option-value-of :string (string-substring tail 1 (inc 1)) ""))) (option-some-of [:option :string] "|=")
+                                (and (>= (string-byte-length tail) 2) (= "^" (option-value-of :string (string-substring tail 0 (inc 0)) "")) (= "=" (option-value-of :string (string-substring tail 1 (inc 1)) ""))) (option-some-of [:option :string] "^=")
+                                (and (>= (string-byte-length tail) 2) (= "$" (option-value-of :string (string-substring tail 0 (inc 0)) "")) (= "=" (option-value-of :string (string-substring tail 1 (inc 1)) ""))) (option-some-of [:option :string] "$=")
+                                (and (>= (string-byte-length tail) 2) (= "*" (option-value-of :string (string-substring tail 0 (inc 0)) "")) (= "=" (option-value-of :string (string-substring tail 1 (inc 1)) ""))) (option-some-of [:option :string] "*=")
+                                (= "=" (option-value-of :string (string-substring tail 0 (inc 0)) "")) (option-some-of [:option :string] "=")
                                 :else (option-none-of [:option :string]))]
                  (when (option-some?-of [:option :string] operator)
                    (let [after-op (subs tail (s-len (option-value-of [:option :string] operator "")))
                          value-start (loop [i 0]
                                        (if (and (< i (string-byte-length after-op))
-                                                (str/blank? (str (string-substring after-op i (inc i)))))
+                                                (str/blank? (option-value-of :string (string-substring after-op i (inc i)) "")))
                                          (recur (inc i)) i))
                          value-char (when (< value-start (string-byte-length after-op))
                                       (string-substring after-op value-start (inc value-start)))
@@ -3311,11 +3317,11 @@
                                      (loop [i (inc value-start)]
                                        (cond
                                          (>= i (string-byte-length after-op)) -1
-                                         (= (str value-char) (str (string-substring after-op i (inc i)))) i
+                                         (= (str value-char) (option-value-of :string (string-substring after-op i (inc i)) "")) i
                                          :else (recur (inc i))))
                                      (loop [i value-start]
                                        (if (and (< i (string-byte-length after-op))
-                                                (not (str/blank? (str (string-substring after-op i (inc i))))))
+                                                (not (str/blank? (option-value-of :string (string-substring after-op i (inc i)) ""))))
                                          (recur (inc i)) i)))
                          value (when (>= value-end 0)
                                  (option-some-of [:option :string]
@@ -3750,7 +3756,7 @@
 
 (defn- selector-tag-name [s]
   (if (or (zero? (string-byte-length s))
-          (not (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (str (string-substring s 0 (inc 0))))))
+          (not (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" (option-value-of :string (string-substring s 0 (inc 0)) ""))))
     ""
     (subs s 0 (selector-ident-end s 0))))
 
@@ -6194,7 +6200,7 @@
           :else
           (let [end (loop [j idx]
                       (if (or (>= j (string-byte-length s))
-                              (str/blank? (str (string-substring s j (inc j))))
+                              (str/blank? (option-value-of :string (string-substring s j (inc j)) ""))
                               (media-range-token? (string-substring s j (inc j))))
                         j
                         (recur (inc j))))]
@@ -6252,9 +6258,9 @@
             (and (zero? depth)
                  (<= (+ idx w) n)
                  (= word (str/ascii-lower (subs s idx (+ idx w))))
-                 (or (zero? idx) (str/blank? (str (string-substring s (dec idx) idx)))
+                 (or (zero? idx) (str/blank? (option-value-of :string (string-substring s (dec idx) idx) ""))
                      (= ")" (string-substring s (dec idx) idx)))
-                 (or (= (+ idx w) n) (str/blank? (str (string-substring s (+ idx w) (inc (+ idx w)))))
+                 (or (= (+ idx w) n) (str/blank? (option-value-of :string (string-substring s (+ idx w) (inc (+ idx w))) ""))
                      (= "(" (string-substring s (+ idx w) (inc (+ idx w))))))
             (recur (+ idx w) (+ idx w) depth (conj out (string-substring s start idx)))
 
@@ -6267,7 +6273,7 @@
   (let [w (string-byte-length word)]
     (when (and (>= (string-byte-length s) w)
                (= word (str/ascii-lower (string-substring s 0 w)))
-               (or (= (string-byte-length s) w) (str/blank? (str (string-substring s w (inc w))))
+               (or (= (string-byte-length s) w) (str/blank? (option-value-of :string (string-substring s w (inc w)) ""))
                    (= "(" (string-substring s w (inc w)))))
       (str/trim (string-substring s w (string-byte-length s))))))
 
@@ -7242,7 +7248,7 @@
          (> (string-byte-length value) (+ colon 3))
          (loop [idx (+ colon 3)]
            (if (>= idx (string-byte-length value)) true
-             (and (not (str/blank? (str (string-substring value idx (inc idx)))))
+             (and (not (str/blank? (option-value-of :string (string-substring value idx (inc idx)) "")))
                   (recur (inc idx))))))))
 
 (def ^:private email-format-pattern
@@ -7548,9 +7554,9 @@
     (loop [idx 1]
       (if (>= (inc idx) n)
         [arg (option-none-of [:option :string])]
-        (if (and (str/blank? (str (string-substring s (dec idx) idx)))
+        (if (and (str/blank? (option-value-of :string (string-substring s (dec idx) idx) ""))
                  (= "of" (str/ascii-lower (subs s idx (+ idx 2))))
-                 (str/blank? (str (string-substring s (+ idx 2) (inc (+ idx 2)))))
+                 (str/blank? (option-value-of :string (string-substring s (+ idx 2) (inc (+ idx 2))) ""))
                  (< (+ idx 3) n))
           [(str/trim (subs s 0 (dec idx)))
            (option-some-of [:option :string] (str/trim (subs s (+ idx 3))))]
@@ -10852,7 +10858,7 @@
         body (if (str/starts-with? s "--") (string-substring s 2 (string-byte-length s)) s)
         n (string-byte-length body)]
     (and (pos? n)
-         (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" (str (string-substring body 0 (inc 0)))))
+         (or (str/includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" (option-value-of :string (string-substring body 0 (inc 0)) "")))
          (loop [idx 1]
            (if (>= idx n) true
              (let [ch (string-substring body idx (inc idx))]
