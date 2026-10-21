@@ -4487,15 +4487,13 @@
              np (vector-count p0)]
          (if (= np 0)
            selector
-           (let [comb (option-some-of [:option :keyword] :descendant)
-                 first-raw (typed-list-nth [:list [:ref :cssom/compound]] p0 0)
-                 first-c (assoc first-raw :selector/combinator comb)
-                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))
-             base (typed-list-conj [:list [:ref :cssom/compound]] base0 first-c)]
+           (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))]
              (assoc selector :selector/parts
-               (loop [i 1 out base]
+               (loop [i 0 out base0]
                  (if (>= i np) out
-                   (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (typed-list-nth [:list [:ref :cssom/compound]] p0 i))))))))))
+                   (let [part (typed-list-nth [:list [:ref :cssom/compound]] p0 i)
+                         part2 (if (= i 0) (assoc part :selector/combinator (option-some-of [:option :keyword] :descendant)) part)]
+                     (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out part2))))))))))
      :default
   (if (names-scope? selector)
     selector
@@ -4539,15 +4537,13 @@
              np (vector-count p0)]
          (if (= np 0)
            selector
-           (let [comb (option-some-of [:option :keyword] :descendant)
-                 first-raw (typed-list-nth [:list [:ref :cssom/compound]] p0 0)
-                 first-c (assoc first-raw :selector/combinator comb)
-                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))
-             base (typed-list-conj [:list [:ref :cssom/compound]] base0 first-c)]
+           (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part selector))]
              (assoc selector :selector/parts
-               (loop [i 1 out base]
+               (loop [i 0 out base0]
                  (if (>= i np) out
-                   (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out (typed-list-nth [:list [:ref :cssom/compound]] p0 i))))))))))
+                   (let [part (typed-list-nth [:list [:ref :cssom/compound]] p0 i)
+                         part2 (if (= i 0) (assoc part :selector/combinator (option-some-of [:option :keyword] :descendant)) part)]
+                     (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out part2))))))))))
      :default
   (if (names-scope? selector)
     selector
