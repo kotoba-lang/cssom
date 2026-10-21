@@ -4487,8 +4487,11 @@
              np (vector-count p0)]
          (if (= np 0)
            selector
-           (let [first-c (assoc (typed-list-nth [:list [:ref :cssom/compound]] p0 0) :selector/combinator (option-some-of [:option :keyword] :descendant))
-                 base (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part)) first-c)]
+           (let [comb (option-some-of [:option :keyword] :descendant)
+                 first-raw (typed-list-nth [:list [:ref :cssom/compound]] p0 0)
+                 first-c (assoc first-raw :selector/combinator comb)
+                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part))
+             base (typed-list-conj [:list [:ref :cssom/compound]] base0 first-c)]
              (assoc selector :selector/parts
                (loop [i 1 out base]
                  (if (>= i np) out
@@ -4536,8 +4539,11 @@
              np (vector-count p0)]
          (if (= np 0)
            selector
-           (let [first-c (assoc (typed-list-nth [:list [:ref :cssom/compound]] p0 0) :selector/combinator (option-some-of [:option :keyword] :descendant))
-                 base (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part)) first-c)]
+           (let [comb (option-some-of [:option :keyword] :descendant)
+                 first-raw (typed-list-nth [:list [:ref :cssom/compound]] p0 0)
+                 first-c (assoc first-raw :selector/combinator comb)
+                 base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part))
+             base (typed-list-conj [:list [:ref :cssom/compound]] base0 first-c)]
              (assoc selector :selector/parts
                (loop [i 1 out base]
                  (if (>= i np) out
