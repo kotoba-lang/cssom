@@ -3305,19 +3305,19 @@
                                 (= "=" (option-value-of :string (string-substring tail 0 (inc 0)) "")) (option-some-of [:option :string] "=")
                                 :else (option-none-of [:option :string]))]
                  (when (option-some?-of [:option :string] operator)
-                   (let [after-op (subs tail (s-len (option-value-of [:option :string] operator "")))
+                   (let [after-op (option-value-of :string (subs tail (s-len (option-value-of [:option :string] operator ""))) "")
                          value-start (loop [i 0]
                                        (if (and (< i (string-byte-length after-op))
                                                 (str/blank? (option-value-of :string (string-substring after-op i (inc i)) "")))
                                          (recur (inc i)) i))
-                         value-char (when (< value-start (string-byte-length after-op))
-                                      (string-substring after-op value-start (inc value-start)))
-                         quoted? (or (= "\"" (str value-char)) (= "'" (str value-char)))
+                         vchar (if (< value-start (string-byte-length after-op))
+                                 (option-value-of :string (string-substring after-op value-start (inc value-start)) "") "")
+                         quoted? (or (= "\"" (str vchar)) (= "'" (str vchar)))
                          value-end (if quoted?
                                      (loop [i (inc value-start)]
                                        (cond
                                          (>= i (string-byte-length after-op)) -1
-                                         (= (str value-char) (option-value-of :string (string-substring after-op i (inc i)) "")) i
+                                         (= (str vchar) (option-value-of :string (string-substring after-op i (inc i)) "")) i
                                          :else (recur (inc i))))
                                      (loop [i value-start]
                                        (if (and (< i (string-byte-length after-op))
