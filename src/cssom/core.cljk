@@ -442,7 +442,8 @@
             [kotoba.wasm.host.color :as host-color]
             #?(:kotoba [kotoba.lang.bounded-regex :as bounded-regex]))
   (:schemas
-   {:cssom/attr [:record :cssom/attr [[:attr/name :keyword]
+   {:cssom/parts [:list [:ref :cssom/compound]]
+    :cssom/attr [:record :cssom/attr [[:attr/name :keyword]
                                       [:attr/operator [:option :string]]
                                       [:attr/value [:option :string]]
                                       [:attr/case-insensitive? :bool]]]
@@ -4445,6 +4446,22 @@
                              (recur (inc i) (dec depth)))
           :else (recur (inc i) depth))))))
 
+(defn- scope-parts-new
+  [#?@(:kotoba [p0 [:list [:ref :cssom/compound]] selector [:ref :cssom/compound] np :i64] :default [p0 selector np])]
+  #?@(:kotoba [[:list [:ref :cssom/compound]]])
+  #?(:kotoba
+     (loop [i 0 out (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part))]
+       (if (>= i np) out
+         (let [part (typed-list-nth [:list [:ref :cssom/compound]] p0 i)
+               part2 (if (= i 0) (assoc part :selector/combinator (option-some-of [:option :keyword] :descendant)) part)]
+           (recur (inc i) (typed-list-conj [:list [:ref :cssom/compound]] out part2)))))
+     :default
+     (loop [i 0 out [(implicit-scope-part)]]
+       (if (>= i np) out
+         (let [part (nth p0 i)
+               part2 (if (= i 0) (assoc part :selector/combinator :descendant) part)]
+           (recur (inc i) (conj out part2)))))))
+
 (defn- parse-scope-prelude
   "One `@scope` prelude -- everything between `@scope` and its `{` -- as
    `{:scope/root <selector vector or nil> :scope/limit <same>}`.
@@ -4530,7 +4547,7 @@
            selector
            (let [base0 (typed-list-conj [:list [:ref :cssom/compound]] (typed-list-new [:list [:ref :cssom/compound]]) (implicit-scope-part))]
              (assoc selector :selector/parts
-               (scope-parts-new p0 selector))))))
+               (scope-parts-new p0 selector (count p0)))))))
      :default
   (if (names-scope? selector)
     selector
