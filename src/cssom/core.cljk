@@ -3329,11 +3329,11 @@
                                      (subs after-op (inc value-start) value-end)
                                      (string-substring after-op value-start value-end))))
                          rest-start (if quoted? (inc value-end) value-end)
-                         raw-rest (when (>= rest-start 0) (string-substring after-op rest-start (string-byte-length after-op)))
-                         rest (str/trim (or raw-rest ""))
-                         separated? (and (seq raw-rest)
+                         raw-rest (if (>= rest-start 0) (string-substring after-op rest-start (string-byte-length after-op)) "")
+                         rest (str/trim raw-rest)
+                         separated? (and (not (str/blank? raw-rest))
                                          (str/blank? (string-substring raw-rest 0 1)))
-                         valid-flag? (and separated? (= 1 (count rest))
+                         valid-flag? (and separated? (= 1 (string-length rest))
                                           (or (= "i" rest) (= "I" rest)
                                               (= "s" rest) (= "S" rest)))]
                      (when (and (option-some?-of [:option :string] value)
@@ -4471,7 +4471,7 @@
         [root-text after] (if to-first?
                             [nil 0]
                             (or (balanced-paren-group h 0) [nil 0]))
-        rest-text (subs h (min after (count h)))
+        rest-text (subs h (min after (string-length h)))
         limit-text (when (to-paren-at? rest-text true)
                      (first (balanced-paren-group rest-text 0)))]
     {:scope/root (when (and root-text (not (str/blank? root-text)))
